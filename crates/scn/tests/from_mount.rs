@@ -7,9 +7,9 @@
 use std::process::Command;
 
 use common::{REPO, TOKEN, changeset, land};
-use nfsserve::nfs::{filename3, nfspath3, nfsstat3, sattr3};
 #[cfg(feature = "unstable-writable-mount")]
 use nfsserve::nfs::set_size3;
+use nfsserve::nfs::{filename3, nfspath3, nfsstat3, sattr3};
 use open_scion::client::id_from;
 use open_scion::test_support::{
     client::test_objects,
