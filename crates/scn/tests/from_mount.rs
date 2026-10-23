@@ -7,7 +7,9 @@
 use std::process::Command;
 
 use common::{REPO, TOKEN, changeset, land};
-use nfsserve::nfs::{filename3, nfspath3, nfsstat3, sattr3, set_size3};
+use nfsserve::nfs::{filename3, nfspath3, nfsstat3, sattr3};
+#[cfg(feature = "unstable-writable-mount")]
+use nfsserve::nfs::set_size3;
 use open_scion::client::id_from;
 use open_scion::test_support::{
     client::test_objects,
@@ -21,6 +23,7 @@ use scion_server::Backend;
 mod common;
 
 /// Runs `scn ARGS` against `url`, with `home` as the home directory.
+#[cfg(feature = "unstable-writable-mount")]
 fn scn(url: &str, home: &std::path::Path, args: &[&str]) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_scn"))
         .args(["--server", url, "--repo", REPO])
@@ -92,7 +95,9 @@ struct Mount {
 }
 
 /// Mounts the tree of `base` through the VFS, with the writes a
-/// `--unstable-writable` mount takes.
+/// `--unstable-writable` mount takes. A build without the feature
+/// compiles its callers out, so the helper goes with them.
+#[cfg(feature = "unstable-writable-mount")]
 fn mount(tiers: &common::Tiers, base: &ChangesetId) -> Mount {
     mount_as(tiers, base, true)
 }
@@ -503,7 +508,7 @@ mod a_default_build_has_no_writable_mount {
             .args(["--server", &tiers.server, "--repo", REPO])
             .args(["mount", "--unstable-writable", "--no-mount"])
             .arg(home.path().join("view"))
-            .arg(&base.to_string())
+            .arg(base.to_string())
             .env("SCION_TOKEN", TOKEN)
             .env("HOME", home.path())
             .output()
