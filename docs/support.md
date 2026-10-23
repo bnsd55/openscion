@@ -46,8 +46,8 @@ marked supported here.
 | scn | Linux | x64 | any | — | supported | `test` (ci.yml) | The CLI suite runs in the workspace job |
 | scn | Linux | arm64 | any | — | best effort | `test-arm64` (ci.yml) | The CLI suite runs in the arm64 job, which runs nightly and on release candidates |
 | scn | macOS | arm64 | any | — | supported | `test-macos` (ci.yml) | The CLI suite runs in the macOS job; the runner's disk is APFS |
-| scn mount | Linux | x64 | NFS | — | supported | `nfs-mount` (ci.yml) | The kernel NFS client mounts scn's server on the runner |
-| scn mount | macOS | arm64 | NFS | — | best effort | — | macOS can mount NFS, but no job proves it |
+| scn mount | Linux | x64 | NFS | — | supported | `nfs-mount` (ci.yml) | The kernel NFS client mounts scn's server on the runner. The mounted mode is read-only; the write mode is the `unstable-writable-mount` build feature, off in every release binary |
+| scn mount | macOS | arm64 | NFS | — | best effort | — | macOS can mount NFS, but no job proves it. The write mode is the `unstable-writable-mount` build feature, off in every release binary |
 | scn mount | Windows | any | any | — | unsupported | — | The mount serves NFSv3 and rides POSIX mounts |
 
 Runner labels move (macOS versions retire, Ubuntu releases come): the
