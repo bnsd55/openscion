@@ -84,7 +84,7 @@ const MAX_DIFFS: usize = 4;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 /// Most bytes that all `ReadFile` replies together hold: the parts read and
 /// not yet sent, and the readers of files of more than one part.
-const READ_BUDGET_BYTES: usize = 256 << 20;
+pub const READ_BUDGET_BYTES: usize = 256 << 20;
 /// A `ReadFile` reply ends when its client takes no part for this long, and
 /// frees its share, so a client that stops reading does not hold budget.
 /// The parts that it leaves in its channel and in HTTP/2 stay outside the
@@ -809,6 +809,19 @@ pub(crate) fn mark_stream<T>(response: Response<T>) -> Response<T> {
     let mut response = response;
     response.extensions_mut().insert(crate::reply::ReplyStreams);
     response
+}
+
+/// The `ListDir` order mutation, for the red of the RSS-bound test:
+/// true runs the old build-then-share order. False outside the test
+/// hooks, so a release binary carries no lever and no env read.
+#[cfg(any(test, feature = "test-hooks"))]
+fn listdir_mutation() -> bool {
+    std::env::var("SCION_TEST_LISTDIR_MUTATION").as_deref() == Ok("build_then_share")
+}
+
+#[cfg(not(any(test, feature = "test-hooks")))]
+fn listdir_mutation() -> bool {
+    false
 }
 
 pub(crate) use scion_proto::runtime::check::id as parse_id;
@@ -1987,11 +2000,24 @@ impl Scion for ScionService {
                 Ok((dir_id, size))
             })
             .await?;
-        let share = self.whole_share_of(size).await?;
-        let data = self
-            .worker
-            .run(move |store| Ok(store.read(|c| c.get_tree(dir_id))?.encode()))
-            .await?;
+        // The old order, for the red of the RSS-bound test: build the
+        // whole body first, take its share after, so concurrent builds
+        // are uncounted and the RSS blows past the budget.
+        let (share, data) = if listdir_mutation() {
+            let data = self
+                .worker
+                .run(move |store| Ok(store.read(|c| c.get_tree(dir_id))?.encode()))
+                .await?;
+            let share = self.whole_share_of(size).await?;
+            (share, data)
+        } else {
+            let share = self.whole_share_of(size).await?;
+            let data = self
+                .worker
+                .run(move |store| Ok(store.read(|c| c.get_tree(dir_id))?.encode()))
+                .await?;
+            (share, data)
+        };
         Ok(mark_stream(Self::stream_whole_holding(
             call,
             data,

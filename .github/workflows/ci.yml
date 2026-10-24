@@ -363,6 +363,20 @@ jobs:
             echo "::error::the test suite left the work tree dirty: $dirty"
             exit 1
           fi
+      - name: unread ListDir replies - measure both orders (evidence run)
+        run: |
+          # TEMPORARY evidence step: print both orders' lines, judge
+          # nothing. The next commit pins the ceiling between them and
+          # restores the strict red step.
+          cargo test -p open-scion-server --test listdir_rss -- --nocapture \
+            > /tmp/listdir-green.log 2>&1 || true
+          SCION_TEST_LISTDIR_MUTATION=build_then_share \
+            cargo test -p open-scion-server --test listdir_rss -- --nocapture \
+            > /tmp/listdir-red.log 2>&1 || true
+          echo "=== green (the right order) ==="
+          grep -E "held_list|baseline|test result" /tmp/listdir-green.log || true
+          echo "=== red (build-then-share) ==="
+          grep -E "held_list|baseline|test result" /tmp/listdir-red.log || true
       - name: a real disk full (tmpfs)
         run: cargo test -p open-scion-server --test disk_full
         env:
