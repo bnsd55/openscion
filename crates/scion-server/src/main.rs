@@ -748,7 +748,18 @@ struct StagingFolder {
 
 impl Drop for StagingFolder {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
+        // A failed cleanup would show up at the next start as a crash's
+        // leftover, with nothing saying why: name the path and the error.
+        // NotFound is fine: the folder is gone, which is the point.
+        if let Err(why) = std::fs::remove_dir_all(&self.path)
+            && why.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                path = %self.path.display(),
+                error = %why,
+                "the run's staging folder could not be removed"
+            );
+        }
     }
 }
 #[tokio::main]
