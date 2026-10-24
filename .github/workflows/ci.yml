@@ -235,7 +235,7 @@ jobs:
       # The writable mount is a build feature, off by default (C54): a
       # PR that breaks the feature build must fail on the PR, not on
       # main after the merge.
-      - run: cargo clippy -p open-scn --features unstable-writable-mount -- -D warnings
+      - run: cargo clippy -p open-scion --features unstable-writable-mount -- -D warnings
       # A release build has no dev-dependencies, so the test-hooks feature
       # stays off and every test-only item that a cfg misses shows up as
       # dead code. --all-targets unifies the dev-dependency that turns
@@ -618,7 +618,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # The feature build's tests: the write-side unit tests of the VFS
       # and the from-mount suite, which the default build compiles out.
-      - run: cargo test -p open-scn --features unstable-writable-mount
+      - run: cargo test -p open-scion --features unstable-writable-mount
 
   test-macos:
     name: test (macOS)
