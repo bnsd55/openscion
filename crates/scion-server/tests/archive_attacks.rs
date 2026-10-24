@@ -13,6 +13,50 @@ use scion_core::{BlobId, Changeset, ChangesetId, FileState, IdentityTime, RepoPa
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use scion_server::{Backend, archive, test_support::tree};
 
+static LOG: std::sync::LazyLock<Captured> = std::sync::LazyLock::new(Captured::default);
+
+#[derive(Clone, Default)]
+struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+    type Writer = Captured;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Installs the one global subscriber, once: the restore's failure log
+/// lands in the buffer a test reads from its own mark.
+fn init_log() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::level_filters::LevelFilter::TRACE)
+            .with_writer(Captured::clone(&*LOG))
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).unwrap();
+    });
+}
+
+fn mark() -> usize {
+    LOG.0.lock().unwrap().len()
+}
+
+fn since(mark: usize) -> String {
+    String::from_utf8(LOG.0.lock().unwrap()[mark..].to_vec()).unwrap()
+}
+
 const REPO: &str = "main";
 const SECOND: &str = "second";
 
@@ -500,6 +544,240 @@ fn assert_pg_database_empty(check: &mut postgres::Client) {
         };
         assert_eq!(rows, 0, "{table} must be empty after a failed restore");
     }
+}
+
+/// The bounded cleanup: a lock held on the staging schema past the
+/// reset's clock must not hang the failed restore forever - the
+/// restore fails within the bound, one log line names the staging
+/// schema left behind, and the next restore, whose start resets the
+/// schema, succeeds once the lock is gone. Runs only where
+/// `SCION_TEST_POSTGRES_URL` names the job's own scratch instance.
+#[test]
+fn a_stale_lock_cannot_hang_the_failed_restore_and_the_next_one_lands() {
+    let Ok(base) = std::env::var("SCION_TEST_POSTGRES_URL") else {
+        return;
+    };
+    init_log();
+    let name = format!("scion_restore_attack_stale_{}", std::process::id());
+    let mut maker = postgres::Client::connect(&base, postgres::NoTls).unwrap();
+    maker
+        .batch_execute(&format!("DROP DATABASE IF EXISTS {name}"))
+        .unwrap();
+    maker
+        .batch_execute(&format!("CREATE DATABASE {name}"))
+        .unwrap();
+    let url = format!(
+        "{}/{}",
+        base.rsplit_once('/')
+            .map_or(base.as_str(), |(rest, _)| rest),
+        name
+    );
+    let (_keep, out, _main, _second) = sound_archive();
+    let empty = tempfile::tempdir().unwrap();
+    let holder_url = url.clone();
+    let (locked, wait_locked) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let mut db = postgres::Client::connect(&holder_url, postgres::NoTls).unwrap();
+        // The lock goes down as soon as the restore's open has made its
+        // tables, and holds PAST the reset's 60 s lock clock: the
+        // failure-path drop must give up on the clock, not hang.
+        let started = std::time::Instant::now();
+        loop {
+            let there: Option<String> = db
+                .query_one("SELECT to_regclass('public.changesets')::text", &[])
+                .unwrap()
+                .get(0);
+            if there.is_some() {
+                db.batch_execute("BEGIN; LOCK TABLE changesets IN EXCLUSIVE MODE;")
+                    .unwrap();
+                let _ = locked.send(());
+                std::thread::sleep(std::time::Duration::from_secs(75));
+                let _ = db.batch_execute("COMMIT");
+                return;
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(30),
+                "the test database never gained its changesets table within 30 s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    });
+    let mark = mark();
+    let started = std::time::Instant::now();
+    let restored = archive::restore_with(&out, empty.path(), Some(&url), None, |path, url, ca| {
+        let store = scion_server::Backend::open(path, url, ca)?;
+        wait_locked
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the holder never took its table");
+        // The seam: the replay's first write dies as busy, and the
+        // cleanup's drop waits behind the holder's table lock.
+        store.fail_next_commits(1);
+        Ok(store)
+    });
+    assert!(
+        restored.is_err(),
+        "a replay whose store refuses its commit must not report success"
+    );
+    // Within the bound: the store's 5 s clock, then the reset's 60 s,
+    // not the forever the unbounded drop waited.
+    let took = started.elapsed();
+    assert!(
+        took < std::time::Duration::from_secs(110),
+        "the failed restore took {took:?}; the reset's clock did not bound it"
+    );
+    let log = since(mark);
+    assert!(
+        log.contains("is left behind"),
+        "the failure must name the staging schema it left behind: {log}"
+    );
+    holder.join().unwrap();
+    // The lock is gone: the next restore's start resets the leftover
+    // schema, and the restore lands whole.
+    let report = archive::restore(&out, empty.path(), Some(&url), None)
+        .unwrap_or_else(|e| panic!("the restore after the stale lock failed: {e:#}"));
+    assert_eq!(report.repos.len(), 2);
+    maker
+        .batch_execute(&format!("DROP DATABASE {name}"))
+        .unwrap();
+}
+
+/// The data-loss attack (the #575 review's F1): a restore pointed at
+/// the URL of a real store whose server is DOWN. A stopped store holds
+/// no one-server lock, so the start cleanup's only guard cannot see
+/// it: the drop would erase the store's whole schema. A restore may
+/// drop only what a restore made - a schema that holds a store's
+/// identity and no restore's staging mark is refused, unchanged.
+/// Runs only where `SCION_TEST_POSTGRES_URL` names the job's own
+/// scratch instance.
+#[test]
+fn a_restore_at_a_stopped_stores_url_refuses_and_leaves_it_whole() {
+    let Ok(base) = std::env::var("SCION_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let name = format!("scion_restore_attack_stopped_{}", std::process::id());
+    let mut maker = postgres::Client::connect(&base, postgres::NoTls).unwrap();
+    maker
+        .batch_execute(&format!("DROP DATABASE IF EXISTS {name}"))
+        .unwrap();
+    maker
+        .batch_execute(&format!("CREATE DATABASE {name}"))
+        .unwrap();
+    let url = format!(
+        "{}/{}",
+        base.rsplit_once('/')
+            .map_or(base.as_str(), |(rest, _)| rest),
+        name
+    );
+    // A real store, with data: one repo, one row the restore has no
+    // right to touch.
+    let data = tempfile::tempdir().unwrap();
+    let store = Backend::open(data.path(), Some(&url), None).unwrap();
+    store.write(|c| c.create_repo("real").map(|_| ())).unwrap();
+    drop(store);
+    // The counts come from the scratch database the store lives in,
+    // not the shared one: a query on the wrong database proves nothing.
+    let mut check = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    let repos_before: i64 = check
+        .query_one("SELECT count(*) FROM repos", &[])
+        .unwrap()
+        .get(0);
+    assert_eq!(repos_before, 1, "the store holds its repo");
+
+    // The restore, at the stopped store's URL, into an empty target.
+    let (_keep, out, _main, _second) = sound_archive();
+    let target = tempfile::tempdir().unwrap().path().join("restored");
+    std::fs::create_dir_all(&target).unwrap();
+    let restored = archive::restore(&out, &target, Some(&url), None);
+    assert!(
+        restored.is_err(),
+        "a restore at a stopped store's URL must refuse, not drop it"
+    );
+    let why = format!("{:#}", restored.unwrap_err());
+    assert!(
+        why.contains("refuses to drop"),
+        "the refusal must say what it protects: {why}"
+    );
+    let repos_after: i64 = check
+        .query_one("SELECT count(*) FROM public.repos", &[])
+        .unwrap()
+        .get(0);
+    drop(check);
+    assert_eq!(
+        repos_after, repos_before,
+        "the refused restore must leave the store's rows unchanged"
+    );
+    maker
+        .batch_execute(&format!("DROP DATABASE {name}"))
+        .unwrap();
+}
+
+/// The published store must not carry the mark (Y1): restore A lands,
+/// a server serves it and lands one more change, the server stops, and
+/// restore B at the same URL must refuse - not drop a real store as a
+/// leftover. Red if the mark survives publication. Runs only where
+/// `SCION_TEST_POSTGRES_URL` names the job's own scratch instance.
+#[test]
+fn a_restored_store_does_not_carry_the_mark_and_a_later_restore_refuses() {
+    let Ok(base) = std::env::var("SCION_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let name = format!("scion_restore_attack_published_{}", std::process::id());
+    let mut maker = postgres::Client::connect(&base, postgres::NoTls).unwrap();
+    maker
+        .batch_execute(&format!("DROP DATABASE IF EXISTS {name}"))
+        .unwrap();
+    maker
+        .batch_execute(&format!("CREATE DATABASE {name}"))
+        .unwrap();
+    let url = format!(
+        "{}/{}",
+        base.rsplit_once('/')
+            .map_or(base.as_str(), |(rest, _)| rest),
+        name
+    );
+    let (_keep, out, _main, _second) = sound_archive();
+    let target = tempfile::tempdir().unwrap().path().join("restored-a");
+    std::fs::create_dir_all(&target).unwrap();
+    // Restore A publishes; the mark must be gone when it reports.
+    archive::restore(&out, &target, Some(&url), None)
+        .unwrap_or_else(|e| panic!("restore A failed: {e:#}"));
+    // The checks run against the scratch database the restore used,
+    // not the shared one: a query on the wrong database passes
+    // trivially and proves nothing.
+    let mut check = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    let mark_there: Option<String> = check
+        .query_one("SELECT to_regclass('public.restore_staging')::text", &[])
+        .unwrap()
+        .get(0);
+    assert!(
+        mark_there.is_none(),
+        "a published store carries the restore's mark: {mark_there:?}"
+    );
+    // The published store's rows are the state a later restore meets:
+    // a store's identity, no mark, and rows a stopped server's schema
+    // would hold.
+    let repos_before: i64 = check
+        .query_one("SELECT count(*) FROM repos", &[])
+        .unwrap()
+        .get(0);
+    assert!(repos_before >= 1, "restore A landed its repos");
+    // Restore B at the same URL, empty target: refused, A intact.
+    let target_b = tempfile::tempdir().unwrap().path().join("restored-b");
+    std::fs::create_dir_all(&target_b).unwrap();
+    let restored = archive::restore(&out, &target_b, Some(&url), None);
+    assert!(
+        restored.is_err(),
+        "a restore at the published store's URL must refuse"
+    );
+    let repos_after: i64 = check
+        .query_one("SELECT count(*) FROM repos", &[])
+        .unwrap()
+        .get(0);
+    assert_eq!(repos_after, repos_before, "A's rows are intact");
+    drop(check);
+    maker
+        .batch_execute(&format!("DROP DATABASE {name}"))
+        .unwrap();
 }
 
 /// The earlier half of the promise, made deterministic: the restore

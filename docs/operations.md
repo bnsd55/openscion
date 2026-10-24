@@ -707,6 +707,20 @@ Proof: crates/scion-server/tests/restore_bench.rs::a_restore_of_a_stated_store_t
 
 Proof: crates/scion-server/tests/backup.rs::a_backup_taken_while_serving_restores_whole
 
+On Postgres, a restore's staging schema carries a `restore_staging`
+mark from its first transaction until publication, so a restore drops
+only what a restore made: a schema that names a store and no mark is
+refused ("a restore refuses to drop a store it did not make"), never
+dropped. One window sits between a restore's last transaction and the
+rename that publishes its data directory: a restore killed there
+leaves a complete store in the schema with no mark, and the next
+restore at that URL refuses it and names the way out - rename the
+target's `<name>.restoring` directory into place and start a server on
+it, or restore into a new schema.
+
+Proof: crates/scion-server/tests/archive_attacks.rs::a_restore_at_a_stopped_stores_url_refuses_and_leaves_it_whole
+Proof: crates/scion-server/tests/archive_attacks.rs::a_restored_store_does_not_carry_the_mark_and_a_later_restore_refuses
+
 ## 4. Upgrades
 
 The schema version lives in the database. On open, a server migrates an
