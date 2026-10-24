@@ -856,7 +856,9 @@ re-date such a commit in the git history and import again.
 So an upgrade is: stop the server (and any tiers that share the directory —
 none do by default), copy the directory as a backup (section 3), start the
 new binary, watch the log for the migration, run `fsck`. A store that
-has data logs its migration steps when a build migrates it.
+has data logs its migration steps when a build migrates it; a first
+boot on a fresh, empty directory logs no migration - it says the store
+was created.
 
 Where the binaries come from. v0.1.0 is a source release: build the
 version you need from its signed tag (`docs/RELEASING.md`):

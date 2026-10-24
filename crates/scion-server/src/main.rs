@@ -319,9 +319,11 @@ enum KindName {
     PathHistory,
 }
 
-/// Runs `export` and prints the manifest's counts. Exits 0, or 2 when
-/// the export could not run.
-fn archive_export(store: &Backend, data: &Path, repo: Option<&str>, all: bool, out: &Path) -> ! {
+/// Runs `export` and prints the manifest's counts, and returns the exit
+/// code: 0, or 2 when the export could not run. The code returns
+/// instead of `std::process::exit`, whose destructors skip the caller's
+/// cleanup: the staging folder goes with the run.
+fn archive_export(store: &Backend, data: &Path, repo: Option<&str>, all: bool, out: &Path) -> i32 {
     match archive::export(store, data, repo, all, out) {
         Ok(manifest) => {
             let counts = &manifest["counts"];
@@ -333,27 +335,26 @@ fn archive_export(store: &Backend, data: &Path, repo: Option<&str>, all: bool, o
                 counts["pending_lands"],
                 counts["blobs"],
             );
-            std::process::exit(0)
+            0
         }
         Err(e) => {
             eprintln!("scion-server export: {e}");
-            std::process::exit(2);
+            2
         }
     }
 }
 
-/// Runs `fsck` against `store`, prints one line per problem, and exits:
-/// 0 when it saw no damage, 1 when it did, 2 when it could not run.
-/// The exits are `std::process::exit`, which skips destructors: safe
-/// here, because nothing this function holds needs dropping — the
-/// store's lock is released by the kernel at exit, and the report is
-/// plain data.
-fn fsck_command(store: &Backend) -> anyhow::Result<()> {
+/// Runs `fsck` against `store`, prints one line per problem, and returns
+/// the exit code: 0 when it saw no damage, 1 when it did, 2 when it
+/// could not run. The code returns instead of `std::process::exit`,
+/// whose destructors skip the caller's cleanup: the staging folder goes
+/// with the run.
+fn fsck_command(store: &Backend) -> i32 {
     let report = match fsck::run(store, fsck::BATCH, &mut |_| {}) {
         Ok(report) => report,
         Err(e) => {
             eprintln!("scion-server fsck: {e}");
-            std::process::exit(2);
+            return 2;
         }
     };
     for problem in &report.problems {
@@ -367,10 +368,7 @@ fn fsck_command(store: &Backend) -> anyhow::Result<()> {
         report.problems.len(),
         report.old.len()
     );
-    if report.is_clean() {
-        std::process::exit(0);
-    }
-    std::process::exit(1);
+    i32::from(!report.is_clean())
 }
 
 /// Opens the audit log a CLI subcommand records its admin lines in:
@@ -741,6 +739,18 @@ fn test_reply_budget() -> usize {
     scion_server::REPLY_MEMORY_BUDGET
 }
 
+/// The staging folder a one-shot command removes when it ends - success,
+/// error, or panic - so the next open's sweep has nothing of a live run
+/// to call a crash's leftover. The server keeps its folder for its life.
+struct StagingFolder {
+    path: std::path::PathBuf,
+}
+
+impl Drop for StagingFolder {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
@@ -867,6 +877,17 @@ async fn main() -> anyhow::Result<()> {
         ),
     }
     .with_context(|| format!("cannot open data directory {}", cli.data.display()))?;
+    // A one-shot command removes its own staging folder when it ends -
+    // success, error, or panic - so the next open's sweep has nothing of
+    // a live run to call a crash's leftover. The guard is armed after
+    // the store opens; the server keeps its folder for its life.
+    let staging = if matches!(cli.command, Command::Serve { .. }) {
+        None
+    } else {
+        Some(StagingFolder {
+            path: store.temp_folder().to_path_buf(),
+        })
+    };
     match cli.command {
         Command::Serve { .. } => {
             let flags = flags.expect("a serve command validated its flags");
@@ -925,10 +946,14 @@ async fn main() -> anyhow::Result<()> {
             unreachable!("handled before the store opens")
         }
         Command::Export { repo, all, out } => {
-            archive_export(&store, &cli.data, repo.as_deref(), all, &out);
+            let code = archive_export(&store, &cli.data, repo.as_deref(), all, &out);
+            drop(staging);
+            std::process::exit(code);
         }
         Command::Fsck => {
-            return fsck_command(&store);
+            let code = fsck_command(&store);
+            drop(staging);
+            std::process::exit(code);
         }
         Command::Gc {
             grace_secs,

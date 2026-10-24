@@ -408,6 +408,17 @@ impl Backend {
         }
     }
 
+    /// This process's staging folder under the data directory's `tmp/`:
+    /// a one-shot command removes it when it ends, whatever way it ends,
+    /// so its folder is not left for the next open to sweep.
+    #[must_use]
+    pub fn temp_folder(&self) -> &Path {
+        match &self.inner {
+            Inner::Sqlite(store) => store.temp_folder(),
+            Inner::Postgres(pg) => pg.blobs().temp_folder(),
+        }
+    }
+
     /// Whether the backend is a data directory that other processes share.
     /// A shared one keeps its write transactions short; a Postgres database
     /// sorts its writers out itself.

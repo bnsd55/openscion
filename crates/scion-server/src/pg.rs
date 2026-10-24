@@ -2147,11 +2147,13 @@ fn migrate_under_lock(client: &mut PgClient) -> Result<Option<(u32, u32)>> {
     if version == PG_SCHEMA_VERSION {
         return Ok(None);
     }
-    tracing::info!(
-        from_version = version,
-        to_version = PG_SCHEMA_VERSION,
-        "migrating the metadata schema"
-    );
+    if version != 0 {
+        tracing::info!(
+            from_version = version,
+            to_version = PG_SCHEMA_VERSION,
+            "migrating the metadata schema"
+        );
+    }
     for (n, sql) in PG_MIGRATIONS.iter().enumerate() {
         let n = u32::try_from(n + 1).expect("a schema version fits in a u32");
         if n <= version {
@@ -2178,18 +2180,27 @@ fn migrate_under_lock(client: &mut PgClient) -> Result<Option<(u32, u32)>> {
             i64::from(n)
         ))?;
         tx.commit()?;
+        if version != 0 {
+            tracing::info!(
+                from_version = n - 1,
+                to_version = n,
+                elapsed_ms = u64::try_from(step.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "the metadata schema migrated one step"
+            );
+        }
+    }
+    if version == 0 {
         tracing::info!(
-            from_version = n - 1,
-            to_version = n,
-            elapsed_ms = u64::try_from(step.elapsed().as_millis()).unwrap_or(u64::MAX),
-            "the metadata schema migrated one step"
+            to_version = PG_SCHEMA_VERSION,
+            "the metadata schema was created"
+        );
+    } else {
+        tracing::info!(
+            from_version = version,
+            to_version = PG_SCHEMA_VERSION,
+            "the metadata migration is done"
         );
     }
-    tracing::info!(
-        from_version = version,
-        to_version = PG_SCHEMA_VERSION,
-        "the metadata migration is done"
-    );
     // Version 0 was no schema at all: the first open creates one, and a
     // creation moves nothing.
     let migrated = if version == 0 {

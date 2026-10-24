@@ -152,9 +152,9 @@ fn an_open_logs_what_migrated_and_nothing_when_nothing_did() {
         "an open at the current schema says nothing: {quiet}"
     );
 
-    // A leftover temp folder is still reported, for what it is: the
-    // folder's process is gone - a crash's or a one-shot run's. The
-    // sweep cannot tell which, and the line does not claim to.
+    // A crash's leftover is still reported as one. A one-shot command
+    // removes its own folder (its own test), so what the sweep finds is
+    // a folder whose holder died.
     let tmp = dir.path().join("tmp");
     std::fs::create_dir(tmp.join("dead-folder")).unwrap();
     let leftover_at = mark();
@@ -162,8 +162,8 @@ fn an_open_logs_what_migrated_and_nothing_when_nothing_did() {
     drop(store);
     let leftover = since(leftover_at);
     assert!(
-        leftover.contains("removed temp folders whose process is gone"),
-        "a folder whose process is gone is reported: {leftover}"
+        leftover.contains("removed temp folders that a crash left behind"),
+        "a crash's leftover is reported: {leftover}"
     );
     assert!(
         !tmp.join("dead-folder").exists(),
