@@ -1134,7 +1134,10 @@ fn serve_flags(args: &ServeArgs) -> anyhow::Result<ServeFlags> {
             args.token.clone()
         }
         (None, Some(file)) => Some(secret_file(file)?),
-        (None, None) => std::env::var("SCION_TOKEN").ok().filter(|t| !t.is_empty()),
+        (None, None) => std::env::var("SCION_TOKEN")
+            .ok()
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty()),
     };
     let (access, single) = load_access(token, None, args.access.clone())?;
     let caps = caps(
@@ -1340,8 +1343,12 @@ fn load_access(
         return Ok((scion_server::Access::single(&token), true));
     }
     if let Some(token) = token {
-        anyhow::ensure!(!token.is_empty(), "--token must not be empty");
-        return Ok((scion_server::Access::single(&token), true));
+        let trimmed = token.trim();
+        anyhow::ensure!(
+            !trimmed.is_empty(),
+            "--token must not be empty or whitespace-only"
+        );
+        return Ok((scion_server::Access::single(trimmed), true));
     }
     let file = access.expect("exactly one source is given");
     // The access file holds bearer tokens: read through one checked
@@ -1471,10 +1478,16 @@ fn hash_token() -> anyhow::Result<()> {
         (None, Some(file)) => secret_file(file)?,
         (Some(_), None) => {
             warn_argv_secret("--token", "--token-file, SCION_TOKEN or stdin");
-            token.expect("the argv form is given")
+            let token = token.expect("the argv form is given");
+            let trimmed = token.trim();
+            anyhow::ensure!(
+                !trimmed.is_empty(),
+                "a token of only whitespace is no secret"
+            );
+            trimmed.to_owned()
         }
         (None, None) => match std::env::var("SCION_TOKEN") {
-            Ok(env_token) if !env_token.is_empty() => env_token,
+            Ok(env_token) if !env_token.trim().is_empty() => env_token.trim().to_owned(),
             _ => {
                 use std::io::Read as _;
                 let mut from_stdin = String::new();
