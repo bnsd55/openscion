@@ -81,9 +81,16 @@ fn a_daemon_serves_a_data_directory_that_exists() {
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
     // The socket must sit inside a short path: macOS's sun_path caps
     // at 104 bytes, and a deep tempdir busts it. Give the socket an
-    // explicit short path through /tmp.
-    let short = std::env::temp_dir().join(format!("c78-{}", std::process::id()));
-    let _ = std::fs::remove_file(&short);
+    // explicit short path through /tmp - in a directory of its own,
+    // 0700 and owned by this user, because the socket's PARENT is what
+    // check_private_dir judges: /tmp itself is 1777 and root-owned on
+    // Linux, so a socket laid straight in /tmp is refused there (it
+    // passed on macOS, whose TMPDIR is per-user).
+    let short_dir = std::env::temp_dir().join(format!("c78-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&short_dir);
+    std::fs::create_dir_all(&short_dir).unwrap();
+    std::fs::set_permissions(&short_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let short = short_dir.join("d.sock");
     let mut child = Command::new(env!("CARGO_BIN_EXE_scion-daemon"))
         .args([
             "--token",
@@ -118,7 +125,7 @@ fn a_daemon_serves_a_data_directory_that_exists() {
     }
     let _ = child.kill();
     let _ = child.wait();
-    let _ = std::fs::remove_file(&short);
+    let _ = std::fs::remove_dir_all(&short_dir);
     assert!(
         served,
         "the daemon never served a data directory that exists"
