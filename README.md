@@ -445,7 +445,8 @@ here. Every job is in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 | Where | Runner, architecture | What runs there |
 |---|---|---|
-| Ubuntu 24.04, x86-64 | GitHub's `ubuntu-24.04` image, Linux 6.x, ext4 | Every CI job: the lint, doc and supply-chain jobs, `test`, the tmpfs disk-full test, block-level power cuts (dm-log-writes), the Postgres suite, the power-loss suite on LazyFS 0.3.1, the mount (NFS) job through the kernel's NFS client, the restore-RSS-ceiling and writable-mount-feature tests, the XFS cell, the demo in Docker, the fuzz smoke on `x86_64-unknown-linux-gnu`, the release smoke of the README quick start, and `publish check`. The linux-arm64 cell runs here too. |
+| Ubuntu 24.04, x86-64 | GitHub's `ubuntu-24.04` image, Linux 6.x, ext4 | Every Linux x86-64 CI job: the lint, doc and supply-chain jobs, `test`, the tmpfs disk-full test, block-level power cuts (dm-log-writes), the Postgres suite, the power-loss suite on LazyFS 0.3.1, the mount (NFS) job through the kernel's NFS client, the restore-RSS-ceiling and writable-mount-feature tests, the XFS cell, the demo in Docker, the fuzz smoke on `x86_64-unknown-linux-gnu`, the release smoke of the README quick start, and `publish check` |
+| Ubuntu 24.04, arm64 | GitHub's `ubuntu-24.04-arm` image | `test (linux arm64)`: the whole workspace suite plus a real disk-full run on tmpfs; best effort until v0.8 — the nightly and a release candidate's dispatch prove the arm64 cells, a push does not |
 | macOS 15, Apple Silicon (arm64) | GitHub's `macos-15` image, APFS | `test (macOS)`: the whole test suite; `release smoke (macos-15)`: the README quick start on release binaries |
 
 The macOS row carries its repetition evidence: after PR
