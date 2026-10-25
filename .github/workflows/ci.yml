@@ -150,7 +150,7 @@ jobs:
               deny.toml|*/deny.toml|\
               scripts/check-deny-coverage.sh) deps=true ;;
             esac
-            # The writable mount (C54): its code lives in the VFS, the
+            # The writable mount: its code lives in the VFS, the
             # mount command and the commit's mount path. A pull request
             # that touches one runs the feature's tests, so a PR cannot
             # break the writable build for main to find out after the
@@ -232,7 +232,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      # The writable mount is a build feature, off by default (C54): a
+      # The writable mount is a build feature, off by default: a
       # PR that breaks the feature build must fail on the PR, not on
       # main after the merge.
       - run: cargo clippy -p open-scion --features unstable-writable-mount -- -D warnings

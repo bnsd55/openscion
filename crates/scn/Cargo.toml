@@ -42,7 +42,8 @@ test-hooks = []
 # in architecture.md section 9), so a default or release build has no
 # write path at all, and the read-only mount stays. The flag and the
 # mount argument exist in every build; a build without the feature
-# refuses both by name. Out until v1.0.0 passes (ROADMAP D24).
+# refuses both by name. The write path stays out until a rewrite that
+# opens each path step by handle passes the hostile tests.
 unstable-writable-mount = []
 
 [dev-dependencies]
