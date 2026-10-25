@@ -169,14 +169,16 @@ jobs:
                   free -m || true
                   { ps -eo pid,rss,pcpu,etime,comm,args --sort=-rss > watcher.top && head -14 watcher.top; } || true
                 } | tee -a watcher.log
-                # The kill is anchored and listed: ^cargo names the
-                # measure's own wrapper, ^<tree> names the test
-                # binaries - the step's bash and the watcher itself,
-                # whose command lines start elsewhere, are immune, and
-                # the pgrep lines say exactly what was signalled.
-                { pgrep -af '^cargo nextest' || true; pgrep -af 'target/debug/deps' || true; } >> watcher.log 2> /dev/null
-                pkill -TERM -f '^cargo nextest' || true
-                pkill -TERM -f 'target/debug/deps' || true
+                # The kill reaches exactly the measure's process
+                # group (setsid above): the negative pgid signals the
+                # wrapper, the runner and every test process, and
+                # nothing else - not the step, not the watcher.
+                if [ -f measure.pgid ]; then
+                  pg=$(cat measure.pgid)
+                  kill -TERM -- "-$pg" || true
+                else
+                  pkill -TERM -f '^cargo nextest' || true
+                fi
                 exit 2
               fi
             done ) &
@@ -210,7 +212,11 @@ jobs:
           # The %4m pool folds them into four files per test binary.
           # The gate merges *.profraw, so the report does not change.
           export LLVM_PROFILE_FILE="$PWD/target/coverage/sqlite-%4m.profraw"
-          nice -n 19 cargo nextest run --workspace --no-fail-fast \
+          # The measure runs in its own process group (setsid): the
+          # guard's trip kills that group by number, which reaches the
+          # wrapper, the runner and every test process and nothing
+          # else - no name pattern, nothing of the step or the watcher.
+          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --workspace --no-fail-fast; echo $? > measure.rc' \
             | tee measure.log
           # The step must not fail on a watcher that is already gone:
           # a tripped guard exited by design, and its trip file says so
@@ -222,6 +228,10 @@ jobs:
             echo 'the guard tripped: the measure above was stopped by it'
             tail -30 watcher.log
             exit 1
+          fi
+          if [ -f measure.rc ] && [ "$(cat measure.rc)" != "0" ]; then
+            echo "the measure itself failed: nextest status $(cat measure.rc)"
+            exit "$(cat measure.rc)"
           fi
           wait "$watcher" 2> /dev/null
           watch_rc=$?
@@ -395,14 +405,16 @@ jobs:
                   free -m || true
                   { ps -eo pid,rss,pcpu,etime,comm,args --sort=-rss > watcher.top && head -14 watcher.top; } || true
                 } | tee -a watcher.log
-                # The kill is anchored and listed: ^cargo names the
-                # measure's own wrapper, ^<tree> names the test
-                # binaries - the step's bash and the watcher itself,
-                # whose command lines start elsewhere, are immune, and
-                # the pgrep lines say exactly what was signalled.
-                { pgrep -af '^cargo nextest' || true; pgrep -af 'target/debug/deps' || true; } >> watcher.log 2> /dev/null
-                pkill -TERM -f '^cargo nextest' || true
-                pkill -TERM -f 'target/debug/deps' || true
+                # The kill reaches exactly the measure's process
+                # group (setsid above): the negative pgid signals the
+                # wrapper, the runner and every test process, and
+                # nothing else - not the step, not the watcher.
+                if [ -f measure.pgid ]; then
+                  pg=$(cat measure.pgid)
+                  kill -TERM -- "-$pg" || true
+                else
+                  pkill -TERM -f '^cargo nextest' || true
+                fi
                 exit 2
               fi
             done ) &
@@ -426,8 +438,11 @@ jobs:
           # when the batched ancestry walk lands.
           LLVM_PROFILE_FILE=/dev/null nice -n 19 cargo nextest run \
             --workspace --no-run
-          nice -n 19 cargo nextest run --workspace --no-fail-fast \
-            -E 'package(open-scion-server) and not test(graph_queries_across_many_merges_answer)' \
+          # The measure runs in its own process group (setsid): the
+          # guard's trip kills that group by number, which reaches the
+          # wrapper, the runner and every test process and nothing
+          # else - no name pattern, nothing of the step or the watcher.
+          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --workspace --no-fail-fast -E "package(open-scion-server) and not test(graph_queries_across_many_merges_answer)"; echo $? > measure.rc' \
             | tee measure-postgres.log
           # The same end-of-step rules as the default measure above.
           kill "$watcher" 2> /dev/null || true
@@ -436,6 +451,10 @@ jobs:
             echo 'the guard tripped: the measure above was stopped by it'
             tail -30 watcher.log
             exit 1
+          fi
+          if [ -f measure.rc ] && [ "$(cat measure.rc)" != "0" ]; then
+            echo "the measure itself failed: nextest status $(cat measure.rc)"
+            exit "$(cat measure.rc)"
           fi
           wait "$watcher" 2> /dev/null
           watch_rc=$?
