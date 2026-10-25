@@ -1236,7 +1236,7 @@ mod tests {
                             b"Ada".to_vec(),
                             b"ada@example.com".to_vec(),
                             1_700_000_000,
-                            i32::try_from(n).unwrap(),
+                            0,
                         )
                         .unwrap(),
                         None,
