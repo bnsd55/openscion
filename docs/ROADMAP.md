@@ -40,9 +40,9 @@ Make the project safe to install anywhere it claims to work.
   printed it through the reason-visible harness of
   [#627](https://github.com/bnsd55/openscion/pull/627)). Fixed: the
   reopen, and every restart-after-a-kill-or-cut of the power suite,
-  takes the C60 bounded wait - the real condition, the holder refusal
-  only, 10 s at most - so the killed server's lock is waited for, not
-  raced. The full suite runs on a clock now: the
+  takes the bounded wait of start_after_kill - the real condition, the
+  holder refusal only, 10 s at most - so the killed server's lock is
+  waited for, not raced. The full suite runs on a clock now: the
   nightly ci.yml run (03:00, in its own concurrency group since #614)
   exercises it, and scripts/nightly-streak.sh counts those runs. The earlier suspected
   flake, scn's `failed printing to stdout: Broken pipe` in the release
