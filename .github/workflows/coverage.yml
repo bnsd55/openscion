@@ -169,15 +169,20 @@ jobs:
                   free -m || true
                   { ps -eo pid,rss,pcpu,etime,comm,args --sort=-rss > watcher.top && head -14 watcher.top; } || true
                 } | tee -a watcher.log
-                # The kill reaches exactly the measure's process
-                # group (setsid above): the negative pgid signals the
-                # wrapper, the runner and every test process, and
-                # nothing else - not the step, not the watcher.
-                if [ -f measure.pgid ]; then
-                  pg=$(cat measure.pgid)
-                  kill -TERM -- "-$pg" || true
+                # The reason goes to a file FIRST: the kill below takes
+                # the measure's process group, and anything this
+                # subshell only teed could die with the flush. The kill
+                # reaches exactly the measure's own session (setsid
+                # above): the negative pgid signals the wrapper, the
+                # runner and every test process. A setsid that failed
+                # would record the step's own group - the guard then
+                # stands down rather than kill its family, and the
+                # numbers below name that.
+                printf 'trip at %s: avail=%s mem=%s pgid=%s step_pgid=%s\n' "$(date -u +%T)" "${avail:-?}" "${mem:-?}" "$(cat measure.pgid 2> /dev/null || echo none)" "$(ps -o pgid= -p $$ 2> /dev/null | tr -d ' ')" > guard.trip 2> /dev/null || true
+                if [ -f measure.pgid ] && [ "$(ps -o pgid= -p "$(cat measure.pgid)" 2> /dev/null | tr -d ' ')" != "$(ps -o pgid= -p $$ 2> /dev/null | tr -d ' ')" ]; then
+                  kill -TERM -- "-$(cat measure.pgid)" || true
                 else
-                  pkill -TERM -f '^cargo nextest' || true
+                  echo "the guard stands down: no separate measure group (setsid failed?)" >> guard.trip || true
                 fi
                 exit 2
               fi
@@ -405,15 +410,20 @@ jobs:
                   free -m || true
                   { ps -eo pid,rss,pcpu,etime,comm,args --sort=-rss > watcher.top && head -14 watcher.top; } || true
                 } | tee -a watcher.log
-                # The kill reaches exactly the measure's process
-                # group (setsid above): the negative pgid signals the
-                # wrapper, the runner and every test process, and
-                # nothing else - not the step, not the watcher.
-                if [ -f measure.pgid ]; then
-                  pg=$(cat measure.pgid)
-                  kill -TERM -- "-$pg" || true
+                # The reason goes to a file FIRST: the kill below takes
+                # the measure's process group, and anything this
+                # subshell only teed could die with the flush. The kill
+                # reaches exactly the measure's own session (setsid
+                # above): the negative pgid signals the wrapper, the
+                # runner and every test process. A setsid that failed
+                # would record the step's own group - the guard then
+                # stands down rather than kill its family, and the
+                # numbers below name that.
+                printf 'trip at %s: avail=%s mem=%s pgid=%s step_pgid=%s\n' "$(date -u +%T)" "${avail:-?}" "${mem:-?}" "$(cat measure.pgid 2> /dev/null || echo none)" "$(ps -o pgid= -p $$ 2> /dev/null | tr -d ' ')" > guard.trip 2> /dev/null || true
+                if [ -f measure.pgid ] && [ "$(ps -o pgid= -p "$(cat measure.pgid)" 2> /dev/null | tr -d ' ')" != "$(ps -o pgid= -p $$ 2> /dev/null | tr -d ' ')" ]; then
+                  kill -TERM -- "-$(cat measure.pgid)" || true
                 else
-                  pkill -TERM -f '^cargo nextest' || true
+                  echo "the guard stands down: no separate measure group (setsid failed?)" >> guard.trip || true
                 fi
                 exit 2
               fi
