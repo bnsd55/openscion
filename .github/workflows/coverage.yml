@@ -246,7 +246,13 @@ jobs:
           # load.
           sum="${GITHUB_STEP_SUMMARY:-/dev/null}"
           echo "default measure starts at $(date -u +%T)" >> "$sum" || true
-          nice -n 19 cargo nextest --no-run --workspace --no-fail-fast -E "not package(open-scion-server)" > build.log 2>&1 && echo "default build ends at $(date -u +%T)" >> "$sum" || { echo "the default build failed:"; tail -40 build.log; exit 1; }
+          if nice -n 19 cargo nextest --no-run --workspace --no-fail-fast -E "not package(open-scion-server)" > build.log 2>&1; then
+            echo "default build ends at $(date -u +%T)" >> "$sum" || true
+          else
+            echo "the default build failed:"
+            tail -40 build.log
+            exit 1
+          fi
           setsid bash -c 'echo $$ > measure.pgid; sleep 2700; echo 0 > measure.rc' \
             | tee measure.log
           # The step must not fail on a watcher that is already gone:
@@ -496,7 +502,13 @@ jobs:
           # else - no name pattern, nothing of the step or the watcher.
           sum="${GITHUB_STEP_SUMMARY:-/dev/null}"
           echo "postgres measure starts at $(date -u +%T)" >> "$sum" || true
-          nice -n 19 cargo nextest --no-run --workspace --no-fail-fast -E "package(open-scion-server) and not test(graph_queries_across_many_merges_answer)" > build-postgres.log 2>&1 && echo "postgres build ends at $(date -u +%T)" >> "$sum" || { echo "the postgres build failed:"; tail -40 build-postgres.log; exit 1; }
+          if nice -n 19 cargo nextest --no-run --workspace --no-fail-fast -E "package(open-scion-server) and not test(graph_queries_across_many_merges_answer)" > build-postgres.log 2>&1; then
+            echo "postgres build ends at $(date -u +%T)" >> "$sum" || true
+          else
+            echo "the postgres build failed:"
+            tail -40 build-postgres.log
+            exit 1
+          fi
           setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --workspace --no-fail-fast -E "package(open-scion-server) and not test(graph_queries_across_many_merges_answer)"; echo $? > measure.rc' \
             | tee measure-postgres.log
           # The same end-of-step rules as the default measure above.
