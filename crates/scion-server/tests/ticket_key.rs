@@ -13,7 +13,7 @@ use std::process::{Command, Output};
 /// audit log lives there, and the working directory's default ACL on CI
 /// would refuse the default path.
 fn run(data: &Path, args: &[&std::ffi::OsStr]) -> Output {
-    // The binary refuses a missing data directory (#592); a test that
+    // The binary refuses a missing data directory (#578); a test that
     // wants the command to run makes the directory itself.
     fs::create_dir_all(data).unwrap();
     Command::new(env!("CARGO_BIN_EXE_scion-server"))

@@ -71,7 +71,7 @@ sudo modprobe nfs
 command -v mount.nfs > /dev/null || sudo apt-get install -y -qq nfs-common
 
 note "starting the server"
-# The server refuses a missing data directory (#592); create it here.
+# The server refuses a missing data directory (#578); create it here.
 mkdir -p "$WORK/server"
 chmod 700 "$WORK/server"
 "$BIN/scion-server" --data "$WORK/server" ticket-key --out "$WORK/ticket.key" > "$WORK/ticket.pub"

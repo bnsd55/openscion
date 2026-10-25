@@ -1,4 +1,4 @@
-//! A missing data directory is refused, not created (#592). Every
+//! A missing data directory is refused, not created (#578). Every
 //! subcommand that touches a store - serve, fsck, gc, import, export,
 //! derive, ticket-key - exits with the refusal and creates nothing,
 //! whether the directory came from `--data`, `SCION_DATA` or the

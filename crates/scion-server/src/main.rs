@@ -377,7 +377,7 @@ fn fsck_command(store: &Backend) -> anyhow::Result<()> {
 /// the same file, checks, and writer the server uses, so the CLI and a
 /// running server append whole lines to one file. A run that cannot
 /// record refuses before it changes anything.
-/// A missing data directory is refused, not created (#592). One rule for
+/// A missing data directory is refused, not created (#578). One rule for
 /// every subcommand that touches a store; `restore` creates its own
 /// target and never sees this.
 fn refuse_missing_data_dir(data: &Path) -> anyhow::Result<()> {
@@ -817,7 +817,7 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => {}
     }
-    // A missing data directory is refused, not created (#592). Every
+    // A missing data directory is refused, not created (#578). Every
     // subcommand that touches a store or writes into the directory must
     // find it there; `restore` is the one command whose job is to
     // create one, `verify` reads only the archive, and `hash-token`
