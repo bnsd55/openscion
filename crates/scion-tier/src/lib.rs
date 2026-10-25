@@ -412,9 +412,22 @@ struct Inner<S> {
     /// empty wakes once per settle instead of polling.
     settled: tokio::sync::Notify,
     /// The keys that a ticket of a call must verify against: the keys of
-    /// the upstream server, one of which is enough. Empty on a daemon,
-    /// which does not check tickets, only forwards them.
-    ticket_keys: Vec<ed25519_dalek::VerifyingKey>,
+    /// The tickets this tier checks, and how.
+    tickets: Tickets,
+}
+
+/// How a tier treats the ticket of a call. The mode is the constructor's
+/// explicit choice and lives here, so no `is_empty()` ever decides a
+/// security path.
+enum Tickets {
+    /// A cache: every call's ticket must verify against one of these
+    /// keys, and the walk from its root tree proves every object. The
+    /// list is never empty: `Tier::new` refuses it.
+    Verify(Vec<ed25519_dalek::VerifyingKey>),
+    /// A daemon: the ticket is relayed as it came, unverified, and the
+    /// upstream does the checking. The walk is skipped with it (a relay
+    /// has no root tree of its own to walk from).
+    Relay,
 }
 
 /// What one reply has done: hits and misses for the log, and how far into
@@ -481,6 +494,60 @@ impl<S: Store> Tier<S> {
         client_tls: Option<&ClientTls>,
         ticket_keys: Vec<ed25519_dalek::VerifyingKey>,
     ) -> anyhow::Result<Self> {
+        // A tier that verifies tickets verifies them on every call: an
+        // empty key list would silently turn the tier into a relay that
+        // serves whatever its store holds, to any caller that names an
+        // object ID. The relay mode is the daemon's explicit choice
+        // (`new_relay`), never inferred from an empty list.
+        anyhow::ensure!(
+            !ticket_keys.is_empty(),
+            "a ticket-verifying tier needs at least one public key (the hex \
+             that `scion-server ticket-key` printed)"
+        );
+        Self::build(
+            store,
+            upstream,
+            upstream_token,
+            timeout,
+            client_tls,
+            Tickets::Verify(ticket_keys),
+        )
+    }
+
+    /// The daemon's tier: it relays the ticket its caller presents,
+    /// unverified, and its upstream does the checking (the daemon's
+    /// socket is 0600 in a private directory, so the caller is the one
+    /// OS user that owns the socket).
+    ///
+    /// # Errors
+    ///
+    /// A bad upstream address, or a client TLS that cannot load.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn new_relay(
+        store: S,
+        upstream: &str,
+        upstream_token: &str,
+        timeout: Duration,
+        client_tls: Option<&ClientTls>,
+    ) -> anyhow::Result<Self> {
+        Self::build(
+            store,
+            upstream,
+            upstream_token,
+            timeout,
+            client_tls,
+            Tickets::Relay,
+        )
+    }
+
+    fn build(
+        store: S,
+        upstream: &str,
+        upstream_token: &str,
+        timeout: Duration,
+        client_tls: Option<&ClientTls>,
+        tickets: Tickets,
+    ) -> anyhow::Result<Self> {
         let endpoint = Endpoint::from_shared(upstream.to_owned())
             .with_context(|| format!("bad upstream address {upstream:?}"))?;
         let endpoint = if let Some(client_tls) = client_tls {
@@ -532,7 +599,7 @@ impl<S: Store> Tier<S> {
                 fetching: Arc::new(Semaphore::new(FETCH_BYTES)),
                 flights: Mutex::default(),
                 settled: tokio::sync::Notify::new(),
-                ticket_keys,
+                tickets,
             }),
         })
     }
@@ -715,7 +782,7 @@ impl<S: Store> Tier<S> {
         // anyway, so serving unproved objects adds nothing. Trigger to
         // upgrade: a daemon that serves several OS users must walk (and
         // then check tickets), like a cache.
-        if !self.inner.ticket_keys.is_empty()
+        if matches!(self.inner.tickets, Tickets::Verify(_))
             && let Err(failed) = self.prove(i, ask).await
         {
             return Some((Err(failed), self.share(held, 1, ask).await?));
@@ -1370,15 +1437,22 @@ impl<S: Store> Objects for Tier<S> {
         // a daemon with no ticket keys serves what its store holds, to the
         // one OS user that owns its private socket (see the SHORTCUT at
         // `produce`).
-        let ticket = if self.inner.ticket_keys.is_empty() {
-            scion_proto::ticket::parse_unverified(&ticket, scion_proto::ticket::now())
-        } else {
-            scion_proto::ticket::parse(&ticket, &self.inner.ticket_keys, scion_proto::ticket::now())
+        let ticket = match &self.inner.tickets {
+            Tickets::Relay => {
+                scion_proto::ticket::parse_unverified(&ticket, scion_proto::ticket::now())
+            }
+            Tickets::Verify(keys) => {
+                scion_proto::ticket::parse(&ticket, keys, scion_proto::ticket::now())
+            }
         }
         .map_err(|why| {
             // The reason only: no ticket bytes, and no signature.
             tracing::warn!(reason = %why, "a GetObjects ticket was refused");
-            Status::permission_denied(format!("bad ticket: {why}"))
+            Status::permission_denied(format!(
+                "bad ticket: {why} (the tier's --ticket-public-key must hold a \
+                 key the server signs with; operations.md section 2's rotation \
+                 keeps the old key alive during a change)"
+            ))
         })?;
         let keys = refs
             .into_iter()
@@ -1655,6 +1729,38 @@ mod tests {
             request_id: None,
             stalled: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_tier_refuses_a_ticket_of_another_key() {
+        use scion_proto::v1::GetObjectsRequest;
+        let setup = setup(1, 1 << 20).await;
+        // A ticket the tier's key did not sign: refused with the key named.
+        let forged = scion_proto::ticket::sign(
+            &ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
+            "r",
+            "test",
+            *setup.root.as_bytes(),
+            scion_proto::ticket::now(),
+        )
+        .unwrap();
+        let request = GetObjectsRequest {
+            ticket: forged,
+            refs: vec![scion_proto::v1::ObjectRef {
+                kind: setup.keys[0].kind() as i32,
+                id: setup.keys[0].id().as_slice().to_vec(),
+                path: setup.paths[0].clone(),
+            }],
+            accept: Vec::new(),
+        };
+        let error = Objects::get_objects(&setup.tier, Request::new(request))
+            .await
+            .unwrap_err();
+        assert!(
+            error.message().contains("unknown key or bad signature"),
+            "the refusal names the signature: {}",
+            error.message()
+        );
     }
 
     #[tokio::test]
@@ -1987,13 +2093,12 @@ mod tests {
                 .add_service(ObjectsServer::new(Stalls(data.to_vec())))
                 .serve_with_incoming(TcpListenerStream::new(listener)),
         );
-        Tier::new(
+        Tier::new_relay(
             MemoryStore::new(0),
             &url,
             "token",
             CACHE_UPSTREAM_TIMEOUT,
             None,
-            Vec::new(),
         )
         .unwrap()
     }

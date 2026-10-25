@@ -121,15 +121,8 @@ fn start_stack(
     let node = tempfile::tempdir().unwrap();
     let disk = DiskStore::open(&node.path().join("data"), 64 << 20).unwrap();
     let (listener, daemon) = tcp();
-    let daemon_tier = Tier::new(
-        disk,
-        &cache_url,
-        TOKEN,
-        DAEMON_UPSTREAM_TIMEOUT,
-        None,
-        Vec::new(),
-    )
-    .unwrap();
+    let daemon_tier =
+        Tier::new_relay(disk, &cache_url, TOKEN, DAEMON_UPSTREAM_TIMEOUT, None).unwrap();
     tasks.push(runtime.spawn(async move {
         let _ = daemon_tier
             .serve(

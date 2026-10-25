@@ -821,14 +821,31 @@ pub async fn bind_unix(path: &Path) -> io::Result<UnixListener> {
     })?;
     // The checked directory, so no symlink in `path` is followed again.
     let path = &check_private_dir(dir)?.join(name);
-    if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_socket()) {
-        if UnixStream::connect(path).await.is_ok() {
+    match std::fs::symlink_metadata(path) {
+        // A socket file that nothing listens on is ours from an earlier
+        // run that died: remove it and bind again.
+        Ok(meta) if meta.file_type().is_socket() => {
+            if UnixStream::connect(path).await.is_ok() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    format!("a process listens on {}", path.display()),
+                ));
+            }
+            std::fs::remove_file(path)?;
+        }
+        // Anything else already there - above all a symlink, which bind
+        // would follow to a path this check never saw - is refused with
+        // the path named.
+        Ok(_) => {
             return Err(io::Error::new(
-                io::ErrorKind::AddrInUse,
-                format!("a process listens on {}", path.display()),
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "{} exists and is not a socket file; remove it and start again",
+                    path.display()
+                ),
             ));
         }
-        std::fs::remove_file(path)?;
+        Err(_) => {}
     }
     let listener = UnixListener::bind(path)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;

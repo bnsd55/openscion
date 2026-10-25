@@ -270,6 +270,13 @@ that breaks one is caught.
   `scion-server/tests/archive_attacks.rs::two_pending_lands_sharing_a_request_key_are_named_or_tolerated`,
   `scion-server/tests/archive_attacks.rs::a_mid_replay_failure_leaves_the_target_empty`,
   `scion-server/tests/archive_attacks.rs::a_pg_replay_that_dies_halfway_leaves_the_database_empty`
+- **A cache verifies every ticket it serves.** The cache refuses to
+  start without a public key, and a call whose ticket the key did not
+  sign is refused before the walk; the unverified relay is the daemon's
+  explicit mode (its 0600 socket already gives it one user). The
+  connection cap, the stream cap and the audit meter's per-address
+  folding bound a refused call the same as any other.
+  `scion-tier/tests/keyless_cache.rs::a_cache_without_a_public_key_does_not_start`
 - **A refused-auth flood is counted by the machine, not the socket.**
   The audit meter folds one peer's refusals into counted lines keyed
   by the address — an IPv6 by its /64, the smallest block one site
@@ -278,6 +285,14 @@ that breaks one is caught.
   stranger in the shared bucket. (#414)
   `meter_key`, and the test
   `scion-server/src/audit.rs::one_address_rotating_ports_does_not_bury_a_stranger`
+- **A client that never reads its unary replies holds the budget, not
+  the server's memory.** The reply-memory layer counts every parked
+  unary reply's bytes against one budget (128 MiB across every
+  connection) and refuses further unary reads with `resource_exhausted`
+  while it is spent; a committed write's reply goes out regardless, and
+  every way a reply ends — the reply finishes, the client resets the
+  stream, or the connection closes — frees its share. (#586)
+  `crates/scion-server/tests/reply_budget_h2.rs`
 - **A restore verifies first, and goes only into an empty store.** It
   runs the same `verify` a reader runs and refuses on any damage, and it
   refuses a data directory that already holds a store

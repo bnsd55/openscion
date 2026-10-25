@@ -75,9 +75,10 @@ struct Cli {
     upstream_token_file: Option<PathBuf>,
     /// The public keys (64 hex characters, from `scion-server ticket-key`)
     /// that a ticket of a call must verify against. One is enough; a
-    /// second keeps the old key alive during a rotation. Without one, no
-    /// object is served.
-    #[arg(long, value_name = "HEX")]
+    /// second keeps the old key alive during a rotation. The cache
+    /// refuses to start without one: a tier that checks no ticket would
+    /// serve every object it holds to any caller.
+    #[arg(long, value_name = "HEX", required = true)]
     ticket_public_key: Vec<String>,
     /// Most connections served at once. More clients wait until one closes.
     #[arg(long, default_value_t = listen::DEFAULT_CONNECTIONS)]

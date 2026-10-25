@@ -51,6 +51,8 @@ fn spawn() -> Cache {
             "t",
             "--upstream",
             &format!("http://{upstream}"),
+            "--ticket-public-key",
+            "1d9a210b3533c802f27bd5aeef391e48978ecbda81cbdafacd0b76a020df8a99",
         ])
         .env("NO_COLOR", "1")
         .env("RUST_LOG", "info")

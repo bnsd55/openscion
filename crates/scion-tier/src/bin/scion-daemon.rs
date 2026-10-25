@@ -176,15 +176,17 @@ async fn main() -> anyhow::Result<()> {
     for path in &cli.seed {
         seed(&store, path);
     }
-    let tier = Tier::new(
+    // A daemon checks no ticket and walks nothing: it forwards the
+    // ticket as it came, and the 0600 socket (one OS user, the socket's
+    // owner) and the upstream's checks are the gates. The relay mode is
+    // this constructor's explicit choice, never a fallthrough of an
+    // empty key list.
+    let tier = Tier::new_relay(
         store,
         &cli.upstream,
         &upstream,
         DAEMON_UPSTREAM_TIMEOUT,
         Some(&client_tls),
-        // A daemon does not check tickets: it forwards them, and its
-        // upstream does the checking. Only the walk gates what it serves.
-        Vec::new(),
     )?;
     let socket = cli.socket.unwrap_or_else(|| cli.data.join("daemon.sock"));
     let listener = bind_unix(&socket)

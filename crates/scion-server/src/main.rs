@@ -27,19 +27,20 @@ use tracing_subscriber::EnvFilter;
 #[command(version, about, long_about = None)]
 struct Cli {
     /// The data directory. Holds the SQLite database and the objects.
-    #[arg(long, env = "SCION_DATA", default_value = "scion-data")]
+    #[arg(long, global = true, env = "SCION_DATA", default_value = "scion-data")]
     data: PathBuf,
     /// Serve metadata from Postgres at this URL instead of the SQLite
     /// database of the data directory. The URL holds the credentials, so it
     /// is never logged. Prefer `--postgres-url-file` or `SCION_POSTGRES_URL`:
     /// a URL on the command line is readable by every local account (`ps`).
-    #[arg(long, value_name = "URL")]
+    #[arg(long, global = true, value_name = "URL")]
     postgres_url: Option<String>,
     /// File with the Postgres URL, read like the access file: the owner
     /// alone may read it, and a symlink is refused. Give `--postgres-url`
     /// or `--postgres-url-file`, not both.
     #[arg(
         long,
+        global = true,
         conflicts_with = "postgres_url",
         env = "SCION_POSTGRES_URL_FILE",
         value_name = "FILE"
@@ -47,7 +48,7 @@ struct Cli {
     postgres_url_file: Option<PathBuf>,
     /// Verify the certificate of the Postgres server with this CA (PEM).
     /// Required when `--postgres-url` names a host that is not local.
-    #[arg(long, requires = "postgres_url", value_name = "FILE")]
+    #[arg(long, global = true, requires = "postgres_url", value_name = "FILE")]
     postgres_ca: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
@@ -738,6 +739,28 @@ fn write_gc_metrics_file(path: &Path, report: &gc::Report, took: Duration, dry_r
     }
 }
 
+/// The reply-memory budget the serve command runs with: the compiled
+/// default, or the size the env names. Test-hooks only: the lever tests
+/// spawn a child server and need a budget small enough that parking a
+/// few unread replies binds it (the compiled 128 MiB cannot be bound by
+/// the 256 streams one connection may open). Release builds never read
+/// the env.
+#[cfg(feature = "test-hooks")]
+fn test_reply_budget() -> usize {
+    match std::env::var_os("SCION_TEST_REPLY_BUDGET") {
+        Some(value) => value
+            .to_str()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(scion_server::REPLY_MEMORY_BUDGET),
+        None => scion_server::REPLY_MEMORY_BUDGET,
+    }
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn test_reply_budget() -> usize {
+    scion_server::REPLY_MEMORY_BUDGET
+}
+
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
@@ -1251,7 +1274,7 @@ async fn serve(
             tls: config.server_tls,
             metrics,
             audit: config.audit,
-            reply_memory_budget: scion_server::REPLY_MEMORY_BUDGET,
+            reply_memory_budget: test_reply_budget(),
         },
         tickets,
         async move {
@@ -1326,7 +1349,11 @@ fn load_access(
         .count();
     anyhow::ensure!(
         given == 1,
-        "give --token, --token-file or --access, not two"
+        if given == 0 {
+            "give --token-file, SCION_TOKEN or --access: serve has no token source"
+        } else {
+            "give --token, --token-file or --access, not two"
+        }
     );
     if let Some(file) = token_file {
         let token = secret_file(&file)?;
@@ -1560,6 +1587,22 @@ mod access_file_tests {
         std::fs::write(&file, text).unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
         file
+    }
+
+    /// With no token source at all, the refusal says what is missing;
+    /// with two sources, it keeps "not two".
+    #[test]
+    fn serve_without_a_token_source_says_what_is_missing() {
+        let err = load_access(None, None, None).unwrap_err().to_string();
+        assert!(
+            err.contains("--token-file, SCION_TOKEN or --access")
+                && err.contains("no token source"),
+            "{err}"
+        );
+        let err = load_access(Some("t".into()), Some(PathBuf::from("k")), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not two"), "{err}");
     }
 
     #[test]
