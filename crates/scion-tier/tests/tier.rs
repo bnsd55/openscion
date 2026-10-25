@@ -1870,7 +1870,7 @@ async fn a_daemons_stderr_stays_quiet_and_colorless_across_gets() {
 /// signature named, and nothing is served or fetched. The proof that
 /// binds the check to this tier: the refusal lives in this call site
 /// (`Tickets::Verify` -> `parse`), and a cache that reads its tickets
-/// unverified serves every one of these (found by C131).
+/// unverified serves every one of these.
 #[tokio::test]
 async fn a_cache_refuses_a_ticket_that_no_key_of_its_signed() {
     let secret = blob(b"the object a forged ticket must not reach\n");
@@ -1910,6 +1910,12 @@ async fn a_cache_refuses_a_ticket_that_no_key_of_its_signed() {
     assert!(status.message().contains("signature"), "{status:?}");
 
     let mut flipped = signed.clone();
+    // The body layout is version (1 byte), expiry (8), root tree (32),
+    // then the u16 length of the repo name. The flip hits the repo
+    // name's first byte: the length stays small and even, so the body
+    // still parses to exactly a repo, a principal and a root tree - the
+    // shape check cannot refuse it, and the signature is the only check
+    // left that can.
     let at = 1 + 8 + 32 + 2;
     flipped[at] ^= 0xff;
     let status = get_with(&mut caller, vec![ref_for(&fake, &secret)], flipped)
