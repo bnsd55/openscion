@@ -39,4 +39,21 @@ count=$(count_reader_failures "$work/empty.log")
 count=$(count_reader_timeouts "$work/absent.log")
 [ "$count" -eq 0 ] || { echo "an absent log must count 0, got $count" >&2; exit 1; }
 
+# The throughput's arithmetic, pinned on a two-rep fixture: two reps,
+# 1000 lands each over 10 s and 20 s, want 2000 / 30 = 66.7 lands/s.
+# The bug this catches: summing the reports' FIRST field (the lands) as
+# the seconds read 1.0 lands/s in every cell of run 40206407822.
+jsons=$(mktemp -d)
+trap 'rm -rf "$work" "$jsons"' EXIT
+jq -n '{landed: 1000, seconds: 10.0}' > "$jsons/rep1.json"
+jq -n '{landed: 1000, seconds: 20.0}' > "$jsons/rep2.json"
+got=$(cell_throughput "$jsons"/rep1.json "$jsons"/rep2.json)
+[ "$got" = "66.7" ] || { echo "throughput: wanted 66.7, got $got" >&2; exit 1; }
+# A rep whose bench died leaves no report; the survivors still divide.
+got=$(cell_throughput "$jsons"/rep1.json "$jsons/absent.json")
+[ "$got" = "100.0" ] || { echo "throughput (one live rep): wanted 100.0, got $got" >&2; exit 1; }
+# No live report: the dash, not a division by zero.
+got=$(cell_throughput "$jsons/absent.json")
+[ "$got" = "-" ] || { echo "throughput (no reports): wanted '-', got $got" >&2; exit 1; }
+
 echo "counter test: ok"

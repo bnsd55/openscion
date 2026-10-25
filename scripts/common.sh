@@ -435,6 +435,29 @@ start_scion() {
     --upstream "http://127.0.0.1:$CACHE_PORT"
 }
 
+# cell_throughput BENCH_JSONS: the cell's throughput, the lands the
+# bench reports over the seconds its reports cover, summed over the
+# cell's reps. A rep whose bench died leaves no report and adds no
+# lands or seconds. test-capacity-counters.sh pins the arithmetic: the
+# seconds are the reports' SECOND field - summing the lands field read
+# 1.0 lands/s in every cell of run 40206407822.
+cell_throughput() {
+  local bf lands=0 secs=0 tsv
+  tsv=$(mktemp)
+  for bf in "$@"; do
+    [ -f "$bf" ] || continue
+    jq -r '[.landed // 0, .seconds // 0] | @tsv' "$bf" > "$tsv" || continue
+    lands=$((lands + $(cut -f1 "$tsv")))
+    secs=$(awk -v s="$secs" '{ print s + $2 }' "$tsv")
+  done
+  rm -f "$tsv"
+  if awk -v s="$secs" 'BEGIN { exit !(s > 0) }'; then
+    awk -v l="$lands" -v s="$secs" 'BEGIN { printf "%.1f\n", l / s }'
+  else
+    echo "-"
+  fi
+}
+
 # scrape_metrics URL: the total of the out-bytes counters of the registry at
 # URL. A counter that never incremented does not render, hence the +0.
 scrape_metrics() {
