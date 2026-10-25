@@ -135,20 +135,22 @@ cover and cannot write; the server derives a view of the repo for it.
 numbers, and removes what it made. The method and the checkout
 benchmark against git are in [docs/benchmarks.md](https://github.com/bnsd55/openscion/blob/main/docs/benchmarks.md).
 
-The steps below want a git repository with a `src/` folder and a
-`README.md`. Get one:
+The steps below want a git repository with a `README.md` and code under
+a `tokio/src/` folder (tokio is a workspace; its library lives in
+`tokio/src`). Get one:
 
 ```sh
 git clone https://github.com/tokio-rs/tokio /tmp/tokio
 git -C /tmp/tokio checkout be689a35f5ade5a39e507f79d3ec85cdab27806f
 ```
 
-(any git repository with those two works). Every line below runs as
-written.
+(another repository works if you change the paths below to its own;
+with tokio, every line runs as written).
 
 ```sh
 cargo build --release
 export SCION_TOKEN=dev SCION_SERVER=http://127.0.0.1:7878
+install -d -m 0700 /tmp/scion
 ./target/release/scion-server --data /tmp/scion import /tmp/tokio
 ./target/release/scion-server --data /tmp/scion ticket-key --out /tmp/scion/ticket.key > /tmp/scion/ticket.pub
 # the public key is now in ticket.pub; pass it to the tiers below
@@ -156,12 +158,12 @@ export SCION_TOKEN=dev SCION_SERVER=http://127.0.0.1:7878
 ./target/release/scion-server --data /tmp/scion fsck              # check the data directory; safe while the server runs
 ./target/release/scion-server --data /tmp/scion gc --dry-run      # what a collection would remove; safe while the server runs
 
-./target/release/scn ls main:src                    # mode, kind, size, name per entry
+./target/release/scn ls main:tokio/src            # mode, kind, size, name per entry
 ./target/release/scn log -n 5
-./target/release/scn log --path src -n 5            # changesets that changed src/
+./target/release/scn log --path tokio/src -n 5    # changesets that changed tokio/src/
 ./target/release/scn blame main:README.md
 ./target/release/scn cat main:README.md
-./target/release/scn checkout main --into /tmp/work # --sparse DIR for part of it
+./target/release/scn checkout main --into /tmp/work # --sparse tokio/src for part of it
 mkdir -p /tmp/view
 # The mount serves NFS from scn itself and holds this terminal: run it
 # in another terminal, and leave it there until `scn unmount`. On macOS
@@ -313,8 +315,9 @@ lives there. Each directory above it must be owned by root or by you, and
 must not be writable by group or others unless it has the sticky bit (as
 `/tmp` has). `scn` checks the same for the socket. The error names the
 directory; `chmod go-w DIR` fixes it. With umask 002 (a private group per
-user), new directories are group-writable, so they are refused until you run
-that. Stop the daemon with Ctrl-C or SIGTERM: it then writes its index, and
+user), a plain mkdir makes a group-writable directory, and it is refused by
+choice (the rule stays fail-closed). Make the directory with
+`install -d -m 0700 DIR`, or run `chmod g-w DIR`. Stop the daemon with Ctrl-C or SIGTERM: it then writes its index, and
 its next start reads that one file instead of every stored object.
 
 A regional cache can also write snapshots, so that a new node's daemon does
@@ -400,6 +403,7 @@ A bearer token over plain TCP to a non-loopback address stays refused.
 | [`docs/format-v1.md`](https://github.com/bnsd55/openscion/blob/main/docs/format-v1.md) | The v1 byte format. Object IDs are hashes of these bytes. |
 | [`docs/protocol-v1.md`](https://github.com/bnsd55/openscion/blob/main/docs/protocol-v1.md) | The v1 API contract: calls, limits, status codes, retries, durability and what a client checks |
 | [`docs/cli.md`](https://github.com/bnsd55/openscion/blob/main/docs/cli.md) | Every `scn` command: what it does, its flags, the global flags and env vars, and the exit codes |
+| [`docs/cli-vs-git.md`](https://github.com/bnsd55/openscion/blob/main/docs/cli-vs-git.md) | Every `scn` command next to the closest `git` and `gh` operation, and the differences that matter for a reader arriving from a GitHub workflow |
 | [`docs/operations.md`](https://github.com/bnsd55/openscion/blob/main/docs/operations.md) | How to run a server: deploy, keys, the access file, Postgres, backups, and what each failure means |
 | [`docs/threat-model.md`](https://github.com/bnsd55/openscion/blob/main/docs/threat-model.md) | The supported profile, the assets, the actors, the trust boundaries, and each security invariant with the test that proves it |
 | [`docs/faults.md`](https://github.com/bnsd55/openscion/blob/main/docs/faults.md) | One row per fault: what the client sees, what the operator sees, what survives a restart, and the test that proves it |
@@ -477,6 +481,13 @@ tmpfs disk-full and dm-log-writes steps), `test (postgres)` (Postgres
 
 Requires Rust 1.88 or newer and `protoc` (the Protocol Buffers compiler; for
 example `brew install protobuf` or `apt install protobuf-compiler`).
+
+v0.1.0 is a source release: the binaries of a version build from its
+signed tag (`git checkout <tag>; cargo build --release --locked`). A
+release that ships binaries says so in its release notes, and
+`docs/verify.md` verifies them. An operator upgrading keeps the previous
+release's binaries beside the new ones: a rollback needs them
+(`docs/operations.md`, "Upgrades").
 
 ```sh
 cargo test --workspace
