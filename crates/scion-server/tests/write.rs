@@ -297,6 +297,27 @@ fn bad_requests_are_rejected_and_store_nothing() {
             "message",
         ),
         (
+            "name too long",
+            ok(|cs| {
+                let a = cs.author();
+                let long = IdentityTime::new(
+                    vec![b'n'; MAX_IDENTITY_BYTES + 1],
+                    a.email().to_vec(),
+                    a.unix_secs(),
+                    a.tz_offset_minutes(),
+                )
+                .expect("identity fits the format");
+                rebuilt(
+                    cs.parents().to_vec(),
+                    cs.committer().cloned(),
+                    cs.message().to_vec(),
+                    long,
+                    cs.changes().clone(),
+                )
+            }),
+            "author",
+        ),
+        (
             "email too long",
             ok(|cs| {
                 let a = cs.author();
@@ -355,6 +376,24 @@ fn bad_requests_are_rejected_and_store_nothing() {
             .read(|c| count_changesets(c.sqlite().unwrap()))
             .unwrap(),
         before
+    );
+
+    // The boundary the limits compare against, placed after the count
+    // assert above (this one intentionally stores): a message of exactly
+    // the limit is accepted - the limit is "longer than" - so a mutant
+    // that refuses the boundary or accepts past it fails here.
+    let boundary = ok(|cs| {
+        rebuilt(
+            cs.parents().to_vec(),
+            cs.committer().cloned(),
+            vec![b'm'; MAX_COMMIT_MESSAGE_BYTES],
+            cs.author().clone(),
+            cs.changes().clone(),
+        )
+    });
+    assert!(
+        create_changeset(&f.store, REPO, &boundary, &later()).is_ok(),
+        "a message of exactly the limit is accepted"
     );
 }
 
