@@ -244,7 +244,7 @@ section; its fixes landed as #561. Highlights, with the C50 verdicts:
 
 Closed since the audit:
 
-- The C60 Postgres lock-restart runbook, and whether `serve` should
+- The Postgres lock-restart runbook, and whether `serve` should
   wait for the lock (#609, §2: the runbook names the supervisor's
   restart as the recovery, and `serve` fails fast by design).
 - The archive restore's repository-sized RAM hold (#575, §2: the replay
@@ -253,7 +253,7 @@ Closed since the audit:
   commit` whole-file read (#582, §3).
 - The database-loop sweep: SQL in loops, `ORDER BY`, isolation (#570,
   §4: every loop listed with its verdict, no repo-sized site).
-- The data-dir default create-vs-refuse question (D25, #578, §6: a
+- The data-dir default create-vs-refuse question (#578, §6: a
   missing data directory is refused, not created).
 - The additive contract goldens that enforce the format policies
   (#571, §7: the store, protocol and archive goldens, with the
