@@ -1121,6 +1121,68 @@ mod tests {
         assert_eq!(real.files_removed, 1, "{real:?}");
     }
 
+    /// A blob named by two repos, dead in one and live in the other: the
+    /// sweep must keep the file because ANY live name keeps it. A
+    /// `keeps_file` that asks whether SOME name survives the prune (an
+    /// `any` where the code says `all`) must not pass here.
+    #[test]
+    fn a_blob_live_in_another_repo_survives_a_dry_run() {
+        let (_dir, store) = store();
+        let b = uploaded(&store, b"shared\n");
+        store
+            .write(|c| {
+                let mut tx = SqliteTx(c);
+                let other = tx.create_repo("other")?;
+                // A stored changeset puts the blob, so repo other's row
+                // is live: nothing prunes it.
+                crate::tree::store_changeset(
+                    &mut tx,
+                    other,
+                    &cs(
+                        None,
+                        &[(
+                            "f",
+                            FileState::Regular {
+                                content: b,
+                                executable: false,
+                            },
+                        )],
+                    ),
+                    &mut crate::tree::lens_of(&Backend::sqlite(store.clone())),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        age_file(&Backend::sqlite(store.clone()), b, OLD);
+        let report = run(
+            &Backend::sqlite(store.clone()),
+            Duration::from_secs(DEFAULT_GRACE_SECS),
+            true,
+            &mut |_| {},
+        )
+        .unwrap();
+        // The dry run takes repo gc's dead row (the dry prune would), and
+        // the file stays: repo other's live row names it.
+        assert_eq!(report.rows_pruned, 1, "{report:?}");
+        assert_eq!(report.files_removed, 0, "{report:?}");
+        assert_eq!(
+            store.blobs().verify(b).unwrap(),
+            crate::store::BlobStatus::Valid
+        );
+        // The real run takes the same row and keeps the file, too.
+        let real = collect(
+            &Backend::sqlite(store.clone()),
+            Duration::from_secs(DEFAULT_GRACE_SECS),
+            &mut |_| {},
+        );
+        assert_eq!(real.rows_pruned, 1, "{real:?}");
+        assert_eq!(real.files_removed, 0, "{real:?}");
+        assert_eq!(
+            store.blobs().verify(b).unwrap(),
+            crate::store::BlobStatus::Valid
+        );
+    }
+
     #[test]
     fn a_store_that_never_holds_blobs_collects_nothing() {
         let (_dir, store) = store();
