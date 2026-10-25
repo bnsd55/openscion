@@ -149,12 +149,33 @@ jobs:
           # The watcher doubles as a guard: a runner whose disk fills or
           # whose memory drains loses its agent mid-suite, with every
           # log — so the measure fails itself, loudly, while there is
-          # still room to log the numbers.
-          ( while sleep 30; do date -u +%T; df -h / | tail -1; free -m | awk 'NR==2'; du -sh target/coverage 2>/dev/null; \
-              ps -eo pid,rss,pcpu,etime,comm --sort=-rss | head -4 | tee -a watcher.log; \
-              avail=$(df --output=avail -BG / | tail -1 | tr -dc '0-9'); \
-              mem=$(free -m | awk 'NR==2 {print $7}'); \
-              { [ "$avail" -gt 3 ] && [ "$mem" -gt 600 ]; } || { echo 'the runner is out of disk or memory'; df -h /; free -m; ps aux --sort=-rss | head -12; exit 2; }; done ) &
+          # still room to log the numbers. Two rules the first watcher
+          # broke (run 40188469520): no pipe may end in SIGPIPE (a ps
+          # piped to head dies with the subshell under pipefail, and
+          # the step then fails at the kill of a watcher already gone),
+          # and a trip must stop the measure, not only print - the
+          # nextest process group dies here, so the step fails with the
+          # hog's name in a log that still uploads.
+          rm -f guard.trip watcher.log watcher.ps
+          ( while sleep 30; do
+              date -u +%T; df -h / | tail -1; free -m | awk 'NR==2'; du -sh target/coverage 2>/dev/null
+              ps -eo pid,rss,pcpu,etime,comm --sort=-rss > watcher.ps
+              head -4 watcher.ps >> watcher.log
+              avail=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+              mem=$(free -m | awk 'NR==2 {print $7}')
+              if [ "$avail" -le 3 ] || [ "$mem" -le 600 ]; then
+                {
+                  echo "the runner is out of disk or memory: avail=${avail}G avail_floor=3G free_mem=${mem}M mem_floor=600M"
+                  df -h /
+                  free -m
+                  ps -eo pid,rss,pcpu,etime,comm,args --sort=-rss > watcher.top
+                  head -14 watcher.top
+                } | tee -a watcher.log
+                pkill -f 'cargo nextest' || true
+                pkill -f 'target/debug/deps' || true
+                exit 2
+              fi
+            done ) &
           watcher=$!
           mkdir -p .config
           printf '[profile.default]\ntimeout = "600s"\nretries = 1\nslow-timeout = { period = "60s", terminate-after = 5 }\n' > .config/nextest.toml
@@ -187,7 +208,24 @@ jobs:
           export LLVM_PROFILE_FILE="$PWD/target/coverage/sqlite-%4m.profraw"
           nice -n 19 cargo nextest run --workspace --no-fail-fast \
             | tee measure.log
-          kill "$watcher"
+          # The step must not fail on a watcher that is already gone:
+          # a tripped guard exited by design, and its trip file says so
+          # below. A watcher that died any other way is a harness bug
+          # and fails the step with its log.
+          kill "$watcher" 2> /dev/null || true
+          wait "$watcher" 2> /dev/null || true
+          if [ -f guard.trip ]; then
+            echo 'the guard tripped: the measure above was stopped by it'
+            tail -30 watcher.log
+            exit 1
+          fi
+          if kill -0 "$watcher" 2> /dev/null; then
+            echo 'the watcher is alive at the end, as it should be'
+          else
+            echo 'the watcher exited early without tripping: a harness bug'
+            tail -30 watcher.log
+            exit 1
+          fi
           df -h / | tail -1; free -m | awk 'NR==2'
           du -sh target/coverage; find target/coverage -name '*.profraw' | wc -l
           echo "the measure's instrumented units:"
@@ -335,11 +373,29 @@ jobs:
       - name: measure, the postgres backend
         run: |
           set -o pipefail
-          ( while sleep 30; do date -u +%T; df -h / | tail -1; free -m | awk 'NR==2'; du -sh target/coverage 2>/dev/null; \
-              ps -eo pid,rss,pcpu,etime,comm --sort=-rss | head -4 | tee -a watcher.log; \
-              avail=$(df --output=avail -BG / | tail -1 | tr -dc '0-9'); \
-              mem=$(free -m | awk 'NR==2 {print $7}'); \
-              { [ "$avail" -gt 3 ] && [ "$mem" -gt 600 ]; } || { echo 'the runner is out of disk or memory'; df -h /; free -m; ps aux --sort=-rss | head -12; exit 2; }; done ) &
+          # The same watcher-guard as the default measure above: no
+          # SIGPIPE death, and a trip stops the measure while the log
+          # can still say what ate the runner.
+          rm -f guard.trip watcher.log watcher.ps
+          ( while sleep 30; do
+              date -u +%T; df -h / | tail -1; free -m | awk 'NR==2'; du -sh target/coverage 2>/dev/null
+              ps -eo pid,rss,pcpu,etime,comm --sort=-rss > watcher.ps
+              head -4 watcher.ps >> watcher.log
+              avail=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+              mem=$(free -m | awk 'NR==2 {print $7}')
+              if [ "$avail" -le 3 ] || [ "$mem" -le 600 ]; then
+                {
+                  echo "the runner is out of disk or memory: avail=${avail}G avail_floor=3G free_mem=${mem}M mem_floor=600M"
+                  df -h /
+                  free -m
+                  ps -eo pid,rss,pcpu,etime,comm,args --sort=-rss > watcher.top
+                  head -14 watcher.top
+                } | tee -a watcher.log
+                pkill -f 'cargo nextest' || true
+                pkill -f 'target/debug/deps' || true
+                exit 2
+              fi
+            done ) &
           watcher=$!
           ulimit -v 6291456
           # shellcheck disable=SC1090
@@ -363,7 +419,21 @@ jobs:
           nice -n 19 cargo nextest run --workspace --no-fail-fast \
             -E 'package(open-scion-server) and not test(graph_queries_across_many_merges_answer)' \
             | tee measure-postgres.log
-          kill "$watcher"
+          # The same end-of-step rules as the default measure above.
+          kill "$watcher" 2> /dev/null || true
+          wait "$watcher" 2> /dev/null || true
+          if [ -f guard.trip ]; then
+            echo 'the guard tripped: the measure above was stopped by it'
+            tail -30 watcher.log
+            exit 1
+          fi
+          if kill -0 "$watcher" 2> /dev/null; then
+            echo 'the watcher is alive at the end, as it should be'
+          else
+            echo 'the watcher exited early without tripping: a harness bug'
+            tail -30 watcher.log
+            exit 1
+          fi
           # The report maps these bytes; no rebuild may touch them.
           # shellcheck disable=SC2046
           tar czf units-postgres.tgz $(find target/debug -type f -perm -u+x ! -name '*.d' ! -name '*.rlib' ! -name '*.so')
