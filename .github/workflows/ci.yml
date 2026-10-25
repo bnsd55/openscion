@@ -60,6 +60,7 @@ jobs:
       macos: ${{ steps.files.outputs.macos }}
       workflows: ${{ steps.files.outputs.workflows }}
       deps: ${{ steps.files.outputs.deps }}
+      mount: ${{ steps.files.outputs.mount }}
     steps:
       - id: files
         env:
@@ -75,6 +76,7 @@ jobs:
           macos=false
           workflows=false
           deps=false
+          mount=false
           while IFS= read -r line; do
             [ -z "$line" ] && continue
             status=${line%% *}
@@ -148,6 +150,17 @@ jobs:
               deny.toml|*/deny.toml|\
               scripts/check-deny-coverage.sh) deps=true ;;
             esac
+            # The writable mount: its code lives in the VFS, the
+            # mount command and the commit's mount path. A pull request
+            # that touches one runs the feature's tests, so a PR cannot
+            # break the writable build for main to find out after the
+            # merge.
+            case "$file" in
+              crates/scn/src/vfs.rs|\
+              crates/scn/src/cmd/mount.rs|\
+              crates/scn/src/cmd/commit.rs|\
+              crates/scn/tests/from_mount.rs) mount=true ;;
+            esac
           done <<< "$files"
           {
             echo "docs_only=$docs_only"
@@ -155,6 +168,7 @@ jobs:
             echo "macos=$macos"
             echo "workflows=$workflows"
             echo "deps=$deps"
+            echo "mount=$mount"
           } >> "$GITHUB_OUTPUT"
 
   lint:
@@ -218,6 +232,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The writable mount is a build feature, off by default: a
+      # PR that breaks the feature build must fail on the PR, not on
+      # main after the merge.
+      - run: cargo clippy -p open-scion --features unstable-writable-mount -- -D warnings
       # A release build has no dev-dependencies, so the test-hooks feature
       # stays off and every test-only item that a cfg misses shows up as
       # dead code. --all-targets unifies the dev-dependency that turns
@@ -585,6 +603,30 @@ jobs:
           SCION_TEST_POSTGRES_URL=postgres://postgres:scion@localhost:5432/scion \
           cargo test -p open-scion-server --test backend_refusals -- --ignored
 
+  test-writable:
+    name: test (the writable mount feature)
+    needs: tier
+    # Risk tier: a pull request that touches the mount's write path
+    # (the VFS, the mount command or the commit's mount path) also runs
+    # the feature's tests, so a PR cannot break the build that carries
+    # the write path. Main, the nightly and a dispatch always run it.
+    if: >-
+      ${{ !cancelled() && (github.event_name != 'pull_request' || (needs.tier.result == 'success' && !github.event.pull_request.draft && needs.tier.outputs.docs_only != 'true' && needs.tier.outputs.mount == 'true')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: protoc
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The feature build's tests: the write-side unit tests of the VFS
+      # and the from-mount suite, which the default build compiles out.
+      - run: cargo test -p open-scion --features unstable-writable-mount
+
   test-macos:
     name: test (macOS)
     needs: tier
@@ -813,8 +855,13 @@ jobs:
 
   nfs-mount:
     name: mount (NFS)
-    # The slow tier: main, the nightly and a dispatch only.
-    if: github.event_name != 'pull_request'
+    needs: tier
+    # The slow tier: main, the nightly, a dispatch, and a pull request
+    # whose files the mount's code touches (the tier output `mount`):
+    # a PR that changes the mount must face the NFS mount, not leave
+    # it for main to find out after the merge.
+    if: >-
+      ${{ !cancelled() && (github.event_name != 'pull_request' || (needs.tier.result == 'success' && !github.event.pull_request.draft && needs.tier.outputs.mount == 'true')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:

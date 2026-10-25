@@ -39,7 +39,7 @@ printf %s "$SCION_TOKEN" > /srv/scion-token
 The `umask 077` and the printf make the token file private (0600). A
 data directory the server does not find is refused, not created: every
 subcommand except restore answers "<path> does not exist; create it or
-pass --data" (D25), so make the directory before the first command.
+pass --data" (#578), so make the directory before the first command.
 The serve command keeps
 its files private, and serves. The log's `serving` line names the address.
 
@@ -457,7 +457,10 @@ principal, so the caps are off unless a flag sets one.
 Rewriting the access file takes effect at the next start (or restart): the
 server reads it once. A ticket keeps working for its whole life after a
 reload that narrows its principal, up to 15 minutes from signing, on this
-server and on any cache that holds the repo's objects. To revoke reads:
+server and on any cache that holds the repo's objects. Tickets live by the
+server's clock: a clock stepped back extends every live ticket by up to the
+60 seconds of skew the check allows, so run NTP in slew mode, not step, on
+a machine that serves tickets. To revoke reads:
 rewrite the file and restart, and either wait out the tickets (15 minutes)
 or rotate the ticket key (`--ticket-key`) to cut them off at once. Objects
 already on a user's daemon are out of reach of both; give a daemon only
@@ -882,7 +885,9 @@ re-date such a commit in the git history and import again.
 So an upgrade is: stop the server (and any tiers that share the directory —
 none do by default), copy the directory as a backup (section 3), start the
 new binary, watch the log for the migration, run `fsck`. A store that
-has data logs its migration steps when a build migrates it.
+has data logs its migration steps when a build migrates it; a first
+boot on a fresh, empty directory logs no migration - it says the store
+was created.
 
 Where the binaries come from. v0.1.0 is a source release: build the
 version you need from its signed tag (`docs/RELEASING.md`):

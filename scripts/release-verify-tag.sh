@@ -11,7 +11,7 @@
 # Prints the peeled commit SHA and exits 0 when the pair is a valid
 # release tag: the ref names a tag object (an annotated tag — a
 # lightweight tag's object is the commit itself, so it cannot carry a
-# signature, D18), the tag object names a commit, GitHub verified the
+# signature), the tag object names a commit, GitHub verified the
 # signature (`verification.verified`, reason `valid` — checked at push
 # time against the key on the owner's account), and the tagger is the
 # owner's email. Otherwise it prints the reason to stderr and exits 1.
@@ -53,7 +53,7 @@ type=$(jq -r .object.type "$tag")
 verified=$(jq -r '.verification.verified | tostring' "$tag")
 reason=$(jq -r '.verification.reason' "$tag")
 [ "$verified" = true ] && [ "$reason" = valid ] || {
-    echo "the tag is not verified: reason=$reason (D18: sign it)" >&2
+    echo "the tag is not verified: reason=$reason (sign the tag)" >&2
     exit 1
 }
 

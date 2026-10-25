@@ -13,7 +13,7 @@ use std::process::{Command, Output};
 /// audit log lives there, and the working directory's default ACL on CI
 /// would refuse the default path.
 fn run(data: &Path, args: &[&std::ffi::OsStr]) -> Output {
-    // D25: the binary refuses a missing data directory; a test that
+    // The binary refuses a missing data directory (#578); a test that
     // wants the command to run makes the directory itself.
     fs::create_dir_all(data).unwrap();
     Command::new(env!("CARGO_BIN_EXE_scion-server"))
@@ -128,7 +128,7 @@ fn serve_refuses_a_seed_that_group_or_others_can_read() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("group or others"), "{err}");
 
-    // Back to 0600, the server starts with the key. D25: the operator
+    // Back to 0600, the server starts with the key. The operator
     // makes this data directory (0700) before the serve.
     fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
     let data2 = dir.path().join("data2");

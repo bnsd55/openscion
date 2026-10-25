@@ -97,7 +97,7 @@ fn every_directory_of_a_new_data_directory_is_private_whatever_the_umask() {
     for umask in ["000", "002", "022"] {
         let top = tmp.path().join(format!("umask-{umask}"));
         let data = top.join("project/data");
-        // D25: the operator makes the data directory (0700 under this
+        // The operator makes the data directory (0700 under this
         // umask, chmod'ed so the plain-mkdir shape cannot leak through);
         // the import still makes everything inside it - the database,
         // the blob folders and this process's staging folder - private
@@ -134,7 +134,7 @@ fn serve_starts_with_its_ticket_key_in_a_data_directory_that_it_made() {
     let tmp = private_tempdir();
     let data = tmp.path().join("project/data");
     let key = data.join("ticket.key");
-    // D25: the operator makes the data directory - 0700 even under the
+    // The operator makes the data directory - 0700 even under the
     // most open umask, where a plain mkdir would give 0777, which no
     // check of the key's directory accepts.
     fs::create_dir_all(&data).unwrap();

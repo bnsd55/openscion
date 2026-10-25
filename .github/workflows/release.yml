@@ -6,7 +6,7 @@ name: release
 # dry-run (workflow_dispatch) runs everything but the publish, on an
 # unsigned tag name, so the whole pipeline is provable before the first
 # real tag. It never runs on pull_request, and nothing goes to
-# crates.io (D12).
+# crates.io (releases are source-only by the owner's decision).
 
 on:
   push:
@@ -83,7 +83,7 @@ jobs:
           fi
           tag="$RELEASE_TAG"
           # An annotated tag only: a lightweight tag has no tag object,
-          # so it cannot carry a signature (D18).
+          # so it cannot carry a signature (the owner signs the tag).
           gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" \
             > ref-answer.json
           [ "$(jq -r .object.type ref-answer.json)" = tag ] || {

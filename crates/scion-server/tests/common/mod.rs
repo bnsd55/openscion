@@ -278,21 +278,15 @@ impl Server {
     /// its `--postgres-url` fails here, not vacuously as a second
     /// SQLite run.
     pub(crate) fn start_reopened(data: &Path, schema_source: &Path, log: &Path) -> Self {
-        let mut server = Self::spawn_reopened("One server", data, schema_source, log);
-        // Only this start's lines are its business, and the CI log
-        // renderer truncates a long panic message - so a failed start
-        // reports the lines the server itself wrote, whose tail carries
-        // the exit's reason, not the whole shared log.
-        let mark = usize::try_from(fs::metadata(log).map_or(0, |m| m.len()))
-            .expect("the log's length fits usize");
-        let start = Instant::now();
-        while !server.listens(log) {
-            if let Some(status) = server.child.try_wait().unwrap() {
-                panic!("{}", exit_report(log, mark, status));
-            }
-            assert!(start.elapsed() < Duration::from_secs(60), "no listen");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        // The reopen follows a cut or a kill, whose store lock can
+        // outlive the dead process by a moment (run 40178327848: the
+        // Postgres advisory lock of the cut server refused the reopen
+        // and the round died). The same bounded wait every
+        // restart-after-a-kill-or-cut takes; the backend proof below
+        // runs once a server is actually up.
+        let (server, _) = spawn_until_lock_free(data, log, || {
+            Self::spawn_reopened("One server", data, schema_source, log)
+        });
         if Backend::test_is_postgres() {
             let marker = fs::read_to_string(data.join("backend")).unwrap_or_default();
             assert_eq!(
@@ -340,7 +334,7 @@ impl Server {
         postgres_url: Option<&str>,
         log: &Path,
     ) -> Self {
-        // D25: the binary refuses a missing data directory; the harness
+        // The binary refuses a missing data directory (#578); the harness
         // is for servers that serve, so it makes the directory the way
         // the runbook's operator does: private.
         if !data.exists() {
@@ -516,13 +510,30 @@ impl Drop for Server {
 /// it retried: a test that must prove the wait happened asserts on the
 /// count.
 pub(crate) fn start_after_kill(data: &Path, log: &Path) -> (Server, u64) {
+    spawn_until_lock_free(data, log, || Server::spawn(data, log))
+}
+
+/// Spawns a server - however the caller builds it - and waits until it
+/// listens, retrying, bounded at 10 s, ONLY the store-lock holder
+/// refusal a killed server's lock can name for a moment: on Postgres
+/// the advisory lock dies with the killed server's session, when the
+/// database gets around to ending that backend, and on SQLite the
+/// flock tears down when the kernel reaps the process. Any other exit
+/// fails at once with the server's own lines. Returns the listening
+/// server and the number of holder refusals it retried: a test that
+/// must prove the wait happened asserts on the count.
+pub(crate) fn spawn_until_lock_free(
+    data: &Path,
+    log: &Path,
+    mut spawn: impl FnMut() -> Server,
+) -> (Server, u64) {
     let start = Instant::now();
     let deadline = start + Duration::from_secs(10);
     let mut retried = 0_u64;
     loop {
         let mark = usize::try_from(fs::metadata(log).map_or(0, |m| m.len()))
             .expect("the log's length fits usize");
-        let mut server = Server::spawn(data, log);
+        let mut server = spawn();
         let mut listening = false;
         loop {
             if server.listens(log) {
@@ -561,7 +572,7 @@ pub(crate) fn start_after_kill(data: &Path, log: &Path) -> (Server, u64) {
         );
         retried += 1;
         eprintln!(
-            "start_after_kill: the killed server's store lock is still held, retrying at {} ms",
+            "start: the killed server's store lock is still held, retrying at {} ms",
             start.elapsed().as_millis()
         );
         std::thread::sleep(Duration::from_millis(20));

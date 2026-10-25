@@ -87,7 +87,7 @@ else
   KILL_AT+=("$q" "$((q * 2))" "$((q * 3))")
 fi
 # The pg backend and its restart. Off by default; the nightly keeps it
-# off until the 72-hour hosting decision (D10) says where Postgres
+# off until the 72-hour hosting decision says where Postgres
 # lives. SCION_FAULT_PG_CMD is the restart command itself, for example
 # `docker restart soak-pg`.
 # The Postgres URL reaches every scion-server this script raises
@@ -492,7 +492,8 @@ fi
 
 # The kills happened: one line per kill in restarts.csv, so a fault
 # loop that skipped one (a bug in the schedule or a swallowed signal)
-# is not a soak of fewer faults than the plan says (C50).
+# is not a soak of fewer faults than the plan says (the harness
+# vacuity audit of 2026-10-23).
 planned_kills=${#KILL_AT[@]}
 done_kills=$(wc -l < "$WORK/restarts.csv" | tr -d ' ')
 if [ "$done_kills" -ne "$planned_kills" ]; then
@@ -501,7 +502,7 @@ if [ "$done_kills" -ne "$planned_kills" ]; then
 fi
 # A Postgres run that planned restarts but made none did not soak the
 # fault it was armed for: the summary row alone would show it, and
-# nothing would fail (C74 review F1).
+# nothing would fail (a review finding of #585).
 if [ "${SCION_FAULT_PG:-0}" = "1" ] && [ "$PG_RESTARTS" -ne "$done_kills" ]; then
   echo "FAIL: $PG_RESTARTS of $done_kills kills restarted Postgres" >&2
   fail=1
@@ -628,7 +629,7 @@ row "land requests served (counter)" "$landed"
 row "samples" "$rows"
 [ -n "$early" ] && row "p99 early -> late" "$early ms -> $late ms"
 # New rows go at the end of the summary (the owner's report template
-# reads the lines above; C50).
+# reads the lines above; the harness vacuity audit of 2026-10-23).
 row "kills planned -> done" "$planned_kills -> $done_kills"
 # The backend the run really served, from the data dir, against the
 # one the run asked for: the server runs Postgres when SCION_PG_URL is

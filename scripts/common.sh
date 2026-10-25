@@ -166,7 +166,7 @@ fetch_dataset() {
 # sets $COMMITS. Its times are in $WORK/import.log.
 import_dataset() {
   note "importing"
-  # D25: the server refuses a missing data directory; create it here.
+  # The server refuses a missing data directory (#578); create it here.
   mkdir -p "$WORK/server"
   chmod 700 "$WORK/server"
   /usr/bin/time -p "$BIN/scion-server" --data "$WORK/server" import --rev main "$WORK/src.git" \

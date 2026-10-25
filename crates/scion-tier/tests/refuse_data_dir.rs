@@ -86,7 +86,7 @@ fn a_daemon_serves_a_data_directory_that_exists() {
     // check_private_dir judges: /tmp itself is 1777 and root-owned on
     // Linux, so a socket laid straight in /tmp is refused there (it
     // passed on macOS, whose TMPDIR is per-user).
-    let short_dir = std::env::temp_dir().join(format!("c78-{}", std::process::id()));
+    let short_dir = std::env::temp_dir().join(format!("scn-d-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&short_dir);
     std::fs::create_dir_all(&short_dir).unwrap();
     std::fs::set_permissions(&short_dir, std::fs::Permissions::from_mode(0o700)).unwrap();

@@ -296,7 +296,7 @@ async fn cut_round(
     common::spawn_guard::across_release(|| {
         common::spawn_guard::wait_for_lock_release(&data);
     });
-    let mut server = Server::start(&data, log);
+    let (mut server, _) = start_after_kill(&data, log);
     eprintln!("round {round}: server up");
     check(&server.url, &data, &data, &mut ledger, &mut checked, rng).await;
     eprintln!("round {round}: check 1 done");
@@ -782,7 +782,7 @@ async fn racing_puts_of_one_blob_survive_a_cut() {
         common::spawn_guard::across_release(|| {
             common::spawn_guard::wait_for_lock_release(&data);
         });
-        let mut server = Server::start(&data, &server_log);
+        let (mut server, _) = start_after_kill(&data, &server_log);
         events.line(&format!("round {round}: server up"));
         // Acked waves: every put is answered before the cut, so every one
         // of them must survive it.
@@ -794,7 +794,7 @@ async fn racing_puts_of_one_blob_survive_a_cut() {
         server.freeze();
         lazy.cut();
         drop(server);
-        let mut server = Server::start(&data, &server_log);
+        let (mut server, _) = start_after_kill(&data, &server_log);
         events.line(&format!("round {round}: server up after the cut"));
         // A wave cut in flight: the freeze ends it, so no racer of the
         // wave gets a reply past the cut. Whatever the acked waves put
@@ -924,7 +924,7 @@ async fn checker_writes_outlive_the_lazyfs_exit() {
         let mut lazy = Lazyfs::start(dir.path(), &lazyfs, round);
         let data = lazy.mount.join("data");
         create_repo(&data);
-        let mut server = Server::start(&data, &log);
+        let (mut server, _) = start_after_kill(&data, &log);
         // The server writes through the mount: blobs, acknowledged. The
         // waits run behind ceilings, so a hang names its step.
         let (mut scion, _objects) =

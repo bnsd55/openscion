@@ -103,7 +103,7 @@ private key"). One file per run, in this shape.
 ### R7 - The tag, signed - **OWNER** (RELEASING.md "Release steps" 1)
 
 1. The owner signs the annotated tag personally with their SSH key
-   (D18); the signature a verifier checks is the owner's, not a CI
+   the signature a verifier checks is the owner's, not a CI
    secret's:
 
    ```sh
@@ -163,7 +163,7 @@ The v0.8 list ("without one person's account, machine or private
 key"), from this drill:
 
 1. **The signed tag** (R7): the owner's personal SSH key, by decision
-   D18. A second maintainer cannot tag a release.
+A second maintainer cannot tag a release.
 2. **The `refs/tags/v*` ruleset** (R8): creation restricted to the
    owner, so tag rights live in one account.
 3. **The immutable-releases setting** (R8): a repository setting only
