@@ -45,6 +45,7 @@ jobs:
           - { crate: scion-server, target: write-decode, budget: 300 }
           - { crate: scion-server, target: blame-cursor, budget: 300 }
           - { crate: scion-server, target: access, budget: 120 }
+          - { crate: scion-server, target: backend-marker, budget: 120 }
           - { crate: scion-server, target: archive-verify, budget: 300 }
           - { crate: scion-server, target: archive-read, budget: 300 }
           - { crate: scion-tier, target: snapshot-seed, budget: 300 }
