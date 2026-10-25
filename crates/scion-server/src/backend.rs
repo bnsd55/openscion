@@ -891,6 +891,13 @@ impl MetaTx for BackendTx<'_> {
         }
     }
 
+    fn repos_naming(&mut self, blob: &[u8]) -> Result<Vec<RepoId>> {
+        match self {
+            Self::Sqlite(tx) => tx.repos_naming(blob),
+            Self::Postgres(pg) => pg.repos_naming(blob),
+        }
+    }
+
     fn changeset_bodies_after(
         &mut self,
         from: &[u8],

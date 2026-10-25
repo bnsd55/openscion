@@ -566,6 +566,12 @@ pub trait MetaTx {
     /// Whether any repo names `blob`.
     fn any_repo_names(&mut self, blob: &[u8]) -> Result<bool>;
 
+    /// The repos whose `repo_blobs` row names `blob`, so the dry run's
+    /// sweep can subtract the pairs its prune would remove: the real run
+    /// deletes those rows before it sweeps, and the dry run must report
+    /// the same files. Same shape as `any_repo_names`.
+    fn repos_naming(&mut self, blob: &[u8]) -> Result<Vec<RepoId>>;
+
     /// The `(changeset ID, body)` of the changesets after `from`, in ID
     /// order, at most `limit`. `fsck`'s walk over every stored changeset.
     fn changeset_bodies_after(
