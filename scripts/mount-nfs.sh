@@ -204,7 +204,9 @@ fi
 "$TIMEOUT" 30 stat "$VIEW/renamed.txt" > /dev/null || die "the mount died"
 
 # (e1) The default build refuses --unstable-writable by name: it has no
-# write path at all.
+# write path at all. The mount point exists, so the refusal is the
+# build's, not the mount-point check's.
+mkdir -p "$WORK/refused-view"
 if "$BIN/scn" --server "$SERVER" mount --unstable-writable "$WORK/refused-view" main \
   2> "$WORK/refused.log"; then
   die "the default build took --unstable-writable"
