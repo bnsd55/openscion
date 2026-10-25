@@ -377,7 +377,7 @@ fn fsck_command(store: &Backend) -> anyhow::Result<()> {
 /// the same file, checks, and writer the server uses, so the CLI and a
 /// running server append whole lines to one file. A run that cannot
 /// record refuses before it changes anything.
-/// D25: a missing data directory is refused, not created. One rule for
+/// A missing data directory is refused, not created (#592). One rule for
 /// every subcommand that touches a store; `restore` creates its own
 /// target and never sees this.
 fn refuse_missing_data_dir(data: &Path) -> anyhow::Result<()> {
@@ -817,7 +817,7 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => {}
     }
-    // D25: a missing data directory is refused, not created. Every
+    // A missing data directory is refused, not created (#592). Every
     // subcommand that touches a store or writes into the directory must
     // find it there; `restore` is the one command whose job is to
     // create one, `verify` reads only the archive, and `hash-token`
@@ -1288,7 +1288,7 @@ async fn serve(
 
 /// The stderr warning of a secret that arrived on the command line: ps
 /// and `/proc/$$/cmdline` show it to every local account, and it lands
-/// in shell history. The argv form stays for now (the owner's D8: warn
+/// in shell history. The argv form stays for now (the owner's call: warn
 /// first, remove in a later minor); the replacement reads a file that
 /// the checked read of the access file protects.
 fn argv_secret_warning(flag: &str, replacement: &str) -> String {

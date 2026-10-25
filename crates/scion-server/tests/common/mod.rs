@@ -340,7 +340,7 @@ impl Server {
         postgres_url: Option<&str>,
         log: &Path,
     ) -> Self {
-        // D25: the binary refuses a missing data directory; the harness
+        // The binary refuses a missing data directory (#592); the harness
         // is for servers that serve, so it makes the directory the way
         // the runbook's operator does: private.
         if !data.exists() {

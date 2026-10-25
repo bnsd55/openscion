@@ -87,7 +87,7 @@ else
   KILL_AT+=("$q" "$((q * 2))" "$((q * 3))")
 fi
 # The pg backend and its restart. Off by default; the nightly keeps it
-# off until the 72-hour hosting decision (D10) says where Postgres
+# off until the 72-hour hosting decision says where Postgres
 # lives. SCION_FAULT_PG_CMD is the restart command itself, for example
 # `docker restart soak-pg`.
 # The Postgres URL reaches every scion-server this script raises

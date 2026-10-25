@@ -10,7 +10,7 @@ publication timeline, triage ownership), without filling the gaps.
 
 docs/drills/release-drill.md runs RELEASING.md as a second maintainer,
 starting with the dry run, and marks every step that today needs the
-owner: the signed tag (their personal SSH key, D18), the refs/tags/v*
+owner: the signed tag (their personal SSH key), the refs/tags/v*
 ruleset, and the immutable-releases setting - the v0.8 list. Both files
 carry the record header, the done-whens, and the notes blanks, and
 keep to what the runbooks already say.

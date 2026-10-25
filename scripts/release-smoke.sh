@@ -101,7 +101,7 @@ run_story() {
 
   step repo make_repo
 
-  # D25: the server refuses a missing data directory; create it here.
+  # The server refuses a missing data directory (#592); create it here.
   mkdir -p "$WORK/server"
   chmod 700 "$WORK/server"
   step import "$BIN/scion-server" --data "$WORK/server" import "$WORK/src"

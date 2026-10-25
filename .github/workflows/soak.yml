@@ -111,7 +111,7 @@ jobs:
   # checks, on a Postgres-backed store, with the database itself
   # restarted beside every server kill (SCION_FAULT_PG, soak-fault.sh's
   # pg_restart). Dispatch only: where a long-run Postgres lives is
-  # still open (D10), so the nightly never runs this arm; a dispatch
+  # still open (the 72-hour hosting decision), so the nightly never runs this arm; a dispatch
   # proves it on demand. The image is pinned tag@sha256 the way the
   # digest-pin wave (#595) pins the service containers.
   soak-fault-postgres:

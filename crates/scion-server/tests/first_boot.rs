@@ -38,7 +38,7 @@ async fn a_first_boot_serves_probes_and_reads_back() {
     let (data, log) = (dir.path().join("data"), dir.path().join("server.log"));
 
     // Command 1: the first boot refuses a directory that does not
-    // exist (D25): it creates nothing and says so. The token went in a
+    // exist (#592): it creates nothing and says so. The token went in a
     // file (the runbook's umask 077 and printf), not in argv.
     assert!(!data.exists(), "the directory does not exist yet");
     // A 0600 token file of our own: the serve path checks the token

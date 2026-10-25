@@ -1,6 +1,6 @@
 # Roadmap
 
-The order of the work, as the owner decided it (D7). Each milestone has
+The order of the work, as the owner decided it. Each milestone has
 the work that ends it; a milestone is done when its gate passes on every
 supported platform, and nothing shortcuts one. Planned work the roadmap
 does not name is tracked in
@@ -138,7 +138,7 @@ Say exactly what v1.0 will support.
   filesystem, `--insecure-listen`, an untrusted local account and
   `scn mount` on a multi-user host are outside the production profile.
   The mount v1 ships is read-only: the writable mount is a build
-  feature, off in release builds, and out until v1.0.0 passes (D24).
+  feature, off in release builds, and out until v1.0.0 passes.
 - `docs/threat-model.md` names the assets, attackers, trust boundaries
   and security invariants. Each invariant names its test.
 - `docs/support.md` defines severity, backports and end of support. The
@@ -187,14 +187,14 @@ Freeze the surfaces users need, not the implementation.
   pre-upgrade backup.
 - A full repository exports to a versioned logical archive. CI verifies
   and restores the archive.
-- Postgres 17 is promoted to production (D23) when all of it holds:
+- Postgres 17 is promoted to production when all of it holds:
   the contract test ([#560](https://github.com/bnsd55/openscion/issues/560))
   passes on Postgres 17, the real Postgres fault rows pass, backup and
   restore pass on Postgres 17, and the release-candidate trial runs on
   Postgres 17 as well as on SQLite. The durability evidence of v0.5 is
   the floor this stands on. The per-requirement gap list with the
   evidence behind each verdict is `docs/pg17-qualification.md`.
-- No crate publishes to crates.io at v1.0 (D12). A narrow client crate
+- No crate publishes to crates.io at v1.0. A narrow client crate
   may publish when a real outside consumer exists. The server, tier and
   CLI internals stay private, and a machine check watches the facade
   that a later publish would freeze.
@@ -245,11 +245,11 @@ Make releases repeatable without one person's machine or account.
 - The unsigned release payload rebuilds byte for byte.
 - Each artifact has a checksum, an SPDX or CycloneDX SBOM and
   verifiable provenance. From this release, the binaries and SBOMs get
-  GitHub artifact attestations (D18). The recorded release workflow is
+  GitHub artifact attestations. The recorded release workflow is
   assessed against SLSA Build L3, as [docs/slsa.md](slsa.md)
   records.
 - Production code has at least 80 percent statement coverage, measured
-  with a pinned tool, with the exclusions checked in (D15).
+  with a pinned tool, with the exclusions checked in.
 - Required tests have no hidden retry. The scheduled full suite passes
   30 consecutive runs, with no open flaky-test issue.
 - The project holds the OpenSSF Best Practices silver badge.
@@ -291,7 +291,7 @@ Cut the tested release. Add no new surface.
   `docs/compatibility.md`, `docs/operations.md` and
   `docs/RELEASING.md` state the supported deployment, support window
   and 1.x promises. The supported deployment names SQLite and Postgres
-  17 (D23): one server each, per the production topology.
+  17: one server each, per the production topology.
 - The release notes link the gate evidence.
 
 ## Out until v1.0.0 passes
@@ -301,14 +301,14 @@ before v1.0.0 passes.
 
 - [A horizontally scalable backend](https://github.com/bnsd55/openscion/issues/47):
   more than one server process sharing data, per region and per node.
-  v1.0 promises one active server and no automatic failover (D11).
+  v1.0 promises one active server and no automatic failover.
 - [History and writes for a principal with folder read
   rules](https://github.com/bnsd55/openscion/issues/183).
 - Blame as derived data.
 - The writable `scn` mount: v1's mount is read-only, and the overlay
   write and `commit --from-mount` are a build feature, off in release
   builds, that returns only after a handle-walking rewrite passes the
-  hostile tests (D24).
+  hostile tests.
 - A virtual checkout safe from other local users: the server trusts
   every local account that can read its data directory, so this is a
   different storage and virtual-checkout design, not a hardening of

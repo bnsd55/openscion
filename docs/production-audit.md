@@ -22,7 +22,7 @@ document landed on.
 
 | Finding | Evidence | Status |
 | --- | --- | --- |
-| `scn mount --unstable-writable`: a planted parent symlink can redirect an overlay write outside the mount (final-name-only check). Ben's D24: the writable mount leaves the v1 release binary — the write path becomes a build feature, off in release | `crates/scn/src/vfs.rs:1469`, `docs/cli.md:57`, `changes/313.fixed.md` | open, closed when the write path left the release builds |
+| `scn mount --unstable-writable`: a planted parent symlink can redirect an overlay write outside the mount (final-name-only check). the maintainer's decision: the writable mount leaves the v1 release binary — the write path becomes a build feature, off in release | `crates/scn/src/vfs.rs:1469`, `docs/cli.md:57`, `changes/313.fixed.md` | open, closed when the write path left the release builds |
 | Env aliases `SCION_DATA`, `SCION_TOKEN`, `SCION_POSTGRES_URL`, `SCION_POSTGRES_URL_FILE` exist beside their flags | `crates/scion-server/src/main.rs:30,36-44,1290` | fixed by design (each alias is the documented spelling of a flag in `docs/cli.md`; the flag list is the release surface, and the URL env exists so secrets stay off argv) |
 | Test hooks in release binaries: the store fault hooks and the derive test pool build only with `--features test-hooks` | `crates/scion-server/Cargo.toml:61`, `crates/scion-server/src/store.rs:920` | fixed by design (the feature is off in every release build; `release.yml` builds plain `--release`) |
 
@@ -179,7 +179,7 @@ in-process; stated in the PR).
 
 | Finding | Evidence | Status |
 | --- | --- | --- |
-| The default data directory is `scion-data` relative to the server's working directory | `crates/scion-server/src/main.rs:29` | fixed (D25): a missing data directory is refused, not created — every subcommand except restore answers "<path> does not exist; create it or pass --data" (`main.rs`, `refuse_missing_data_dir`); fsck's refusal exits 2, its "could not run" code; `tests/refuse_data_dir.rs` holds every subcommand to the refusal and asserts nothing is created |
+| The default data directory is `scion-data` relative to the server's working directory | `crates/scion-server/src/main.rs:29` | fixed (#592): a missing data directory is refused, not created — every subcommand except restore answers "<path> does not exist; create it or pass --data" (`main.rs`, `refuse_missing_data_dir`); fsck's refusal exits 2, its "could not run" code; `tests/refuse_data_dir.rs` holds every subcommand to the refusal and asserts nothing is created |
 | Secrets on argv: `--postgres-url` is deprecated and warns; `--postgres-url-file` and `SCION_POSTGRES_URL` are the supported forms | `crates/scion-server/src/main.rs:33-43` | fixed (the warning ships; the removal is on the deprecation clock) |
 | Ticket and seed files are 0600; the access file refuses group/other writable and symlinks | `crates/scion-server/src/main.rs:1333,1433,1493` | bounded — ceiling: 0600 on every secret file, the access file refuses go-w and symlinks at the open; `operations.md` "The open checks" states the refusal |
 | Listeners default to loopback | `crates/scion-server/src/main.rs:60` (`default_value = "127.0.0.1:7878"`) | bounded — ceiling: the default bind is 127.0.0.1:7878; `docs/operations.md`'s serve examples restate it |
