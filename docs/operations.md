@@ -1365,7 +1365,7 @@ checking out through a cache and a daemon beside it.
 | | |
 |---|---|
 | Commit | ab6bfdc92314fc41d2a8c5dca0f0a13bd39b5612 the main commit the run measured (the run's own HEAD, fcb947e6, adds the grid's database name only), at [run 40119721010](https://github.com/bnsd55/openscion/actions/runs/40119721010) |
-| Runner | the hosted runner class, by its public label and spec |
+| Runner | GitHub-hosted `ubuntu-24.04`: 4 vCPU, 16 GiB RAM, ext4 on a ~144 GiB SSD, runner image `ubuntu24 20261012.334.1`, kernel `6.17.0-1022-azure` (the run's `machine.txt` artifact) |
 | Filesystem | the filesystem the run measured, from the run's `machine.txt` artifact (`df -T` on the work directory); the `ubuntu-24.04` class's root disk is ext4 ([support.md](support.md)) |
 | Repetitions | 2 per cell; the table reports the cell's whole run, and the run's raw samples are the workflow run's `capacity.csv` artifact |
 
