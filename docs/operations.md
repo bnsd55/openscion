@@ -794,9 +794,10 @@ read, prints the seconds, and fails past a 600 s bound. The measured
 time includes the fsync of every restored file and directory: a
 restore is done when a crash cannot lose it. A real store's restore
 time scales with its blob bytes and its changeset count. On the fixed
-runner that store restored in 10.5 s (run 39539498175: 72 MiB/s on
-disk, 1147 changesets/s; the 750 MiB on disk matched the raw bytes,
-and the store built in 28.0 s). One sample at one size; a second size
+runner that store restored in 10.5 s (run
+[39539498175](https://github.com/bnsd55/openscion/actions/runs/39539498175)
+on `main` at `39364422`: 72 MiB/s on disk, 1147 changesets/s; the
+750 MiB on disk matched the raw bytes, and the store built in 28.0 s). One sample at one size; a second size
 is the next step when the number starts steering a decision. The
 current numbers live in the workflow's run log on `main`, and a run
 that drifts far from them is a regression to look at, not a promise
@@ -1403,10 +1404,11 @@ measures from the restart's command until readiness answers `SERVING`
 and the first read resolves a ref. It prints the seconds and fails past
 a 60 s bound. The kill is the runbook's crash: no flush, no drain -
 whatever the write-ahead log holds is what recovery starts from. On
-the fixed runner that recovery took 0.1 s (run 39623531102: readiness
-answered `SERVING` and the first read resolved within a tenth of a
-second of the restart's command, with 5 pending lands left by the
-kill; the store built in 0.7 s). One sample at one size; a second size
+the fixed runner that recovery took 0.1 s (run
+[39623531102](https://github.com/bnsd55/openscion/actions/runs/39623531102)
+on `main` at `a9f8df07`: readiness answered `SERVING` and the first
+read resolved within a tenth of a second of the restart's command,
+with 5 pending lands left by the kill; the store built in 0.7 s). One sample at one size; a second size
 is the next step when the number starts steering a decision. The
 current numbers live in the workflow's run log on `main`, and a run
 that drifts far from them is a regression to look at, not a promise to
