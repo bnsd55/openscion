@@ -488,6 +488,7 @@ pair_3() {
   sport=$(start server "$dir" "$BIN/scion-server" port --data "$dir/server" serve \
     --listen 127.0.0.1:0 --ticket-key "$dir/ticket.key")
   mkdir -p "$dir/daemon-data"
+  chmod 700 "$dir/daemon-data"
   start daemon "$dir" "$daemon/scion-daemon" serving --data "$dir/daemon-data" \
     --socket "$sock" --upstream "http://127.0.0.1:$sport"
   mkdir -p "$dir/out"
@@ -599,12 +600,14 @@ pair_6() {
   rm -f "$sock"
   if "$daemon/scion-daemon" --help 2>&1 | grep -q -- '--seed-full-repo'; then
     mkdir -p "$dir/daemon-data"
+  chmod 700 "$dir/daemon-data"
   start daemon "$dir" "$daemon/scion-daemon" serving --data "$dir/daemon-data" \
       --socket "$sock" --upstream "http://127.0.0.1:$sport" \
       --seed "$dir/snaps/main.scnsnap" --seed-full-repo
   else
     note "the N-1 daemon predates --seed-full-repo: it seeds without the say-so"
     mkdir -p "$dir/daemon-data"
+  chmod 700 "$dir/daemon-data"
   start daemon "$dir" "$daemon/scion-daemon" serving --data "$dir/daemon-data" \
       --socket "$sock" --upstream "http://127.0.0.1:$sport" \
       --seed "$dir/snaps/main.scnsnap"

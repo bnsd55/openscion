@@ -363,6 +363,13 @@ jobs:
           # The fast tier: a pull request runs 500 cases, main, the
           # nightly and a dispatch the full 2000.
           PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '500' || '2000' }}
+      # The daemon startup rules (#592's data-dir gate) are exercised by
+      # no per-PR job otherwise: the dispatch scripts (soak, bench,
+      # capacity, version-matrix) start the daemon, the suite does not.
+      # A few seconds: start the stack through common.sh, one call
+      # through the daemon, stop.
+      - name: the shell stack starts (server, cache, daemon)
+        run: scripts/start-scion-smoke.sh
       - name: the work tree is still clean after the tests
         run: |
           # A test that writes outside its sandbox (the #332 class) shows up
