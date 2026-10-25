@@ -1354,9 +1354,10 @@ mod tests {
         )
         .unwrap_err();
         let text = err.to_string();
+        let hex = ChangesetId::try_from(id.as_slice()).unwrap().to_string();
         assert!(
-            text.contains(&cs_string(&id)),
-            "the error must name the corrupt changeset: {text}"
+            text.contains(&hex),
+            "the error must name the corrupt changeset {hex}: {text}"
         );
     }
 
