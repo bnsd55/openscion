@@ -1184,6 +1184,202 @@ mod tests {
         );
     }
 
+    /// The report names what the grace kept: one young row and one old
+    /// row, one fresh orphan file and one collected one. The counters are
+    /// the operator's picture of a run; a sign flip or a multiply by zero
+    /// would hide the rows and files the grace still holds.
+    #[test]
+    fn the_report_counts_what_the_grace_kept() {
+        let (_dir, store) = store();
+        let young = uploaded(&store, b"young row\n");
+        let old = uploaded(&store, b"old row\n");
+        age_file(
+            &Backend::sqlite(store.clone()),
+            young,
+            Duration::from_secs(1),
+        );
+        age_file(&Backend::sqlite(store.clone()), old, OLD);
+        // A fresh orphan file: no row names it, and it is young.
+        let fresh = store.blobs().put(b"fresh orphan\n").unwrap();
+        age_file(
+            &Backend::sqlite(store.clone()),
+            fresh,
+            Duration::from_secs(1),
+        );
+        let report = collect(
+            &Backend::sqlite(store.clone()),
+            Duration::from_secs(DEFAULT_GRACE_SECS),
+            &mut |_| {},
+        );
+        assert_eq!(report.rows_pruned, 1, "{report:?}");
+        assert_eq!(report.rows_young, 1, "{report:?}");
+        assert_eq!(report.files_removed, 1, "{report:?}");
+        assert_eq!(report.files_young, 2, "{report:?}");
+        assert!(named(&store, young));
+        assert!(!named(&store, old));
+    }
+
+    /// A walk whose pages end exactly on the batch still ends: the live
+    /// set stops when a page is short, so a store with exactly `BATCH`
+    /// changesets must take one more (empty) page and finish, not spin
+    /// forever on a page that never comes.
+    #[test]
+    fn a_walk_whose_pages_end_exactly_on_the_batch_still_ends() {
+        let (_dir, store) = store();
+        store
+            .write(|c| {
+                let repo = c.repo_id(REPO)?;
+                for n in 0..BATCH {
+                    let cs = Changeset::new(
+                        vec![],
+                        IdentityTime::new(
+                            b"Ada".to_vec(),
+                            b"ada@example.com".to_vec(),
+                            1_700_000_000,
+                            i32::try_from(n).unwrap(),
+                        )
+                        .unwrap(),
+                        None,
+                        format!("walk {n}\n").into_bytes(),
+                        BTreeMap::default(),
+                    )
+                    .unwrap();
+                    c.insert_changeset(repo, &cs)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let report = collect(
+            &Backend::sqlite(store.clone()),
+            Duration::from_secs(DEFAULT_GRACE_SECS),
+            &mut |_| {},
+        );
+        assert_eq!(report.repos, 1, "{report:?}");
+        assert_eq!(report.rows_pruned, 0, "{report:?}");
+    }
+
+    /// The blob root is missing (a store that never stored a file): the
+    /// collector reads it as empty instead of failing.
+    #[test]
+    fn a_missing_blob_root_collects_nothing() {
+        let (_dir, store) = store();
+        let root = store.blobs().root().to_path_buf();
+        std::fs::remove_dir_all(&root).unwrap();
+        let report = collect(
+            &Backend::sqlite(store.clone()),
+            Duration::from_secs(DEFAULT_GRACE_SECS),
+            &mut |_| {},
+        );
+        assert_eq!(report.files_removed, 0, "{report:?}");
+    }
+
+    /// A stray file in the blob root is left alone: only fan-out
+    /// directories are walked, and the run does not fail on the one file
+    /// that fsck reports.
+    #[test]
+    fn a_stray_file_in_the_blob_root_is_left_alone() {
+        let (_dir, store) = store();
+        let root = store.blobs().root().to_path_buf();
+        let stray = root.join("stray.txt");
+        std::fs::write(&stray, b"not a blob\n").unwrap();
+        let report = collect(
+            &Backend::sqlite(store.clone()),
+            Duration::from_secs(DEFAULT_GRACE_SECS),
+            &mut |_| {},
+        );
+        assert_eq!(report.files_removed, 0, "{report:?}");
+        assert_eq!(
+            std::fs::read(&stray).unwrap(),
+            b"not a blob\n",
+            "the stray file was touched"
+        );
+    }
+
+    /// A row whose file is gone is dead at any age: the file grants
+    /// nothing, so the prune takes the row and the run does not fail.
+    #[test]
+    fn a_row_whose_file_is_gone_is_dead_at_any_age() {
+        let (_dir, store) = store();
+        let b = uploaded(&store, b"vanished\n");
+        let (_, path) = store.blobs().location(b);
+        std::fs::remove_file(&path).unwrap();
+        let report = collect(
+            &Backend::sqlite(store.clone()),
+            Duration::from_secs(DEFAULT_GRACE_SECS),
+            &mut |_| {},
+        );
+        assert_eq!(report.rows_pruned, 1, "{report:?}");
+        assert!(!named(&store, b));
+    }
+
+    /// A stored changeset whose body does not decode fails the run, and
+    /// the error names the changeset: the operator must know which row
+    /// is corrupt, not just that something is.
+    #[test]
+    fn a_corrupt_changeset_names_its_id() {
+        let (_dir, store) = store();
+        let b = uploaded(&store, b"corrupt\n");
+        store
+            .write(|c| {
+                let repo = c.repo_id(REPO)?;
+                c.insert_changeset(repo, &cs_put(b))
+            })
+            .unwrap();
+
+        // Corrupt the stored body in place: the id stays, the bytes lie.
+        let id = store
+            .read(|c| {
+                let repo = c.repo_id(REPO)?;
+                let ids = c.repo_changeset_ids(repo)?;
+                Ok(ids[0].clone())
+            })
+            .unwrap();
+        Backend::sqlite(store.clone())
+            .write(|c| {
+                c.sqlite()
+                    .unwrap()
+                    .execute(
+                        "UPDATE changesets SET body = X'00' WHERE id = ?1",
+                        rusqlite::params![id],
+                    )
+                    .map_err(crate::error::from_sqlite)?;
+                Ok(())
+            })
+            .unwrap();
+        let err = run(
+            &Backend::sqlite(store.clone()),
+            Duration::from_secs(DEFAULT_GRACE_SECS),
+            false,
+            &mut |_| {},
+        )
+        .unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains(&cs_string(&id)),
+            "the error must name the corrupt changeset: {text}"
+        );
+    }
+
+    /// An unreadable blob root fails the run: silence would tell the
+    /// operator there was nothing to collect while the disk stayed full.
+    #[test]
+    fn an_unreadable_blob_root_fails_the_run() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (_dir, store) = store();
+        let root = store.blobs().root().to_path_buf();
+        let mode = std::fs::metadata(&root).unwrap().permissions();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let out = run(
+            &Backend::sqlite(store.clone()),
+            Duration::from_secs(DEFAULT_GRACE_SECS),
+            false,
+            &mut |_| {},
+        );
+        std::fs::set_permissions(&root, mode).unwrap();
+        assert!(out.is_err(), "the unreadable root was read as empty");
+    }
+
     #[test]
     fn a_store_that_never_holds_blobs_collects_nothing() {
         let (_dir, store) = store();
