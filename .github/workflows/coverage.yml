@@ -237,11 +237,14 @@ jobs:
           # losses). It measures under the default backend in the
           # nightly soak instead.
           # Bisecting the default job's agent losses (runs 40223621889,
-          # 40230347062, 40234675369): memory flat, disk growth never
-          # tripped, the loop-device test excluded and the loss still
-          # came. This dispatch measures the four small crates only;
-          # open-scion-server's default-backend suite is next.
-          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --workspace --no-fail-fast -E "not package(open-scion-server)"; echo $? > measure.rc' \
+          # 40230347062, 40234675369, 40238876183): the losses sit at
+          # 49-55 minutes of wall clock with memory and disk flat, in
+          # different test sets. This dispatch runs NOTHING in the
+          # measure: 45 minutes of sleep under the same watcher. The
+          # agent dying anyway convicts the runner, not the suite; the
+          # agent surviving convicts the instrumented build or test
+          # load.
+          setsid bash -c 'echo $$ > measure.pgid; sleep 2700; echo 0 > measure.rc' \
             | tee measure.log
           # The step must not fail on a watcher that is already gone:
           # a tripped guard exited by design, and its trip file says so
