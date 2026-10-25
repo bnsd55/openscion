@@ -6,4 +6,4 @@ every test while every held ticket stopped verifying), and the
 schema rows name the drills that run today instead of the issues
 that promised them: the tagged-store ladder is store-upgrade.yml
 (pinned stand-in commits until a tag exists) and the N-1 restore
-drill is backup-n1.yml (C117).
+drill is backup-n1.yml.
