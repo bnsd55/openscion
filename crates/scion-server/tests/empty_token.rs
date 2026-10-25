@@ -4,6 +4,7 @@
 //! server whose access file names the empty digest does not start.
 
 use std::io::Write as _;
+use std::os::unix::fs::PermissionsExt as _;
 use std::process::{Command, Stdio};
 
 use scion_proto::runtime::auth::token_digest;
@@ -67,7 +68,6 @@ fn a_server_whose_access_file_names_the_empty_digest_does_not_start() {
     let dir = tempfile::tempdir().unwrap();
     let access = dir.path().join("access");
     let mut file = std::fs::File::create(&access).unwrap();
-    use std::os::unix::fs::PermissionsExt as _;
     writeln!(file, "token\tci\t{}", empty_digest()).unwrap();
     writeln!(file, "read\tci\tmain").unwrap();
     drop(file);
