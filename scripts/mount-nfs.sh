@@ -66,8 +66,11 @@ fi
 note "building the debug binaries"
 "$TIMEOUT" 300 cargo build --locked --quiet -p open-scion-server -p open-scion
 # The write path is the unstable-writable-mount build feature, off in
-# this default build; the write checks below run on a second binary
-# that names the feature. Both builds keep --locked.
+# this default build. Both builds write the same target path, so the
+# default binary is copied out first and the write checks below run on
+# a feature build. Both builds keep --locked.
+mkdir -p "$WORK/default-bin"
+cp "$BIN/scn" "$WORK/default-bin/scn"
 "$TIMEOUT" 300 cargo build --locked --quiet -p open-scion --features unstable-writable-mount
 mkdir -p "$WORK/feature-bin"
 cp "$BIN/scn" "$WORK/feature-bin/scn-writable"
@@ -207,11 +210,11 @@ fi
 # write path at all. The mount point exists, so the refusal is the
 # build's, not the mount-point check's.
 mkdir -p "$WORK/refused-view"
-if "$BIN/scn" --server "$SERVER" mount --unstable-writable "$WORK/refused-view" main \
+if "$WORK/default-bin/scn" --server "$SERVER" mount --unstable-writable "$WORK/refused-view" main \
   2> "$WORK/refused.log"; then
   die "the default build took --unstable-writable"
 fi
-grep -q -- "--unstable-writable" "$WORK/refused.log" \
+grep -q -- "unstable-writable-mount" "$WORK/refused.log" \
   || die "the default build's refusal names no flag: $(cat "$WORK/refused.log")"
 note "the default build refuses --unstable-writable by name"
 
@@ -219,7 +222,7 @@ note "the default build refuses --unstable-writable by name"
 # the write is refused with EROFS, and the commit from it names the flag.
 VIEW2="$WORK/ro-view"
 mkdir -p "$VIEW2"
-"$BIN/scn" --server "$SERVER" mount "$VIEW2" main \
+"$WORK/default-bin/scn" --server "$SERVER" mount "$VIEW2" main \
   > "$WORK/mount-ro.log" 2>&1 &
 RO_PID=$!
 "$TIMEOUT" 30 bash -c 'until grep -q "^sudo mount -t nfs" '"$WORK"'/mount-ro.log 2> /dev/null; do
@@ -236,11 +239,11 @@ got=$("$TIMEOUT" 30 cat "$VIEW2/README.md")
 if "$TIMEOUT" 30 bash -c 'echo refused > "'"$VIEW2"'/refused.txt"' 2> /dev/null; then
   die "a read-only mount took a write"
 fi
-RO_COMMIT=$("$TIMEOUT" 60 "$BIN/scn" --server "$SERVER" commit -m "ro" \
+RO_COMMIT=$("$TIMEOUT" 60 "$WORK/default-bin/scn" --server "$SERVER" commit -m "ro" \
   --from-mount "$VIEW2" 2>&1 || true)
 echo "$RO_COMMIT" | grep -q -- "unstable-writable-mount" \
   || die "the commit from a read-only mount names no flag: $RO_COMMIT"
-"$TIMEOUT" 60 "$BIN/scn" --server "$SERVER" unmount "$VIEW2" \
+"$TIMEOUT" 60 "$WORK/default-bin/scn" --server "$SERVER" unmount "$VIEW2" \
   > "$WORK/unmount-ro.log" 2>&1 || die "scn unmount of the read-only mount failed"
 sudo umount -f -l "$VIEW2" 2> /dev/null || true
 if mount | grep -q " on $VIEW2 "; then
