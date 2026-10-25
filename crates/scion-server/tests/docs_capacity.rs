@@ -207,11 +207,15 @@ fn a_no_reader_row_names_the_land_and_dashes_the_reads() {
     let shapes: [(&[&str], bool); 6] = [
         // (cells after the cell name, does the rule accept it?)
         (
-            &["63.1", "70", "115", "0", "0", "30376", "2000", "155.4", "1106", "-"],
+            &[
+                "63.1", "70", "115", "0", "0", "30376", "2000", "155.4", "1106", "-",
+            ],
             true,
         ), // a live sqlite cell
         (
-            &["63.1", "-", "-", "0", "0", "30376", "2000", "155.4", "1106", "-"],
+            &[
+                "63.1", "-", "-", "0", "0", "30376", "2000", "155.4", "1106", "-",
+            ],
             true,
         ), // r=0: no readers ran
         (
@@ -219,7 +223,9 @@ fn a_no_reader_row_names_the_land_and_dashes_the_reads() {
             true,
         ), // the bench died; the lands it got through still divide
         (
-            &["63.1", "-", "115", "0", "0", "30376", "2000", "155.4", "1106", "-"],
+            &[
+                "63.1", "-", "115", "0", "0", "30376", "2000", "155.4", "1106", "-",
+            ],
             false,
         ), // half-filled: never
         (
@@ -230,8 +236,7 @@ fn a_no_reader_row_names_the_land_and_dashes_the_reads() {
         ), // a live postgres cell: both growth columns
         (
             &[
-                "63.1", "70", "115", "0", "0", "30376", "2000", "11.4", "nonsense",
-                "-",
+                "63.1", "70", "115", "0", "0", "30376", "2000", "11.4", "nonsense", "-",
             ],
             false,
         ), // a growth column that is neither number nor "-": never
