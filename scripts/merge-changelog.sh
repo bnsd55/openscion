@@ -50,18 +50,25 @@ if [ "$1" = "--check" ]; then
     release=CHECK
     # A file in changes/ that no section's find matches never merges and
     # is never deleted: the release silently drops it. Refuse it here.
-    known=$(find changes -maxdepth 1 -type f \( -name '*.added.md' \
-        -o -name '*.changed.md' -o -name '*.fixed.md' \
-        -o -name '*.security.md' \) | wc -l | tr -d ' ')
-    all=$(find changes -maxdepth 1 -type f -name '*.md' | wc -l | tr -d ' ')
-    if [ "$known" -ne "$all" ]; then
-        find changes -maxdepth 1 -type f -name '*.md' \! \( -name '*.added.md' \
+    # A missing changes/ is not a failure: the release fold deletes every
+    # fragment, git keeps no empty directory, and the tree this check
+    # guards is the folded one (the empty case passes below). The finds
+    # guard on the directory, or set -e's pipefail turns find's error
+    # into a refusal of a clean tree.
+    if [ -d changes ]; then
+        known=$(find changes -maxdepth 1 -type f \( -name '*.added.md' \
             -o -name '*.changed.md' -o -name '*.fixed.md' \
-            -o -name '*.security.md' \) |
-            while IFS= read -r stray; do
-                echo "fragment's section is not one of added, changed, fixed, security: $stray" >&2
-            done
-        exit 1
+            -o -name '*.security.md' \) | wc -l | tr -d ' ')
+        all=$(find changes -maxdepth 1 -type f -name '*.md' | wc -l | tr -d ' ')
+        if [ "$known" -ne "$all" ]; then
+            find changes -maxdepth 1 -type f -name '*.md' \! \( -name '*.added.md' \
+                -o -name '*.changed.md' -o -name '*.fixed.md' \
+                -o -name '*.security.md' \) |
+                while IFS= read -r stray; do
+                    echo "fragment's section is not one of added, changed, fixed, security: $stray" >&2
+                done
+            exit 1
+        fi
     fi
 else
     check=

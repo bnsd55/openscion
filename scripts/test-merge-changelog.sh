@@ -128,6 +128,14 @@ rm -rf "$check/changes"
 mkdir "$check/changes"
 printf 'A thing that passes every rule, no front matter, no row\nmarker on the first line, no indent on any line.\n' >"$check/changes/1.fixed.md"
 (cd "$check" && "$here/merge-changelog.sh" --check) >/dev/null
+
+# A missing changes/ passes too: the release fold deletes every
+# fragment, git keeps no empty directory, so the tree after the fold
+# has none - and --check ran there on the release branch (2026-10-25:
+# 'find: changes: No such file or directory', set -e's pipefail, 9 red
+# CI jobs). An empty changes/ passed already; the missing one died.
+rm -rf "$check/changes"
+(cd "$check" && "$here/merge-changelog.sh" --check) >/dev/null
 echo "merge-changelog --check: fixture ok"
 
 # The argument is either --check or a release name: a flag nobody reads
