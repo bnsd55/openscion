@@ -405,6 +405,16 @@ mod tests {
     use scion_core::{BlobId, Entry, FileEntry, FileState, GitOid, PathElem, Tree, TreeId};
 
     #[test]
+    fn a_ticket_s_lifetime_is_the_documented_fifteen_minutes() {
+        // The lifetime is a documented number: architecture.md's "A
+        // ticket lives 15 minutes", and the narrow-a-principal note
+        // that gives "at most 15 minutes from signing". A mutant that
+        // lengthens a ticket's life past what the docs promise is a
+        // security change; this pin fails first.
+        assert_eq!(TICKET_LIFETIME_SECS, 15 * 60);
+    }
+
+    #[test]
     fn a_signed_ticket_parses_for_its_life() {
         let key = SigningKey::from_bytes(&[7; 32]);
         let bytes = sign(&key, "r", "alice", [1; 32], 1_000).unwrap();
@@ -668,6 +678,53 @@ mod tests {
                 id: [9; 32],
                 path: Vec::new()
             })
+        );
+    }
+
+    #[test]
+    fn a_walk_refuses_a_substituted_tree_that_reaches() {
+        // A store that lies can serve, for the ID of an empty directory,
+        // the bytes of a tree that names the file. The tree's bytes do
+        // not decode to the ID it was asked for, so the walk refuses
+        // them: nothing is reachable that the ticket's own tree does
+        // not name, whatever the reader returns.
+        let file_tree = Tree::new(
+            [(
+                PathElem::new("leaf").unwrap(),
+                Entry::File(FileEntry::new(
+                    FileState::Regular {
+                        content: BlobId::of(b"secret\n"),
+                        executable: false,
+                    },
+                    b"secret\n".len() as u64,
+                )),
+            )]
+            .into(),
+        )
+        .expect("tree fits the format");
+        let (_empty_bytes, empty_id) = Tree::default().encode_with_id();
+        let crafted = file_tree.encode();
+        let root = Tree::new([(PathElem::new("a").unwrap(), Entry::Dir(empty_id))].into())
+            .expect("tree fits the format");
+        let root_id = *root.id().as_bytes();
+        let root_bytes = root.encode();
+        let mut read = move |id: [u8; 32]| -> Result<Option<Vec<u8>>, ()> {
+            if id == root_id {
+                Ok(Some(root_bytes.clone()))
+            } else {
+                // The crafted tree, served for the empty directory's ID.
+                Ok(Some(crafted.clone()))
+            }
+        };
+        let mut walk = Walker::new(root_id);
+        assert_eq!(
+            walk.reach(
+                &mut read,
+                ObjectKind::Blob,
+                BlobId::of(b"secret\n").as_bytes(),
+                b"a/leaf"
+            ),
+            Ok(Walk::Absent)
         );
     }
 
