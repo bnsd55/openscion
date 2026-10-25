@@ -1964,6 +1964,140 @@ mod tests {
         ));
     }
 
+    /// A land request whose target_ref or request_key breaks the name
+    /// rule is refused before anything is recorded: not even the pending
+    /// row exists.
+    #[test]
+    fn a_land_request_with_an_empty_name_is_refused_and_records_nothing() {
+        let f = fixture();
+        let cs = f.commit(f.root, &[put("a/x", "new")]);
+        let mut r = req(cs, "k");
+        r.target_ref = String::new();
+        match f.lands.land(&f.store, &caller(), &r) {
+            Err(Error::InvalidArgument(why)) => {
+                assert!(why.contains("must be 1 to"), "{why}");
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+        let mut r = req(cs, "k");
+        r.request_key = String::new();
+        match f.lands.land(&f.store, &caller(), &r) {
+            Err(Error::InvalidArgument(why)) => {
+                assert!(why.contains("must be 1 to"), "{why}");
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+        assert_eq!(f.landed_count(), 0, "nothing was recorded");
+    }
+
+    /// The name limit is "longer than", so a target_ref of exactly
+    /// MAX_NAME_BYTES passes the check (the land then answers Rejected:
+    /// no ref has that name) and one byte more is refused. A comparison
+    /// flipped to == (accepts past the limit) or >= (refuses the
+    /// boundary) fails here.
+    #[test]
+    fn a_target_ref_at_the_name_limit_is_accepted_and_one_byte_more_is_refused() {
+        let f = fixture();
+        let cs = f.commit(f.root, &[put("a/x", "new")]);
+        let mut r = req(cs, "k");
+        r.target_ref = "m".repeat(MAX_NAME_BYTES);
+        let out = f.lands.land(&f.store, &caller(), &r).unwrap();
+        assert_eq!(out.state, LandState::Rejected, "{}", out.detail);
+        r.target_ref = "m".repeat(MAX_NAME_BYTES + 1);
+        match f.lands.land(&f.store, &caller(), &r) {
+            Err(Error::InvalidArgument(why)) => {
+                assert!(why.contains("must be 1 to"), "{why}");
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    /// A land whose settle is aborted at every attempt stops at the
+    /// attempt cap: the reply is the Aborted error and the replans
+    /// counted are the attempts minus one. The hook moves the ref
+    /// between the plan and the settle and re-arms itself while imports
+    /// remain, so every attempt loses its race and the loop must give
+    /// up. A guard that never ends (attempt < MAX_ATTEMPTS -> true), one
+    /// extra attempt (< -> <=) or a counter that walks the wrong way
+    /// (+= -> -= or *=) hangs this test or fails the count.
+    #[test]
+    fn a_land_that_aborts_at_every_settle_stops_at_the_attempt_cap() {
+        let f = fixture();
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+        let lands = Arc::new(Lands::new(None, Some(Arc::clone(&metrics))));
+        // Main moves past the base, so every plan rebases onto a head
+        // the hook then moves again.
+        f.move_main(f.commit(f.root, &[put("b/y", "first")]));
+        let cs = f.commit(f.root, &[put("a/x", "new")]);
+        let imports: Vec<ChangesetId> = (0..MAX_ATTEMPTS)
+            .scan(f.main().target, |head, _| {
+                let id = f.commit(*head, &[put("c", "import")]);
+                *head = id;
+                Some(id)
+            })
+            .collect();
+        // Each hook run moves `main` to the next import and, while
+        // imports remain, arms the same step again (the seam takes the
+        // hook's lock after the step ran, so re-arming inside it is
+        // what the hook exists for). One armed hook per attempt: the
+        // last abort must end the loop with no successor armed.
+        fn arm(
+            lands: &Arc<Lands>,
+            store: &Backend,
+            repo: RepoId,
+            queue: Arc<Mutex<Vec<ChangesetId>>>,
+        ) {
+            let hook_store = store.clone();
+            let hook_lands = Arc::clone(lands);
+            lands.set_before_settle(Box::new(move || {
+                let to = queue
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .pop()
+                    .expect("the attempt cap ends the loop before the imports run out");
+                let head = hook_store
+                    .read(|c| Ok(c.get_ref(repo, "main")?.unwrap()))
+                    .unwrap();
+                let moved = hook_store
+                    .write(|c| c.cas_ref(repo, "main", Some(head.version), to))
+                    .unwrap();
+                assert!(moved, "the import's move lost a race it cannot lose");
+                let more = !queue
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .is_empty();
+                if more {
+                    arm(&hook_lands, &hook_store, repo, queue);
+                }
+            }));
+        }
+        arm(
+            &lands,
+            &f.store,
+            f.repo,
+            Arc::new(Mutex::new(imports.clone())),
+        );
+        let out = lands.land(&f.store, &caller(), &req(cs, "hook"));
+        match out {
+            Err(Error::Aborted(detail)) => {
+                assert!(!detail.is_empty(), "the abort says why");
+            }
+            other => panic!("expected Aborted after the cap, got {other:?}"),
+        }
+        assert_eq!(
+            metrics.land_replans(),
+            MAX_ATTEMPTS - 1,
+            "one replan per abort but the last"
+        );
+        // The land stays pending: a retry with the same key replans
+        // against the head the last import made.
+        let row = f
+            .store
+            .read(|c| c.land_outcome(f.repo, &caller(), 1))
+            .unwrap();
+        assert_eq!(row.state, LandState::Pending);
+    }
+
     /// Where the first attempt at a land stopped.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Crash {
