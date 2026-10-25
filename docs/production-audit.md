@@ -239,7 +239,7 @@ section; its fixes landed as #561. Highlights, with the C50 verdicts:
 ## The open list (the v1.0 blockers this audit leaves)
 
 1. The `--unstable-writable` write path out of the release binary (§1,
-   the table's last open row) — closed by #596, which takes the write
+   the table's last open row) — closed by #640, which takes the write
    path into a build feature, off in release.
 
 Closed since the audit:
