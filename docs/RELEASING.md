@@ -81,8 +81,20 @@ A release is cut through one PR from a branch named
 
 1. **Tag, signed.** Cut an annotated tag from the commit that the
    release notes describe. The owner signs it personally with their SSH
-   key, so the signature a verifier checks is the owner's, not a
-   CI secret's:
+   signing key (the public key file they registered on GitHub as a
+   Signing key), so the signature a verifier checks is the owner's, not
+   a CI secret's.
+
+   Before the first tag, once: register that public key at GitHub
+   Settings → SSH and GPG keys as a **Signing key**, and check the
+   account carries it (the list must not be empty):
+
+   ```sh
+   curl -s https://api.github.com/users/<owner>/ssh_signing_keys | jq length
+   ```
+
+   Then sign. The key file below is an example (an ed25519 key in the
+   default place); pass the public key file you registered:
 
    ```sh
    git -c gpg.format=ssh -c user.signingkey="$HOME/.ssh/id_ed25519.pub" \
