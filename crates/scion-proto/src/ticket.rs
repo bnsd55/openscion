@@ -427,6 +427,15 @@ mod tests {
     }
 
     #[test]
+    fn the_prefix_is_the_v1_bytes_stability_names() {
+        // The prefix IS the version: the signature covers it, the keys
+        // do not survive its change, and stability.md names the bytes.
+        // A rewrite here is a new ticket format beside v1 - this test
+        // fails first, and the fix is the new format, never a re-pin.
+        assert_eq!(PREFIX, b"scion\0ticket\0v1\0");
+    }
+
+    #[test]
     fn an_unverified_ticket_still_keeps_its_shape_and_its_clock() {
         let key = SigningKey::from_bytes(&[7; 32]);
         let bytes = sign(&key, "r", "alice", [1; 32], 1_000).unwrap();
