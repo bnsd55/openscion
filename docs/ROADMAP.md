@@ -38,11 +38,11 @@ Make the project safe to install anywhere it claims to work.
   tree). Not the store-lock family and not an open refusal; seven
   dispatches with a reason-visible harness (40137812112, 40139978155,
   40142823750, 40144825176, 40169943939, 40171484679, 40175218902) did
-  not reproduce it, at the observed rate of about one in six job runs.
+  not reproduce it: one failure in the eight recorded runs of that job.
   #627 makes the next failure print the server's own lines, whose tail
-  carries the exit's reason. Nothing watches the full suite on a schedule — only the
-  nightly soak and the nightly version matrix run on a clock; the
-  suite runs per push and per pull request. The earlier suspected
+  carries the exit's reason. The full suite runs on a clock now: the
+  nightly ci.yml run (03:00, in its own concurrency group since #614)
+  exercises it, and scripts/nightly-streak.sh counts those runs. The earlier suspected
   flake, scn's `failed printing to stdout: Broken pipe` in the release
   smoke, is confirmed fixed: [#341](https://github.com/bnsd55/openscion/pull/341)
   landed the fix, and none of the 57 CI runs on `main` from its merge
