@@ -34,6 +34,7 @@ marked supported here.
 | scion-server | Linux | arm64 | ext4 | — | best effort | `test-arm64` (ci.yml) | The arm64 suite runs nightly and on release candidates, not per push; the cell is best effort until v0.8, and the Linux arm64 binaries return with the v0.8 support wave |
 | scion-server | Linux | arm64 | ext4 | 17 | best effort | — | No job runs Postgres on arm64; the Postgres-backed arm64 run comes with the Postgres-major wave |
 | scion-server | Linux | x64 | xfs | — | best effort | `test-xfs` (ci.yml) | Every store the server suite opens lands on a real xfs loop device (TMPDIR); the job runs nightly and on release candidates, not per push |
+| scion-server | Linux | x64 | ext4 | — | best effort | `test-restore-ceiling` (ci.yml) | The streamed restore's RSS ceiling (`archive_restore_stream`) runs release-shaped on main pushes, the nightly and dispatches — not on pull requests, where the fixture's disk cost buys nothing; the job measures the restore's own peak against the twin's baseline |
 | scion-server | macOS | arm64 | APFS | — | supported | `test-macos` (ci.yml) | Native `macos-15` runner, full workspace suite; the runner's disk is APFS |
 | scion-server | Windows | x64 | any | — | unsupported | — | No job builds or tests it; the lock files and paths assume POSIX. Unsupported until a native job exists |
 | scion-cache | Linux | x64 | memory | — | supported | `test` (ci.yml) | The suite covers the tier crate; objects live in memory |
