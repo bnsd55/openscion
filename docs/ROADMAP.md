@@ -31,7 +31,16 @@ Make the project safe to install anywhere it claims to work.
   land-model cost the arm64 run exposes; and the admin-audit seed's
   server.lock, which can lag its drop by a tick when the spawned CLI
   opens at once (the seed now waits for the real lock-free condition,
-  #559). Nothing watches the full suite on a schedule — only the
+  #559); and the power suite's post-cut reopen on Postgres: in run
+  40134699394 the reopened server (`start_reopened`, the cut_round
+  restart) opened fine, served, recovered five pending lands, then
+  exited 1 with nothing on stderr (tests/common/mod.rs:256 in that
+  tree). Not the store-lock family and not an open refusal; seven
+  dispatches with a reason-visible harness (40137812112, 40139978155,
+  40142823750, 40144825176, 40169943939, 40171484679, 40175218902) did
+  not reproduce it, at the observed rate of about one in six job runs.
+  #627 makes the next failure print the server's own lines, whose tail
+  carries the exit's reason. Nothing watches the full suite on a schedule — only the
   nightly soak and the nightly version matrix run on a clock; the
   suite runs per push and per pull request. The earlier suspected
   flake, scn's `failed printing to stdout: Broken pipe` in the release
