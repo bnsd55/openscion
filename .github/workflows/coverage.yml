@@ -227,8 +227,15 @@ jobs:
           # a tripped guard exited by design, and its trip file says so
           # below. A watcher that died any other way is a harness bug
           # and fails the step with its log.
+          # One wait only: a second wait on the reaped job re-fires
+          # the saved status and, under errexit, kills this step with
+          # it - that was the exit-143 after every green measure. The
+          # watcher ends three ways: 2 = it tripped (the file says
+          # so below), 143 = the kill above, the normal shutdown,
+          # anything else = a harness bug.
           kill "$watcher" 2> /dev/null || true
-          wait "$watcher" 2> /dev/null || true
+          watch_rc=0
+          wait "$watcher" 2> /dev/null || watch_rc=$?
           if [ -f guard.trip ]; then
             echo 'the guard tripped: the measure above was stopped by it'
             tail -30 watcher.log
@@ -238,9 +245,9 @@ jobs:
             echo "the measure itself failed: nextest status $(cat measure.rc)"
             exit "$(cat measure.rc)"
           fi
-          wait "$watcher" 2> /dev/null
-          watch_rc=$?
-          if [ "$watch_rc" -eq 0 ]; then
+          if [ "$watch_rc" -eq 143 ]; then
+            echo 'the watcher was stopped by this step, as it should be'
+          elif [ "$watch_rc" -eq 0 ]; then
             echo 'the watcher ran to the end, as it should be'
           else
             echo "the watcher exited early without tripping: status $watch_rc - a harness bug"
@@ -455,8 +462,15 @@ jobs:
           setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --workspace --no-fail-fast -E "package(open-scion-server) and not test(graph_queries_across_many_merges_answer)"; echo $? > measure.rc' \
             | tee measure-postgres.log
           # The same end-of-step rules as the default measure above.
+          # One wait only: a second wait on the reaped job re-fires
+          # the saved status and, under errexit, kills this step with
+          # it - that was the exit-143 after every green measure. The
+          # watcher ends three ways: 2 = it tripped (the file says
+          # so below), 143 = the kill above, the normal shutdown,
+          # anything else = a harness bug.
           kill "$watcher" 2> /dev/null || true
-          wait "$watcher" 2> /dev/null || true
+          watch_rc=0
+          wait "$watcher" 2> /dev/null || watch_rc=$?
           if [ -f guard.trip ]; then
             echo 'the guard tripped: the measure above was stopped by it'
             tail -30 watcher.log
@@ -466,9 +480,9 @@ jobs:
             echo "the measure itself failed: nextest status $(cat measure.rc)"
             exit "$(cat measure.rc)"
           fi
-          wait "$watcher" 2> /dev/null
-          watch_rc=$?
-          if [ "$watch_rc" -eq 0 ]; then
+          if [ "$watch_rc" -eq 143 ]; then
+            echo 'the watcher was stopped by this step, as it should be'
+          elif [ "$watch_rc" -eq 0 ]; then
             echo 'the watcher ran to the end, as it should be'
           else
             echo "the watcher exited early without tripping: status $watch_rc - a harness bug"
