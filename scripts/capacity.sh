@@ -305,7 +305,8 @@ for backend in sqlite postgres; do
         [ -f "$bf" ] || continue
         jq -r '[.landed // 0, .seconds // 0] | @tsv' "$bf" > "$WORK/one-rep.tsv" || continue
         bench_lands=$((bench_lands + $(cut -f1 "$WORK/one-rep.tsv")))
-        bench_secs=$(awk -v s="$bench_secs" '{ print s + $1 }' "$WORK/one-rep.tsv")
+        # The seconds are the second TSV field ($2); $1 is the lands.
+        bench_secs=$(awk -v s="$bench_secs" '{ print s + $2 }' "$WORK/one-rep.tsv")
       done
       if [ "$(awk -v s="$bench_secs" 'BEGIN { print (s > 0) }')" = 1 ]; then
         lands_per_sec=$(awk -v l="$bench_lands" -v s="$bench_secs" 'BEGIN { printf "%.1f", l / s }')
