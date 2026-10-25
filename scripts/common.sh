@@ -428,6 +428,9 @@ start_scion() {
     --ticket-public-key "$(cat "$WORK/ticket.pub")" \
     --metrics-listen "127.0.0.1:$CACHE_METRICS_PORT"
   mkdir -p "$WORK/daemon"
+  # The daemon refuses a data directory open to other users (its socket
+  # and store live there); the scripts run alone in $WORK, so 0700.
+  chmod 700 "$WORK/daemon"
   start daemon serving "$BIN/scion-daemon" --data "$WORK/daemon" --socket "$SOCKET" \
     --upstream "http://127.0.0.1:$CACHE_PORT"
 }
