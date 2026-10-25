@@ -1423,6 +1423,28 @@ impl MetaTx for SqliteTx<'_> {
             .map_err(crate::error::from_sqlite)
     }
 
+    /// The repos whose `repo_blobs` row names `blob`. The dry run's sweep
+    /// needs the names, not just whether there is one: the pairs its prune
+    /// would remove must not count (the real run deletes them before the
+    /// sweep; the dry run keeps them, and the sweep subtracts them here).
+    /// Same shape as `any_repo_names`: one probe per repo.
+    fn repos_naming(&mut self, blob: &[u8]) -> Result<Vec<RepoId>> {
+        let mut stmt = self
+            .0
+            .prepare_cached(
+                "SELECT r.repo_id FROM repos r
+                 WHERE EXISTS (SELECT 1 FROM repo_blobs rb
+                               WHERE rb.repo_id = r.repo_id AND rb.blob = ?1)
+                 ORDER BY r.repo_id",
+            )
+            .map_err(crate::error::from_sqlite)?;
+        let rows = stmt
+            .query_map(params![blob], |row| row.get(0))
+            .map_err(crate::error::from_sqlite)?;
+        rows.map(|row| row.map(RepoId).map_err(crate::error::from_sqlite))
+            .collect()
+    }
+
     /// The `(changeset ID, body)` of the changesets after `from`, in ID
     /// order, at most `limit`.
     fn changeset_bodies_after(

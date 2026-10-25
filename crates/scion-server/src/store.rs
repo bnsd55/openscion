@@ -451,6 +451,14 @@ impl Store {
         &self.inner.blobs
     }
 
+    /// This process's staging folder under the data directory's `tmp/`:
+    /// a one-shot command removes it when it ends, whatever way it ends,
+    /// so its folder is not left for the next open to sweep.
+    #[must_use]
+    pub fn temp_folder(&self) -> &Path {
+        self.inner.blobs.temp_folder()
+    }
+
     /// Runs `f` on a read-only connection, outside any explicit transaction.
     /// Each statement sees its own snapshot: every commit that it can see
     /// when it starts. So a caller that needs one consistent view must read
@@ -834,11 +842,17 @@ pub fn migrate(db: &Connection, target: u32) -> Result<Option<(u32, u32)>> {
     if version == target {
         return Ok(None);
     }
-    tracing::info!(
-        from_version = version,
-        to_version = target,
-        "migrating the metadata schema"
-    );
+    // One loop serves both stories: a fresh database (version 0) is
+    // created, and its log says so once - nothing was there for a
+    // migration to move. A store with data keeps the per-step story an
+    // operator reads during an upgrade.
+    if version != 0 {
+        tracing::info!(
+            from_version = version,
+            to_version = target,
+            "migrating the metadata schema"
+        );
+    }
     // Each migration runs in its own transaction, with the version it sets.
     // A crash rolls it back, and the next open runs it again from its start.
     for (to, sql) in (1..=target).zip(MIGRATIONS).skip(version as usize) {
@@ -852,18 +866,24 @@ pub fn migrate(db: &Connection, target: u32) -> Result<Option<(u32, u32)>> {
         tx.pragma_update(None, "user_version", to)
             .map_err(from_sqlite)?;
         tx.commit().map_err(from_sqlite)?;
+        if version != 0 {
+            tracing::info!(
+                from_version = to - 1,
+                to_version = to,
+                elapsed_ms = u64::try_from(step.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "the metadata schema migrated one step"
+            );
+        }
+    }
+    if version == 0 {
+        tracing::info!(to_version = target, "the metadata schema was created");
+    } else {
         tracing::info!(
-            from_version = to - 1,
-            to_version = to,
-            elapsed_ms = u64::try_from(step.elapsed().as_millis()).unwrap_or(u64::MAX),
-            "the metadata schema migrated one step"
+            from_version = version,
+            to_version = target,
+            "the metadata migration is done"
         );
     }
-    tracing::info!(
-        from_version = version,
-        to_version = target,
-        "the metadata migration is done"
-    );
     // Version 0 was no schema at all: the first open creates one, and a
     // creation moves nothing.
     let migrated = if version == 0 {
@@ -962,6 +982,14 @@ enum SyncStep<'a> {
 const WRITE_STRIPES: usize = 256;
 
 impl Blobs {
+    /// This process's staging folder under the data directory's `tmp/`:
+    /// a one-shot command removes it when it ends, whatever way it ends,
+    /// so its folder is not left for the next open to sweep.
+    #[must_use]
+    pub fn temp_folder(&self) -> &Path {
+        &self.mine
+    }
+
     pub(crate) fn open(dir: &Path) -> Result<Self> {
         // Folders of `tmp/` made in this process, so each `Blobs` gets its own.
         static FOLDERS: AtomicU64 = AtomicU64::new(0);

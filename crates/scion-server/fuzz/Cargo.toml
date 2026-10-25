@@ -55,3 +55,10 @@ bench = false
 
 # Fuzzing builds on nightly with its own lockfile, outside the main workspace.
 [workspace]
+
+[[bin]]
+name = "backend-marker"
+path = "fuzz_targets/backend-marker.rs"
+test = false
+doc = false
+bench = false

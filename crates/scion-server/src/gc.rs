@@ -55,7 +55,7 @@ use scion_core::{BlobId, Changeset, ChangesetId};
 
 use crate::backend::Backend;
 use crate::db;
-use crate::meta::{Meta as _, MetaTx as _, RepoChangeset, RepoId};
+use crate::meta::{Meta as _, MetaTx, RepoChangeset, RepoId};
 use std::str::FromStr as _;
 
 /// Rows to read per batch, as `fsck` reads.
@@ -195,14 +195,23 @@ pub fn run(
     // One read names the repos for the start line and the prune; prune
     // rows walks them right after.
     let repos = store.read(|c| c.repos())?;
+    // The dry run's prune deletes nothing: it records the pairs it would
+    // remove, and its sweep subtracts them from the row check, the way
+    // the real run's delete does before it sweeps - so both runs report
+    // the same rows and files.
+    let mut dry = if dry_run {
+        Dry::WouldRemove(BTreeSet::new())
+    } else {
+        Dry::Real
+    };
     tracing::info!(
         repos = u64::try_from(repos.len()).unwrap_or(u64::MAX),
         grace_secs = grace.as_secs(),
         dry_run,
         "the collector walks the live set"
     );
-    prune_rows(store, &live, repos, grace, dry_run, between, &mut report)?;
-    sweep_files(store, grace, dry_run, between, &mut report)?;
+    prune_rows(store, &live, repos, grace, &mut dry, between, &mut report)?;
+    sweep_files(store, grace, &dry, between, &mut report)?;
     tracing::info!(
         repos = report.repos,
         rows_pruned = report.rows_pruned,
@@ -264,13 +273,15 @@ impl LiveSet {
 }
 
 /// Prunes the dead `repo_blobs` rows of each repo, in chunks of at most
-/// `PRUNE_BATCH` rows, one transaction per chunk.
+/// `PRUNE_BATCH` rows, one transaction per chunk. A dry run records the
+/// pairs it would remove instead of deleting them, and its sweep
+/// subtracts them, so both runs report the same files.
 fn prune_rows(
     store: &Backend,
     live: &LiveSet,
     repos: Vec<(RepoId, String)>,
     grace: Duration,
-    dry_run: bool,
+    dry: &mut Dry,
     between: &mut dyn FnMut(Stage),
     report: &mut Report,
 ) -> crate::error::Result<()> {
@@ -376,8 +387,14 @@ fn prune_rows(
                     .filter(|blob| !fresh.contains(*blob))
                     .map(|blob| blob.as_bytes().to_vec())
                     .collect();
-                if !dry_run && !gone.is_empty() {
-                    c.delete_repo_blobs(repo, &gone)?;
+                match &mut *dry {
+                    Dry::Real if !gone.is_empty() => c.delete_repo_blobs(repo, &gone)?,
+                    Dry::Real => {}
+                    Dry::WouldRemove(would) => {
+                        for blob in &gone {
+                            would.insert((repo, blob.clone()));
+                        }
+                    }
                 }
                 report.rows_pruned += u64::try_from(gone.len()).unwrap_or(u64::MAX);
                 Ok(())
@@ -434,11 +451,36 @@ fn bytes_chunks(lengths: &[(Vec<u8>, i64)], budget: usize) -> Vec<Vec<Vec<u8>>> 
     chunks
 }
 
+/// What a run deletes with: a real run removes the dead rows before its
+/// sweep; a dry run removes nothing and records the pairs its prune
+/// would remove, so its sweep can subtract them from the row check and
+/// report the same files the real run would.
+enum Dry {
+    Real,
+    WouldRemove(BTreeSet<(RepoId, Vec<u8>)>),
+}
+
+impl Dry {
+    /// Whether `blob` would survive the real run's sweep: every repo
+    /// that names it now is a pair the dry prune would remove. A repo
+    /// that named it in the snapshot and does not any more counts as
+    /// gone either way - no row, no name.
+    fn keeps_file(&self, c: &mut dyn MetaTx, blob: &[u8]) -> crate::error::Result<bool> {
+        match self {
+            Self::Real => Ok(c.any_repo_names(blob)?),
+            Self::WouldRemove(gone) => Ok(!c
+                .repos_naming(blob)?
+                .iter()
+                .all(|repo| gone.contains(&(*repo, blob.to_vec())))),
+        }
+    }
+}
+
 /// Unlinks the blob files that no row names, oldest first.
 fn sweep_files(
     store: &Backend,
     grace: Duration,
-    dry_run: bool,
+    dry: &Dry,
     between: &mut dyn FnMut(Stage),
     report: &mut Report,
 ) -> crate::error::Result<()> {
@@ -479,13 +521,13 @@ fn sweep_files(
                 // write anew. The metadata transaction orders the row
                 // check; the file work itself needs this lock.
                 let _dir = store.blobs().dir_flock(*id)?;
-                if c.any_repo_names(id.as_bytes())? {
+                if dry.keeps_file(c, id.as_bytes())? {
                     continue;
                 }
                 if file_mtime(path)? != Some(*listed) {
                     continue;
                 }
-                if !dry_run {
+                if matches!(dry, Dry::Real) {
                     std::fs::remove_file(path)?;
                 }
                 report.files_removed += 1;
@@ -1044,42 +1086,102 @@ mod tests {
     }
 
     #[test]
-    fn a_dry_run_removes_nothing() {
+    fn a_dry_run_reports_what_the_real_run_would_remove() {
         let (_dir, store) = store();
         let x = uploaded(&store, b"dry\n");
         age_file(&Backend::sqlite(store.clone()), x, OLD);
-        let mut removed = 0;
-        let mut between = |stage: Stage| {
-            if stage == Stage::BlobFiles {
-                removed += 1;
-            }
-        };
         let report = run(
             &Backend::sqlite(store.clone()),
             Duration::from_secs(DEFAULT_GRACE_SECS),
             true,
-            &mut between,
+            &mut |_| {},
         )
         .unwrap();
-        // The report says what the stages would collect. In a real run the
-        // rows go first, and the sweep of the same run would then see no
-        // row; a dry run keeps the rows, so the sweep keeps the file too.
-        assert_eq!(report.rows_pruned, 1, "{report:?}");
-        assert_eq!(report.files_removed, 0, "{report:?}");
         // Nothing was removed: the row and the file are still there.
         assert!(named(&store, x));
         assert_eq!(
             store.blobs().verify(x).unwrap(),
             crate::store::BlobStatus::Valid
         );
-        // The real run after it collects both.
+        // The report is the real run's: the sweep subtracts the rows the
+        // dry prune would remove, the way the real run's delete does
+        // before it sweeps. A dead row must not keep its file out of the
+        // count, or an operator budgets the disk from a number that the
+        // run that follows doubles.
+        let real = collect(
+            &Backend::sqlite(store.clone()),
+            Duration::from_secs(DEFAULT_GRACE_SECS),
+            &mut |_| {},
+        );
+        assert_eq!(report.rows_pruned, real.rows_pruned, "{report:?} {real:?}");
+        assert_eq!(
+            report.files_removed, real.files_removed,
+            "{report:?} {real:?}"
+        );
+        assert_eq!(real.rows_pruned, 1, "{real:?}");
+        assert_eq!(real.files_removed, 1, "{real:?}");
+    }
+
+    /// A blob named by two repos, dead in one and live in the other: the
+    /// sweep must keep the file because ANY live name keeps it. A
+    /// `keeps_file` that asks whether SOME name survives the prune (an
+    /// `any` where the code says `all`) must not pass here.
+    #[test]
+    fn a_blob_live_in_another_repo_survives_a_dry_run() {
+        let (_dir, store) = store();
+        let b = uploaded(&store, b"shared\n");
+        store
+            .write(|c| {
+                let mut tx = SqliteTx(c);
+                let other = tx.create_repo("other")?;
+                // A stored changeset puts the blob, so repo other's row
+                // is live: nothing prunes it.
+                crate::tree::store_changeset(
+                    &mut tx,
+                    other,
+                    &cs(
+                        None,
+                        &[(
+                            "f",
+                            FileState::Regular {
+                                content: b,
+                                executable: false,
+                            },
+                        )],
+                    ),
+                    &mut crate::tree::lens_of(&Backend::sqlite(store.clone())),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        age_file(&Backend::sqlite(store.clone()), b, OLD);
+        let report = run(
+            &Backend::sqlite(store.clone()),
+            Duration::from_secs(DEFAULT_GRACE_SECS),
+            true,
+            &mut |_| {},
+        )
+        .unwrap();
+        // The dry run takes repo gc's dead row (the dry prune would), and
+        // the file stays: repo other's live row names it.
+        assert_eq!(report.rows_pruned, 1, "{report:?}");
+        assert_eq!(report.files_removed, 0, "{report:?}");
+        assert_eq!(
+            store.blobs().verify(b).unwrap(),
+            crate::store::BlobStatus::Valid
+        );
+        // The real run takes the same row and keeps the file, too.
         let real = collect(
             &Backend::sqlite(store.clone()),
             Duration::from_secs(DEFAULT_GRACE_SECS),
             &mut |_| {},
         );
         assert_eq!(real.rows_pruned, 1, "{real:?}");
-        assert_eq!(real.files_removed, 1, "{real:?}");
+        assert_eq!(real.files_removed, 0, "{real:?}");
+        assert_eq!(
+            store.blobs().verify(b).unwrap(),
+            crate::store::BlobStatus::Valid
+        );
     }
 
     #[test]

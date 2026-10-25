@@ -31,16 +31,18 @@ Make the project safe to install anywhere it claims to work.
   land-model cost the arm64 run exposes; and the admin-audit seed's
   server.lock, which can lag its drop by a tick when the spawned CLI
   opens at once (the seed now waits for the real lock-free condition,
-  #559); and the power suite's post-cut reopen on Postgres: in run
-  40134699394 the reopened server (`start_reopened`, the cut_round
-  restart) opened fine, served, recovered five pending lands, then
-  exited 1 with nothing on stderr (tests/common/mod.rs:256 in that
-  tree). Not the store-lock family and not an open refusal; seven
-  dispatches with a reason-visible harness (40137812112, 40139978155,
-  40142823750, 40144825176, 40169943939, 40171484679, 40175218902) did
-  not reproduce it: one failure in the eight recorded runs of that job.
-  #627 makes the next failure print the server's own lines, whose tail
-  carries the exit's reason. The full suite runs on a clock now: the
+  #559); and the power suite's post-cut reopen on Postgres, whose
+  reason is now known: the reopen raced the cut server's store lock -
+  on Postgres the advisory lock of the killed server's session
+  outlives the SIGKILL until the database ends that backend, and the
+  reopen refused with "another server holds this store" (run
+  40134699394 hid it behind a truncated panic; main's run 40178327848
+  printed it through the reason-visible harness of
+  [#627](https://github.com/bnsd55/openscion/pull/627)). Fixed: the
+  reopen, and every restart-after-a-kill-or-cut of the power suite,
+  takes the bounded wait of start_after_kill - the real condition, the
+  holder refusal only, 10 s at most - so the killed server's lock is
+  waited for, not raced. The full suite runs on a clock now: the
   nightly ci.yml run (03:00, in its own concurrency group since #614)
   exercises it, and scripts/nightly-streak.sh counts those runs. The earlier suspected
   flake, scn's `failed printing to stdout: Broken pipe` in the release
