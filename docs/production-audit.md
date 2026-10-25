@@ -238,13 +238,26 @@ section; its fixes landed as #561. Highlights, with the C50 verdicts:
 
 ## The open list (the v1.0 blockers this audit leaves)
 
-1. The `--unstable-writable` write path out of the release binary —
-   open, closed by C54 (§1).
-2. The archive restore's repository-sized RAM hold (§2), and the C60
-   Postgres lock-restart runbook + whether `serve` should wait (§2).
-3. The unary reply caps and `lossy` JSON closed (#586, #576); the
-   `scn commit` whole-file read closed by #582 (§3).
-4. The database-loop sweep: SQL in loops, `ORDER BY`, isolation (§4).
-6. The data-dir default create-vs-refuse question (§6).
-7. The additive contract goldens that enforce the format policies (§7).
-8. Digest pins for the service-container tags (§9).
+1. The `--unstable-writable` write path out of the release binary (§1,
+   the table's last open row) — closed by #596, which takes the write
+   path into a build feature, off in release.
+
+Closed since the audit:
+
+- The C60 Postgres lock-restart runbook, and whether `serve` should
+  wait for the lock (#609, §2: the runbook names the supervisor's
+  restart as the recovery, and `serve` fails fast by design).
+- The archive restore's repository-sized RAM hold (#575, §2: the replay
+  streams and commits per byte budget, with the RSS ceiling test).
+- The unary reply caps and `lossy` JSON (#586, #576, §3), and the `scn
+  commit` whole-file read (#582, §3).
+- The database-loop sweep: SQL in loops, `ORDER BY`, isolation (#570,
+  §4: every loop listed with its verdict, no repo-sized site).
+- The data-dir default create-vs-refuse question (D25, #578, §6: a
+  missing data directory is refused, not created).
+- The additive contract goldens that enforce the format policies
+  (#571, §7: the store, protocol and archive goldens, with the
+  doc-pairing lint).
+- Digest pins for the service-container tags (#595, §9: every services
+  image pins its tag's multi-arch index, and the workflow lint holds
+  it).
