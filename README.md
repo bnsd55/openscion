@@ -457,8 +457,9 @@ run](https://github.com/bnsd55/openscion/actions/runs/39310255775)).
 PostgreSQL 17.11 (`postgres:17.11`) is the version the Postgres job runs
 per push; the nightly and the release-candidate dispatch also run 16.15
 and 18.6, and every Postgres cell is experimental in v0.1.0. The release
-builds target x86-64 Linux and Apple Silicon macOS; the release smoke
-runs the README quick start on release binaries on both. The toolchain
+workflow builds and smoke-tests binaries for x86-64 Linux and Apple
+Silicon macOS; v0.1.0 itself is a source release (docs/RELEASING.md).
+The toolchain
 floor is Rust 1.88 (`rust-version`, checked by the `check (MSRV)` job).
 
 Not supported, or tested only in parts:
