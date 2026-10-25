@@ -349,7 +349,8 @@ fn prune_rows(
                 // The lengths, in row chunks of [`DERIVED_BATCH`]: ids
                 // and lengths only, 40 bytes a row, so holding them is
                 // fine; the statement must not grow with the repo (the
-                // C62 sweep class).
+                // sweep class of the production audit's database-loop
+                // section, bounded by #573).
                 let mut lengths = Vec::new();
                 for ids in unseen.chunks(crate::meta::DERIVED_BATCH) {
                     lengths.extend(c.stored_changeset_body_lengths(ids)?);

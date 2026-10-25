@@ -78,7 +78,7 @@ the database's own WAL, and each fault row cuts the half it names.
 | Whole server on a real full disk (tmpfs) | `disk_full.rs` on Postgres in the tmpfs step (blob path and inodes) | EVIDENCE |
 | SIGTERM drain under load | `health.rs` runs on Postgres in the whole-suite step | EVIDENCE |
 | Soak-fault: kill -9 the server under load, on Postgres | The `soak-fault-postgres` job (`.github/workflows/soak.yml`) arms the Postgres arm of `scripts/soak-fault.sh` (`pg_restart`, `soak-fault.sh:338-344`): a dispatch-only Postgres 17 service container pinned tag@sha256, `SCION_PG_URL`, `SCION_FAULT_PG=1`, and a restart command that restarts the container between kills. The summary names the backend, the kills and the Postgres restarts, and the run fails unless every kill restarted Postgres | WEAK — dispatch-only (D10), never per push or nightly. Green: [40017979410](https://github.com/bnsd55/openscion/actions/runs/40017979410) (postgres -> postgres, 3 kills, 3 restarts); red: [40071077720](https://github.com/bnsd55/openscion/actions/runs/40071077720) (the restart command replaced by a stop: "Postgres never came back"). Promotion to EVIDENCE comes with D10's hosting decision |
-| The C60 restart-refusal row (a server restarting right after a crash refuses until Postgres reaps the dead session's lock) | Open in `docs/production-audit.md` section 2; the runbook must say the supervisor retries the open with backoff | open row of the audit, not a CI gap — feeds the trial's runbook walk |
+| The lock-restart refusal row (a server restarting right after a crash refuses until Postgres reaps the dead session's lock) | Open in `docs/production-audit.md` section 2; the runbook must say the supervisor retries the open with backoff | open row of the audit, not a CI gap — feeds the trial's runbook walk |
 | Operator / release / vulnerability drills | `docs/drills/*.md` name no Postgres arm | MISSING as drills — covered by (d)'s trial if the trial runs the drills on Postgres 17. Card 4 |
 
 ## 3. The WEAK and MISSING rows, and what closes them
@@ -107,6 +107,7 @@ the database's own WAL, and each fault row cuts the half it names.
    Postgres 17 as part of it; the trial file lands in
    `docs/release-notes/`.
 
-The C60 runbook row (§2 of the production audit) and the #575 restore
-finding stay where they are; neither is a Postgres 17 qualification
+The lock-restart runbook row (§2 of the production audit, closed by
+[#609](https://github.com/bnsd55/openscion/pull/609)) and the #575
+restore finding stay where they are; neither is a Postgres 17 qualification
 gap beyond what the trial's runbook walk already covers.

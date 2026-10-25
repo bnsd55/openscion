@@ -14,7 +14,7 @@ The blocking audit for v1.0. Every finding carries exactly one status:
   in this document is merely "known".
 
 Sections follow the production review of 2026-10-23 (Q4). The harness
-vacuity table of the same day (C50) feeds section 8. Each finding names
+vacuity table of the same day feeds section 8. Each finding names
 its evidence point `file:line`, checked once against the commit this
 document landed on.
 
@@ -22,7 +22,7 @@ document landed on.
 
 | Finding | Evidence | Status |
 | --- | --- | --- |
-| `scn mount --unstable-writable`: a planted parent symlink can redirect an overlay write outside the mount (final-name-only check). Ben's D24: the writable mount leaves the v1 release binary — the write path becomes a build feature, off in release | `crates/scn/src/vfs.rs:1469`, `docs/cli.md:57`, `changes/313.fixed.md` | open, closed by C54 (the write path out of the release builds) |
+| `scn mount --unstable-writable`: a planted parent symlink can redirect an overlay write outside the mount (final-name-only check). Ben's D24: the writable mount leaves the v1 release binary — the write path becomes a build feature, off in release | `crates/scn/src/vfs.rs:1469`, `docs/cli.md:57`, `changes/313.fixed.md` | open, closed when the write path left the release builds |
 | Env aliases `SCION_DATA`, `SCION_TOKEN`, `SCION_POSTGRES_URL`, `SCION_POSTGRES_URL_FILE` exist beside their flags | `crates/scion-server/src/main.rs:30,36-44,1290` | fixed by design (each alias is the documented spelling of a flag in `docs/cli.md`; the flag list is the release surface, and the URL env exists so secrets stay off argv) |
 | Test hooks in release binaries: the store fault hooks and the derive test pool build only with `--features test-hooks` | `crates/scion-server/Cargo.toml:61`, `crates/scion-server/src/store.rs:920` | fixed by design (the feature is off in every release build; `release.yml` builds plain `--release`) |
 
@@ -215,15 +215,15 @@ doc, and the lint holds every later change.
 
 ## 8. Evidence and CI
 
-The harness vacuity audit of 2026-10-23 (C50) is the base table of this
-section; its fixes landed as #561. Highlights, with the C50 verdicts:
+The harness vacuity audit of 2026-10-23 is the base table of this
+section; its fixes landed as #561. Highlights, with that audit's verdicts:
 
 | Finding | Evidence | Status |
 | --- | --- | --- |
 | The soaks and the smoke never named the store they served, and soak-fault never counted its kills | `scripts/soak-fault.sh`, `scripts/soak.sh`, `scripts/release-smoke.sh` | fixed (#561: the backend row, the kills count, the no-sample segment rule) |
 | The wall-clock budget in the derived flight tests could lose to a thread start | `crates/scion-server/src/derived.rs` | fixed (#566: the tests expire the deadline on the test's word, after the state proves the order) |
-| The batch equality guards run both sides through the same flush, so a shared flush bug passes row-by-row equality | `tests/changeset_batch_eq.rs` | bounded — ceiling: 0 shared-flush coverage in the eq witness; the catching suites for quiet wrong content are `tests/history.rs` (the path log answers the git-referenced IDs) and `tests/audit_evidence.rs` (`a_tampered_history_node_reads_as_corrupt`, `fsck_reports_a_tampered_history_node`: a swapped history-node body answers Corrupt "does not match its ID" and fsck reports history-node-bad, both backends); the blind spot is recorded in the C50 notes |
-| Main-only jobs without dispatch proof: every harness named in the C50 table now carries a branch dispatch run id | `.github/workflows/soak.yml`, `ci.yml`, `version-matrix.yml` | fixed (dispatches 39891410810, 39926987173, 39949854816, 39923804727) |
+| The batch equality guards run both sides through the same flush, so a shared flush bug passes row-by-row equality | `tests/changeset_batch_eq.rs` | bounded — ceiling: 0 shared-flush coverage in the eq witness; the catching suites for quiet wrong content are `tests/history.rs` (the path log answers the git-referenced IDs) and `tests/audit_evidence.rs` (`a_tampered_history_node_reads_as_corrupt`, `fsck_reports_a_tampered_history_node`: a swapped history-node body answers Corrupt "does not match its ID" and fsck reports history-node-bad, both backends); the blind spot is recorded in that audit's notes |
+| Main-only jobs without dispatch proof: every harness named in that audit's table now carries a branch dispatch run id | `.github/workflows/soak.yml`, `ci.yml`, `version-matrix.yml` | fixed (dispatches 39891410810, 39926987173, 39949854816, 39923804727) |
 | Env-required suites that skip silently | `tests/crash_pg.rs:596`, `power.rs:80`, `dm_log_writes.rs:33`, `disk_full.rs:32` | bounded — ceiling: 0 silent skips; each prints its skip line, and the CI job that owns it sets the REQUIRE variable so a missing build fails the job |
 | A randomized land model as an independent oracle | the land model script (#492) | fixed |
 
@@ -239,9 +239,10 @@ section; its fixes landed as #561. Highlights, with the C50 verdicts:
 ## The open list (the v1.0 blockers this audit leaves)
 
 1. The `--unstable-writable` write path out of the release binary —
-   open, closed by C54 (§1).
-2. The archive restore's repository-sized RAM hold (§2), and the C60
-   Postgres lock-restart runbook + whether `serve` should wait (§2).
+   open, closed when the write path left the release builds (§1).
+2. The archive restore's repository-sized RAM hold (§2), and the
+   Postgres lock-restart runbook + whether `serve` should wait (§2),
+   closed by [#609](https://github.com/bnsd55/openscion/pull/609).
 3. The unary reply caps and `lossy` JSON closed (#586, #576); the
    `scn commit` whole-file read closed by #582 (§3).
 4. The database-loop sweep: SQL in loops, `ORDER BY`, isolation (§4).

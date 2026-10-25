@@ -113,7 +113,7 @@ jobs:
   # pg_restart). Dispatch only: where a long-run Postgres lives is
   # still open (D10), so the nightly never runs this arm; a dispatch
   # proves it on demand. The image is pinned tag@sha256 the way the
-  # digest-pin wave (C64) pins the service containers.
+  # digest-pin wave (#595) pins the service containers.
   soak-fault-postgres:
     name: soak-fault-postgres
     if: github.event_name == 'workflow_dispatch'

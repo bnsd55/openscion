@@ -292,10 +292,10 @@ for backend in sqlite postgres; do
         # errors column, and the land p99 column stays empty.
         land_p99="-"
       fi
-      c50=$(pct "$WORK/read-times.csv" 0.50)
-      c99=$(pct "$WORK/read-times.csv" 0.99)
-      [ -n "$c50" ] || c50="-"
-      [ -n "$c99" ] || c99="-"
+      p50=$(pct "$WORK/read-times.csv" 0.50)
+      p99=$(pct "$WORK/read-times.csv" 0.99)
+      [ -n "$p50" ] || p50="-"
+      [ -n "$p99" ] || p99="-"
       du_sample "$WORK/store-sizes-$backend-w$w-r$r.csv" "$WORK/server" end
       store_end=$(sed -n 's/^[^,]*,//p' "$WORK/store-sizes-$backend-w$w-r$r.csv" | tail -n 1)
       # Per 1,000 lands, divided by the lands the counter measured: a
@@ -309,7 +309,7 @@ for backend in sqlite postgres; do
       else
         db_growth="-"
       fi
-      echo "$backend,$w,$r,$land_p99,$c50,$c99,$reader_timeouts,$errors,$rss_end,$lands_landed,$blob_growth,$db_growth" \
+      echo "$backend,$w,$r,$land_p99,$p50,$p99,$reader_timeouts,$errors,$rss_end,$lands_landed,$blob_growth,$db_growth" \
         >> "$WORK/capacity.csv"
       if [ "$((errors + reader_timeouts))" -gt 0 ]; then
         note "cell $backend w$w r$r: $reader_timeouts timeouts, $errors errors (readers $reader_failures, bench $bench_fail) - recorded, next cell"
@@ -352,8 +352,8 @@ echo "capacity envelope: machine $CAPACITY_MACHINE, commit $HEAD_HEX"
 echo
 echo "| backend | writers | readers | land p99 ms | checkout p50 ms | checkout p99 ms | timeouts | errors | server RSS MiB | landed | blob store KiB per 1k lands | database KiB per 1k lands |"
 echo "|---|---|---|---|---|---|---|---|---|---|---|---|"
-while IFS=, read -r backend w r land_p99 c50 c99 timeouts errors rss landed blob_growth db_growth; do
-  echo "| $backend | $w | $r | $land_p99 | $c50 | $c99 | $timeouts | $errors | $((rss / 1024)) | $landed | $blob_growth | $db_growth |"
+while IFS=, read -r backend w r land_p99 p50 p99 timeouts errors rss landed blob_growth db_growth; do
+  echo "| $backend | $w | $r | $land_p99 | $p50 | $p99 | $timeouts | $errors | $((rss / 1024)) | $landed | $blob_growth | $db_growth |"
 done < "$WORK/capacity.csv"
 echo
 row "commit" "$HEAD_HEX"
