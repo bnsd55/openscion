@@ -169,8 +169,14 @@ jobs:
                   free -m || true
                   { ps -eo pid,rss,pcpu,etime,comm,args --sort=-rss > watcher.top && head -14 watcher.top; } || true
                 } | tee -a watcher.log
-                pkill -f 'cargo nextest' || true
-                pkill -f 'target/debug/deps' || true
+                # The kill is anchored and listed: ^cargo names the
+                # measure's own wrapper, ^<tree> names the test
+                # binaries - the step's bash and the watcher itself,
+                # whose command lines start elsewhere, are immune, and
+                # the pgrep lines say exactly what was signalled.
+                { pgrep -af '^cargo nextest' || true; pgrep -af 'target/debug/deps' || true; } >> watcher.log 2> /dev/null
+                pkill -TERM -f '^cargo nextest' || true
+                pkill -TERM -f 'target/debug/deps' || true
                 exit 2
               fi
             done ) &
@@ -389,8 +395,14 @@ jobs:
                   free -m || true
                   { ps -eo pid,rss,pcpu,etime,comm,args --sort=-rss > watcher.top && head -14 watcher.top; } || true
                 } | tee -a watcher.log
-                pkill -f 'cargo nextest' || true
-                pkill -f 'target/debug/deps' || true
+                # The kill is anchored and listed: ^cargo names the
+                # measure's own wrapper, ^<tree> names the test
+                # binaries - the step's bash and the watcher itself,
+                # whose command lines start elsewhere, are immune, and
+                # the pgrep lines say exactly what was signalled.
+                { pgrep -af '^cargo nextest' || true; pgrep -af 'target/debug/deps' || true; } >> watcher.log 2> /dev/null
+                pkill -TERM -f '^cargo nextest' || true
+                pkill -TERM -f 'target/debug/deps' || true
                 exit 2
               fi
             done ) &
