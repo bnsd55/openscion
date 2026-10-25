@@ -157,14 +157,23 @@ jobs:
           # nextest process group dies here, so the step fails with the
           # hog's name in a log that still uploads.
           rm -f guard.trip watcher.log watcher.ps
+          # The absolute floors are late: a leak that eats the runner
+          # kills its agent before 3G/600M arrive. The watch also
+          # trips on GROWTH against this measure's own start, which
+          # fires while there is still room to leave the evidence.
+          start_avail=$(df --output=avail -BG / 2> /dev/null | tail -1 | tr -dc '0-9') || true
+          start_mem=$(free -m 2> /dev/null | awk 'NR==2 {print $7}') || true
           ( while sleep 10; do
               { date -u +%T; df -h / | tail -1; free -m | awk 'NR==2'; du -sh target/coverage 2>/dev/null; } || true
               { ps -eo pid,rss,pcpu,etime,comm --sort=-rss > watcher.ps && head -4 watcher.ps >> watcher.log; } || true
               avail=$(df --output=avail -BG / | tail -1 | tr -dc '0-9' 2> /dev/null) || true
               mem=$(free -m | awk 'NR==2 {print $7}' 2> /dev/null) || true
-              if [ "${avail:-10}" -le 3 ] || [ "${mem:-10000}" -le 600 ]; then
+              avail_drop=0; mem_drop=0
+              [ -n "${avail:-}" ] && [ -n "${start_avail:-}" ] && avail_drop=$((start_avail - avail)) || true
+              [ -n "${mem:-}" ] && [ -n "${start_mem:-}" ] && mem_drop=$((start_mem - mem)) || true
+              if [ "${avail:-10}" -le 3 ] || [ "${mem:-10000}" -le 600 ] || [ "$avail_drop" -ge 6 ] || [ "$mem_drop" -ge 4000 ]; then
                 {
-                  echo "the runner is out of disk or memory: avail=${avail:-?}G avail_floor=3G free_mem=${mem:-?}M mem_floor=600M"
+                  echo "the runner is out of disk or memory, or is leaking: avail=${avail:-?}G avail_floor=3G free_mem=${mem:-?}M mem_floor=600M disk_drop_since_start=${avail_drop:-?}G mem_drop_since_start=${mem_drop:-?}M"
                   df -h / || true
                   free -m || true
                   { ps -eo pid,rss,pcpu,etime,comm,args --sort=-rss > watcher.top && head -14 watcher.top; } || true
@@ -178,7 +187,7 @@ jobs:
                 # would record the step's own group - the guard then
                 # stands down rather than kill its family, and the
                 # numbers below name that.
-                printf 'trip at %s: avail=%s mem=%s pgid=%s step_pgid=%s\n' "$(date -u +%T)" "${avail:-?}" "${mem:-?}" "$(cat measure.pgid 2> /dev/null || echo none)" "$(ps -o pgid= -p $$ 2> /dev/null | tr -d ' ')" > guard.trip 2> /dev/null || true
+                printf 'trip at %s: avail=%s mem=%s disk_drop=%s mem_drop=%s pgid=%s step_pgid=%s\n' "$(date -u +%T)" "${avail:-?}" "${mem:-?}" "${avail_drop:-?}" "${mem_drop:-?}" "$(cat measure.pgid 2> /dev/null || echo none)" "$(ps -o pgid= -p $$ 2> /dev/null | tr -d ' ')" > guard.trip 2> /dev/null || true
                 if [ -f measure.pgid ] && [ "$(ps -o pgid= -p "$(cat measure.pgid)" 2> /dev/null | tr -d ' ')" != "$(ps -o pgid= -p $$ 2> /dev/null | tr -d ' ')" ]; then
                   kill -TERM -- "-$(cat measure.pgid)" || true
                 else
@@ -405,14 +414,23 @@ jobs:
           # SIGPIPE death, and a trip stops the measure while the log
           # can still say what ate the runner.
           rm -f guard.trip watcher.log watcher.ps
+          # The absolute floors are late: a leak that eats the runner
+          # kills its agent before 3G/600M arrive. The watch also
+          # trips on GROWTH against this measure's own start, which
+          # fires while there is still room to leave the evidence.
+          start_avail=$(df --output=avail -BG / 2> /dev/null | tail -1 | tr -dc '0-9') || true
+          start_mem=$(free -m 2> /dev/null | awk 'NR==2 {print $7}') || true
           ( while sleep 10; do
               { date -u +%T; df -h / | tail -1; free -m | awk 'NR==2'; du -sh target/coverage 2>/dev/null; } || true
               { ps -eo pid,rss,pcpu,etime,comm --sort=-rss > watcher.ps && head -4 watcher.ps >> watcher.log; } || true
               avail=$(df --output=avail -BG / | tail -1 | tr -dc '0-9' 2> /dev/null) || true
               mem=$(free -m | awk 'NR==2 {print $7}' 2> /dev/null) || true
-              if [ "${avail:-10}" -le 3 ] || [ "${mem:-10000}" -le 600 ]; then
+              avail_drop=0; mem_drop=0
+              [ -n "${avail:-}" ] && [ -n "${start_avail:-}" ] && avail_drop=$((start_avail - avail)) || true
+              [ -n "${mem:-}" ] && [ -n "${start_mem:-}" ] && mem_drop=$((start_mem - mem)) || true
+              if [ "${avail:-10}" -le 3 ] || [ "${mem:-10000}" -le 600 ] || [ "$avail_drop" -ge 6 ] || [ "$mem_drop" -ge 4000 ]; then
                 {
-                  echo "the runner is out of disk or memory: avail=${avail:-?}G avail_floor=3G free_mem=${mem:-?}M mem_floor=600M"
+                  echo "the runner is out of disk or memory, or is leaking: avail=${avail:-?}G avail_floor=3G free_mem=${mem:-?}M mem_floor=600M disk_drop_since_start=${avail_drop:-?}G mem_drop_since_start=${mem_drop:-?}M"
                   df -h / || true
                   free -m || true
                   { ps -eo pid,rss,pcpu,etime,comm,args --sort=-rss > watcher.top && head -14 watcher.top; } || true
@@ -426,7 +444,7 @@ jobs:
                 # would record the step's own group - the guard then
                 # stands down rather than kill its family, and the
                 # numbers below name that.
-                printf 'trip at %s: avail=%s mem=%s pgid=%s step_pgid=%s\n' "$(date -u +%T)" "${avail:-?}" "${mem:-?}" "$(cat measure.pgid 2> /dev/null || echo none)" "$(ps -o pgid= -p $$ 2> /dev/null | tr -d ' ')" > guard.trip 2> /dev/null || true
+                printf 'trip at %s: avail=%s mem=%s disk_drop=%s mem_drop=%s pgid=%s step_pgid=%s\n' "$(date -u +%T)" "${avail:-?}" "${mem:-?}" "${avail_drop:-?}" "${mem_drop:-?}" "$(cat measure.pgid 2> /dev/null || echo none)" "$(ps -o pgid= -p $$ 2> /dev/null | tr -d ' ')" > guard.trip 2> /dev/null || true
                 if [ -f measure.pgid ] && [ "$(ps -o pgid= -p "$(cat measure.pgid)" 2> /dev/null | tr -d ' ')" != "$(ps -o pgid= -p $$ 2> /dev/null | tr -d ' ')" ]; then
                   kill -TERM -- "-$(cat measure.pgid)" || true
                 else
