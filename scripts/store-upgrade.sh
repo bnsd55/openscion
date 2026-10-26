@@ -274,6 +274,9 @@ stepwise() {
     "$tag_dir/bin/scion-server" --data "$dir/chain" fsck >"$dir/step.log" 2>&1 ||
       die "stepwise ($ref): the open at $tag failed"
   done
+  # The chain is a copy of the store the old binary made: the chmod is
+  # the operator's upgrade step, before HEAD's first open.
+  chmod 700 "$dir/chain"
   "$BIN/scion-server" --data "$dir/chain" fsck >"$dir/step-head.log" 2>&1 ||
     die "stepwise ($ref): HEAD cannot open the chain"
   fingerprint "$dir/chain/scion.db"
