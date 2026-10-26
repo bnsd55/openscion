@@ -245,16 +245,29 @@ jobs:
           # agent surviving convicts the instrumented build or test
           # load.
           sum="${GITHUB_STEP_SUMMARY:-/dev/null}"
-          echo "default measure starts at $(date -u +%T)" >> "$sum" || true
-          if nice -n 19 cargo nextest --no-run --workspace --no-fail-fast -E "not package(open-scion-server)" > build.log 2>&1; then
-            echo "default build ends at $(date -u +%T)" >> "$sum" || true
-          else
-            echo "the default build failed:"
-            tail -40 build.log
-            exit 1
-          fi
-          setsid bash -c 'echo $$ > measure.pgid; sleep 2700; echo 0 > measure.rc' \
-            | tee measure.log
+          # Bisecting the default job's agent losses (40223621889,
+          # 40230347062, 40234675369, 40238876183): the build always
+          # finishes, the loss lands mid-tests at 49-55 minutes with
+          # memory and disk flat, and the sleep probe survived 50
+          # minutes untouched - the runner is innocent, the test load
+          # is not. One crate at a time, each result to the job
+          # summary: a loss names the last completed crate.
+          for crate in scion-core scion-proto scion-tier scn; do
+            echo "starting $crate at $(date -u +%T)" >> "$sum" || true
+            setsid bash -c "echo \$\$ > measure.pgid; nice -n 19 cargo nextest run -p $crate --no-fail-fast; echo \$? > measure.rc" \
+              | tee "measure-$crate.log"
+            rc=0
+            [ -f measure.rc ] && rc=$(cat measure.rc)
+            if [ "$rc" -eq 0 ]; then
+              echo "$crate passed at $(date -u +%T)" >> "$sum" || true
+            else
+              echo "$crate failed with status $rc at $(date -u +%T)" >> "$sum" || true
+              tail -30 "measure-$crate.log"
+              exit "$rc"
+            fi
+            rm -f measure.rc
+          done
+          echo "all four crates passed at $(date -u +%T)" >> "$sum" || true
           # The step must not fail on a watcher that is already gone:
           # a tripped guard exited by design, and its trip file says so
           # below. A watcher that died any other way is a harness bug
