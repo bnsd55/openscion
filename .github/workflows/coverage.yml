@@ -118,6 +118,12 @@ jobs:
           mkdir -p .cargo
           printf '[profile.dev]\ndebug = false\nstrip = true\n\n[profile.test]\ndebug = false\nstrip = true\n' > .cargo/config.toml
           echo "RUSTFLAGS=-C link-arg=-Wl,--no-keep-memory" >> "$GITHUB_ENV"
+      - name: restore the last instrumented build
+        uses: actions/cache/restore@55cc834565d60d8dcfcfecbe5f27c8d2f16c2d80 # v6.1.0
+        with:
+          path: target
+          key: coverage-build-${{ runner.os }}-${{ github.sha }}
+          restore-keys: coverage-build-${{ runner.os }}-
       # The image ships dozens of gigabytes of toolchains this job
       # never touches; they go.
       - name: free the runner's disk for the instrumented build
@@ -143,9 +149,51 @@ jobs:
           df -h / | tail -1; free -m | awk 'NR==2'
       - name: stale profiles go
         run: rm -f target/coverage/*.profraw target/coverage/*.profdata target/coverage/*-profraw-list
+      - name: build, the default backend
+        run: |
+          set -o pipefail
+          mkdir -p .config
+          printf '[profile.default]\ntimeout = "600s"\nretries = 1\nslow-timeout = { period = "60s", terminate-after = 5 }\n' > .config/nextest.toml
+          # The README's recipe: show-env exports the instrumentation
+          # RUSTFLAGS and the profile environment, plain cargo nextest
+          # runs the tests against the binaries the build makes. The
+          # profiles accumulate in the target dir; the report step below
+          # merges them into the one number the gate checks. nextest
+          # isolates every test in its own process with its own timeout.
+          # A per-process address-space cap of 6 GB: a test whose
+          # allocations run away under instrumentation freezes the
+          # runner in swap thrash and kills the agent with every log.
+          # Under this cap the runaway test is the one that dies, and
+          # the step fails cleanly with its name in the log.
+          ulimit -v 6291456
+          # shellcheck disable=SC1090
+          source <(cargo llvm-cov show-env --sh)
+          # The build phase writes profiles too: instrumented
+          # proc-macro and build-script processes run while cargo
+          # compiles, and their counters map to no binary the report
+          # reads - they were the 794 "functions have mismatched data"
+          # the corrected split still printed. So the build runs with
+          # profiles discarded, and only the run phase writes them.
+          LLVM_PROFILE_FILE=/dev/null nice -n 19 cargo nextest run \
+            --workspace --no-run
+          echo "default build ends at $(date -u +%T)" >> "${GITHUB_STEP_SUMMARY:-/dev/null}" || true
+      # The save rides right behind the build: a run whose agent dies
+      # later still leaves a warm build for the next run, which breaks
+      # the cold-rebuild loop that loses the runner every other push.
+      - name: save the instrumented build
+        uses: actions/cache/save@55cc834565d60d8dcfcfecbe5f27c8d2f16c2d80 # v6.1.0
+        with:
+          path: target
+          key: coverage-build-${{ runner.os }}-${{ github.sha }}-sqlite
       - name: measure, the default backend
         run: |
           set -o pipefail
+          # One .profraw per test process made thousands per job, and
+          # the runner was lost four runs in a row with no log (#565).
+          # The %4m pool folds them into four files per test binary.
+          # The gate merges *.profraw, so the report does not change.
+          export LLVM_PROFILE_FILE="$PWD/target/coverage/sqlite-%4m.profraw"
+
           # The watcher doubles as a guard: a runner whose disk fills or
           # whose memory drains loses its agent mid-suite, with every
           # log — so the measure fails itself, loudly, while there is
@@ -217,35 +265,6 @@ jobs:
               fi
             done ) &
           watcher=$!
-          mkdir -p .config
-          printf '[profile.default]\ntimeout = "600s"\nretries = 1\nslow-timeout = { period = "60s", terminate-after = 5 }\n' > .config/nextest.toml
-          # The README's recipe: show-env exports the instrumentation
-          # RUSTFLAGS and the profile environment, plain cargo nextest
-          # runs the tests against the binaries the build makes. The
-          # profiles accumulate in the target dir; the report step below
-          # merges them into the one number the gate checks. nextest
-          # isolates every test in its own process with its own timeout.
-          # A per-process address-space cap of 6 GB: a test whose
-          # allocations run away under instrumentation freezes the
-          # runner in swap thrash and kills the agent with every log.
-          # Under this cap the runaway test is the one that dies, and
-          # the step fails cleanly with its name in the log.
-          ulimit -v 6291456
-          # shellcheck disable=SC1090
-          source <(cargo llvm-cov show-env --sh)
-          # The build phase writes profiles too: instrumented
-          # proc-macro and build-script processes run while cargo
-          # compiles, and their counters map to no binary the report
-          # reads - they were the 794 "functions have mismatched data"
-          # the corrected split still printed. So the build runs with
-          # profiles discarded, and only the run phase writes them.
-          LLVM_PROFILE_FILE=/dev/null nice -n 19 cargo nextest run \
-            --workspace --no-run
-          # One .profraw per test process made thousands per job, and
-          # the runner was lost four runs in a row with no log (#565).
-          # The %4m pool folds them into four files per test binary.
-          # The gate merges *.profraw, so the report does not change.
-          export LLVM_PROFILE_FILE="$PWD/target/coverage/sqlite-%4m.profraw"
           # The measure runs in its own process group (setsid): the
           # guard's trip kills that group by number, which reaches the
           # wrapper, the runner and every test process and nothing
@@ -405,6 +424,12 @@ jobs:
           mkdir -p .cargo
           printf '[profile.dev]\ndebug = false\nstrip = true\n\n[profile.test]\ndebug = false\nstrip = true\n' > .cargo/config.toml
           echo "RUSTFLAGS=-C link-arg=-Wl,--no-keep-memory" >> "$GITHUB_ENV"
+      - name: restore the last instrumented build
+        uses: actions/cache/restore@55cc834565d60d8dcfcfecbe5f27c8d2f16c2d80 # v6.1.0
+        with:
+          path: target
+          key: coverage-build-${{ runner.os }}-${{ github.sha }}
+          restore-keys: coverage-build-${{ runner.os }}-
       # The image ships dozens of gigabytes of toolchains this job
       # never touches; they go.
       - name: free the runner's disk for the instrumented build
