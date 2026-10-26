@@ -233,6 +233,8 @@ jobs:
               echo "processes=$procs threads=$threads store_family=$family" >> watcher.log || true
               avail=$(df --output=avail -BG / | tail -1 | tr -dc '0-9' 2> /dev/null) || true
               mem=$(free -m | awk 'NR==2 {print $7}' 2> /dev/null) || true
+              swap_used=$(free -m 2> /dev/null | awk 'NR==3 {print $3}') || true
+              echo "procs=$procs threads=$threads family=$family mem_avail=${mem:-?}M swap_used=${swap_used:-?}M disk_avail=${avail:-?}G" || true
               avail_drop=0; mem_drop=0; proc_growth=0
               if [ -n "${avail:-}" ] && [ -n "${start_avail:-}" ]; then
                 avail_drop=$((start_avail - avail))
@@ -492,6 +494,8 @@ jobs:
               echo "processes=$procs threads=$threads store_family=$family" >> watcher.log || true
               avail=$(df --output=avail -BG / | tail -1 | tr -dc '0-9' 2> /dev/null) || true
               mem=$(free -m | awk 'NR==2 {print $7}' 2> /dev/null) || true
+              swap_used=$(free -m 2> /dev/null | awk 'NR==3 {print $3}') || true
+              echo "procs=$procs threads=$threads family=$family mem_avail=${mem:-?}M swap_used=${swap_used:-?}M disk_avail=${avail:-?}G" || true
               avail_drop=0; mem_drop=0; proc_growth=0
               if [ -n "${avail:-}" ] && [ -n "${start_avail:-}" ]; then
                 avail_drop=$((start_avail - avail))
