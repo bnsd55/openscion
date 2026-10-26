@@ -155,7 +155,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p .config
-          printf '[profile.default]\ntimeout = "600s"\nretries = 1\nslow-timeout = { period = "60s", terminate-after = 5 }\n' > .config/nextest.toml
+          printf '[profile.coverage]\nretries = 1\nslow-timeout = { period = "60s", terminate-after = 5 }\n' > .config/nextest.toml
           # The README's recipe: show-env exports the instrumentation
           # RUSTFLAGS and the profile environment, plain cargo nextest
           # runs the tests against the binaries the build makes. The
@@ -274,7 +274,7 @@ jobs:
           # else - no name pattern, nothing of the step or the watcher.
           sum="${GITHUB_STEP_SUMMARY:-/dev/null}"
           echo "default measure starts at $(date -u +%T)" >> "$sum" || true
-          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --workspace --no-fail-fast; echo $? > measure.rc' \
+          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --profile coverage --workspace --no-fail-fast; echo $? > measure.rc' \
             | tee measure.log
           echo "default measure ends at $(date -u +%T)" >> "$sum" || true
           # The step must not fail on a watcher that is already gone:
@@ -559,7 +559,7 @@ jobs:
             tail -40 build-postgres.log
             exit 1
           fi
-          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --workspace --no-fail-fast -E "package(open-scion-server) and not test(graph_queries_across_many_merges_answer)"; echo $? > measure.rc' \
+          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --profile coverage --workspace --no-fail-fast -E "package(open-scion-server) and not test(graph_queries_across_many_merges_answer)"; echo $? > measure.rc' \
             | tee measure-postgres.log
           # The same end-of-step rules as the default measure above.
           # One wait only: a second wait on the reaped job re-fires
