@@ -27,9 +27,12 @@ EOD
 echo pinned >"$work/crates/scion-server/tests/archive_v1.golden"
 git -C "$work" add -A
 git -C "$work" commit -qm base
+base_sha=$(git -C "$work" rev-parse HEAD)
 
 run_check() { # base head -> exit status of the real script on the row
-    ( cd "$work" && "$here/check-golden-pairing.sh" "$1" "$2" )
+    # GITHUB_HEAD_REF unset: on a release/* branch the check exits 0 at
+    # once, and the rules under test would never run.
+    ( cd "$work" && env -u GITHUB_HEAD_REF "$here/check-golden-pairing.sh" "$1" "$2" )
 }
 
 fail() { echo "test-golden-pairing: $1" >&2; exit 1; }
@@ -46,10 +49,14 @@ git -C "$work" add -A
 git -C "$work" commit -qm golden-only
 if run_check HEAD^ HEAD; then fail "(b) a golden change without the version line must fail"; fi
 
-# (c) a golden change WITH the version line moved passes.
+# (c) a golden change WITH the version line moved, in ONE commit from
+# the base: the pairing's whole point. The branch restarts at the base
+# commit, so the range base..head holds both changes together.
+git -C "$work" checkout -qb c "$base_sha"
 printf 'Version 2 is this document: the layout and the verify steps.\n' >"$work/docs/archive-format.md"
+echo repinned-2 >"$work/crates/scion-server/tests/archive_v1.golden"
 git -C "$work" add -A
 git -C "$work" commit -qm golden-and-version
-if ! run_check HEAD^ HEAD; then fail "(c) a golden change with the version line moved must pass"; fi
+if ! run_check "$base_sha" HEAD; then fail "(c) a golden change with the version line moved must pass"; fi
 
 echo "test-golden-pairing: ok"

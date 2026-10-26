@@ -200,6 +200,8 @@ jobs:
       - name: a golden change moves its format doc's version
         if: github.event_name == 'pull_request'
         run: scripts/check-golden-pairing.sh
+      - name: golden pairing rules
+        run: scripts/test-golden-pairing.sh
       - name: the changelog merge script does what it says
         run: scripts/test-merge-changelog.sh
       - name: the release tag verdicts hold (release-verify-tag)
