@@ -163,24 +163,40 @@ jobs:
           # fires while there is still room to leave the evidence.
           start_avail=$(df --output=avail -BG / 2> /dev/null | tail -1 | tr -dc '0-9') || true
           start_mem=$(free -m 2> /dev/null | awk 'NR==2 {print $7}') || true
+          # The agent can also die of a process or thread leak: servers a
+          # test left behind pile up until the runner cannot fork. The
+          # watch counts processes, threads and the store family every
+          # tick, and trips on growth against this measure's own start.
+          start_procs=$(ps -e --no-headers 2> /dev/null | wc -l | tr -d ' ') || true
+          pgrep -c -f 'scion-(server|daemon|cache)' 2> /dev/null > /dev/null || true
           ( while sleep 10; do
               { date -u +%T; df -h / | tail -1; free -m | awk 'NR==2'; du -sh target/coverage 2>/dev/null; } || true
               { ps -eo pid,rss,pcpu,etime,comm --sort=-rss > watcher.ps && head -4 watcher.ps >> watcher.log; } || true
+              procs=$(ps -e --no-headers 2> /dev/null | wc -l | tr -d ' ') || true
+              threads=$(ps -eLo --no-headers 2> /dev/null | wc -l | tr -d ' ') || true
+              family=$(pgrep -c -f 'scion-(server|daemon|cache)' 2> /dev/null) || true
+              family=${family:-0}
+              # shellcheck disable=SC2034
+              echo "processes=$procs threads=$threads store_family=$family" >> watcher.log || true
               avail=$(df --output=avail -BG / | tail -1 | tr -dc '0-9' 2> /dev/null) || true
               mem=$(free -m | awk 'NR==2 {print $7}' 2> /dev/null) || true
-              avail_drop=0; mem_drop=0
+              avail_drop=0; mem_drop=0; proc_growth=0
               if [ -n "${avail:-}" ] && [ -n "${start_avail:-}" ]; then
                 avail_drop=$((start_avail - avail))
               fi
               if [ -n "${mem:-}" ] && [ -n "${start_mem:-}" ]; then
                 mem_drop=$((start_mem - mem))
               fi
-              if [ "${avail:-10}" -le 3 ] || [ "${mem:-10000}" -le 600 ] || [ "$avail_drop" -ge 6 ] || [ "$mem_drop" -ge 4000 ]; then
+              if [ -n "${procs:-}" ] && [ -n "${start_procs:-}" ]; then
+                proc_growth=$((procs - start_procs))
+              fi
+              if [ "${avail:-10}" -le 3 ] || [ "${mem:-10000}" -le 600 ] || [ "$avail_drop" -ge 6 ] || [ "$mem_drop" -ge 4000 ] || [ "$proc_growth" -ge 500 ] || [ "$family" -ge 200 ]; then
                 {
-                  echo "the runner is out of disk or memory, or is leaking: avail=${avail:-?}G avail_floor=3G free_mem=${mem:-?}M mem_floor=600M disk_drop_since_start=${avail_drop:-?}G mem_drop_since_start=${mem_drop:-?}M"
+                  echo "the runner is out of disk or memory, or is leaking: avail=${avail:-?}G avail_floor=3G free_mem=${mem:-?}M mem_floor=600M disk_drop_since_start=${avail_drop:-?}G mem_drop_since_start=${mem_drop:-?}M processes=$procs (start ${start_procs:-?}, growth $proc_growth, floor +500) store_family=$family (floor 200) threads=$threads"
                   df -h / || true
                   free -m || true
                   { ps -eo pid,rss,pcpu,etime,comm,args --sort=-rss > watcher.top && head -14 watcher.top; } || true
+                  { ps -eo ppid,comm | sort | uniq -c | sort -rn | head -10; } || true
                 } | tee -a watcher.log
                 # The reason goes to a file FIRST: the kill below takes
                 # the measure's process group, and anything this
@@ -427,24 +443,40 @@ jobs:
           # fires while there is still room to leave the evidence.
           start_avail=$(df --output=avail -BG / 2> /dev/null | tail -1 | tr -dc '0-9') || true
           start_mem=$(free -m 2> /dev/null | awk 'NR==2 {print $7}') || true
+          # The agent can also die of a process or thread leak: servers a
+          # test left behind pile up until the runner cannot fork. The
+          # watch counts processes, threads and the store family every
+          # tick, and trips on growth against this measure's own start.
+          start_procs=$(ps -e --no-headers 2> /dev/null | wc -l | tr -d ' ') || true
+          pgrep -c -f 'scion-(server|daemon|cache)' 2> /dev/null > /dev/null || true
           ( while sleep 10; do
               { date -u +%T; df -h / | tail -1; free -m | awk 'NR==2'; du -sh target/coverage 2>/dev/null; } || true
               { ps -eo pid,rss,pcpu,etime,comm --sort=-rss > watcher.ps && head -4 watcher.ps >> watcher.log; } || true
+              procs=$(ps -e --no-headers 2> /dev/null | wc -l | tr -d ' ') || true
+              threads=$(ps -eLo --no-headers 2> /dev/null | wc -l | tr -d ' ') || true
+              family=$(pgrep -c -f 'scion-(server|daemon|cache)' 2> /dev/null) || true
+              family=${family:-0}
+              # shellcheck disable=SC2034
+              echo "processes=$procs threads=$threads store_family=$family" >> watcher.log || true
               avail=$(df --output=avail -BG / | tail -1 | tr -dc '0-9' 2> /dev/null) || true
               mem=$(free -m | awk 'NR==2 {print $7}' 2> /dev/null) || true
-              avail_drop=0; mem_drop=0
+              avail_drop=0; mem_drop=0; proc_growth=0
               if [ -n "${avail:-}" ] && [ -n "${start_avail:-}" ]; then
                 avail_drop=$((start_avail - avail))
               fi
               if [ -n "${mem:-}" ] && [ -n "${start_mem:-}" ]; then
                 mem_drop=$((start_mem - mem))
               fi
-              if [ "${avail:-10}" -le 3 ] || [ "${mem:-10000}" -le 600 ] || [ "$avail_drop" -ge 6 ] || [ "$mem_drop" -ge 4000 ]; then
+              if [ -n "${procs:-}" ] && [ -n "${start_procs:-}" ]; then
+                proc_growth=$((procs - start_procs))
+              fi
+              if [ "${avail:-10}" -le 3 ] || [ "${mem:-10000}" -le 600 ] || [ "$avail_drop" -ge 6 ] || [ "$mem_drop" -ge 4000 ] || [ "$proc_growth" -ge 500 ] || [ "$family" -ge 200 ]; then
                 {
-                  echo "the runner is out of disk or memory, or is leaking: avail=${avail:-?}G avail_floor=3G free_mem=${mem:-?}M mem_floor=600M disk_drop_since_start=${avail_drop:-?}G mem_drop_since_start=${mem_drop:-?}M"
+                  echo "the runner is out of disk or memory, or is leaking: avail=${avail:-?}G avail_floor=3G free_mem=${mem:-?}M mem_floor=600M disk_drop_since_start=${avail_drop:-?}G mem_drop_since_start=${mem_drop:-?}M processes=$procs (start ${start_procs:-?}, growth $proc_growth, floor +500) store_family=$family (floor 200) threads=$threads"
                   df -h / || true
                   free -m || true
                   { ps -eo pid,rss,pcpu,etime,comm,args --sort=-rss > watcher.top && head -14 watcher.top; } || true
+                  { ps -eo ppid,comm | sort | uniq -c | sort -rn | head -10; } || true
                 } | tee -a watcher.log
                 # The reason goes to a file FIRST: the kill below takes
                 # the measure's process group, and anything this
