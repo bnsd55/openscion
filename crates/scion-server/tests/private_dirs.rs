@@ -232,3 +232,59 @@ fn an_export_into_a_new_out_makes_it_private_whatever_the_umask() {
     ));
     assert_eq!(mode_of(&out), 0o700, "a new export root");
 }
+
+/// A restore publishes the staging directory by one rename, so the
+/// restored data directory carries the staging's mode. The staging must
+/// therefore be private: a restore under umask 022 (a plain `create_dir_all`
+/// would give 0755) leaves the target 0700, every directory below it 0700,
+/// so no other user reaches the store files whatever their own modes are.
+#[test]
+fn a_restore_under_umask_022_publishes_a_private_data_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let git = tmp.path().join("git");
+    git_repo(&git);
+    let data = tmp.path().join("data");
+    // The operator makes the data directory itself, private: the point
+    // under test is the directory the RESTORE publishes.
+    fs::create_dir_all(&data).unwrap();
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
+    run(server(
+        "022",
+        &[
+            "--data".as_ref(),
+            data.as_os_str(),
+            "import".as_ref(),
+            "--repo".as_ref(),
+            "main".as_ref(),
+            git.as_os_str(),
+        ],
+    ));
+    let out = tmp.path().join("archive");
+    run(server(
+        "022",
+        &[
+            "--data".as_ref(),
+            data.as_os_str(),
+            "export".as_ref(),
+            "--all".as_ref(),
+            "--out".as_ref(),
+            out.as_os_str(),
+        ],
+    ));
+
+    let target = tmp.path().join("restored");
+    run(server(
+        "022",
+        &[
+            "--data".as_ref(),
+            target.as_os_str(),
+            "restore".as_ref(),
+            "--archive".as_ref(),
+            out.as_os_str(),
+        ],
+    ));
+    assert_eq!(mode_of(&target), 0o700, "the restored data directory");
+    for (path, mode) in directories(&target) {
+        assert_eq!(mode, 0o700, "{}", path.display());
+    }
+}

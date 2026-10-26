@@ -540,7 +540,9 @@ fn restore_impl(
         tracing::warn!(staging = %staging.display(), "removing a staging directory a killed restore left behind");
         fs::remove_dir_all(&staging)?;
     }
-    fs::create_dir_all(&staging)?;
+    // The staging becomes the target by one rename, so its mode is the
+    // restored store's mode: private, whatever the umask of the run.
+    scion_proto::runtime::auth::create_private_dir_all(&staging)?;
     // The metadata of a killed restore's committed batches sits in the
     // database the URL names: drop that schema before the replay, so
     // the replay starts empty whatever the last run left. A live store

@@ -29,11 +29,15 @@ itself: each step is run by a person.
 A release is cut through one PR from a branch named
 `release/<version>`. Its checklist:
 
-1. **Merge the CHANGELOG fragments.** Run
-   `scripts/merge-changelog.sh v0.1.0` (or the release's section), so
+1. **Refresh the release.** Run
+   `scripts/release-refresh.sh v0.1.0` (or the release's version), so
    that the fragments under `changes/` (`changes/<slug>.<section>.md`)
-   are merged into the version's section. Review the result, and
-   commit it on the release branch.
+   are merged into the version's section. Beyond the fold the script
+   also demands the release-notes file (`docs/release-notes/<version>.md`)
+   and refuses one that still carries a PENDING capacity slot, and
+   reminds about the release date while the section still says
+   "unreleased". Review the result, and commit it on the release
+   branch.
 2. **Set the date in `CHANGELOG.md`.** Rename the `## [v0.1.0] -
    unreleased` section to `## [v0.1.0] - YYYY-MM-DD` with the release
    day, and add a fresh empty `## [Unreleased]` above it. The note that
