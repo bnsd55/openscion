@@ -153,10 +153,12 @@ fn assert_restore_equals_source(source: &Backend, restored: &Backend) {
 
 #[test]
 fn a_restore_commits_bounded_transactions_and_answers_like_its_source() {
-    let data = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
     let store = stream_source(data.path());
 
-    let out = tempfile::tempdir().unwrap().path().join("archive");
+    let out = scion_server::test_support::private_tempdir()
+        .path()
+        .join("archive");
     let manifest = archive::export(&store, data.path(), None, true, &out)
         .unwrap_or_else(|e| panic!("export failed: {e:#}"));
     assert_eq!(manifest["kind"], "store");
@@ -167,7 +169,7 @@ fn a_restore_commits_bounded_transactions_and_answers_like_its_source() {
     // many transactions. The count comes from the counter, read before
     // and after, so the assertion is about work done, not work planned.
     let before = scion_server::test_support::archive::restore_tx_count();
-    let restored_dir = tempfile::tempdir().unwrap();
+    let restored_dir = scion_server::test_support::private_tempdir();
     archive::restore_with_budget(&out, restored_dir.path(), None, None, BUDGET, Backend::open)
         .unwrap_or_else(|e| panic!("restore failed: {e:#}"));
     let txs = scion_server::test_support::archive::restore_tx_count() - before;
@@ -225,7 +227,7 @@ fn a_big_restore_stays_under_its_rss_ceiling() {
         return;
     }
 
-    let data = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
     let content = "small file\n".to_string();
     let blob = store.blobs().put(content.as_bytes()).unwrap();
@@ -250,7 +252,9 @@ fn a_big_restore_stays_under_its_rss_ceiling() {
         })
         .unwrap();
 
-    let out = tempfile::tempdir().unwrap().path().join("archive");
+    let out = scion_server::test_support::private_tempdir()
+        .path()
+        .join("archive");
     archive::export(&store, data.path(), None, true, &out)
         .unwrap_or_else(|e| panic!("export failed: {e:#}"));
     let bin_len = std::fs::metadata(out.join("repos").join("big").join("changesets.bin"))
@@ -282,10 +286,14 @@ fn a_big_restore_stays_under_its_rss_ceiling() {
 fn measure_ceiling(store: &Backend, out: &std::path::Path, tx_kb: u64, slack_kb: u64) {
     let baseline_kb = restore_sampled(
         &empty_archive(),
-        &tempfile::tempdir().unwrap().path().join("restored-empty"),
+        &scion_server::test_support::private_tempdir()
+            .path()
+            .join("restored-empty"),
         tx_kb * 1024,
     );
-    let target = tempfile::tempdir().unwrap().path().join("restored");
+    let target = scion_server::test_support::private_tempdir()
+        .path()
+        .join("restored");
     let peak_kb = restore_sampled(out, &target, tx_kb * 1024);
     println!(
         "the streamed restore's peak RSS was {peak_kb} kB; \
@@ -312,13 +320,17 @@ fn measure_ceiling(store: &Backend, out: &std::path::Path, tx_kb: u64, slack_kb:
 /// failure path - and lands whole.
 #[test]
 fn a_killed_restore_leaves_the_next_one_clean() {
-    let data = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
     let store = stream_source(data.path());
-    let out = tempfile::tempdir().unwrap().path().join("archive");
+    let out = scion_server::test_support::private_tempdir()
+        .path()
+        .join("archive");
     archive::export(&store, data.path(), None, true, &out)
         .unwrap_or_else(|e| panic!("export failed: {e:#}"));
 
-    let target = tempfile::tempdir().unwrap().path().join("restored");
+    let target = scion_server::test_support::private_tempdir()
+        .path()
+        .join("restored");
     std::fs::create_dir_all(&target).unwrap();
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .arg("--data")
@@ -375,9 +387,9 @@ fn a_killed_restore_leaves_the_next_one_clean() {
 /// restores to measure the binary's own footprint.
 #[cfg(target_os = "linux")]
 fn empty_archive() -> std::path::PathBuf {
-    let data = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
-    let parent = tempfile::tempdir().unwrap();
+    let parent = scion_server::test_support::private_tempdir();
     let out = parent.path().join("archive-empty");
     archive::export(&store, data.path(), None, true, &out).unwrap();
     drop(store);

@@ -267,12 +267,14 @@ impl Store {
             )
             .into());
         }
-        if meta.mode() & 0o022 != 0 {
+        // Readable is reachable: the daemon refuses a socket directory
+        // open to other users, and the store's data directory answers the
+        // same rule - group or others get no bits at all.
+        if meta.mode() & 0o077 != 0 {
             return Err(io::Error::new(
                 ErrorKind::PermissionDenied,
                 format!(
-                    "{} can be written by group or others (fix: chmod go-w {})",
-                    dir.display(),
+                    "{} is open to other users; make it mode 0700",
                     dir.display()
                 ),
             )
@@ -2164,8 +2166,8 @@ mod tests {
     /// the checks.
     #[test]
     fn a_symlinked_data_directory_is_refused() {
-        let real = tempfile::tempdir().unwrap();
-        let holder = tempfile::tempdir().unwrap();
+        let real = crate::test_support::private_tempdir();
+        let holder = crate::test_support::private_tempdir();
         let link = holder.path().join("data");
         std::os::unix::fs::symlink(real.path(), &link).unwrap();
         let err = match Store::open(&link) {
@@ -2206,7 +2208,7 @@ mod tests {
     /// however the test ends, so a panicking assert cannot wedge the
     /// writer ([#142]).
     fn held_stripe_waits(write: impl Fn(&Store, BlobId, &'static [u8]) + Send + Sync) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Store::open(dir.path()).unwrap();
         let content = b"the same bytes for both writes";
         let id = BlobId::of(content);
@@ -2249,18 +2251,14 @@ mod tests {
             mode.set_mode(0o777);
             fs::set_permissions(path, mode).unwrap();
         };
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let path = dir.path().join("data");
         fs::create_dir(&path).unwrap();
         writable(&path);
         let Err(err) = Store::open(&path) else {
             panic!("the open of a writable data directory must fail");
         };
-        assert!(
-            err.to_string()
-                .contains("can be written by group or others"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("make it mode 0700"), "{err}");
         // The same through a parent that another user can change: a
         // group-writable directory without the sticky bit above the data.
         let parent = dir.path().join("shared");
@@ -2268,6 +2266,9 @@ mod tests {
         writable(&parent);
         let path = parent.join("data");
         fs::create_dir(&path).unwrap();
+        // The data directory itself is private here: the check under
+        // test is the swappable parent, not the directory's own mode.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         let Err(err) = Store::open(&path) else {
             panic!("the open under a swappable parent must fail");
         };
@@ -2281,7 +2282,7 @@ mod tests {
 
     #[test]
     fn a_blob_size_comes_from_its_frame_header() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Store::open(dir.path()).unwrap();
         for raw in [b"".to_vec(), b"hello".to_vec(), vec![7; 100_000]] {
             let id = store.blobs().put(&raw).unwrap();
@@ -2332,7 +2333,7 @@ mod tests {
             })
         };
         for _ in 0..100 {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::test_support::private_tempdir();
             let first = Store::open(dir.path()).unwrap();
             let clone = first.clone();
             super::spawn_guard::across_release(|| {
@@ -2355,7 +2356,7 @@ mod tests {
         // The last part of this test drops every store and asserts the
         // lock released, so no child may spawn beside it.
         super::spawn_guard::across_release(|| {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::test_support::private_tempdir();
             let first = Store::open(dir.path()).unwrap();
             let clone = first.clone();
             assert_in_use(Store::open(dir.path()), dir.path(), "another server");
@@ -2398,7 +2399,7 @@ mod tests {
         // The drops and reopens of this test must see a lock released, so
         // no child may be in its fork-to-exec window (see `spawn_guard`).
         super::spawn_guard::across_release(|| {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::test_support::private_tempdir();
             let tmp = dir.path().join("tmp");
             let server = Store::open(dir.path()).unwrap();
             // The temp file of a write that the server has not renamed yet.
@@ -2419,7 +2420,7 @@ mod tests {
         // The drops and reopens of this test must see a lock released, so
         // no child may be in its fork-to-exec window (see `spawn_guard`).
         super::spawn_guard::across_release(|| {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::test_support::private_tempdir();
             let tmp = dir.path().join("tmp");
             let server = Store::open(dir.path()).unwrap();
             // A live importer: its folder is held with its lock, and a blob
@@ -2460,7 +2461,7 @@ mod tests {
         // The drops and reopens of this test must see a lock released, so
         // no child may be in its fork-to-exec window (see `spawn_guard`).
         super::spawn_guard::across_release(|| {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::test_support::private_tempdir();
             {
                 let c = Connection::open(dir.path().join("scion.db")).unwrap();
                 migrate(&c, 1).unwrap();
@@ -2506,8 +2507,8 @@ mod tests {
     #[test]
     fn a_store_of_schema_version_1_opens_upgrades_and_serves() {
         super::spawn_guard::across_release(|| {
-            let dir = tempfile::tempdir().unwrap();
-            let scratch = tempfile::tempdir().unwrap();
+            let dir = crate::test_support::private_tempdir();
+            let scratch = crate::test_support::private_tempdir();
             // The blob files, made by this build's writer and copied into
             // the old directory: blob files are content-addressed and
             // carry no schema.
@@ -2639,7 +2640,7 @@ mod tests {
         // The drops and reopens of this test must see a lock released, so
         // no child may be in its fork-to-exec window (see `spawn_guard`).
         super::spawn_guard::across_release(|| {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::test_support::private_tempdir();
             let old = hold_lock(dir.path(), FlockOperation::NonBlockingLockExclusive, "");
             let by = "a process that holds it alone";
             assert_in_use(Store::open(dir.path()), dir.path(), by);
@@ -2661,7 +2662,7 @@ mod tests {
         // The drops and reopens of this test must see a lock released, so
         // no child may be in its fork-to-exec window (see `spawn_guard`).
         super::spawn_guard::across_release(|| {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::test_support::private_tempdir();
             let ours = build();
             // A build with one more kind.
             let other = format!("{ours}, blame 1");
@@ -2704,7 +2705,7 @@ mod tests {
             // What a crashed import left: its staging folder with many temp
             // files, so removing it takes a while.
             const LEFT: usize = 5_000;
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::test_support::private_tempdir();
             let tmp = dir.path().join("tmp");
             let dead = tmp.join("dead");
             fs::create_dir_all(&dead).unwrap();
@@ -2734,7 +2735,7 @@ mod tests {
         // The drops and reopens of this test must see a lock released, so
         // no child may be in its fork-to-exec window (see `spawn_guard`).
         super::spawn_guard::across_release(|| {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::test_support::private_tempdir();
             // Another store is opening the directory.
             let opening = lock_file(dir.path(), "open.lock").unwrap();
             assert!(flock(&opening, FlockOperation::NonBlockingLockExclusive).unwrap());
@@ -2756,7 +2757,7 @@ mod tests {
 
     #[test]
     fn a_shared_store_commits_with_full_flushes() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         // Of the write connection, which commits.
         let fullfsync = |store: &Store| -> bool {
             store
@@ -2772,7 +2773,7 @@ mod tests {
 
     #[test]
     fn a_put_records_one_observation_per_fsync_of_the_blob_path() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let metrics = std::sync::Arc::new(crate::metrics::Metrics::default());
         let store = Store::open(dir.path()).unwrap();
         store.set_metrics(Arc::clone(&metrics));
@@ -2801,7 +2802,7 @@ mod tests {
 
     #[test]
     fn free_bytes_of_a_tempdir_is_positive() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let free = free_bytes(dir.path()).unwrap();
         assert!(free > 0, "{free}");
     }
@@ -2809,7 +2810,7 @@ mod tests {
     #[test]
     fn concurrent_puts_share_full_flushes() {
         const WRITERS: u64 = 32;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let blobs = Blobs::open(dir.path()).unwrap();
         // Odd writers put a blob that is already stored.
         blobs.put(b"stored").unwrap();
@@ -2911,7 +2912,7 @@ mod tests {
 
     #[test]
     fn a_reader_gives_what_put_wrote_in_parts() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let blobs = Blobs::open(dir.path()).unwrap();
         // Larger than the window, so the frame uses the whole window.
         let raw: Vec<u8> = (0..5_u32 << 20)
@@ -2929,7 +2930,7 @@ mod tests {
 
     #[test]
     fn verify_gives_the_same_answer_as_get() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let blobs = Blobs::open(dir.path()).unwrap();
         let packed = zstd::bulk::compress(b"content", 3).unwrap();
         let mut flipped = packed.clone();
@@ -2989,7 +2990,7 @@ mod tests {
 
     #[test]
     fn verify_reports_a_read_error_as_io_not_as_corrupt() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let blobs = Blobs::open(dir.path()).unwrap();
         // A directory opens like a file, but every read of it fails.
         let id = BlobId::of(b"content");
@@ -3022,7 +3023,7 @@ mod tests {
 
     #[test]
     fn an_upload_stores_the_blob_of_all_its_parts() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let blobs = Blobs::open(dir.path()).unwrap();
         let cases: [&[&[u8]]; 4] = [&[], &[b""], &[b"a", b"", b"bc"], &[b"abc"]];
         for parts in cases {
@@ -3042,7 +3043,7 @@ mod tests {
     #[test]
     fn an_upload_keeps_its_parts_on_disk_not_in_memory() {
         const PART: usize = 1 << 20;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let blobs = Blobs::open(dir.path()).unwrap();
         // A period (251) that does not divide the part size, so parts stored
         // in the wrong order give other bytes.
@@ -3062,7 +3063,7 @@ mod tests {
 
     #[test]
     fn one_byte_over_the_limit_fails_an_upload() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let blobs = Blobs::open(dir.path()).unwrap();
         // As if all but one byte of the limit had arrived.
         let mut upload = blobs.upload().unwrap();
@@ -3077,7 +3078,7 @@ mod tests {
 
     #[test]
     fn a_crash_before_the_rename_leaves_no_blob_and_no_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Store::open(dir.path()).unwrap();
         let content = b"never stored";
         let id = BlobId::of(content);
@@ -3101,7 +3102,7 @@ mod tests {
     #[test]
     fn concurrent_uploads_of_one_blob_leave_one_file() {
         const UPLOADERS: usize = 8;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let blobs = Blobs::open(dir.path()).unwrap();
         let content: Vec<u8> = (0..251_u8).cycle().take(3 << 20).collect();
         let ready = Barrier::new(UPLOADERS);
@@ -3132,7 +3133,7 @@ mod tests {
     #[test]
     fn a_put_of_a_stored_blob_still_waits_for_a_full_flush() {
         // Another put may have renamed the file and not synced it yet.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let blobs = Blobs::open(dir.path()).unwrap();
         blobs.put(b"stored").unwrap();
         let before = blobs.full_flushes();
@@ -3194,7 +3195,7 @@ mod tests {
 
     #[test]
     fn a_write_returns_after_a_full_flush_where_fsync_leaves_the_cache() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Store::open(dir.path()).unwrap();
         let before = store.blobs().full_flushes();
         store
@@ -3225,14 +3226,14 @@ mod tests {
 
     #[test]
     fn a_read_with_no_unflushed_commit_runs_no_flush() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Store::open(dir.path()).unwrap();
         assert_eq!(flushes_in_read(&store), 0);
     }
 
     #[test]
     fn a_read_of_an_unflushed_commit_waits_for_a_full_flush() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Store::open(dir.path()).unwrap();
         store.commit(create_repo).unwrap();
         // None where the commit's own fsync flushes the drive cache.
@@ -3243,7 +3244,7 @@ mod tests {
 
     #[test]
     fn a_read_after_a_write_runs_no_flush() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Store::open(dir.path()).unwrap();
         store.write(create_repo).unwrap();
         assert_eq!(flushes_in_read(&store), 0);
@@ -3260,7 +3261,7 @@ mod tests {
 
     #[test]
     fn a_long_read_blocks_no_write_and_no_other_read() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Store::open(dir.path()).unwrap();
         store.write(add_repo("a")).unwrap();
         let (held, holding) = mpsc::channel();
@@ -3293,7 +3294,7 @@ mod tests {
 
     #[test]
     fn a_write_in_progress_blocks_no_read() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Store::open(dir.path()).unwrap();
         store.write(add_repo("a")).unwrap();
         let (held, holding) = mpsc::channel();
@@ -3328,7 +3329,7 @@ mod tests {
 
     #[test]
     fn a_read_that_sees_a_commit_waits_until_it_is_durable() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Store::open(dir.path()).unwrap();
         // None where the commit's own fsync flushes the drive cache.
         let flush = u64::from(FSYNC_LEAVES_DRIVE_CACHE);
@@ -3371,7 +3372,7 @@ mod tests {
 
     #[test]
     fn a_read_that_panics_returns_its_connection() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Store::open(dir.path()).unwrap();
         let readers = store.inner.readers.idle().len();
         let read = panic::catch_unwind(|| store.read(|_| -> Result<()> { panic!("a bug") }));
@@ -3383,7 +3384,7 @@ mod tests {
 
     #[test]
     fn the_last_store_to_close_moves_the_log_into_the_database() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Store::open(dir.path()).unwrap();
         store.write(add_repo("a")).unwrap();
         assert_eq!(store.read(repos).unwrap(), 1);
@@ -3395,7 +3396,7 @@ mod tests {
     #[test]
     fn the_log_restarts_while_reads_run_back_to_back() {
         const COMMITS: usize = 600;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Store::open(dir.path()).unwrap();
         store
             .write(|c| {
@@ -3434,7 +3435,7 @@ mod tests {
 
     #[test]
     fn a_connection_left_in_a_transaction_is_replaced() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Store::open(dir.path()).unwrap();
         store.write(add_repo("a")).unwrap();
         store
@@ -3462,7 +3463,7 @@ mod tests {
         use tempfile::TempDir;
 
         use DurabilityStep as S;
-        let dir = TempDir::new().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Store::open(dir.path()).unwrap();
         let raws: Vec<&[u8]> = vec![b"one", b"two", b"three"];
         let ids: Vec<BlobId> = {

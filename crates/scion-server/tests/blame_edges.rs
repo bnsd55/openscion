@@ -82,7 +82,7 @@ fn commit(
 /// A store whose repo has one root changeset that puts `file.txt` with
 /// `root_body`, written by a 4-byte author.
 fn store(root_body: &[u8]) -> (tempfile::TempDir, Backend, ChangesetId) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = from_store(Store::open(dir.path()).unwrap());
     let blob = store.blobs().put(root_body).unwrap();
     let root = store

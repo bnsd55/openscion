@@ -31,7 +31,7 @@ const RESTORE_BOUND_SECS: u64 = 600;
 #[test]
 #[ignore = "a measurement for the restore-time job: run with --ignored --nocapture"]
 fn a_restore_of_a_stated_store_takes_a_stated_time() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = from_store(Store::open(dir.path()).unwrap());
 
     // The build: REPOS repos of CHANGESETS_PER_REPO changesets each, one
@@ -90,7 +90,7 @@ fn a_restore_of_a_stated_store_takes_a_stated_time() {
     // The backup, in the runbook's order: the metadata snapshot first
     // (`VACUUM INTO`, a consistent committed state while the store
     // serves), then the blob files.
-    let backup = tempfile::tempdir().unwrap();
+    let backup = scion_server::test_support::private_tempdir();
     let snapshot = backup.path().join("scion.db");
     // The snapshot and the blob copy are the runbook's own lines.
     take_the_guides_backup(dir.path(), backup.path(), &snapshot);
@@ -99,7 +99,7 @@ fn a_restore_of_a_stated_store_takes_a_stated_time() {
     // the backup into a fresh directory, then `fsck`, then an open and a
     // read - the steps of the runbook's restore.
     let restore_started = Instant::now();
-    let restored_dir = tempfile::tempdir().unwrap();
+    let restored_dir = scion_server::test_support::private_tempdir();
     fs::copy(&snapshot, restored_dir.path().join("scion.db")).unwrap();
     copy_tree(
         &backup.path().join("objects"),

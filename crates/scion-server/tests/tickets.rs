@@ -37,7 +37,7 @@ async fn server() -> (
     tokio::sync::oneshot::Sender<()>,
     tempfile::TempDir,
 ) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Store::open(dir.path()).unwrap();
     let readme = store.blobs().put(CONTENT).unwrap();
     let changeset = Changeset::new(
@@ -274,7 +274,7 @@ async fn server_of_readme() -> (
     tokio::sync::oneshot::Sender<()>,
     tempfile::TempDir,
 ) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let server_store = Store::open(dir.path()).unwrap();
     let readme = server_store.blobs().put(CONTENT).unwrap();
     let changeset = Changeset::new(
@@ -524,7 +524,7 @@ fn changesets(
 async fn tiers() -> (Tiers, tokio::sync::oneshot::Sender<()>, tempfile::TempDir) {
     use scion_tier::{MemoryStore, Tier};
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Store::open(dir.path()).unwrap();
     // One blob in both repos, and one in each alone.
     let shared = store.blobs().put(b"shared\n").unwrap();

@@ -108,8 +108,21 @@ pub(crate) mod write;
 /// than the modules themselves: the modules are pub(crate), and a pub
 /// re-export of a pub(crate) module is refused (E0365), while a re-export
 /// of the items inside a public submodule is fine.
-#[cfg(feature = "test-hooks")]
+#[cfg(any(test, feature = "test-hooks"))]
 pub mod test_support {
+    /// A temp directory the run owns outright: mode 0700, whatever the
+    /// umask. The server refuses a data directory that group or others
+    /// can read, and a plain `crate::test_support::private_tempdir()` is 0777 less the
+    /// umask, so a test that opens a store in the temp directory
+    /// directly must hold a private one.
+    #[must_use]
+    pub fn private_tempdir() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir
+    }
+
     /// The caller behind an authenticated RPC, for tests that name one.
     pub mod auth {
         pub use crate::auth::Caller;

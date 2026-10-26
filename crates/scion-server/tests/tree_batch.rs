@@ -52,7 +52,7 @@ fn the_derivation_of_a_hundred_directories_costs_four_statements_more() {
     }
     let mut counts = Vec::new();
     for d in [10, 100] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = scion_server::test_support::private_tempdir();
         let store = Backend::open_test_shared(dir.path()).unwrap();
         let repo = store.write(|c| c.create_repo(REPO)).unwrap();
         // The base commit creates the directories, so the counted commit's

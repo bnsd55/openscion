@@ -16,7 +16,7 @@ struct Git(tempfile::TempDir);
 
 impl Git {
     fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = scion_server::test_support::private_tempdir();
         let out = Command::new("git")
             .args(["init", "-q", "-b", "main"])
             .current_dir(dir.path())
@@ -105,7 +105,7 @@ fn the_batch_writes_the_rows_the_per_commit_path_writes() {
     let tip = git.fast_commits(50);
     let mut rows = Vec::new();
     for per_commit in [true, false] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = scion_server::test_support::private_tempdir();
         let store = Backend::open_test(dir.path()).unwrap();
         scion_server::set_import_per_commit_txs(per_commit);
         import_git(&store, "main", git.path(), &opts(&tip)).unwrap();

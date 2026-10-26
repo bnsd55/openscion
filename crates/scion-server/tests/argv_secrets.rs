@@ -59,7 +59,7 @@ fn hash_token(args: &[&str], stdin: Option<&str>, env: &[(&str, &str)]) -> (bool
 
 #[test]
 fn a_token_file_works_end_to_end() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let file = write_secret(dir.path(), "token", 0o600, " the-token \n");
     let (ok, stdout, stderr) = hash_token(&["--token-file", file.to_str().unwrap()], None, &[]);
     assert!(ok, "{stderr}");
@@ -100,7 +100,7 @@ fn the_argv_form_warns_and_still_answers() {
 
 #[test]
 fn a_group_readable_token_file_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let file = write_secret(dir.path(), "token", 0o644, "the-token\n");
     let (ok, stdout, stderr) = hash_token(&["--token-file", file.to_str().unwrap()], None, &[]);
     assert!(!ok, "a 0644 token file must be refused: {stdout}{stderr}");
@@ -109,7 +109,7 @@ fn a_group_readable_token_file_is_refused() {
 
 #[test]
 fn an_empty_token_file_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let file = write_secret(dir.path(), "token", 0o600, "  \n");
     let (ok, stdout, stderr) = hash_token(&["--token-file", file.to_str().unwrap()], None, &[]);
     assert!(!ok, "{stdout}{stderr}");
@@ -121,8 +121,8 @@ fn a_group_readable_serve_token_file_is_refused() {
     // The same refusal on the `serve` path: the flag is parsed by the
     // serve command, which checks the file before the data directory
     // opens, so nothing is created.
-    let data = tempfile::tempdir().unwrap();
-    let dir = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
+    let dir = scion_server::test_support::private_tempdir();
     let file = write_secret(dir.path(), "token", 0o644, "the-token\n");
     let out = Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .arg("--data")
@@ -144,8 +144,8 @@ fn a_group_readable_serve_token_file_is_refused() {
 fn a_serve_token_file_starts_the_server() {
     // The file form reaches the same single-principal access the argv
     // form built: the server starts and says so on its log.
-    let data = tempfile::tempdir().unwrap();
-    let dir = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
+    let dir = scion_server::test_support::private_tempdir();
     let file = write_secret(dir.path(), "token", 0o600, "the-token\n");
     let mut child = Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .arg("--data")

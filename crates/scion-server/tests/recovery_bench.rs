@@ -47,7 +47,7 @@ const READINESS_SERVICE: &str = "scion.v1.Scion";
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "a measurement for the recovery-time job: run with --ignored --nocapture"]
 async fn a_restart_after_a_kill_recovers_in_a_stated_time() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     std::fs::create_dir(&data).unwrap();
     let store = from_store(Store::open(&data).unwrap());

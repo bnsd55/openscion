@@ -42,7 +42,7 @@ fn seed_root(store: &Store, root: &Changeset) -> scion_core::ChangesetId {
 /// The budget holds two parked replies, not three: a third unread
 /// reply is refused, which is the proof the holds are counted.
 async fn served_repo(names: usize) -> (tempfile::TempDir, DiffRequest, String) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Store::open(dir.path()).unwrap();
     let root = Changeset::new(
         vec![],

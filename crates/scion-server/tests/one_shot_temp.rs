@@ -41,7 +41,7 @@ fn staging(data: &std::path::Path) -> Vec<String> {
 
 #[test]
 fn a_one_shot_command_leaves_no_staging_folder_behind() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = data_dir(dir.path());
 
     // A fresh store: fsck opens it (its first open creates the schema),

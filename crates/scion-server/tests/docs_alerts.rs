@@ -67,7 +67,7 @@ struct Runbook {
 }
 
 async fn runbook() -> Runbook {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Store::open(dir.path()).unwrap();
     let hello = store.blobs().put(b"pub fn main() {}\n").unwrap();
     let links = store.blobs().put(b"# links\n").unwrap();

@@ -10,7 +10,7 @@ use scion_server::{Backend, Error, StorageClass};
 
 /// A store on the backend the tests run on.
 fn store() -> (tempfile::TempDir, Backend) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     (dir, store)
 }
@@ -420,7 +420,7 @@ fn a_failing_disk_runbook_fscks_restores_and_serves() {
     // metadata snapshot and the objects copy, fsck runs on it, and the
     // server opens it.
     let fresh = dir.path().join("restored");
-    std::fs::create_dir_all(&fresh).unwrap();
+    scion_proto::runtime::auth::create_private_dir_all(&fresh).unwrap();
     std::fs::copy(&vacuumed, fresh.join("scion.db")).unwrap();
     copy_tree(&backup.join("objects"), &fresh.join("objects"));
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))

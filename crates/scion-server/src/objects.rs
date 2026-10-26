@@ -641,7 +641,7 @@ mod tests {
     // test sees the second object hold its share, however busy the machine.
     #[tokio::test(start_paused = true)]
     async fn a_client_that_stops_reading_is_cut_off_and_frees_its_budget() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         let raw = store.as_sqlite().expect("the client tests run on SQLite");
         let keys: Vec<Key> = [b"one".as_slice(), b"second", b"three"]
@@ -691,7 +691,7 @@ mod tests {
             read_object(store, key, plan)
         }
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         let a = Key::Blob(store.blobs().put(b"a blob").unwrap());
         let budget = 1000;
@@ -733,7 +733,7 @@ mod tests {
     // fails the call before any object is read.
     #[tokio::test]
     async fn a_walk_bigger_than_the_free_budget_ends_resource_exhausted() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         let a = Key::Blob(store.blobs().put(b"a blob").unwrap());
         let budget = 1000;
@@ -772,7 +772,7 @@ mod tests {
     /// deadline, not after the 30 s limit.
     #[tokio::test]
     async fn a_wait_for_room_ends_before_the_deadline() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         let a = Key::Blob(store.blobs().put(b"a blob").unwrap());
         let in_flight = Arc::new(Semaphore::new(1000));
@@ -812,7 +812,7 @@ mod tests {
             read_object(store, key, plan)
         }
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         let content = vec![b'x'; 5000];
         let key = Key::Blob(store.blobs().put(&content).unwrap());
@@ -861,7 +861,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_blob_goes_out_as_its_stored_file_in_parts_or_unpacked() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         // Over three parts once packed: bytes that do not compress.
         let mut state = 1_u64;
@@ -935,7 +935,7 @@ mod tests {
     fn a_ticket_walk_stops_before_it_decodes_past_the_budget() {
         use scion_core::{Entry, FileEntry, FileState, PathElem, Tree};
         use std::collections::BTreeMap;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         // A middle tree whose one file entry has a wide name, so its body
         // is hundreds of bytes, under a root of one small entry, over a
@@ -1020,7 +1020,7 @@ mod tests {
     fn a_tree_size_reads_the_octets_of_a_stored_tree() {
         use scion_core::Tree;
         use std::collections::BTreeMap;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test(dir.path()).unwrap();
         let tree = Tree::new(BTreeMap::new()).expect("tree fits the format");
         let id = store.write(|c| c.put_tree(&tree)).unwrap();
@@ -1037,7 +1037,7 @@ mod tests {
         use crate::meta::MetaTx as _;
         use scion_core::{Changeset, IdentityTime};
         use std::collections::BTreeMap;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test(dir.path()).unwrap();
         let repo = store.write(|c| c.create_repo("fsck-rows")).unwrap();
         // The derived table's foreign key names a stored changeset.

@@ -1274,7 +1274,7 @@ mod tests {
     #[test]
     fn a_tiny_blob_cache_imports_the_same_changesets() {
         crate::store::spawn_guard::prime_gix_lookup();
-        let repo = tempfile::tempdir().unwrap();
+        let repo = crate::test_support::private_tempdir();
         let dir = repo.path();
         git(dir, &["init", "-q", "-b", "main"]);
         // Eight distinct blobs, then the same blobs at new paths. With a cache
@@ -1297,7 +1297,7 @@ mod tests {
             verify_sample: usize::MAX,
         };
         let import = |cache_entries| {
-            let data = tempfile::tempdir().unwrap();
+            let data = crate::test_support::private_tempdir();
             let store = Backend::sqlite(Store::open(data.path()).unwrap());
             import_with_cache(&store, "main", dir, &opts, cache_entries, MAX_CHANGES).unwrap()
         };
@@ -1312,14 +1312,14 @@ mod tests {
     #[test]
     fn a_reimport_trusts_a_stored_blob_it_skips_and_fsck_reports_the_damage() {
         crate::store::spawn_guard::prime_gix_lookup();
-        let repo = tempfile::tempdir().unwrap();
+        let repo = crate::test_support::private_tempdir();
         let dir = repo.path();
         git(dir, &["init", "-q", "-b", "main"]);
         fs::write(dir.join("f"), "payload\n").unwrap();
         git(dir, &["add", "-A"]);
         git(dir, &["commit", "-q", "-m", "add"]);
 
-        let data = tempfile::tempdir().unwrap();
+        let data = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(data.path()).unwrap());
         let opts = |rev: &str| ImportOptions {
             rev: rev.into(),
@@ -1362,14 +1362,14 @@ mod tests {
     #[test]
     fn a_commit_with_too_many_changes_is_named_and_refused() {
         crate::store::spawn_guard::prime_gix_lookup();
-        let repo = tempfile::tempdir().unwrap();
+        let repo = crate::test_support::private_tempdir();
         let dir = repo.path();
         git(dir, &["init", "-q", "-b", "main"]);
         fs::write(dir.join("f"), "one\n").unwrap();
         git(dir, &["add", "-A"]);
         git(dir, &["commit", "-q", "-m", "one"]);
 
-        let data = tempfile::tempdir().unwrap();
+        let data = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(data.path()).unwrap());
         let opts = ImportOptions {
             rev: "main".into(),
@@ -1400,7 +1400,7 @@ mod tests {
     #[test]
     fn a_land_while_the_import_checks_the_ref_is_never_overwritten() {
         crate::store::spawn_guard::prime_gix_lookup();
-        let data = tempfile::tempdir().unwrap();
+        let data = crate::test_support::private_tempdir();
         let server = Backend::sqlite(Store::open(data.path()).unwrap());
         let importer = Backend::sqlite(Store::open_shared(data.path()).unwrap());
         // main is at root. Git has root ─ tip, and a land puts X on root.
@@ -1480,7 +1480,7 @@ mod tests {
     /// tip, so the import never hears "diverged".
     #[test]
     fn an_import_that_keeps_losing_the_ref_swap_gives_up() {
-        let data = tempfile::tempdir().unwrap();
+        let data = crate::test_support::private_tempdir();
         let server = Backend::sqlite(Store::open(data.path()).unwrap());
         let importer = Backend::sqlite(Store::open_shared(data.path()).unwrap());
         // main is at root. The chain root <- a1 <- a2 <- a3 <- tip hangs
@@ -1555,7 +1555,7 @@ mod tests {
     #[test]
     fn an_import_derives_missing_parent_root_trees_in_steps_first() {
         crate::store::spawn_guard::prime_gix_lookup();
-        let repo = tempfile::tempdir().unwrap();
+        let repo = crate::test_support::private_tempdir();
         let dir = repo.path();
         git(dir, &["init", "-q", "-b", "main"]);
         for i in 0..5 {
@@ -1563,7 +1563,7 @@ mod tests {
             git(dir, &["add", "-A"]);
             git(dir, &["commit", "-q", "-m", &i.to_string()]);
         }
-        let data = tempfile::tempdir().unwrap();
+        let data = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(data.path()).unwrap());
         let import = |rev: &str| {
             let opts = ImportOptions {
@@ -1595,7 +1595,7 @@ mod tests {
     #[test]
     fn a_server_write_waits_less_than_busy_timeout_during_a_slow_batch() {
         crate::store::spawn_guard::prime_gix_lookup();
-        let repo = tempfile::tempdir().unwrap();
+        let repo = crate::test_support::private_tempdir();
         let dir = repo.path();
         git(dir, &["init", "-q", "-b", "main"]);
         // More commits than one budget-sized transaction takes, so the batch
@@ -1606,7 +1606,7 @@ mod tests {
                 &["commit", "-q", "--allow-empty", "-m", &i.to_string()],
             );
         }
-        let data = tempfile::tempdir().unwrap();
+        let data = crate::test_support::private_tempdir();
         let server = Backend::sqlite(Store::open(data.path()).unwrap());
         let importer = Backend::sqlite(Store::open_shared(data.path()).unwrap());
         let opts = ImportOptions {
@@ -1647,7 +1647,7 @@ mod tests {
     #[test]
     fn an_import_that_is_alone_runs_its_batch_in_one_transaction() {
         crate::store::spawn_guard::prime_gix_lookup();
-        let repo = tempfile::tempdir().unwrap();
+        let repo = crate::test_support::private_tempdir();
         let dir = repo.path();
         git(dir, &["init", "-q", "-b", "main"]);
         // More slow records than one budget-sized transaction takes, so a
@@ -1658,7 +1658,7 @@ mod tests {
                 &["commit", "-q", "--allow-empty", "-m", &i.to_string()],
             );
         }
-        let data = tempfile::tempdir().unwrap();
+        let data = crate::test_support::private_tempdir();
         let importer = Backend::sqlite(Store::open(data.path()).unwrap());
         let opts = ImportOptions {
             rev: "main".into(),

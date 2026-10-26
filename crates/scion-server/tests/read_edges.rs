@@ -66,7 +66,7 @@ fn author() -> IdentityTime {
 /// A store whose repo has one root changeset that puts `files` at the repo
 /// root. An empty `files` makes an empty directory.
 fn store(files: &[(Vec<u8>, &[u8])]) -> (tempfile::TempDir, Backend, ChangesetId) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = from_store(Store::open(dir.path()).unwrap());
     let root = store
         .write(|c| {

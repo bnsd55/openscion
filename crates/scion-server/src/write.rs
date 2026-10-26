@@ -376,7 +376,7 @@ mod tests {
 
     /// A store with repo `main` and an empty root changeset in it.
     fn store_with_root() -> (tempfile::TempDir, Backend, ChangesetId) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         let root = store
             .write(|c| {

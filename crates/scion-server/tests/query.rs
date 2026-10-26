@@ -36,7 +36,7 @@ fn skip_on_postgres(why: &str) -> bool {
 }
 
 fn open_store() -> (TempDir, Backend) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     (dir, store)
 }
@@ -147,7 +147,7 @@ fn graph_fixture(dir: &Path) {
 
 #[test]
 fn merge_base_and_is_ancestor_match_git() {
-    let git_dir = tempfile::tempdir().unwrap();
+    let git_dir = scion_server::test_support::private_tempdir();
     let dir = git_dir.path();
     graph_fixture(dir);
     let (_data, store) = open_store();
@@ -520,7 +520,7 @@ fn diff_fixture(dir: &Path) -> (String, String) {
 
 #[test]
 fn diff_matches_git_name_status_and_resumes_after_any_path() {
-    let git_dir = tempfile::tempdir().unwrap();
+    let git_dir = scion_server::test_support::private_tempdir();
     let dir = git_dir.path();
     let (old_commit, new_commit) = diff_fixture(dir);
     let (_data, store) = open_store();
@@ -936,7 +936,7 @@ fn rename_fixture(dir: &Path) -> (String, String) {
 
 #[test]
 fn diff_finds_renames_as_git_diff_does() {
-    let git_dir = tempfile::tempdir().unwrap();
+    let git_dir = scion_server::test_support::private_tempdir();
     let dir = git_dir.path();
     let (old_commit, new_commit) = rename_fixture(dir);
     let (_data, store) = open_store();
@@ -1218,7 +1218,7 @@ fn the_search_for_similar_files_stops_at_its_budget() {
 
 #[test]
 fn similar_files_are_not_searched_past_git_rename_limit() {
-    let git_dir = tempfile::tempdir().unwrap();
+    let git_dir = scion_server::test_support::private_tempdir();
     let dir = git_dir.path();
     git(dir, &["init", "-q", "-b", "main"]);
     // `old.txt` becomes `new.txt` with an edit. Symlinks with targets of

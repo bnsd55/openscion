@@ -62,7 +62,7 @@ fn a_served_database_refuses_a_markerless_directory_and_a_mismatched_marker() {
 
     // A served store: an open migrates, then a repo row makes the
     // schema one a server has served.
-    let dir1 = tempfile::tempdir().unwrap();
+    let dir1 = scion_server::test_support::private_tempdir();
     let store = match Backend::open(dir1.path(), Some(&url), None) {
         Ok(store) => store,
         Err(e) => panic!("the first open serves: {e:#}"),
@@ -73,7 +73,7 @@ fn a_served_database_refuses_a_markerless_directory_and_a_mismatched_marker() {
     // A fresh directory pointed at the served database: the database
     // names a store the directory does not know, and the schema has
     // served repos, so the open refuses instead of adopting it.
-    let dir2 = tempfile::tempdir().unwrap();
+    let dir2 = scion_server::test_support::private_tempdir();
     let Err(refused) = Backend::open(dir2.path(), Some(&url), None) else {
         panic!("a served database refuses a marker-less directory")
     };
@@ -88,7 +88,7 @@ fn a_served_database_refuses_a_markerless_directory_and_a_mismatched_marker() {
 
     // A directory whose marker names ANOTHER store: the mismatch
     // refusal, before any row of this directory is named.
-    let dir3 = tempfile::tempdir().unwrap();
+    let dir3 = scion_server::test_support::private_tempdir();
     write_marker(dir3.path(), [0xaa; 16]);
     let Err(refused) = Backend::open(dir3.path(), Some(&url), None) else {
         panic!("a mismatched marker refuses the open")
@@ -109,7 +109,7 @@ fn an_offhost_plain_url_is_refused_before_it_connects() {
     // would be plaintext, so the open refuses before it dials. The IP
     // is TEST-NET-3: nothing answers there, so a connect would hang -
     // the test would time out if the check did not fire first.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let Err(refused) = Backend::open(dir.path(), Some("postgres://203.0.113.7/scion"), None) else {
         panic!("an off-host plain URL refuses")
     };
@@ -122,7 +122,7 @@ fn an_offhost_plain_url_is_refused_before_it_connects() {
     // Loopback is exempt: the same URL shape to 127.0.0.1 gets past the
     // check and fails on the connect instead (nothing listens there),
     // which must NOT be the encryption refusal.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let Err(refused) = Backend::open(dir.path(), Some("postgres://127.0.0.1:1/scion"), None) else {
         panic!("a closed loopback port still refuses, on the connect")
     };
@@ -142,7 +142,7 @@ fn a_database_of_a_newer_schema_is_refused() {
     let (maker, db_url) = scratch_db("newer");
 
     // A store of this build migrates the fresh database to version 5.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     match Backend::open(dir.path(), Some(&db_url), None) {
         Ok(_) => {}
         Err(e) => panic!("the fresh database opens: {e:#}"),

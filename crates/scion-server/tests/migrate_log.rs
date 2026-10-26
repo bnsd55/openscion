@@ -91,7 +91,7 @@ fn fields(log: &str, message: &str, field: &str) -> Vec<u32> {
 /// A SQLite data directory at schema version 7, as a build of that
 /// version left it: migrations 1 to 7 applied, `user_version` at 7.
 fn schema_7_data(data: &std::path::Path) {
-    fs::create_dir_all(data).unwrap();
+    scion_proto::runtime::auth::create_private_dir_all(data).unwrap();
     let c = rusqlite::Connection::open(data.join("scion.db")).unwrap();
     c.execute_batch("PRAGMA journal_mode = WAL;").unwrap();
     for sql in [
@@ -120,7 +120,7 @@ fn an_open_logs_what_migrated_and_nothing_when_nothing_did() {
     // A fresh store's first open says it created the schema, and no
     // migration line: nothing was there for a migration to move, and a
     // line that says it migrated would be false.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let fresh_at = mark();
     {
         let store = Backend::open_test(dir.path()).unwrap();
@@ -172,7 +172,7 @@ fn an_open_logs_what_migrated_and_nothing_when_nothing_did() {
 
     // An open of an older store tells the whole story: from version,
     // one line per step, and the end.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     schema_7_data(&dir.path().join("data"));
     let at = mark();
     let store = Backend::open_test(&dir.path().join("data")).unwrap();
@@ -230,7 +230,7 @@ fn a_postgres_open_of_a_fresh_database_logs_its_creation() {
     if std::env::var("SCION_TEST_BACKEND").as_deref() != Ok("postgres") {
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let at = mark();
     let store = Backend::open_test(dir.path()).unwrap();
     drop(store);

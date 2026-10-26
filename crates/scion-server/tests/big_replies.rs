@@ -49,7 +49,7 @@ fn seed_root(store: &Store, root: &Changeset) -> scion_core::ChangesetId {
 /// part per message and no more, so a reply that arrived as one message
 /// would fail to decode.
 async fn big_repo(names: usize) -> (tempfile::TempDir, Scion, ChangesetId) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Store::open(dir.path()).unwrap();
     // The root changeset, so the changeset under test has a parent.
     let root = Changeset::new(

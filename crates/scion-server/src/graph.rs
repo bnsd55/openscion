@@ -869,7 +869,7 @@ mod tests {
     fn store_graph(
         parents: &[Vec<usize>],
     ) -> (tempfile::TempDir, Backend, RepoId, Vec<ChangesetId>) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         let (repo, ids) = store
             .write(|c| {
@@ -1130,7 +1130,7 @@ mod tests {
         // second. The test counts reads, so its pass does not depend on how
         // busy the machine is.
         const N: usize = 4_096;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         let (repo, ids, side) = deep_chain(&store, N);
         let tip = ids[N - 1];

@@ -56,7 +56,7 @@ fn access(principals: &[&str]) -> Access {
 /// A store whose repo `main` has one root changeset that puts `README`,
 /// with its blob registered, as an upload through `PutBlob` would leave it.
 fn store() -> (tempfile::TempDir, Backend) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     let blob = store.blobs().put(b"# hello\n").unwrap();
     store

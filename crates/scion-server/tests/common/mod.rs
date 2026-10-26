@@ -324,7 +324,7 @@ impl Server {
     #[cfg(unix)]
     fn make_private_dir(data: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt as _;
-        fs::create_dir_all(data).unwrap();
+        scion_proto::runtime::auth::create_private_dir_all(data).unwrap();
         fs::set_permissions(data, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
@@ -341,7 +341,7 @@ impl Server {
             #[cfg(unix)]
             Self::make_private_dir(data);
             #[cfg(not(unix))]
-            fs::create_dir_all(data).unwrap();
+            scion_proto::runtime::auth::create_private_dir_all(data).unwrap();
         }
         let argv = Self::guide_argv(heading, data);
         let log_file = fs::OpenOptions::new()

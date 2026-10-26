@@ -1569,6 +1569,16 @@ fn hash_token() -> anyhow::Result<()> {
 #[cfg(test)]
 mod key_file_tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// A temp directory the run owns outright: mode 0700, whatever the
+    /// umask. The server refuses a data directory group or others can
+    /// read, and a plain temp directory is 0777 less the umask.
+    fn private_tempdir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir
+    }
 
     fn write_key(dir: &Path, name: &str, mode: u32, text: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1580,21 +1590,21 @@ mod key_file_tests {
 
     #[test]
     fn a_private_seed_reads_back_trimmed() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let file = write_key(dir.path(), "seed", 0o600, "  abcd \n");
         assert_eq!(read_hex(&file, true).unwrap(), "abcd");
     }
 
     #[test]
     fn a_public_key_reads_back() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let file = write_key(dir.path(), "old", 0o644, "abcd\n");
         assert_eq!(read_hex(&file, false).unwrap(), "abcd");
     }
 
     #[test]
     fn a_group_readable_seed_file_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let file = write_key(dir.path(), "seed", 0o640, "abcd");
         let err = read_hex(&file, true).unwrap_err().to_string();
         assert!(err.contains("read by group or others"), "{err}");
@@ -1602,7 +1612,7 @@ mod key_file_tests {
 
     #[test]
     fn a_group_writable_public_key_file_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let file = write_key(dir.path(), "old", 0o664, "abcd");
         let err = read_hex(&file, false).unwrap_err().to_string();
         assert!(err.contains("written by group or others"), "{err}");
@@ -1614,7 +1624,7 @@ mod key_file_tests {
     /// whichever file the path names when the read happens.
     #[test]
     fn a_symlinked_key_is_refused_with_a_perfect_target() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let target = write_key(dir.path(), "real", 0o600, "abcd");
         let link = dir.path().join("seed");
         std::os::unix::fs::symlink(&target, &link).unwrap();
@@ -1629,6 +1639,16 @@ mod key_file_tests {
 #[cfg(test)]
 mod access_file_tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// A temp directory the run owns outright: mode 0700, whatever the
+    /// umask. The server refuses a data directory group or others can
+    /// read, and a plain temp directory is 0777 less the umask.
+    fn private_tempdir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir
+    }
 
     fn write_access(dir: &Path, name: &str, mode: u32, text: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1656,7 +1676,7 @@ mod access_file_tests {
 
     #[test]
     fn an_access_file_the_group_or_others_can_read_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let file = write_access(dir.path(), "access", 0o644, "# rules\n");
         let err = load_access(None, None, Some(file)).unwrap_err().to_string();
         assert!(err.contains("read by group or others"), "{err}");
@@ -1664,7 +1684,7 @@ mod access_file_tests {
 
     #[test]
     fn a_private_access_file_parses() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let file = write_access(dir.path(), "access", 0o600, "# rules\n");
         let (_, single) = load_access(None, None, Some(file)).unwrap();
         assert!(!single);
@@ -1672,7 +1692,7 @@ mod access_file_tests {
 
     #[test]
     fn a_symlinked_access_file_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let target = write_access(dir.path(), "real", 0o600, "# rules\n");
         let link = dir.path().join("access");
         std::os::unix::fs::symlink(&target, &link).unwrap();

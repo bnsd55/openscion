@@ -511,7 +511,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_line_carries_the_schema_version_and_a_timestamp() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let path = dir.path().join("audit.log");
         let audit = Audit::open(&path).unwrap();
         audit
@@ -533,7 +533,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_batch_is_one_durable_append_per_caller() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let path = dir.path().join("audit.log");
         let audit = Audit::open(&path).unwrap();
         let (a, b) = tokio::join!(
@@ -547,7 +547,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_write_error_keeps_its_kind() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let path = dir.path().join("audit.log");
         let audit = Audit::open(&path).unwrap();
         audit.fail_next_appends(1).unwrap();
@@ -564,7 +564,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failing_append_refuses_the_caller_and_latches_readiness() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let path = dir.path().join("audit.log");
         let audit = Audit::open(&path).unwrap();
         audit.fail_next_appends(1).unwrap();
@@ -584,7 +584,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_meter_folds_many_refusals_into_one_counted_line() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let path = dir.path().join("audit.log");
         let audit = Audit::open(&path).unwrap();
         let meter = Arc::new(Meter::default());
@@ -613,7 +613,7 @@ mod tests {
 
     #[tokio::test]
     async fn one_address_rotating_ports_does_not_bury_a_stranger() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let path = dir.path().join("audit.log");
         let audit = Audit::open(&path).unwrap();
         let meter = Arc::new(Meter::default());
@@ -646,7 +646,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_ipv6_machine_keys_by_its_prefix64() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let path = dir.path().join("audit.log");
         let audit = Audit::open(&path).unwrap();
         let meter = Arc::new(Meter::default());
@@ -663,7 +663,7 @@ mod tests {
 
     #[tokio::test]
     async fn strangers_past_the_peer_cap_share_one_bucket() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let path = dir.path().join("audit.log");
         let audit = Audit::open(&path).unwrap();
         let meter = Arc::new(Meter::default());
@@ -681,7 +681,7 @@ mod tests {
 
     #[test]
     fn every_open_syncs_the_parent_directory() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let path = dir.path().join("audit.log");
         let audit = Audit::open(&path).unwrap();
         assert_eq!(audit.dir_syncs(), 1, "the create syncs the parent");
@@ -693,7 +693,7 @@ mod tests {
     #[tokio::test]
     async fn a_torn_line_is_glued_on_reopen_so_the_next_lines_parse() {
         use std::os::unix::fs::PermissionsExt as _;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let path = dir.path().join("audit.log");
         // A line that an ENOSPC cut in the middle: no newline at the
         // end. The tear stays a fragment; the glue keeps it from
@@ -716,7 +716,7 @@ mod tests {
 
     #[test]
     fn a_symlink_at_the_audit_path_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let target = dir.path().join("real.log");
         std::fs::write(&target, b"").unwrap();
         let link = dir.path().join("audit.log");
@@ -732,7 +732,7 @@ mod tests {
     #[test]
     fn a_preexisting_file_with_the_wrong_mode_is_refused() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let path = dir.path().join("audit.log");
         std::fs::write(&path, b"").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -743,7 +743,7 @@ mod tests {
     #[test]
     fn an_audit_path_in_a_shared_parent_is_refused() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let parent = dir.path().join("shared");
         std::fs::create_dir(&parent).unwrap();
         std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o777)).unwrap();

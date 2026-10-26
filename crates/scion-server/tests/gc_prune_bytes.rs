@@ -71,7 +71,7 @@ fn the_prune_fetches_bodies_in_byte_budget_chunks() {
     // budget into this run, or add its fetches to this count.
     Backend::test_set_gc_body_budget(512);
     Backend::test_reset_gc_body_fetch_count();
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test_shared(dir.path()).unwrap();
     let repo_a = store.write(|c| c.create_repo("gc-a")).unwrap();
     let repo_b = store.write(|c| c.create_repo("gc-b")).unwrap();

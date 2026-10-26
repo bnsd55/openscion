@@ -142,7 +142,7 @@ fn regular(content: BlobId) -> FileState {
 /// A store whose repo `main` has one root changeset that puts `README`,
 /// and its blob. Returns the store, root changeset, and blob id.
 fn store() -> (tempfile::TempDir, Backend, ChangesetId, BlobId) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     let blob = store.blobs().put(b"# hello\n").unwrap();
     let root = store
@@ -1693,7 +1693,7 @@ fn a_partial_reader_case(paths: &[String], rule_seeds: &[u16]) -> Result<(), Tes
 
     // The store: a chain of changesets whose tip tree holds every path,
     // and each file's blob, as an upload would leave them.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = from_store(Store::open(dir.path()).unwrap());
     let tip = store
         .write(|c| {
@@ -1726,7 +1726,7 @@ fn a_partial_reader_case(paths: &[String], rule_seeds: &[u16]) -> Result<(), Tes
         .filter(|p| kept(p, &rule_set))
         .cloned()
         .collect();
-    let dir_b = tempfile::tempdir().unwrap();
+    let dir_b = scion_server::test_support::private_tempdir();
     let store_b = from_store(Store::open(dir_b.path()).unwrap());
     let tip_b = store_b
         .write(|c| {

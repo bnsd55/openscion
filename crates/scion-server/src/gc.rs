@@ -724,7 +724,7 @@ mod tests {
 
     /// A store with one repo and no changesets.
     fn store() -> (TempDir, Store) {
-        let dir = TempDir::new().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Store::open(dir.path()).unwrap();
         store
             .write(|c| {
@@ -1415,7 +1415,7 @@ mod tests {
     /// the blob's row and file survive.
     #[test]
     fn a_changeset_that_commits_while_gc_runs_keeps_its_blob() {
-        let dir = TempDir::new().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test_shared(dir.path()).unwrap();
         let repo = store.write(|c| c.create_repo(REPO)).unwrap();
         let b = store.blobs().put(b"pinned\n").unwrap();
@@ -1458,7 +1458,7 @@ mod tests {
         // with no one-server lock - and the writer the way a server
         // does, with the per-schema lock. One data directory, as they
         // share in production: the store UUID pairs it with the schema.
-        let dir = TempDir::new().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let gc_store = Backend::open_test_shared(dir.path()).unwrap();
         let writer = Backend::open_test(dir.path()).unwrap();
         let repo = gc_store.write(|c| c.create_repo(REPO)).unwrap();
@@ -1522,7 +1522,7 @@ mod tests {
     /// deletes at most `PRUNE_BATCH` rows.
     #[test]
     fn a_prune_bigger_than_a_chunk_yields_the_key_between_chunks() {
-        let dir = TempDir::new().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test_shared(dir.path()).unwrap();
         let repo = store.write(|c| c.create_repo(REPO)).unwrap();
         let blobs: Vec<BlobId> = (0..PRUNE_BATCH + 2)
@@ -1573,7 +1573,7 @@ mod tests {
     /// unlinked loses the file's bytes for every reader of the path.
     #[test]
     fn a_create_over_a_collected_blob_does_not_name_its_lost_file() {
-        let dir = TempDir::new().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test_shared(dir.path()).unwrap();
         let repo = store.write(|c| c.create_repo(REPO)).unwrap();
         let text = b"named\n";
@@ -1644,7 +1644,7 @@ mod tests {
     /// for the repo, and the next changeset may name it.
     #[test]
     fn a_put_blob_that_answers_ok_names_the_blob_over_a_concurrent_gc() {
-        let dir = TempDir::new().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test_shared(dir.path()).unwrap();
         let repo = store.write(|c| c.create_repo(REPO)).unwrap();
         let upload = store.blobs().upload().unwrap().append(b"kept\n").unwrap();

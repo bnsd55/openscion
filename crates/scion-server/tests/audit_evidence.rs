@@ -124,7 +124,7 @@ fn tamper_history(store: &Backend, data: &std::path::Path, rows: &[(Vec<u8>, Vec
 /// history node's stored body no longer matches its ID.
 #[test]
 fn a_tampered_history_node_reads_as_corrupt() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     let ids = two_changesets(&store);
     let tip = *ids.last().unwrap();
@@ -148,7 +148,7 @@ fn a_tampered_history_node_reads_as_corrupt() {
 /// fsck reports a history node whose body does not match its ID.
 #[test]
 fn fsck_reports_a_tampered_history_node() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     let _ids = two_changesets(&store);
 

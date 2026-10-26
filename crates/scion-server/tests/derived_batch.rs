@@ -20,7 +20,7 @@ struct Git(tempfile::TempDir);
 
 impl Git {
     fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = scion_server::test_support::private_tempdir();
         let out = Command::new("git")
             .args(["init", "-q", "-b", "main"])
             .current_dir(dir.path())
@@ -96,7 +96,7 @@ fn the_imports_derived_family_costs_no_statement_per_commit() {
     for n in [100, 1000] {
         let git = Git::new();
         let tip = git.fast_commits(n);
-        let dir = tempfile::tempdir().unwrap();
+        let dir = scion_server::test_support::private_tempdir();
         let store = Backend::open_test(dir.path()).unwrap();
         Backend::test_reset_statement_count();
         import_git(&store, "main", git.path(), &opts(&tip)).unwrap();

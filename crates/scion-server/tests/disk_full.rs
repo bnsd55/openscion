@@ -755,7 +755,7 @@ fn a_full_postgres_database_answers_out_of_space_and_needs_no_repair() {
 
     // The proving write: lands a client would run, through the store's
     // own write path, until the wall stops one of them.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let store = Backend::open_test(&data).expect("the store opens");
     // The repo, its root changeset, and the ref main, all through the

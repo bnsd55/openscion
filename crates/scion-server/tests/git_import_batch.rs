@@ -51,8 +51,8 @@ fn archive_with_provenance(
     std::path::PathBuf,
     scion_core::ChangesetId,
 ) {
-    let data = tempfile::tempdir().unwrap();
-    let out_dir = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
+    let out_dir = scion_server::test_support::private_tempdir();
     let out = out_dir.path().join("archive");
     let store = Backend::open_test_shared(data.path()).unwrap();
     let repo = store.write(|c| c.create_repo(REPO)).unwrap();
@@ -100,7 +100,7 @@ fn the_restore_of_a_thousand_pairs_costs_three_provenance_statements() {
             name
         );
         let (_data, out, _cs) = archive_with_provenance(n);
-        let target = tempfile::tempdir().unwrap();
+        let target = scion_server::test_support::private_tempdir();
         Backend::test_reset_statement_count();
         let restored = archive::restore(&out, target.path(), Some(&url), None).unwrap();
         assert_eq!(restored.repos, vec![REPO.to_owned()]);
@@ -139,7 +139,7 @@ fn a_repeated_provenance_pair_is_a_no_op() {
         eprintln!("skip on sqlite: this guard counts Postgres statements");
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test_shared(dir.path()).unwrap();
     let repo = store.write(|c| c.create_repo(REPO)).unwrap();
     let first = changeset(Vec::new(), "one\n");

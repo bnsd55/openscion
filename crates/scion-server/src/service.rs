@@ -2386,7 +2386,7 @@ mod tests {
     }
 
     fn file_store(content: &[u8]) -> (tempfile::TempDir, Backend, ChangesetId, BlobId) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         let blob = store.blobs().put(content).unwrap();
         let state = FileState::Regular {
@@ -2747,7 +2747,7 @@ mod tests {
     /// changeset on root, below the floor of a new path index at B, so
     /// the land's plan walks back.
     fn dropped_call_fixture() -> (tempfile::TempDir, Backend, ChangesetId, ChangesetId) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         let blob = store.blobs().put(b"x").unwrap();
         let put = |parents, path: &str| {
@@ -3125,7 +3125,7 @@ mod tests {
         Vec<u8>,
         scion_core::BlobId,
     ) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         let one = store.blobs().put(b"one\n").unwrap();
         let two = store.blobs().put(b"two\n").unwrap();
@@ -3200,7 +3200,7 @@ mod tests {
     async fn a_land_whose_call_failed_moves_its_counter() {
         // main moved past the changeset's parent, so the land's plan has
         // a walk to make: the spent deadline stops it at its first check.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         let blob = store.blobs().put(b"x").unwrap();
         let put = |parents, path: &str| {
@@ -3293,7 +3293,7 @@ mod tests {
     /// ready to land: two thousand files, so its landed changeset must
     /// grow the metadata file.
     fn landed_store() -> (tempfile::TempDir, Backend, ChangesetId) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         let blob = store.blobs().put(b"x").unwrap();
         let mut files = Vec::new();
@@ -3402,7 +3402,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn at_most_max_graph_queries_run_at_once() {
         // root ─ a, and root ─ b.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         let ids = store
             .write(|c| {
@@ -3508,7 +3508,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_worker_panic_does_not_reach_the_client() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let worker = Worker::new(Backend::sqlite(Store::open(dir.path()).unwrap()));
         let status = worker
             .run(|_| -> Result<()> { panic!("secret detail") })

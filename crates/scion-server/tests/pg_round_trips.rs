@@ -55,7 +55,7 @@ const WIDE_BUDGET: u64 = 56;
 
 /// A one-commit git repository, imported on `main`.
 fn git_seed() -> (TempDir, ChangesetId) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let run = |args: &[&str]| {
         let out = Command::new("git")
             .args(["-c", "gc.auto=0", "-c", "maintenance.auto=false"])

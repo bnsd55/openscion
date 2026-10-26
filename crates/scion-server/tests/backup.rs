@@ -47,7 +47,7 @@ async fn a_backup_taken_while_serving_restores_whole() {
     );
     let mut rng = Rng::new(seed);
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let (data, log) = (dir.path().join("data"), dir.path().join("server.log"));
 
     if Backend::test_is_postgres() {
@@ -104,7 +104,7 @@ async fn a_backup_taken_while_serving_restores_whole() {
     // stored only after a whole round, so the pre-snapshot window
     // never splits a round's records.
     let pre_snapshot = acked.load(Ordering::SeqCst);
-    let backup_db = tempfile::tempdir().unwrap();
+    let backup_db = scion_server::test_support::private_tempdir();
     let snapshot = backup_db.path().join("scion.db");
     let _stdout = run_guide_block_with(
         "The durability point",
@@ -119,7 +119,7 @@ async fn a_backup_taken_while_serving_restores_whole() {
     // blob the snapshot names stays reachable, and the copy may or may
     // not hold the newer ones. `gc` must not run during a backup (the
     // runbook's warning); no test runs one here.
-    let backup = tempfile::tempdir().unwrap();
+    let backup = scion_server::test_support::private_tempdir();
     // The blob copy is the runbook's own `cp -R` line, with the test's
     // data directory and backup folder in place of the documented ones.
     let _stdout = run_guide_block_with(
@@ -151,7 +151,7 @@ async fn a_backup_taken_while_serving_restores_whole() {
     // (a Postgres directory has one, and the runbook copies it with the
     // metadata). `fsck` runs before the server serves, the runbook's
     // order.
-    let restored_dir = tempfile::tempdir().unwrap();
+    let restored_dir = scion_server::test_support::private_tempdir();
     std::fs::copy(&snapshot, restored_dir.path().join("scion.db")).unwrap();
     copy_tree(
         &backup.path().join("objects"),
@@ -401,7 +401,7 @@ fn walkdir(from: &std::path::Path) -> Vec<std::path::PathBuf> {
 /// ledger records every acknowledgment, and the same properties the
 /// server test checks over RPC are checked against the restored store.
 fn backup_postgres() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     let (repo, parent) = pg_repo(&store);
 
@@ -441,7 +441,7 @@ fn backup_postgres() {
     // call started must read back after the restore, and what the
     // writer acknowledges from here on may be in or out.
     let pre_snapshot = acked.load(Ordering::SeqCst);
-    let dump = tempfile::tempdir().unwrap();
+    let dump = scion_server::test_support::private_tempdir();
     let dump_file = dump.path().join("metadata.sql");
     let schema = test_schema(dir.path());
     dump_schema(&schema, &dump_file);
@@ -450,7 +450,7 @@ fn backup_postgres() {
     // blob the snapshot names stays reachable, and the copy may or may
     // not hold the newer ones. `gc` must not run during a backup (the
     // runbook's warning); no test runs one here.
-    let backup = tempfile::tempdir().unwrap();
+    let backup = scion_server::test_support::private_tempdir();
     copy_tree(&dir.path().join("objects"), &backup.path().join("objects"));
     stop.store(true, Ordering::SeqCst);
     let raced = writer.join().unwrap();
@@ -467,7 +467,7 @@ fn backup_postgres() {
     // step: it holds the store UUID the metadata holds too), and the
     // blob files of the backup go beside them. `fsck` runs before the
     // store serves, the runbook's order.
-    let restored_dir = tempfile::tempdir().unwrap();
+    let restored_dir = scion_server::test_support::private_tempdir();
     let restored_schema = test_schema(restored_dir.path());
     rename_in(&dump_file, &schema, &restored_schema);
     load_schema(&dump_file);

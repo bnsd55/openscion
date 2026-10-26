@@ -55,7 +55,7 @@ fn the_prune_of_a_thousand_rows_costs_twenty_statements() {
     let old = Duration::from_secs(8 * 24 * 60 * 60);
     let mut counts = Vec::new();
     for n in [100, 1000] {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = scion_server::test_support::private_tempdir();
         let store = Backend::open_test_shared(dir.path()).unwrap();
         let repo = store.write(|c| c.create_repo("gc")).unwrap();
         for i in 0..n {

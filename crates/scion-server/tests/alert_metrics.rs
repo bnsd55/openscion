@@ -53,7 +53,7 @@ async fn served() -> (
     ScionClient<InterceptedService<tonic::transport::Channel, Bearer>>,
     scion_core::ChangesetId,
 ) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = {
         let path = dir.path().to_path_buf();
         tokio::task::spawn_blocking(move || Backend::open_test(&path).unwrap())

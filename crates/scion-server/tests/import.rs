@@ -45,7 +45,7 @@ struct Git(TempDir);
 
 impl Git {
     fn init() -> Self {
-        let git = Self(tempfile::tempdir().unwrap());
+        let git = Self(scion_server::test_support::private_tempdir());
         git.run(&["init", "-q", "-b", "main"]);
         git
     }
@@ -278,7 +278,7 @@ fn an_unknown_timezone_date_is_refused() {
         "the fixture's commit carries -0000"
     );
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test_shared(dir.path()).unwrap();
     let err = try_import(&store, &git, &bad).unwrap_err();
     let text = err.to_string();
@@ -302,7 +302,7 @@ fn an_unknown_timezone_on_the_author_line_is_refused() {
     git.run_with(&["fast-import", "--quiet"], &stream);
     let bad = git.run(&["rev-parse", "main"]);
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test_shared(dir.path()).unwrap();
     let err = try_import(&store, &git, &bad).unwrap_err();
     assert!(
@@ -325,7 +325,7 @@ fn a_signed_zone_imports() {
     git.run_with(&["fast-import", "--quiet"], &stream);
     let head = git.run(&["rev-parse", "main"]);
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test_shared(dir.path()).unwrap();
     let report = import(&store, &git, &head);
     let cs = changeset_of(&store, &head);
@@ -345,7 +345,7 @@ fn opts(rev: &str) -> ImportOptions {
 }
 
 fn open_store() -> (TempDir, Backend) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     (dir, store)
 }
@@ -1288,7 +1288,7 @@ fn make_repo(store: &Backend) {
 /// A store that shares its data directory, so an import keeps its write
 /// transactions short and yields between them.
 fn open_shared_store() -> (tempfile::TempDir, Backend) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test_shared(dir.path()).unwrap();
     (dir, store)
 }

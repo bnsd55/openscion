@@ -39,7 +39,7 @@ fn a_gc_of_a_postgres_backed_directory_removes_no_blob_file() {
     if skip_on_sqlite() {
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     let repo = store.write(|c| c.create_repo("kept")).unwrap();
     let blob = store.blobs().put(b"kept").unwrap();
@@ -91,7 +91,7 @@ fn a_sqlite_open_of_a_postgres_backed_directory_is_refused() {
     if skip_on_sqlite() {
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     drop(store);
     // A data directory whose marker names Postgres refuses a SQLite open,
@@ -110,7 +110,7 @@ fn a_postgres_open_makes_the_data_directory_it_names() {
     // The first serve on a fresh host names the marker before anything
     // else makes the directory: the open creates it, and the marker is in
     // it, so the next SQLite open is refused.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let fresh = dir.path().join("not-made-yet");
     let store = Backend::open_test(&fresh).unwrap();
     assert!(fresh.join("backend").exists(), "the marker names Postgres");
@@ -129,7 +129,7 @@ fn a_postgres_open_makes_the_data_directory_it_names() {
 #[test]
 fn a_damaged_marker_refuses_both_opens() {
     for (name, text) in [("empty", ""), ("garbage", "an old build left this\n")] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = scion_server::test_support::private_tempdir();
         std::fs::write(dir.path().join("backend"), text).unwrap();
         let Err(error) = Backend::open(dir.path(), None, None) else {
             panic!("the {name} marker refuses the SQLite open");
@@ -153,7 +153,7 @@ fn a_damaged_marker_refuses_both_opens() {
 /// clock, through the busy timeout the open sets.
 #[test]
 fn a_write_blocked_by_another_writer_answers_busy_in_seconds() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     if Backend::test_is_postgres() {
         // A connection of the test holds the name in an open transaction: it
@@ -214,7 +214,7 @@ fn a_database_refuses_the_directory_of_another_store() {
     if skip_on_sqlite() {
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     drop(store);
     let marker = dir.path().join("backend");
@@ -246,7 +246,7 @@ fn a_lost_server_lock_fences_the_backend() {
     if skip_on_sqlite() {
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     store
         .write(|c| c.create_repo("before").map(|_| ()))
@@ -297,7 +297,7 @@ fn a_reconnect_ends_the_dead_transaction_and_a_new_begin_passes() {
     if skip_on_sqlite() {
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     store
         .write(|c| c.create_repo("before").map(|_| ()))
@@ -367,7 +367,7 @@ fn an_unreachable_database_is_not_a_takeover() {
         );
         return;
     };
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     store
         .write(|c| c.create_repo("before").map(|_| ()))
@@ -419,7 +419,7 @@ fn a_fsck_of_a_postgres_backed_store_finds_missing_blob_files() {
     if skip_on_sqlite() {
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     let repo = store.write(|c| c.create_repo("fsck-pg")).unwrap();
     let blob = store.blobs().put(b"fsck me\n").unwrap();
@@ -508,9 +508,9 @@ fn a_plain_url_and_one_that_rides_public_fence_each_other() {
         return;
     }
     let db = Throwaway::new("fence");
-    let dir_a = tempfile::tempdir().unwrap();
+    let dir_a = scion_server::test_support::private_tempdir();
     let _a = Backend::open(dir_a.path(), Some(&db.url), None).expect("the plain URL opens");
-    let dir_b = tempfile::tempdir().unwrap();
+    let dir_b = scion_server::test_support::private_tempdir();
     let Err(error) = Backend::open(dir_b.path(), Some(&db.url_riding(Some("public"))), None) else {
         panic!("the second open of one schema is refused");
     };
@@ -533,14 +533,14 @@ fn two_urls_that_ride_different_schemas_open_side_by_side() {
     admin
         .batch_execute("CREATE SCHEMA scion_test_lock_one; CREATE SCHEMA scion_test_lock_two;")
         .unwrap();
-    let dir_a = tempfile::tempdir().unwrap();
+    let dir_a = scion_server::test_support::private_tempdir();
     let a = Backend::open(
         dir_a.path(),
         Some(&db.url_riding(Some("scion_test_lock_one"))),
         None,
     )
     .expect("the first schema opens");
-    let dir_b = tempfile::tempdir().unwrap();
+    let dir_b = scion_server::test_support::private_tempdir();
     let b = Backend::open(
         dir_b.path(),
         Some(&db.url_riding(Some("scion_test_lock_two"))),
@@ -591,7 +591,7 @@ fn a_directory_that_names_a_store_refuses_an_empty_schema() {
     admin
         .batch_execute("CREATE SCHEMA a; CREATE SCHEMA b;")
         .unwrap();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     // Schema `a` serves once: it mints the store, the directory's marker
     // takes its UUID, and the schema holds the store's data.
     let served = Backend::open(dir.path(), Some(&db.url_riding(Some("a"))), None)
@@ -634,7 +634,7 @@ fn a_schema_that_holds_a_store_but_no_uuid_row_still_adopts() {
     let db = Throwaway::new("adopt");
     let mut admin = postgres::Client::connect(&db.url, postgres::NoTls).unwrap();
     admin.batch_execute("CREATE SCHEMA a;").unwrap();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let served = Backend::open(dir.path(), Some(&db.url_riding(Some("a"))), None)
         .expect("the first open mints");
     served.write(|c| c.create_repo("r").map(|_| ())).unwrap();
@@ -675,7 +675,7 @@ fn a_first_open_cut_before_its_marker_opens_again() {
     let db = Throwaway::new("marker_window");
     let mut admin = postgres::Client::connect(&db.url, postgres::NoTls).unwrap();
     admin.batch_execute("CREATE SCHEMA a;").unwrap();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     // The first open mints the store's row; the cut takes the marker the
     // open writes at its end.
     let first = Backend::open(dir.path(), Some(&db.url_riding(Some("a"))), None)
@@ -717,7 +717,7 @@ fn a_served_store_without_its_marker_refuses_a_fresh_directory() {
     let db = Throwaway::new("marker_served");
     let mut admin = postgres::Client::connect(&db.url, postgres::NoTls).unwrap();
     admin.batch_execute("CREATE SCHEMA a;").unwrap();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let served = Backend::open(dir.path(), Some(&db.url_riding(Some("a"))), None)
         .expect("the first open mints");
     served.write(|c| c.create_repo("r").map(|_| ())).unwrap();
@@ -742,7 +742,7 @@ fn a_lost_marker_written_back_as_the_runbook_says_reopens_the_store() {
     let db = Throwaway::new("marker_repair");
     let mut admin = postgres::Client::connect(&db.url, postgres::NoTls).unwrap();
     admin.batch_execute("CREATE SCHEMA a;").unwrap();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let served = Backend::open(dir.path(), Some(&db.url_riding(Some("a"))), None)
         .expect("the first open mints");
     served.write(|c| c.create_repo("r").map(|_| ())).unwrap();

@@ -36,7 +36,7 @@ impl Drop for Server {
 
 /// Starts the real binary on a fresh data directory.
 fn spawn() -> Server {
-    let data = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
     let dir = data.path().join("log");
     fs::create_dir(&dir).unwrap();
     let log = dir.join("server.log");

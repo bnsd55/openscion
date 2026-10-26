@@ -1258,7 +1258,7 @@ mod tests {
 
     /// A new store with `history` in repo `r`, as [`store_chain`] stores it.
     fn store_with(history: &[Edits]) -> (tempfile::TempDir, Backend, RepoId, Vec<ChangesetId>) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         let (repo, ids) = store.write(|c| store_chain(c, history)).unwrap();
         (dir, store, repo, ids)
@@ -1269,7 +1269,7 @@ mod tests {
     fn store_with_here(
         history: &[Edits],
     ) -> (tempfile::TempDir, Backend, RepoId, Vec<ChangesetId>) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test(dir.path()).unwrap();
         let (repo, ids) = store.write(|c| store_chain(c, history)).unwrap();
         (dir, store, repo, ids)
@@ -1449,7 +1449,7 @@ mod tests {
 
     #[test]
     fn a_version_2_database_upgrades_and_rederives_its_root_trees() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let (repo, ids, before) = {
             let c = Connection::open(dir.path().join("scion.db")).unwrap();
             migrate(&c, 2).unwrap();
@@ -1648,7 +1648,7 @@ mod tests {
         // the store's budget holds seven steps' worth, and this test holds
         // two of them, as the walks of other callers would.
         let budget = 7 * walk_step_bytes();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(
             Store::open_with_walk_bytes(
                 dir.path(),
@@ -1703,7 +1703,7 @@ mod tests {
     #[test]
     fn an_unbounded_derive_walk_takes_no_bytes() {
         let budget = walk_step_bytes();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(
             Store::open_with_walk_bytes(
                 dir.path(),
@@ -1825,7 +1825,7 @@ mod tests {
     fn store_graph(
         parents: &[Vec<usize>],
     ) -> (tempfile::TempDir, Backend, RepoId, Vec<ChangesetId>) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         let (repo, ids) = store
             .write(|c| {
@@ -2157,12 +2157,12 @@ mod tests {
         // one and stops inside its first derive, at the closed gate, with
         // its permit taken. The gate, not a clock, holds it there: the
         // walk's permit stays taken for as long as the test wants.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open_with_walks(dir.path(), 1).unwrap());
         let (repo1, ids1) = another_chain(&store, "one", &chain(3));
         let (repo2, ids2) = another_chain(&store, "two", &chain(3));
         let (repo3, ids3) = another_chain(&store, "three", &chain(3));
-        let dir2 = tempfile::tempdir().unwrap();
+        let dir2 = crate::test_support::private_tempdir();
         let store2 = Backend::sqlite(Store::open(dir2.path()).unwrap());
         let (repo_b, ids_b) = another_chain(&store2, "r", &chain(3));
         let (owner, beside) = std::thread::scope(|scope| {
@@ -2299,7 +2299,7 @@ mod tests {
     fn a_permit_timeout_retires_the_flight() {
         let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         COLD_DERIVES.store(0, Ordering::Relaxed);
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open_with_walks(dir.path(), 1).unwrap());
         // r2's walk holds the store's only walk permit, parked at the
         // gate. r1's owner then waits for a permit that never comes, and
@@ -2433,7 +2433,7 @@ mod tests {
         // write connection. Walks without a cap would all queue their
         // transactions on the write connection, and the land would wait
         // behind all of them.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open_with_walks(dir.path(), 2).unwrap());
         let mut repos: Vec<(RepoId, ChangesetId)> = Vec::new();
         for i in 0..40 {

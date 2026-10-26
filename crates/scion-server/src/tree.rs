@@ -551,7 +551,7 @@ mod tests {
 
     /// Runs `f` in one write transaction on a fresh store.
     fn with_db<T>(f: impl FnOnce(&mut SqliteTx<'_>) -> Result<T>) -> T {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         Store::open(dir.path()).unwrap().write(f).unwrap()
     }
 
@@ -872,7 +872,7 @@ mod tests {
             "b4717ab9e5bbd8b20c844a4236fededbea08e83cedbd871731fa9e948a0cbac8",
         ];
         for stored in [true, false] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::test_support::private_tempdir();
             let store = Backend::sqlite(Store::open(dir.path()).unwrap());
             // The chain's six puts name blobs "1".."6"; their files feed the
             // real lens, so stored and re-derived trees carry true lengths.
@@ -919,7 +919,7 @@ mod tests {
     /// the deadline, `read_file` returned the file's bytes.
     #[test]
     fn a_read_with_a_past_deadline_derives_nothing() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         store.blobs().put(b"1").unwrap();
         // A changeset with no root tree row yet.
@@ -947,7 +947,7 @@ mod tests {
     /// could lose a tree that the client was told about.
     #[test]
     fn get_root_tree_flushes_once_after_it_derives() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         store.blobs().put(b"1").unwrap();
         // A changeset with no root tree row yet.
@@ -974,7 +974,7 @@ mod tests {
 
     #[test]
     fn root_tree_derives_a_long_chain_and_caches_it() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         let author = IdentityTime::new(b"a".to_vec(), b"a@x".to_vec(), 0, 0)
             .expect("identity fits the format");

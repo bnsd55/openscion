@@ -584,7 +584,7 @@ struct RunSummary {
 /// Runs the whole script against one real server, then checks.
 #[allow(clippy::too_many_lines)] // one arm per op: the dispatch is the table
 async fn run_script(script: &[Op]) -> RunSummary {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let (data, log) = (dir.path().join("data"), dir.path().join("server.log"));
     create_repo(&data);
     let mut server = Server::start(&data, &log);
@@ -1618,10 +1618,10 @@ async fn get_changeset(scion: &mut Scion, id: ChangesetId) -> (Changeset, Change
 /// says the wait happened. Any other refusal fails at once.
 #[test]
 fn a_restart_waits_for_the_killed_servers_store_lock() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let log = dir.path().join("server.log");
-    std::fs::create_dir_all(&data).unwrap();
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
     let holder = Server::start(&data, &log);
     // The restart races a lock the holder keeps. On its own thread, on
     // a log of its own: `listens` takes the newest serving line of the

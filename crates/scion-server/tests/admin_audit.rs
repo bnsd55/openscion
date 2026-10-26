@@ -18,7 +18,9 @@ use std::os::unix::fs::PermissionsExt as _;
 /// stored blob file, one names a blob with no file at all. Returns the
 /// stored blob's ID.
 fn seed(data: &std::path::Path) -> BlobId {
-    fs::create_dir_all(data).unwrap();
+    // A store directory is private: the open refuses one group or
+    // others can read.
+    scion_proto::runtime::auth::create_private_dir_all(data).unwrap();
     let store = scion_server::Backend::open(data, None, None).unwrap();
     let blob = store.blobs().put(b"a prunable file\n").unwrap();
     let fake = BlobId::from_bytes([7u8; 32]);
@@ -65,7 +67,7 @@ fn hex(id: &BlobId) -> String {
 /// report's counts and `dry_run: false`.
 #[test]
 fn a_gc_run_writes_an_admin_intent_and_ok_line() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     seed(&data);
 
@@ -94,7 +96,7 @@ fn a_gc_run_writes_an_admin_intent_and_ok_line() {
 /// A dry run changes nothing, and its lines say so.
 #[test]
 fn a_dry_run_labels_itself_dry_run() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     seed(&data);
 
@@ -121,7 +123,7 @@ fn a_dry_run_labels_itself_dry_run() {
 /// anything: the prunable rows survive for the next run.
 #[test]
 fn a_gc_whose_audit_file_refuses_changes_nothing() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     seed(&data);
     // An audit file another hand left world-readable: the audit's open
@@ -170,7 +172,7 @@ fn no_blob_ids(value: &serde_json::Value) -> bool {
 /// counts, never content.
 #[test]
 fn a_gc_audit_names_no_blob() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let blob = seed(&data);
 
@@ -192,7 +194,7 @@ fn a_gc_audit_names_no_blob() {
 fn run(data: &std::path::Path, args: &[&str]) -> Output {
     // The binary refuses a missing data directory (#578); a test that
     // wants the create-behavior makes the directory itself.
-    fs::create_dir_all(data).unwrap();
+    scion_proto::runtime::auth::create_private_dir_all(data).unwrap();
     Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .arg("--data")
         .arg(data)
@@ -290,7 +292,7 @@ fn one_changeset(parents: Vec<ChangesetId>, changes: &[(&str, Option<FileState>)
 /// server lock is released, so the CLI a test spawns next opens the
 /// directory at once.
 fn seed_exportable(data: &std::path::Path) {
-    fs::create_dir_all(data).unwrap();
+    scion_proto::runtime::auth::create_private_dir_all(data).unwrap();
     {
         let store = scion_server::Backend::open(data, None, None).unwrap();
         store.blobs().put(b"a\n").unwrap();
@@ -320,7 +322,7 @@ fn seed_exportable(data: &std::path::Path) {
 /// the import's counts.
 #[test]
 fn an_import_writes_an_admin_intent_and_ok_line() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let hist = dir.path().join("hist");
     a_git_repo(&hist);
@@ -355,7 +357,7 @@ fn an_import_writes_an_admin_intent_and_ok_line() {
 /// blob ID appears in the audit.
 #[test]
 fn an_import_audit_names_no_commit_or_blob() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let hist = dir.path().join("hist");
     a_git_repo(&hist);
@@ -375,7 +377,7 @@ fn an_import_audit_names_no_commit_or_blob() {
 /// audit imports the whole history.
 #[test]
 fn an_import_whose_audit_file_refuses_changes_nothing() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let hist = dir.path().join("hist");
     a_git_repo(&hist);
@@ -417,7 +419,7 @@ fn an_import_whose_audit_file_refuses_changes_nothing() {
 /// counts.
 #[test]
 fn a_restore_writes_an_admin_intent_and_ok_line() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let restored = dir.path().join("restored");
     let archive = dir.path().join("archive");
@@ -466,7 +468,7 @@ fn a_restore_writes_an_admin_intent_and_ok_line() {
 /// anything: the target directory holds no store.
 #[test]
 fn a_restore_whose_audit_file_refuses_changes_nothing() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let restored = dir.path().join("restored");
     seed_exportable(&data);
@@ -506,7 +508,7 @@ fn a_restore_whose_audit_file_refuses_changes_nothing() {
 /// good archive exits 0, a damaged one names its damage and does not.
 #[test]
 fn a_verify_subcommand_reports_a_good_archive_and_names_a_damaged_one() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let archive = dir.path().join("archive");
     seed_exportable(&data);
@@ -579,7 +581,7 @@ fn a_verify_subcommand_reports_a_good_archive_and_names_a_damaged_one() {
 /// exactly what a failed run must not delete.
 #[test]
 fn a_restore_that_fails_mid_replay_leaves_its_audit_record() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let restored = dir.path().join("restored");
     seed_exportable(&data);
@@ -634,7 +636,7 @@ fn a_restore_that_fails_mid_replay_leaves_its_audit_record() {
 /// and one ok after it, with the rows the run wrote and removed.
 #[test]
 fn a_derive_writes_an_admin_intent_and_ok_line() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     seed_exportable(&data);
 
@@ -666,7 +668,7 @@ fn a_derive_writes_an_admin_intent_and_ok_line() {
 /// complete, with the error's class and never its message.
 #[test]
 fn a_derive_that_fails_writes_its_failed_line() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     seed_exportable(&data);
 
@@ -690,7 +692,7 @@ fn a_derive_that_fails_writes_its_failed_line() {
 /// audit in any encoding.
 #[test]
 fn a_ticket_key_writes_its_pair_and_no_key_material() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let key_file = dir.path().join("tickets.key");
 
@@ -773,9 +775,9 @@ fn an_open_that_migrates_writes_its_line_once() {
         println!("skipping: the migrate line's path is pinned on SQLite");
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
-    fs::create_dir_all(&data).unwrap();
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
     // The metadata at version 1, as the build's first migration makes it.
     let db = rusqlite::Connection::open(data.join("scion.db")).unwrap();
     scion_server::test_support::store::migrate(&db, 1).unwrap();

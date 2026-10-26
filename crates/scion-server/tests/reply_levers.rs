@@ -230,8 +230,8 @@ async fn status_of(mut body: h2::RecvStream) -> Option<String> {
 /// every parked reply. Returns whether a fresh call is served whole
 /// after the resets.
 async fn fresh_call_after_resets(lever: Option<&str>) -> bool {
-    let data = tempfile::tempdir().unwrap();
-    let secrets = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
+    let secrets = scion_server::test_support::private_tempdir();
     let token = token_file(secrets.path());
     let (root_id, head_id) = seed(data.path());
     let (mut child, addr) = spawn_server(data.path(), &token, lever);
@@ -326,8 +326,8 @@ async fn the_give_back_still_catches_a_budget_that_is_never_freed() {
 /// lever - the count test proves nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_count_still_catches_a_reply_that_is_never_counted() {
-    let data = tempfile::tempdir().unwrap();
-    let secrets = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
+    let secrets = scion_server::test_support::private_tempdir();
     let token = token_file(secrets.path());
     let (root_id, head_id) = seed(data.path());
     let (mut child, addr) = spawn_server(data.path(), &token, Some("uncounted"));
@@ -371,8 +371,8 @@ async fn the_count_still_catches_a_reply_that_is_never_counted() {
 /// must refuse, which is the proof the holds are counted.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_client_that_parks_unread_replies_is_refused() {
-    let data = tempfile::tempdir().unwrap();
-    let secrets = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
+    let secrets = scion_server::test_support::private_tempdir();
     let token = token_file(secrets.path());
     let (root_id, head_id) = seed(data.path());
     let (mut child, addr) = spawn_server(data.path(), &token, None);

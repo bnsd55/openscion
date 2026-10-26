@@ -69,7 +69,7 @@ async fn every_reply_survives_a_kill_of_the_server() {
     // 0.5^10, just under 0.1% - the bar the assert's margin needs, so
     // the assert itself cannot be the next flake.
     let kills = usize::try_from(env("SCION_CRASH_KILLS", 10)).unwrap();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let (data, log) = (dir.path().join("data"), dir.path().join("server.log"));
     create_repo(&data);
 
@@ -174,7 +174,7 @@ const FILLER_ROWS: i64 = 30_000;
 /// repo `r` with a root changeset, ref `main` at it, and [`FILLER_ROWS`]
 /// derived rows of a kind that no build has. Returns the root.
 fn version_2_data(data: &Path) -> ChangesetId {
-    fs::create_dir_all(data).unwrap();
+    scion_proto::runtime::auth::create_private_dir_all(data).unwrap();
     let c = rusqlite::Connection::open(data.join("scion.db")).unwrap();
     // As the server leaves it. So a reader never blocks the server's open.
     c.execute_batch("PRAGMA journal_mode = WAL;").unwrap();
@@ -278,7 +278,7 @@ fn a_kill_during_a_schema_upgrade_leaves_the_old_schema_or_the_new_one() {
         eprintln!("skip on postgres: the row operates on the SQLite file of the data directory");
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let (data, log) = (dir.path().join("data"), dir.path().join("server.log"));
     let root = version_2_data(&data);
     let old = dir.path().join("version-2.db");
@@ -348,7 +348,7 @@ fn a_kill_during_a_schema_upgrade_leaves_the_old_schema_or_the_new_one() {
 /// error talks about.
 #[test]
 fn a_newer_schema_refuses_the_open_and_a_restore_serves() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let (data, log) = (dir.path().join("data"), dir.path().join("server.log"));
     create_repo(&data);
     let server = Server::start(&data, &log);

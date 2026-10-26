@@ -62,7 +62,7 @@ struct Git(tempfile::TempDir);
 
 impl Git {
     fn new() -> Self {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = scion_server::test_support::private_tempdir();
         let out = Command::new("git")
             .args(["init", "-q", "-b", "main"])
             .current_dir(dir.path())
@@ -530,7 +530,7 @@ async fn the_public_reads_match_an_independent_manifest() {
     git.build();
     let manifest = git.manifest();
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test_shared(dir.path()).unwrap();
     assert_identity(dir.path(), &store);
 

@@ -24,7 +24,7 @@ fn script(name: &str) -> &'static str {
 /// run's log stays empty.
 #[test]
 fn a_url_naming_another_database_is_refused_before_any_drop() {
-    let work = tempfile::tempdir().unwrap();
+    let work = scion_server::test_support::private_tempdir();
     let stub = work.path().join("bin");
     std::fs::create_dir_all(&stub).unwrap();
     let log = work.path().join("psql.log");

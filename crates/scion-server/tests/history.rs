@@ -26,7 +26,7 @@ use tempfile::TempDir;
 const REPO: &str = "r";
 
 fn open_store() -> (TempDir, Backend) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     (dir, store)
 }
@@ -97,7 +97,7 @@ fn path_log(
 
 #[test]
 fn path_log_follows_files_directories_deletes_and_first_parents() {
-    let git_dir = tempfile::tempdir().unwrap();
+    let git_dir = scion_server::test_support::private_tempdir();
     let dir = git_dir.path();
     git(dir, &["init", "-q", "-b", "main"]);
     let add = commit(
@@ -710,7 +710,7 @@ fn assert_blame_matches_git(dir: &Path, files: &[&str]) -> (TempDir, Backend, Ch
 
 #[test]
 fn blame_follows_renames_as_git_blame_first_parent_does() {
-    let git_dir = tempfile::tempdir().unwrap();
+    let git_dir = scion_server::test_support::private_tempdir();
     let dir = git_dir.path();
     git(dir, &["init", "-q", "-b", "main"]);
     commit_cases(
@@ -785,7 +785,7 @@ fn blame_follows_renames_as_git_blame_first_parent_does() {
 
 #[test]
 fn blame_picks_the_rename_source_as_git_blame_does() {
-    let git_dir = tempfile::tempdir().unwrap();
+    let git_dir = scion_server::test_support::private_tempdir();
     let dir = git_dir.path();
     git(dir, &["init", "-q", "-b", "main"]);
     // One line of 192 bytes in three 64-byte chunks, then "a".
@@ -875,7 +875,7 @@ fn blame_picks_the_rename_source_as_git_blame_does() {
 
 #[test]
 fn a_rename_search_past_one_call_matches_git() {
-    let git_dir = tempfile::tempdir().unwrap();
+    let git_dir = scion_server::test_support::private_tempdir();
     let dir = git_dir.path();
     git(dir, &["init", "-q", "-b", "main"]);
     // Nine deleted files of 1 MiB, in 8-byte lines: 1,179,648 chunks, more
@@ -898,7 +898,7 @@ fn a_rename_search_past_one_call_matches_git() {
 
 #[test]
 fn binary_files_are_blamed_as_git_blame_does() {
-    let git_dir = tempfile::tempdir().unwrap();
+    let git_dir = scion_server::test_support::private_tempdir();
     let dir = git_dir.path();
     git(dir, &["init", "-q", "-b", "main"]);
     // A NUL byte makes a file binary to git, but `git blame` still diffs it
@@ -1379,7 +1379,7 @@ fn assert_many_deletes_match_git(
     shared: impl Fn(usize) -> usize,
     others: &[(&str, String)],
 ) -> usize {
-    let git_dir = tempfile::tempdir().unwrap();
+    let git_dir = scion_server::test_support::private_tempdir();
     let dir = git_dir.path();
     git(dir, &["init", "-q", "-b", "main"]);
     let mut files: Vec<(String, String)> = (0..count)

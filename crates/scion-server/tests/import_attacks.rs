@@ -22,7 +22,7 @@ struct Git(TempDir);
 
 impl Git {
     fn init() -> Self {
-        let git = Self(tempfile::tempdir().unwrap());
+        let git = Self(scion_server::test_support::private_tempdir());
         git.run(&["init", "-q", "-b", "main"]);
         git
     }
@@ -131,7 +131,7 @@ fn opts() -> ImportOptions {
 }
 
 fn open_store() -> (TempDir, Backend) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     (dir, store)
 }

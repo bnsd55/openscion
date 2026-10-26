@@ -597,10 +597,10 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
         return;
     }
     let _one = one_server();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let log = dir.path().join("server.log");
-    fs::create_dir_all(&data).unwrap();
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
     // The schema is the hash of the data directory's canonical path: the
     // directory exists first, so the name the test derives and the name
     // the harness derives are the same one.
@@ -737,10 +737,10 @@ fn a_kill_during_a_schema_upgrade_leaves_one_whole_version() {
         return;
     }
     let _one = one_server();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let log = dir.path().join("server.log");
-    fs::create_dir_all(&data).unwrap();
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
     // The schema is the hash of the data directory's canonical path: the
     // directory exists first, so the name the test derives and the name
     // the harness derives are the same one.

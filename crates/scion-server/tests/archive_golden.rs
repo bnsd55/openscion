@@ -160,7 +160,7 @@ fn normalized_manifest(manifest: &serde_json::Value) -> String {
 
 #[test]
 fn the_export_is_the_golden_and_restores_to_it() {
-    let data = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
     let (store, main) = source(data.path());
 
     let out = data.path().join("archive");
@@ -243,7 +243,7 @@ fn the_export_is_the_golden_and_restores_to_it() {
 
     // A restore of the golden into an empty data directory: fsck clean,
     // and `main` resolves to the ID the golden pins.
-    let restored_dir = tempfile::tempdir().unwrap();
+    let restored_dir = scion_server::test_support::private_tempdir();
     let report = archive::restore(&out, restored_dir.path(), None, None).unwrap();
     assert_eq!(report.repos, vec![REPO]);
     let restored = Backend::open(restored_dir.path(), None, None).unwrap();

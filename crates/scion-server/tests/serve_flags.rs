@@ -35,7 +35,7 @@ fn refused_and_left_empty(data: &std::path::Path, out: &std::process::Output, fl
 #[test]
 fn a_land_stale_secs_of_zero_or_less_is_refused() {
     for secs in ["0", "-1"] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = scion_server::test_support::private_tempdir();
         let out = serve(dir.path(), &["--land-stale-secs", secs]);
         refused_and_left_empty(dir.path(), &out, "--land-stale-secs");
     }
@@ -48,7 +48,7 @@ fn a_zero_per_principal_cap_is_refused() {
         ("--max-principal-upload-bytes", "0"),
         ("--max-principal-pending-lands", "0"),
     ] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = scion_server::test_support::private_tempdir();
         let out = serve(dir.path(), &[flag, "0"]);
         refused_and_left_empty(dir.path(), &out, flag);
         assert_eq!(value, "0", "the refused value");
@@ -57,7 +57,7 @@ fn a_zero_per_principal_cap_is_refused() {
 
 #[test]
 fn a_non_loopback_listen_is_refused_before_the_data_directory_opens() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let out = serve(dir.path(), &["--listen", "10.0.0.1:7878"]);
     assert!(!out.status.success(), "the listen rule refuses: {out:?}");
     let err = String::from_utf8_lossy(&out.stderr);
@@ -71,7 +71,7 @@ fn a_non_loopback_listen_is_refused_before_the_data_directory_opens() {
 
 #[test]
 fn a_non_loopback_metrics_listen_is_refused_before_the_data_directory_opens() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let out = serve(dir.path(), &["--metrics-listen", "10.0.0.1:7878"]);
     assert!(!out.status.success(), "the metrics rule refuses: {out:?}");
     let made: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
@@ -80,8 +80,8 @@ fn a_non_loopback_metrics_listen_is_refused_before_the_data_directory_opens() {
 
 #[test]
 fn a_serve_that_gives_token_and_access_is_refused_before_the_store_opens() {
-    let dir = tempfile::tempdir().unwrap();
-    let access = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
+    let access = scion_server::test_support::private_tempdir();
     let file = access.path().join("access");
     std::fs::write(&file, "token\n").unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_scion-server"))

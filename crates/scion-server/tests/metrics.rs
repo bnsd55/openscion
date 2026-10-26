@@ -82,7 +82,7 @@ async fn setup() -> (
     ChangesetId,
     std::net::SocketAddr,
 ) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Store::open(dir.path()).unwrap();
     store.blobs().put(CONTENT).unwrap();
     let root = changeset(

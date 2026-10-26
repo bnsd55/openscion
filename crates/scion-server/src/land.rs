@@ -1506,7 +1506,7 @@ mod tests {
 
     /// A repo whose `main` points at a root with `a/x`, `b/y` and `c`.
     fn fixture() -> Fixture {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         fixture_on(store, dir)
     }
@@ -1514,7 +1514,7 @@ mod tests {
     /// The same repo, on the test backend the environment names: the
     /// verdict race runs on SQLite and on the test database alike.
     fn fixture_shared() -> Fixture {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test_shared(dir.path()).unwrap();
         fixture_on(store, dir)
     }
@@ -2738,7 +2738,7 @@ mod tests {
             (parents, edits) in testing::histories(40),
             room in proptest::option::of(0..4000_usize),
         ) {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::test_support::private_tempdir();
             let store = Backend::sqlite(Store::open(dir.path()).unwrap());
             let (repo, ids) = store
                 .write(|c| {
@@ -3402,7 +3402,7 @@ mod tests {
 
     #[test]
     fn a_version_1_database_upgrades_and_keeps_its_lands() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let (child, pending_cs) = {
             let c = Connection::open(dir.path().join("scion.db")).unwrap();
             let v1 = include_str!("../migrations/0001_init.sql");
@@ -3543,7 +3543,7 @@ mod tests {
         let f = fixture();
         // The audit file lives in its own temp dir, so two test runs
         // never share it.
-        let audit_dir = tempfile::tempdir().unwrap();
+        let audit_dir = crate::test_support::private_tempdir();
         let audit_path = audit_dir.path().join("audit.log");
         let audit = crate::audit::Audit::open(&audit_path).unwrap();
         let cs = f.commit(f.root, &[put("a/x", "new")]);

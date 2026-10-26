@@ -41,7 +41,7 @@ fn refuses(cwd: &Path, args: &[&str]) {
 fn a_missing_data_directory_is_refused_not_created() {
     // The default `scion-data` in the cwd: every store-touching
     // subcommand refuses and creates nothing.
-    let cwd = tempfile::tempdir().unwrap();
+    let cwd = scion_server::test_support::private_tempdir();
     let empty = cwd.path();
     refuses(empty, &["fsck"]);
     refuses(empty, &["gc"]);
@@ -99,9 +99,9 @@ fn a_missing_data_directory_is_refused_not_created() {
 
 #[test]
 fn an_existing_data_directory_works_as_today_and_restore_still_creates() {
-    let cwd = tempfile::tempdir().unwrap();
+    let cwd = scion_server::test_support::private_tempdir();
     let data = cwd.path().join("scion-data");
-    std::fs::create_dir_all(&data).unwrap();
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
     let bin = env!("CARGO_BIN_EXE_scion-server");
     // With the directory present, every refused command works as today.
     let out = Command::new(bin)
@@ -145,6 +145,8 @@ fn make_archive(into: &Path) -> PathBuf {
     use scion_server::test_support::tree;
 
     let repo_dir = tempfile::tempdir_in(into).unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(repo_dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let store = scion_server::Backend::open_test(repo_dir.path()).unwrap();
     store.blobs().put(b"a\n").unwrap();
     let repo = store.write(|c| c.create_repo("golden")).unwrap();

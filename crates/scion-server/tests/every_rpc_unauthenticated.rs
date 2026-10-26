@@ -59,7 +59,7 @@ fn access() -> Access {
 /// A store whose repo `main` has one root changeset that puts `README`,
 /// and its blob.
 async fn store() -> (tempfile::TempDir, Backend, scion_core::ChangesetId) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = {
         let path = dir.path().to_path_buf();
         tokio::task::spawn_blocking(move || Backend::open_test(&path).unwrap())

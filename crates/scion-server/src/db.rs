@@ -1791,7 +1791,7 @@ mod tests {
 
     #[test]
     fn the_upgrade_to_version_4_adds_the_blobs_of_each_repo() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let (a, b, c) = {
             let db = Connection::open(dir.path().join("scion.db")).unwrap();
             migrate(&db, 3).unwrap();

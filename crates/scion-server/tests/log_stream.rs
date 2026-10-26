@@ -46,7 +46,7 @@ fn chain(
     count: usize,
     name_len: usize,
 ) -> (tempfile::TempDir, Backend, Vec<scion_core::ChangesetId>) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = from_store(Store::open(dir.path()).unwrap());
     let ids = store
         .write(|c| {

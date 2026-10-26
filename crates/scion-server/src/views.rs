@@ -319,7 +319,7 @@ mod tests {
     }
 
     fn store() -> (tempfile::TempDir, Backend) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(crate::test_support::store::Store::open(dir.path()).unwrap());
         (dir, store)
     }

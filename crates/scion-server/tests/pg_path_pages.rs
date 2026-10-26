@@ -83,7 +83,7 @@ fn move_main(store: &Backend, repo: RepoId, to: ChangesetId) {
 /// The statements one land costs when the ref moved `n` changesets past
 /// the path index's tip: the land's catch-up walks all `n` of them.
 fn catch_up_statements(n: usize) -> u64 {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let (store, repo, root) = setup(dir.path());
     let lands = Lands::default();
     // The index tip: one landed changeset, so the index holds a tip
@@ -146,7 +146,7 @@ fn the_page_statement_returns_the_whole_page() {
     if !Backend::test_is_postgres() {
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let (store, repo, root) = setup(dir.path());
     let mut head = root;
     for i in 0..50 {

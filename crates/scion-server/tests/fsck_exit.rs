@@ -16,7 +16,7 @@ use scion_server::test_support::store::Store;
 #[test]
 fn the_exit_codes_of_fsck() {
     // 0: a clean directory.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Store::open(dir.path()).unwrap();
     let _blob = store.blobs().put(b"clean\n").unwrap();
     drop(store);
@@ -47,7 +47,7 @@ fn the_exit_codes_of_fsck() {
     );
 
     // 2: cannot run. A database no store can open cannot be checked.
-    let broken = tempfile::tempdir().unwrap();
+    let broken = scion_server::test_support::private_tempdir();
     fs::write(broken.path().join("scion.db"), b"not a database at all\n").unwrap();
     assert_eq!(
         fsck(broken.path()).status.code(),

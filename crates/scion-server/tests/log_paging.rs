@@ -34,7 +34,7 @@ type Scion = ScionClient<InterceptedService<Channel, Bearer>>;
 /// changes: even i changes `d/f.txt`, odd i changes `other.txt`. The
 /// message names i, so a test can tell which changeset an entry holds.
 fn chain(count: usize) -> (tempfile::TempDir, Backend, Vec<scion_core::ChangesetId>) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = from_store(Store::open(dir.path()).unwrap());
     let ids = store
         .write(|c| {

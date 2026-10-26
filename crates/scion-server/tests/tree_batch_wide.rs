@@ -50,7 +50,7 @@ fn changeset(files: &[String]) -> Changeset {
 fn a_wide_changeset_builds_under_the_bound() {
     // The public open with no URL is the data directory's SQLite store,
     // whatever SCION_TEST_BACKEND says.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open(dir.path(), None, None).unwrap();
     let repo = store.write(|c| c.create_repo(REPO)).unwrap();
     // The base commit creates the directories, so the counted build's

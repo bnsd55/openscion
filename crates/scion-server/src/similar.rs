@@ -755,7 +755,7 @@ mod tests {
     /// costs what it costs with one path, and finds the same rename.
     #[test]
     fn a_blob_added_at_many_paths_is_indexed_once() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         let new = store.blobs().put(&lines(0..4000)).unwrap();
         // 90% like `new`.
@@ -790,7 +790,7 @@ mod tests {
     /// deleted file with the name of the added file, and step 3 would.
     #[test]
     fn a_file_refused_is_read_once() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         let new = store.blobs().put(&lines(0..1000)).unwrap();
         let refused = store.blobs().put(&lines(0..900)).unwrap();
@@ -823,7 +823,7 @@ mod tests {
     /// rows indexed.
     #[test]
     fn a_file_whose_indexing_crosses_the_budget_stops_before_its_read() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         let deleted_blob = store.blobs().put(&lines(0..60)).unwrap();
         // Two added files, 60 chunks each and of a different content, so no
@@ -869,7 +869,7 @@ mod tests {
     /// each call looks at one more deleted file past the cap.
     #[test]
     fn resumed_calls_reach_the_renames_of_one_uncapped_call() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         let added_blob = store.blobs().put(&lines(0..60)).unwrap();
         let added_path = RepoPath::new("new").unwrap();

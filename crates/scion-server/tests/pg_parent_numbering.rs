@@ -162,7 +162,7 @@ fn a_ladder_through_the_ordinary_path_chains() {
     if !is_pg() {
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let (store, repo, mut tip) = setup(dir.path());
     for i in 0..300 {
         tip = child(&store, repo, tip, &format!("c{i}"));
@@ -182,7 +182,7 @@ fn a_ladder_through_the_ordinary_path_chains() {
 /// n = 1: the rows are the parents' places in the array.
 #[test]
 fn a_merges_parents_keep_their_places_from_zero() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let (store, repo, root) = setup(dir.path());
     let first = child(&store, repo, root, "a");
     let second = child(&store, repo, root, "b");
@@ -208,7 +208,7 @@ fn a_one_based_store_migrates_and_stays_migrated() {
     if !is_pg() {
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let schema = Backend::test_schema(dir.path()).unwrap();
     let mut db = raw_with_schema(&schema);
     db.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"))
@@ -315,7 +315,7 @@ fn the_bulk_seed_writes_what_the_ordinary_path_writes() {
         vec![root, a, b, m]
     };
     // The ordinary store: every changeset through the ordinary path.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let (store, repo, _) = setup(dir.path());
     for cs in ladder() {
         store
@@ -324,7 +324,7 @@ fn the_bulk_seed_writes_what_the_ordinary_path_writes() {
     }
     // The seeded store: the same changesets through the bulk seed, in a
     // fresh store, the way the budget tests seed.
-    let seed_dir = tempfile::tempdir().unwrap();
+    let seed_dir = scion_server::test_support::private_tempdir();
     let seed_store = Backend::open_test(seed_dir.path()).unwrap();
     seed_store
         .write(|c| {

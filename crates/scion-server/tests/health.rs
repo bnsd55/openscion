@@ -157,7 +157,7 @@ fn terminate(child: &Child) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_server_serves_until_shutdown_starts() {
-    let data = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
     let log_dir = data.path().join("log");
     fs::create_dir(&log_dir).unwrap();
     let log = log_dir.join("server.log");
@@ -197,7 +197,7 @@ async fn the_server_serves_until_shutdown_starts() {
 /// in-flight calls are cut, the log says so, and the process exits 1.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_second_signal_ends_the_drain_of_an_open_call() {
-    let data = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
     let log_dir = data.path().join("log");
     fs::create_dir(&log_dir).unwrap();
     let log = log_dir.join("server.log");
@@ -301,7 +301,7 @@ async fn wait_url(log: &Path) -> String {
 /// drain exits 0.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_drain_finishes_its_in_flight_calls_and_the_store_keeps_the_promise() {
-    let data = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
     let log_dir = data.path().join("log");
     let hooks = data.path().join("hooks");
     fs::create_dir(&log_dir).unwrap();
@@ -482,7 +482,7 @@ async fn after_the_restart(
 /// and the log names the cut, and a later retry works against a restart.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_drain_bound_cuts_the_calls_past_it() {
-    let data = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
     let log_dir = data.path().join("log");
     fs::create_dir(&log_dir).unwrap();
     let log = log_dir.join("server.log");

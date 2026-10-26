@@ -104,7 +104,7 @@ fn every_directory_of_a_new_data_directory_is_private_whatever_the_umask() {
         // the import still makes everything inside it - the database,
         // the blob folders and this process's staging folder - private
         // whatever the umask.
-        fs::create_dir_all(&data).unwrap();
+        scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
         for made in [top.join("project"), data.clone()] {
             fs::set_permissions(made, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
@@ -139,7 +139,7 @@ fn serve_starts_with_its_ticket_key_in_a_data_directory_that_it_made() {
     // The operator makes the data directory - 0700 even under the
     // most open umask, where a plain mkdir would give 0777, which no
     // check of the key's directory accepts.
-    fs::create_dir_all(&data).unwrap();
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
     fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
     run(server(
         "000",
@@ -210,7 +210,7 @@ fn a_restore_under_umask_022_publishes_a_private_data_directory() {
     let data = tmp.path().join("data");
     // The operator makes the data directory itself, private: the point
     // under test is the directory the RESTORE publishes.
-    fs::create_dir_all(&data).unwrap();
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
     fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
     run(server(
         "022",
@@ -258,7 +258,7 @@ fn a_restore_under_umask_022_publishes_a_private_data_directory() {
 /// store directory must be mode 0700.
 #[test]
 fn an_open_refuses_a_data_directory_that_group_or_others_can_read() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let path = dir.path().join("data");
     fs::create_dir(&path).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();

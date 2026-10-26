@@ -69,7 +69,7 @@ impl Fixture {
 }
 
 fn setup() -> Fixture {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = from_store(Store::open(dir.path()).unwrap());
     let blob = |content: &str| store.blobs().put(content.as_bytes()).unwrap();
     let state = |blob| {

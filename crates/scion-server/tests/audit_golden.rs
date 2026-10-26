@@ -548,7 +548,7 @@ async fn exercise() -> (tempfile::TempDir, std::path::PathBuf) {
     use tokio_stream::once;
 
     // One refused call: one counted line for this process's address.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = store(dir.path());
     let audit_path = dir.path().join("audit.log");
     let audit = Audit::open(&audit_path).unwrap();
@@ -636,7 +636,7 @@ async fn exercise() -> (tempfile::TempDir, std::path::PathBuf) {
     // against its own empty store, appending to this same audit file.
     // The binary refuses a missing data directory (#578); make it first.
     let gc_data = dir.path().join("gc-data");
-    fs::create_dir_all(&gc_data).unwrap();
+    scion_proto::runtime::auth::create_private_dir_all(&gc_data).unwrap();
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .arg("--data")
         .arg(&gc_data)

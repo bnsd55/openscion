@@ -4441,12 +4441,12 @@ mod tests {
             return;
         }
         let url = crate::backend::test_hooks::test_url().unwrap();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let schema = crate::backend::test_hooks::test_schema(dir.path());
         // The blob files, made by this build's writer and copied into the
         // old store's object folder: blob files carry no schema.
         let (blob_a, blob_b) = {
-            let scratch = tempfile::tempdir().unwrap();
+            let scratch = crate::test_support::private_tempdir();
             let store = crate::store::Store::open(scratch.path()).unwrap();
             let a = store.blobs().put(old_store::A).unwrap();
             let b = store.blobs().put(old_store::B).unwrap();
@@ -4587,7 +4587,7 @@ mod tests {
             return;
         }
         let url = crate::backend::test_hooks::test_url().unwrap();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let schema = crate::backend::test_hooks::test_schema(dir.path());
         let metrics = std::sync::Arc::new(crate::metrics::Metrics::default());
         let pg = Pg::open_test(
@@ -4649,7 +4649,7 @@ mod pool_tests {
             eprintln!("skip on sqlite: the reader pool is Postgres");
             return None;
         }
-        let data = tempfile::tempdir().unwrap();
+        let data = crate::test_support::private_tempdir();
         let backend = crate::backend::Backend::open_test(data.path()).unwrap();
         let pg = backend
             .as_postgres()
@@ -4936,7 +4936,7 @@ mod pool_tests {
     /// first one's row and hears the limit's answer.
     #[test]
     fn two_lands_that_record_together_respect_the_pending_cap() {
-        let data = tempfile::tempdir().unwrap();
+        let data = crate::test_support::private_tempdir();
         let a = crate::backend::Backend::open_test(data.path()).unwrap();
         let b = crate::backend::Backend::open_test_shared(data.path()).unwrap();
         let cs = a
@@ -5073,7 +5073,7 @@ mod pool_tests {
         if !crate::Backend::test_is_postgres() {
             return;
         }
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = crate::Backend::open_test(dir.path()).unwrap();
         let repo = store.write(|c| c.create_repo("main")).unwrap();
         let cs = Changeset::new(
