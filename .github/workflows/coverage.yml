@@ -206,7 +206,7 @@ jobs:
             done ) &
           watcher=$!
           mkdir -p .config
-          printf '[profile.default]\ntimeout = "2400s"\nretries = 1\n\n[profile.default.slow-timeout]\nperiod = "300s"\n' > .config/nextest.toml
+          printf '[profile.default]\ntimeout = "600s"\nretries = 1\nslow-timeout = { period = "60s", terminate-after = 5 }\n' > .config/nextest.toml
           # The README's recipe: show-env exports the instrumentation
           # RUSTFLAGS and the profile environment, plain cargo nextest
           # runs the tests against the binaries the build makes. The
@@ -258,11 +258,12 @@ jobs:
           # under instrumentation, ~13x). The slow-timeout above
           # terminates any test over 60 s and names it in the log
           # while the agent is still alive.
-          # The A/B probe for the coverage-only slowdown: only the two
-          # tests the 60 s cap named, uncapped (40 min per test), each
-          # timed in the log. Dispatch A measures the branch head;
-          # dispatch B passes commit=c1ee12ce.
-          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --workspace --no-fail-fast -E "test(the_model_holds_across_a_random_script) or test(the_give_back_still_catches_a_budget_that_is_never_freed)"; echo $? > measure.rc' \
+          # The wedge hunt: the full suite, uncapped within 5 minutes
+          # per try (the old profile's own kill point). Every test that
+          # eats minutes is terminated at 300 s and named in a log that
+          # uploads; if nothing is named, the 45-minute regime is not
+          # per-test wedges and the hunt moves to the machine state.
+          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --workspace --no-fail-fast; echo $? > measure.rc' \
             | tee measure.log
           # The step must not fail on a watcher that is already gone:
           # a tripped guard exited by design, and its trip file says so
