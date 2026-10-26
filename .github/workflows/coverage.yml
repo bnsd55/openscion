@@ -515,7 +515,7 @@ jobs:
           # else - no name pattern, nothing of the step or the watcher.
           sum="${GITHUB_STEP_SUMMARY:-/dev/null}"
           echo "postgres measure starts at $(date -u +%T)" >> "$sum" || true
-          if nice -n 19 cargo nextest --no-run --workspace --no-fail-fast -E "package(open-scion-server) and not test(graph_queries_across_many_merges_answer)" > build-postgres.log 2>&1; then
+          if nice -n 19 cargo nextest run --no-run --workspace --no-fail-fast -E "package(open-scion-server) and not test(graph_queries_across_many_merges_answer)" > build-postgres.log 2>&1; then
             echo "postgres build ends at $(date -u +%T)" >> "$sum" || true
           else
             echo "the postgres build failed:"
