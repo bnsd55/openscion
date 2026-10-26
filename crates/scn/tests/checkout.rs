@@ -555,6 +555,14 @@ fn a_tree_with_a_dot_nul_or_slash_name_is_refused_before_anything_is_written() {
         assert!(!out.status.success(), "{to:?}: {}", stderr(&out));
         assert!(stderr(&out).contains("bad path"), "{}", stderr(&out));
         assert_untouched(&dest);
+        // The danger of `..` is a write outside the destination: the
+        // temp dir holds the destination and nothing else.
+        let mut strays: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        strays.retain(|name| name != "dest");
+        assert!(strays.is_empty(), "{strays:?}");
     }
 }
 
