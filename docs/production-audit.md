@@ -184,8 +184,8 @@ in-process; stated in the PR).
 | Ticket and seed files are 0600; the access file refuses group/other writable and symlinks | `crates/scion-server/src/main.rs:1333,1433,1493` | bounded — ceiling: 0600 on every secret file, the access file refuses go-w and symlinks at the open; `operations.md` "The open checks" states the refusal |
 | Listeners default to loopback | `crates/scion-server/src/main.rs:60` (`default_value = "127.0.0.1:7878"`) | bounded — ceiling: the default bind is 127.0.0.1:7878; `docs/operations.md`'s serve examples restate it |
 | Production state in temp dirs: the server never writes store state outside `--data`; every temp-dir user is a harness script | `crates/scion-server/src/main.rs:29` (the only store path) | fixed by design (the data dir is the only durable state; `TMPDIR` appears in no serve path) |
-| Paths the process creates with the process umask inherit the gap: `export --out` (a new archive world-readable under a permissive umask) and the restore's staging directory (0755 members under a 0700 store) | export.rs `--out` create; restore staging create | the restore row: fixed (#669, 4d5187f1 - the staging is created 0700 with a red proof); the export row: open, PR #666 (export: `--out` created 0700) - HIGH until it merges |
-| A data directory whose mode lets other users read it is refused at serve time | `check_private_dir`, listen.rs | open, PR #670 |
+| Paths the process creates with the process umask inherit the gap: `export --out` (a new archive world-readable under a permissive umask) and the restore's staging directory (0755 members under a 0700 store) | `archive.rs` `make_dir` (the `--out` root, archive.rs:128,1458); the restore staging create | the restore row: fixed (#669, 4d5187f1 - the staging is created 0700 with a red proof); the export row: open, PR #666 (export: `--out` created 0700) - HIGH until it merges |
+| A data directory whose mode lets other users read it is refused at every open of the store | `refuse_bad_dir`, store.rs:258 (serve, import, fsck, gc, derive) | open, PR #670 |
 | `checkout` accepted the hostile-tree names (`..`, NUL, `..`-prefixed members) a crafted changeset can carry | the checkout name check | fixed (#662): `..`, NUL and `..`-prefixed members are refused; the mutation run found the guard unbound - no test failed a mutant that removed it - and #662's tests name that gap |
 
 ## 7. Compatibility
@@ -207,9 +207,11 @@ The pairing is enforced on the diff: `scripts/check-golden-pairing.sh`
 itself had gaps found on 2026-10-26 (all being fixed in #668, open):
 two table rows (`crates/scion-server/tests/archive_v1.golden` and
 `archive_golden.rs`) carry no rule word, so the `rule` field read the
-golden's path and the row always took the "describe" branch, and the
-protocol row's pattern `describes version ` can never match a diff
-line's leading `+`/`-` context as written. Pinned
+golden's path and the row always took the "describe" branch; and the
+rows whose pattern starts with `^` (`^# Scion object format v` at
+check-golden-pairing.sh:48, `^Version [0-9]+ is this document` at
+:53-54) can never match a diff line, which always begins with `+`, `-`
+or a header prefix. Pinned
 bytes (the wire golden, the store pins, the archive golden) fail
 without their format document's version line in the same pull request.
 `proto/scion.proto` and the surface golden are additive - they need no
@@ -262,7 +264,7 @@ gap.
 | `ticket.rs` (#648) | 2 shapes | the walk's tree-id content-hash guard (a crafted tree reached a file the real tree does not name) and the ticket lifetime (no test pinned the 15 minutes) - both bound in #648. HIGH while it lasted: the tree-id check was unbound |
 | the cache's signature check (#647) | 1 shape | the tier cache accepted `parse_unverified`: a signature check with no tier-level test. #647 drives a real cache with an unsigned ticket, an unknown key, and a flipped byte - each refused, the upstream untouched. HIGH while it lasted |
 | the restore path (#659, #669) | 1 pin + 1 shape | the stream cut: the restore fails naming the torn stream, the target holds no store, the staging scratch is gone (#659); the staging directory made under the process umask left a 0700 parent store with 0755 members - the staging is created 0700 explicitly, whatever the umask, with a red proof (#669, 4d5187f1) |
-| the auth paths | - | a run is in progress; this table grows when it reports |
+| the auth paths | - | the run is paused at 20 of 44 mutants, no gap found so far; this table grows when it reports |
 
 ## The open list (the v1.0 blockers this audit leaves)
 
