@@ -37,7 +37,9 @@ certificates and a real token for anything that matters.
   user `scion` (uid 10001); data lives under `/data`, which a named volume
   owns. `/data` is mode 0700 in the image, so a named volume inherits it
   at its first creation: the server refuses a data directory that other
-  users can read or write, and the volume starts inside the rule.
+  users can read or write, and the volume starts inside the rule. A bind
+  mount keeps the host directory's own mode instead, so the operator
+  makes it private first: `chmod 700 <host dir>`.
 - `docker/compose.yml`: the `server`, `cache`, and a one-shot `scn` runner.
 - `docker/demo.sh`: the script the steps above describe.
 - `docker/compose.postgres.yml`: the Postgres variant's additions, loaded
