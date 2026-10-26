@@ -1964,7 +1964,7 @@ mod tests {
         ));
     }
 
-    /// A land request whose target_ref or request_key breaks the name
+    /// A land request whose `target_ref` or `request_key` breaks the name
     /// rule is refused before anything is recorded: not even the pending
     /// row exists.
     #[test]
@@ -2004,8 +2004,8 @@ mod tests {
         assert_eq!(rows, 0, "no land row for the refused request");
     }
 
-    /// The name limit is "longer than", so a target_ref of exactly
-    /// MAX_NAME_BYTES passes the check (the land then answers Rejected:
+    /// The name limit is "longer than", so a `target_ref` of exactly
+    /// `MAX_NAME_BYTES` passes the check (the land then answers Rejected:
     /// no ref has that name) and one byte more is refused. A comparison
     /// flipped to == (accepts past the limit) or >= (refuses the
     /// boundary) fails here.
@@ -2057,6 +2057,7 @@ mod tests {
         // hook's lock after the step ran, so re-arming inside it is
         // what the hook exists for). One armed hook per attempt: the
         // last abort must end the loop with no successor armed.
+        #[allow(clippy::items_after_statements)]
         fn arm(
             lands: &Arc<Lands>,
             store: &Backend,
