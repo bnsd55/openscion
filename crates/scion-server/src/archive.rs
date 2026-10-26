@@ -119,13 +119,13 @@ pub fn export(
     let mut total_refs = 0_u64;
     let mut total_lands = 0_u64;
     let mut total_members = 0_u64;
-    // The archive's root: made recursively, as before — the operator
-    // names a path whose parents may not exist, and the fold risk this
-    // module guards is between REPO names, not in the operator's own
-    // path. Each section directory below is a NON-recursive create, so
-    // a fold on the disk is an error, not a silent reuse of another
-    // repo's directory.
-    make_dir(out)?;
+    // The archive's root: made recursively and PRIVATE (mode 0700
+    // whatever the umask), as the data directory is — the archive holds
+    // every repo whole. The parents the operator's path needs
+    // are made 0700 where they were missing. Each section directory
+    // below is a NON-recursive create, so a fold on the disk is an
+    // error, not a silent reuse of another repo's directory.
+    scion_proto::runtime::auth::create_private_dir_all(out)?;
     let repos_dir = out.join("repos");
     fs::DirBuilder::new()
         .create(&repos_dir)

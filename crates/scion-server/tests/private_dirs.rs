@@ -197,6 +197,44 @@ fn serve_starts_with_its_ticket_key_in_a_data_directory_that_it_made() {
     );
 }
 
+/// The export's root is the archive's whole body - every repo's blobs,
+/// changesets and refs - so a new `--out` directory is made private
+/// (0700) whatever the umask, as the data directory is.
+#[test]
+fn an_export_into_a_new_out_makes_it_private_whatever_the_umask() {
+    let tmp = private_tempdir();
+    let git = tmp.path().join("git");
+    git_repo(&git);
+    let data = tmp.path().join("data");
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
+    run(server(
+        "022",
+        &[
+            "--data".as_ref(),
+            data.as_os_str(),
+            "import".as_ref(),
+            "--repo".as_ref(),
+            "main".as_ref(),
+            git.as_os_str(),
+        ],
+    ));
+
+    // A new --out under umask 022: the root comes out 0700.
+    let out = tmp.path().join("fresh-archive");
+    run(server(
+        "022",
+        &[
+            "--data".as_ref(),
+            data.as_os_str(),
+            "export".as_ref(),
+            "--all".as_ref(),
+            "--out".as_ref(),
+            out.as_os_str(),
+        ],
+    ));
+    assert_eq!(mode_of(&out), 0o700, "a new export root");
+}
+
 /// A restore publishes the staging directory by one rename, so the
 /// restored data directory carries the staging's mode. The staging must
 /// therefore be private: a restore under umask 022 (a plain `create_dir_all`

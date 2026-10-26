@@ -22,7 +22,7 @@ document landed on.
 
 | Finding | Evidence | Status |
 | --- | --- | --- |
-| `scn mount --unstable-writable`: a planted parent symlink can redirect an overlay write outside the mount (final-name-only check). the maintainer's decision: the writable mount leaves the v1 release binary — the write path becomes a build feature, off in release | `crates/scn/src/vfs.rs:1469`, `docs/cli.md:57`, `changes/313.fixed.md` | open, closed when the write path left the release builds (#640) |
+| `scn mount --unstable-writable`: a planted parent symlink can redirect an overlay write outside the mount (final-name-only check). the maintainer's decision: the writable mount leaves the v1 release binary — the write path becomes a build feature, off in release | `crates/scn/src/vfs.rs:1469`, `docs/cli.md:57`, `changes/313.fixed.md` | fixed (#640: the write path is a build feature, off in release; the build flag names it) |
 | Env aliases `SCION_DATA`, `SCION_TOKEN`, `SCION_POSTGRES_URL`, `SCION_POSTGRES_URL_FILE` exist beside their flags | `crates/scion-server/src/main.rs:30,36-44,1290` | fixed by design (each alias is the documented spelling of a flag in `docs/cli.md`; the flag list is the release surface, and the URL env exists so secrets stay off argv) |
 | Test hooks in release binaries: the store fault hooks and the derive test pool build only with `--features test-hooks` | `crates/scion-server/Cargo.toml:61`, `crates/scion-server/src/store.rs:920` | fixed by design (the feature is off in every release build; `release.yml` builds plain `--release`) |
 
@@ -184,6 +184,9 @@ in-process; stated in the PR).
 | Ticket and seed files are 0600; the access file refuses group/other writable and symlinks | `crates/scion-server/src/main.rs:1333,1433,1493` | bounded — ceiling: 0600 on every secret file, the access file refuses go-w and symlinks at the open; `operations.md` "The open checks" states the refusal |
 | Listeners default to loopback | `crates/scion-server/src/main.rs:60` (`default_value = "127.0.0.1:7878"`) | bounded — ceiling: the default bind is 127.0.0.1:7878; `docs/operations.md`'s serve examples restate it |
 | Production state in temp dirs: the server never writes store state outside `--data`; every temp-dir user is a harness script | `crates/scion-server/src/main.rs:29` (the only store path) | fixed by design (the data dir is the only durable state; `TMPDIR` appears in no serve path) |
+| Paths the process creates with the process umask inherit the gap: `export --out` (a new archive world-readable under a permissive umask) and the restore's staging directory (0755 members under a 0700 store) | `archive.rs` `make_dir` (the `--out` root, archive.rs:128,1458); the restore staging create | the restore row: fixed (#669, 4d5187f1 - the staging is created 0700 with a red proof); the export row: open, PR #666 (export: `--out` created 0700) - HIGH until it merges |
+| A data directory whose mode lets other users read it is refused at every open of the store | `refuse_bad_dir`, store.rs:258 (serve, import, fsck, gc, derive) | open, PR #670 |
+| `checkout` accepted the hostile-tree names (`..`, NUL, `..`-prefixed members) a crafted changeset can carry | the checkout name check | fixed (#662): `..`, NUL and `..`-prefixed members are refused; the mutation run found the guard unbound - no test failed a mutant that removed it - and #662's tests name that gap |
 
 ## 7. Compatibility
 
@@ -200,7 +203,15 @@ in-process; stated in the PR).
 | Archive (`docs/archive-format.md`) | `crates/scion-server/tests/archive_golden.rs` + `archive_v1.golden`: one export's files and normalized manifest, byte-for-byte, on both backends | a manifest with an unknown version or format is refused with the named error before any write (`an_archive_of_an_unknown_version_or_format_is_refused`); red-proven: a reader that accepts version 2 restores the archive and fails the test | the lint watches `archive_v1.golden` and `archive_golden.rs` |
 
 The pairing is enforced on the diff: `scripts/check-golden-pairing.sh`
-(the CI lint job, on the pull request's own `HEAD^1..HEAD`). Pinned
+(the CI lint job, on the pull request's own `HEAD^1..HEAD`). The gate
+itself had gaps found on 2026-10-26 (all being fixed in #668, open):
+two table rows (`crates/scion-server/tests/archive_v1.golden` and
+`archive_golden.rs`) carry no rule word, so the `rule` field read the
+golden's path and the row always took the "describe" branch; and the
+rows whose pattern starts with `^` (`^# Scion object format v` at
+check-golden-pairing.sh:48, `^Version [0-9]+ is this document` at
+:53-54) can never match a diff line, which always begins with `+`, `-`
+or a header prefix. Pinned
 bytes (the wire golden, the store pins, the archive golden) fail
 without their format document's version line in the same pull request.
 `proto/scion.proto` and the surface golden are additive - they need no
@@ -235,6 +246,25 @@ section; its fixes landed as #561. Highlights, with that audit's verdicts:
 | Every third-party action is pinned to a commit SHA with the version in a comment | `.github/workflows/ci.yml:24` and every workflow | fixed (pinned at introduction; the scorecard workflow watches for drift) |
 | Service containers carry version tags, not mutable `latest` | `ci.yml` (the matrix `postgres:16.15/17.11/18.6`, each `@sha256:`-pinned in its include entry), `ci.yml` and `bench.yml` (`postgres:17.11@sha256:...`) | fixed — every services image pins its tag's multi-arch index; `scripts/lint-workflows.sh` fails a services `image:` line without `@sha256:` |
 | Artifacts are built from the protected release tag only | `docs/RELEASING.md`, `docs/verify.md`, `docs/slsa.md` | fixed by design (the release workflow builds on the tag; the provenance doc states the SLSA level) |
+
+## 10. Test strength (mutation testing)
+
+A mutation-testing pass per module: each run flips one comparison or
+guard at a time, and a surviving mutant names a check whose loss no
+test would notice. The table lists the modules run so far, the mutant
+count, what survived, and the pull request whose tests killed each real
+gap.
+
+| Module (the mutants' run) | Mutants | What survived, and what killed it |
+| --- | --- | --- |
+| `gc.rs` (#650) | 94 | 7 shapes: the grace report, the batch walk's end, three blob-root guards, a gone file's age, a corrupt changeset's naming - one test each, linked in #650 |
+| `write.rs` (#649) | 2 shapes | the author-NAME limit (only the email arm was tested) and the message boundary (no test pinned the exact limit) - both bound with red proofs in #649 |
+| the land path (#652) | 3 shapes | the empty name/ref arm, the name limit's boundary, the replan attempt cap - one test each, with the expected mutant outcomes named in #652 |
+| `fsck.rs` (#655, #660) | 55 (the full sweep: 39 assertion-caught, 10 timeout-caught, 6 missed) | the 6 missed shapes, one killing test each in #660: the tree, history-node and repo-blob walks stop at a full page, a land whose changeset is gone reads clean, an unknown derived kind reads as damage instead of old; #655's four operator-view tests (an unreadable blob root, a lying tree size, a page-boundary early stop, a missing blob root) complete the run; the restore's staging pin (#659) adds the late-truncation layer |
+| `ticket.rs` (#648) | 2 shapes | the walk's tree-id content-hash guard (a crafted tree reached a file the real tree does not name) and the ticket lifetime (no test pinned the 15 minutes) - both bound in #648. HIGH while it lasted: the tree-id check was unbound |
+| the cache's signature check (#647) | 1 shape | the tier cache accepted `parse_unverified`: a signature check with no tier-level test. #647 drives a real cache with an unsigned ticket, an unknown key, and a flipped byte - each refused, the upstream untouched. HIGH while it lasted |
+| the restore path (#659, #669) | 1 pin + 1 shape | the stream cut: the restore fails naming the torn stream, the target holds no store, the staging scratch is gone (#659); the staging directory made under the process umask left a 0700 parent store with 0755 members - the staging is created 0700 explicitly, whatever the umask, with a red proof (#669, 4d5187f1) |
+| the auth paths | - | the run is paused at 20 of 44 mutants, no gap found so far; this table grows when it reports |
 
 ## The open list (the v1.0 blockers this audit leaves)
 
