@@ -64,7 +64,7 @@ fn scn(args: &[&str]) -> Output {
 /// changeset on no ref: the two ends of `is-ancestor`'s table. Returns
 /// the URL, the two IDs in hex, and the keep-alive runtime.
 fn server_with_two_changesets() -> (String, String, String, tokio::runtime::Runtime) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = scion_server::test_support::store::Store::open(dir.path()).unwrap();
     let blob = store.blobs().put(b"exit codes\n").unwrap();
     let root = Changeset::new(
