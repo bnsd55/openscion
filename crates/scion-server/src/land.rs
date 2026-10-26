@@ -1987,7 +1987,21 @@ mod tests {
             }
             other => panic!("expected InvalidArgument, got {other:?}"),
         }
-        assert_eq!(f.landed_count(), 0, "nothing was recorded");
+        // The refusal must land before the land is recorded at all: the
+        // lands table holds no row for that caller and key, not even a
+        // pending one (a count of landed rows would miss a row a lost
+        // guard left pending).
+        let sql = "SELECT count(*) FROM lands WHERE caller = ?1 AND request_key = ?2";
+        let rows: i64 = f
+            .store
+            .read(|c| {
+                c.sqlite()
+                    .unwrap()
+                    .query_row(sql, ["t", "k"], |row| row.get(0))
+                    .map_err(crate::error::from_sqlite)
+            })
+            .unwrap();
+        assert_eq!(rows, 0, "no land row for the refused request");
     }
 
     /// The name limit is "longer than", so a target_ref of exactly
@@ -2001,6 +2015,8 @@ mod tests {
         let cs = f.commit(f.root, &[put("a/x", "new")]);
         let mut r = req(cs, "k");
         r.target_ref = "m".repeat(MAX_NAME_BYTES);
+        // No ref carries that name, so a name that passes the limit
+        // answers Rejected - the state proves the check passed it.
         let out = f.lands.land(&f.store, &caller(), &r).unwrap();
         assert_eq!(out.state, LandState::Rejected, "{}", out.detail);
         r.target_ref = "m".repeat(MAX_NAME_BYTES + 1);
@@ -2017,9 +2033,9 @@ mod tests {
     /// counted are the attempts minus one. The hook moves the ref
     /// between the plan and the settle and re-arms itself while imports
     /// remain, so every attempt loses its race and the loop must give
-    /// up. A guard that never ends (attempt < MAX_ATTEMPTS -> true), one
-    /// extra attempt (< -> <=) or a counter that walks the wrong way
-    /// (+= -> -= or *=) hangs this test or fails the count.
+    /// up. The queue is finite: a broken cap (< -> <=, a counter that
+    /// walks the wrong way) runs out of imports and the hook's expect
+    /// fails the test; a count one past the cap fails the assert.
     #[test]
     fn a_land_that_aborts_at_every_settle_stops_at_the_attempt_cap() {
         let f = fixture();
@@ -2086,7 +2102,7 @@ mod tests {
         }
         assert_eq!(
             metrics.land_replans(),
-            MAX_ATTEMPTS - 1,
+            u64::from(MAX_ATTEMPTS) - 1,
             "one replan per abort but the last"
         );
         // The land stays pending: a retry with the same key replans
