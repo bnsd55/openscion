@@ -48,8 +48,9 @@ const READINESS_SERVICE: &str = "scion.v1.Scion";
 #[ignore = "a measurement for the recovery-time job: run with --ignored --nocapture"]
 async fn a_restart_after_a_kill_recovers_in_a_stated_time() {
     let dir = scion_server::test_support::private_tempdir();
+    // Store::open creates the data directory itself, private whatever
+    // the umask; a directory made here first carries the umask's modes.
     let data = dir.path().join("data");
-    std::fs::create_dir(&data).unwrap();
     let store = from_store(Store::open(&data).unwrap());
 
     // The build, the restore bench's shape: REPOS repos of
