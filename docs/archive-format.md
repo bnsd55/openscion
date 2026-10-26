@@ -18,7 +18,9 @@ already keeps the mode the operator gave it.
 ## The version rule
 
 An archive's `manifest.json` names `"format": "scion-archive"` and a
-`"version"`. Version 1 is this document. A reader refuses an archive
+`"version"`. Version 1 is this document, including the 0700 rule for a new
+`--out` directory below. A reader refuses an archive whose format or
+version it does not know: `scion-archive-1` readers
 whose format or version it does not know: `scion-archive-1` readers
 accept version 1 only. A future version that breaks the rules below
 MUST carry a new version number, and SHOULD carry a new top-level
