@@ -267,4 +267,3 @@ fn an_open_refuses_a_data_directory_that_group_or_others_can_read() {
     };
     assert!(err.to_string().contains("make it mode 0700"), "{err}");
 }
-

@@ -82,8 +82,9 @@ the umask is - under umask 002 (Ubuntu's user private groups) a plain `mkdir`
 makes a group-writable directory, and the server refuses it; the error names
 the chmod that fixes it. The data directory holds every blob and every row, so keep it
 mode 0700 and owned by the user the server runs as: the server refuses one
-that group or others can write, or that sits under a directory another user
-can change. Without `--ticket-key` no object is readable, so a real server
+that group or others can write, one they can read, or that sits under a
+directory another user can change; the error names the directory, and
+`chmod 700 <dir>` fixes it. Without `--ticket-key` no object is readable, so a real server
 adds a ticket key (section 2):
 
 ```sh
@@ -238,7 +239,7 @@ example gives the cache the same caller token the server holds.
 ### Server, cache, and a daemon per user
 
 ```sh
-mkdir -p ~/.scion-daemon
+install -d -m 0700 ~/.scion-daemon
 SCION_TOKEN=<USER_TOKEN> SCION_UPSTREAM_TOKEN=<CACHE_TOKEN> \
   ./scion-daemon --data ~/.scion-daemon --upstream http://CACHE:7879
 ```
@@ -725,6 +726,7 @@ are process state, not data. A copy of the directory is a backup:
 
 ```sh
 cp -R /srv/scion /backups/scion-$(date +%F)
+chmod 700 /backups/scion-$(date +%F)
 ```
 
 With the server stopped, the copy is exact. While the server runs, take
@@ -752,6 +754,7 @@ Then copy the blob files into the backup:
 
 ```sh
 cp -R /srv/scion/objects /backups/scion-$(date +%F)/objects
+chmod 700 /backups/scion-$(date +%F)/objects
 ```
 
 The `backend` marker is part of the metadata: it holds the store's UUID,

@@ -455,7 +455,7 @@ fn a_stream_cut_after_the_first_batch_fails_and_leaves_no_store() {
     const CHAIN_BIG: usize = 64;
     const MESSAGE_BYTES: usize = 200 * 1024;
 
-    let data = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
     let content = "small file\n".to_string();
     let blob = store.blobs().put(content.as_bytes()).unwrap();
