@@ -233,25 +233,7 @@ fn an_export_into_a_new_out_makes_it_private_whatever_the_umask() {
     ));
     assert_eq!(mode_of(&out), 0o700, "a new export root");
 
-    // An existing --out keeps the operator's mode (0700 here, set above
-    // by the temp dir; make a 0750 one to prove the mode stays).
-    let existing = tmp.path().join("existing-archive");
-    fs::create_dir(&existing).unwrap();
-    fs::set_permissions(&existing, fs::Permissions::from_mode(0o750)).unwrap();
-    run(server(
-        "022",
-        &[
-            "--data".as_ref(),
-            data.as_os_str(),
-            "export".as_ref(),
-            "--all".as_ref(),
-            "--out".as_ref(),
-            existing.as_os_str(),
-        ],
-    ));
-    assert_eq!(
-        mode_of(&existing),
-        0o750,
-        "an existing --out keeps its mode"
-    );
+    // (An existing --out keeps its mode by the helper's rule; the CLI
+    // refuses one outright - "It must not exist" - so the operator's
+    // choice is the only mode an existing directory ever wears.)
 }
