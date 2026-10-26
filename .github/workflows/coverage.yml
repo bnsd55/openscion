@@ -252,7 +252,7 @@ jobs:
           # minutes untouched - the runner is innocent, the test load
           # is not. One crate at a time, each result to the job
           # summary: a loss names the last completed crate.
-          for crate in scion-core scion-proto scion-tier scn; do
+          for crate in open-scion-core open-scion-proto open-scion-tier open-scion; do
             echo "starting $crate at $(date -u +%T)" >> "$sum" || true
             setsid bash -c "echo \$\$ > measure.pgid; nice -n 19 cargo nextest run -p $crate --no-fail-fast; echo \$? > measure.rc" \
               | tee "measure-$crate.log"
