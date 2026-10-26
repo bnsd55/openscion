@@ -21,6 +21,12 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      commit:
+        description: 'optional commit to measure instead of the ref head'
+        required: false
+        default: ''
+        type: string
 
 # Every third-party action is pinned to the commit SHA its version tag
 # named, with the version in a comment, as ci.yml does.
@@ -59,6 +65,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit != '' && inputs.commit || github.ref }}
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: llvm-tools-preview
@@ -198,7 +206,7 @@ jobs:
             done ) &
           watcher=$!
           mkdir -p .config
-          printf '[profile.default]\ntimeout = "600s"\nretries = 1\nslow-timeout = { period = "20s", terminate-after = 3 }\n' > .config/nextest.toml
+          printf '[profile.default]\ntimeout = "2400s"\nretries = 1\n\n[profile.default.slow-timeout]\nperiod = "300s"\n' > .config/nextest.toml
           # The README's recipe: show-env exports the instrumentation
           # RUSTFLAGS and the profile environment, plain cargo nextest
           # runs the tests against the binaries the build makes. The
@@ -250,7 +258,11 @@ jobs:
           # under instrumentation, ~13x). The slow-timeout above
           # terminates any test over 60 s and names it in the log
           # while the agent is still alive.
-          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --workspace --no-fail-fast; echo $? > measure.rc' \
+          # The A/B probe for the coverage-only slowdown: only the two
+          # tests the 60 s cap named, uncapped (40 min per test), each
+          # timed in the log. Dispatch A measures the branch head;
+          # dispatch B passes commit=c1ee12ce.
+          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --workspace --no-fail-fast -E "test(the_model_holds_across_a_random_script) or test(the_give_back_still_catches_a_budget_that_is_never_freed)"; echo $? > measure.rc' \
             | tee measure.log
           # The step must not fail on a watcher that is already gone:
           # a tripped guard exited by design, and its trip file says so
@@ -343,6 +355,8 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit != '' && inputs.commit || github.ref }}
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: llvm-tools-preview
@@ -580,6 +594,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit != '' && inputs.commit || github.ref }}
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: llvm-tools-preview
