@@ -3,6 +3,8 @@
 //! out-of-space reply that names no server path; nothing acknowledged is
 //! lost, no file is left half-written, and the next write works once the
 //! space is back.
+mod common;
+
 use scion_server::test_support::backend::BackendExt;
 use scion_server::test_support::meta::{Meta as _, MetaTx as _, RepoId};
 use scion_server::test_support::store::Store;
@@ -181,7 +183,11 @@ fn the_blob_hook_refuses_exactly_one_write_per_count() {
         b"d\n"
     );
     // Another open of the same directory still reads the stored files.
+    // The reopen waits out the inherited-flock teardown tick (the child
+    // another test forked shares the lock until the reap; macOS releases
+    // it one tick after waitpid): a real lock leak still fails the guard.
     drop(store);
+    common::spawn_guard::wait_for_lock_release(dir.path());
     let again = Store::open(dir.path()).unwrap();
     assert_eq!(
         again.blobs().get(scion_core::BlobId::of(b"a\n")).unwrap(),
