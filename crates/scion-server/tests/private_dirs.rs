@@ -10,6 +10,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+use scion_server::Backend;
 use std::time::{Duration, Instant};
 
 /// `scion-server` with `args`, run by a shell that first sets umask `umask`,
@@ -250,3 +252,19 @@ fn a_restore_under_umask_022_publishes_a_private_data_directory() {
         assert_eq!(mode, 0o700, "{}", path.display());
     }
 }
+
+/// The server refuses a data directory that group or others can READ, as
+/// the daemon refuses a socket directory: readable means reachable, and a
+/// store directory must be mode 0700.
+#[test]
+fn an_open_refuses_a_data_directory_that_group_or_others_can_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data");
+    fs::create_dir(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    let Err(err) = Backend::open(&path, None, None) else {
+        panic!("the open of a readable data directory must fail");
+    };
+    assert!(err.to_string().contains("make it mode 0700"), "{err}");
+}
+
