@@ -249,10 +249,10 @@ gap.
 | `gc.rs` (#650) | 94 | 7 shapes: the grace report, the batch walk's end, three blob-root guards, a gone file's age, a corrupt changeset's naming - one test each, linked in #650 |
 | `write.rs` (#649) | 2 shapes | the author-NAME limit (only the email arm was tested) and the message boundary (no test pinned the exact limit) - both bound with red proofs in #649 |
 | the land path (#652) | 3 shapes | the empty name/ref arm, the name limit's boundary, the replan attempt cap - one test each, with the expected mutant outcomes named in #652 |
-| `fsck.rs` (#655, plus the follow-up) | 55 (18 verdicts when the budget stopped the run) | 4 shapes where damage reports clean: an unreadable blob root, a lying tree size, a page-boundary early stop, a missing blob root - one operator-view test each, in #655; the restore's staging pin (#659) adds the late-truncation layer |
+| `fsck.rs` (#655, #660) | 55 (the full sweep: 39 assertion-caught, 10 timeout-caught, 6 missed) | the 6 missed shapes, one killing test each in #660: the tree, history-node and repo-blob walks stop at a full page, a land whose changeset is gone reads clean, an unknown derived kind reads as damage instead of old; #655's four operator-view tests (an unreadable blob root, a lying tree size, a page-boundary early stop, a missing blob root) complete the run; the restore's staging pin (#659) adds the late-truncation layer |
 | `ticket.rs` (#648) | 2 shapes | the walk's tree-id content-hash guard (a crafted tree reached a file the real tree does not name) and the ticket lifetime (no test pinned the 15 minutes) - both bound in #648. HIGH while it lasted: the tree-id check was unbound |
 | the cache's signature check (#647) | 1 shape | the tier cache accepted `parse_unverified`: a signature check with no tier-level test. #647 drives a real cache with an unsigned ticket, an unknown key, and a flipped byte - each refused, the upstream untouched. HIGH while it lasted |
-| the restore path (#659, open) | 1 pin | a stream cut after the first batch: the restore fails naming the torn stream, the target holds no store, the staging scratch is gone - #659, in review |
+| the restore path (#659) | 1 pin | a stream cut after the first batch: the restore fails naming the torn stream, the target holds no store, the staging scratch is gone - #659, on the merge train |
 | the auth paths | - | a run is in progress; this table grows when it reports |
 
 ## The open list (the v1.0 blockers this audit leaves)
