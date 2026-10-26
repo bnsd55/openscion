@@ -113,24 +113,24 @@ for section in added changed fixed security; do
             exit 1
             ;;
         esac
+        if [ ! -s "$fragment" ]; then
+            echo "fragment is empty: $fragment" >&2
+            exit 1
+        fi
+        if [ "$(head -n 1 "$fragment")" = "---" ]; then
+            echo "fragment starts with front matter ('---'); it is plain text: $fragment" >&2
+            exit 1
+        fi
+        # The first line becomes the row, so whitespace or a row
+        # marker on it would double ("- - x" or an indented row).
+        # Later lines may carry a nested bullet ("- ") or an indent,
+        # which the merge keeps inside the row, as the landed
+        # fragments write them.
+        if head -n 1 "$fragment" | grep -qn '^\([[:space:]]\|- \)'; then
+            echo "fragment's first line starts with whitespace or a row marker ('- '); it is plain text: $fragment" >&2
+            exit 1
+        fi
         if [ -n "$check" ]; then
-            if [ ! -s "$fragment" ]; then
-                echo "fragment is empty: $fragment" >&2
-                exit 1
-            fi
-            if [ "$(head -n 1 "$fragment")" = "---" ]; then
-                echo "fragment starts with front matter ('---'); it is plain text: $fragment" >&2
-                exit 1
-            fi
-            # The first line becomes the row, so whitespace or a row
-            # marker on it would double ("- - x" or an indented row).
-            # Later lines may carry a nested bullet ("- ") or an indent,
-            # which the merge keeps inside the row, as the landed
-            # fragments write them.
-            if head -n 1 "$fragment" | grep -qn '^\([[:space:]]\|- \)'; then
-                echo "fragment's first line starts with whitespace or a row marker ('- '); it is plain text: $fragment" >&2
-                exit 1
-            fi
             continue
         fi
         # A fragment is plain text: no row marker, no indent. The row
