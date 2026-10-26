@@ -28,10 +28,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # A pull_request run may cancel the run before it; a push to main
-  # may not — a run in progress finishes and verifies the head it ran
-  # on. (This file has no pull_request trigger, so the expression
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'push' }}
+  # An A/B dispatch carries its own group (the run id), so several can
+  # run in parallel; a push to main shares one group - a run in
+  # progress finishes and verifies the head it ran on. (This file has
+  # no pull_request trigger, so the expression
   # reads false on main.)
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
@@ -75,6 +76,7 @@ jobs:
           # measure.
           key: coverage-instrumented
           cache-on-failure: true
+          cache-targets: false
       - run: |
           curl -fsSL -o /tmp/cargo-llvm-cov.tgz \
             https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.9.1/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz
@@ -118,6 +120,13 @@ jobs:
           mkdir -p .cargo
           printf '[profile.dev]\ndebug = false\nstrip = true\n\n[profile.test]\ndebug = false\nstrip = true\n' > .cargo/config.toml
           echo "RUSTFLAGS=-C link-arg=-Wl,--no-keep-memory" >> "$GITHUB_ENV"
+      - name: restore the last instrumented build
+        id: restore-build
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: coverage-build-${{ runner.os }}-stable-${{ hashFiles('Cargo.lock') }}-sqlite
+          restore-keys: coverage-build-${{ runner.os }}-stable-${{ hashFiles('Cargo.lock') }}-
       # The image ships dozens of gigabytes of toolchains this job
       # never touches; they go.
       - name: free the runner's disk for the instrumented build
@@ -143,21 +152,13 @@ jobs:
           df -h / | tail -1; free -m | awk 'NR==2'
       - name: stale profiles go
         run: rm -f target/coverage/*.profraw target/coverage/*.profdata target/coverage/*-profraw-list
-      - name: measure, the default backend
+      - name: build, the default backend
         run: |
           set -o pipefail
-          # The watcher doubles as a guard: a runner whose disk fills or
-          # whose memory drains loses its agent mid-suite, with every
-          # log — so the measure fails itself, loudly, while there is
-          # still room to log the numbers.
-          ( while sleep 30; do date -u +%T; df -h / | tail -1; free -m | awk 'NR==2'; du -sh target/coverage 2>/dev/null; \
-              ps -eo pid,rss,pcpu,etime,comm --sort=-rss | head -4 | tee -a watcher.log; \
-              avail=$(df --output=avail -BG / | tail -1 | tr -dc '0-9'); \
-              mem=$(free -m | awk 'NR==2 {print $7}'); \
-              { [ "$avail" -gt 3 ] && [ "$mem" -gt 600 ]; } || { echo 'the runner is out of disk or memory'; df -h /; free -m; ps aux --sort=-rss | head -12; exit 2; }; done ) &
-          watcher=$!
-          mkdir -p .config
-          printf '[profile.default]\ntimeout = "600s"\nretries = 1\nslow-timeout = { period = "60s", terminate-after = 5 }\n' > .config/nextest.toml
+          # The coverage profile lives in the committed
+          # .config/nextest.toml: retries = 0 (no other CI job retries,
+          # and a retry hides both a flake and the hang this hunts),
+          # and a slow test dies at five minutes, named.
           # The README's recipe: show-env exports the instrumentation
           # RUSTFLAGS and the profile environment, plain cargo nextest
           # runs the tests against the binaries the build makes. The
@@ -180,14 +181,146 @@ jobs:
           # profiles discarded, and only the run phase writes them.
           LLVM_PROFILE_FILE=/dev/null nice -n 19 cargo nextest run \
             --workspace --no-run
+          echo "default build ends at $(date -u +%T)" >> "${GITHUB_STEP_SUMMARY:-/dev/null}" || true
+      # The save rides right behind the build: a run whose agent dies
+      # later still leaves a warm build for the next run, which breaks
+      # the cold-rebuild loop that loses the runner every other push.
+      - name: save the instrumented build
+        if: steps.restore-build.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: coverage-build-${{ runner.os }}-stable-${{ hashFiles('Cargo.lock') }}-sqlite
+      - name: measure, the default backend
+        run: |
+          set -o pipefail
+          # Steps do not share a shell: the 6 GB per-process cap and the
+          # instrumentation flags live in this step too, so the test run
+          # sees the same environment the build compiled with. The cap
+          # stays on: an A/B with and without it ran 6 of 6 green both
+          # ways, so it neither causes nor prevents the rare loss.
+          ulimit -v 6291456
+          # shellcheck disable=SC1090
+          source <(cargo llvm-cov show-env --sh)
           # One .profraw per test process made thousands per job, and
           # the runner was lost four runs in a row with no log (#565).
           # The %4m pool folds them into four files per test binary.
           # The gate merges *.profraw, so the report does not change.
           export LLVM_PROFILE_FILE="$PWD/target/coverage/sqlite-%4m.profraw"
-          nice -n 19 cargo nextest run --workspace --no-fail-fast \
+
+          # The watcher doubles as a guard: a runner whose disk fills or
+          # whose memory drains loses its agent mid-suite, with every
+          # log — so the measure fails itself, loudly, while there is
+          # still room to log the numbers. Two rules the first watcher
+          # broke (run 40188469520): no pipe may end in SIGPIPE (a ps
+          # piped to head dies with the subshell under pipefail, and
+          # the step then fails at the kill of a watcher already gone),
+          # and a trip must stop the measure, not only print - the
+          # nextest process group dies here, so the step fails with the
+          # hog's name in a log that still uploads.
+          rm -f guard.trip watcher.log watcher.ps
+          # The absolute floors are late: a leak that eats the runner
+          # kills its agent before 3G/600M arrive. The watch also
+          # trips on GROWTH against this measure's own start, which
+          # fires while there is still room to leave the evidence.
+          start_avail=$(df --output=avail -BG / 2> /dev/null | tail -1 | tr -dc '0-9') || true
+          start_mem=$(free -m 2> /dev/null | awk 'NR==2 {print $7}') || true
+          # The agent can also die of a process or thread leak: servers a
+          # test left behind pile up until the runner cannot fork. The
+          # watch counts processes, threads and the store family every
+          # tick, and trips on growth against this measure's own start.
+          start_procs=$(ps -e --no-headers 2> /dev/null | wc -l | tr -d ' ') || true
+          pgrep -c -f 'scion-(server|daemon|cache)' 2> /dev/null > /dev/null || true
+          ( while sleep 10; do
+              { date -u +%T; df -h / | tail -1; free -m | awk 'NR==2'; du -sh target/coverage 2>/dev/null; } || true
+              { ps -eo pid,rss,pcpu,etime,comm --sort=-rss > watcher.ps && head -4 watcher.ps >> watcher.log; } || true
+              procs=$(ps -e --no-headers 2> /dev/null | wc -l | tr -d ' ') || true
+              threads=$(ps -eLo --no-headers 2> /dev/null | wc -l | tr -d ' ') || true
+              family=$(pgrep -c -f 'scion-(server|daemon|cache)' 2> /dev/null) || true
+              family=${family:-0}
+              # shellcheck disable=SC2034
+              echo "processes=$procs threads=$threads store_family=$family" >> watcher.log || true
+              avail=$(df --output=avail -BG / | tail -1 | tr -dc '0-9' 2> /dev/null) || true
+              mem=$(free -m | awk 'NR==2 {print $7}' 2> /dev/null) || true
+              swap_used=$(free -m 2> /dev/null | awk 'NR==3 {print $3}') || true
+              echo "procs=$procs threads=$threads family=$family mem_avail=${mem:-?}M swap_used=${swap_used:-?}M disk_avail=${avail:-?}G" || true
+              avail_drop=0; mem_drop=0; proc_growth=0
+              if [ -n "${avail:-}" ] && [ -n "${start_avail:-}" ]; then
+                avail_drop=$((start_avail - avail))
+              fi
+              if [ -n "${mem:-}" ] && [ -n "${start_mem:-}" ]; then
+                mem_drop=$((start_mem - mem))
+              fi
+              if [ -n "${procs:-}" ] && [ -n "${start_procs:-}" ]; then
+                proc_growth=$((procs - start_procs))
+              fi
+              if [ "${avail:-10}" -le 3 ] || [ "${mem:-10000}" -le 600 ] || [ "$avail_drop" -ge 6 ] || [ "$mem_drop" -ge 4000 ] || [ "$proc_growth" -ge 500 ] || [ "$family" -ge 200 ]; then
+                {
+                  echo "the runner is out of disk or memory, or is leaking: avail=${avail:-?}G avail_floor=3G free_mem=${mem:-?}M mem_floor=600M disk_drop_since_start=${avail_drop:-?}G mem_drop_since_start=${mem_drop:-?}M processes=$procs (start ${start_procs:-?}, growth $proc_growth, floor +500) store_family=$family (floor 200) threads=$threads"
+                  df -h / || true
+                  free -m || true
+                  { ps -eo pid,rss,pcpu,etime,comm,args --sort=-rss > watcher.top && head -14 watcher.top; } || true
+                  { ps -eo ppid,comm | sort | uniq -c | sort -rn | head -10; } || true
+                } | tee -a watcher.log
+                # The reason goes to a file FIRST: the kill below takes
+                # the measure's process group, and anything this
+                # subshell only teed could die with the flush. The kill
+                # reaches exactly the measure's own session (setsid
+                # above): the negative pgid signals the wrapper, the
+                # runner and every test process. A setsid that failed
+                # would record the step's own group - the guard then
+                # stands down rather than kill its family, and the
+                # numbers below name that.
+                printf 'trip at %s: avail=%s mem=%s disk_drop=%s mem_drop=%s pgid=%s step_pgid=%s\n' "$(date -u +%T)" "${avail:-?}" "${mem:-?}" "${avail_drop:-?}" "${mem_drop:-?}" "$(cat measure.pgid 2> /dev/null || echo none)" "$(ps -o pgid= -p $$ 2> /dev/null | tr -d ' ')" > guard.trip 2> /dev/null || true
+                if [ -f measure.pgid ] && [ "$(ps -o pgid= -p "$(cat measure.pgid)" 2> /dev/null | tr -d ' ')" != "$(ps -o pgid= -p $$ 2> /dev/null | tr -d ' ')" ]; then
+                  kill -TERM -- "-$(cat measure.pgid)" || true
+                else
+                  echo "the guard stands down: no separate measure group (setsid failed?)" >> guard.trip || true
+                fi
+                exit 2
+              fi
+            done ) &
+          watcher=$!
+          # The measure runs in its own process group (setsid): the
+          # guard's trip kills that group by number, which reaches the
+          # wrapper, the runner and every test process and nothing
+          # else - no name pattern, nothing of the step or the watcher.
+          sum="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          echo "default measure starts at $(date -u +%T)" >> "$sum" || true
+          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --profile coverage --workspace --no-fail-fast; echo $? > measure.rc' \
             | tee measure.log
-          kill "$watcher"
+          echo "default measure ends at $(date -u +%T)" >> "$sum" || true
+          # The step must not fail on a watcher that is already gone:
+          # a tripped guard exited by design, and its trip file says so
+          # below. A watcher that died any other way is a harness bug
+          # and fails the step with its log.
+          # One wait only: a second wait on the reaped job re-fires
+          # the saved status and, under errexit, kills this step with
+          # it - that was the exit-143 after every green measure. The
+          # watcher ends three ways: 2 = it tripped (the file says
+          # so below), 143 = the kill above, the normal shutdown,
+          # anything else = a harness bug.
+          kill "$watcher" 2> /dev/null || true
+          watch_rc=0
+          wait "$watcher" 2> /dev/null || watch_rc=$?
+          if [ -f guard.trip ]; then
+            echo 'the guard tripped: the measure above was stopped by it'
+            tail -30 watcher.log
+            exit 1
+          fi
+          if [ -f measure.rc ] && [ "$(cat measure.rc)" != "0" ]; then
+            echo "the measure itself failed: nextest status $(cat measure.rc)"
+            exit "$(cat measure.rc)"
+          fi
+          if [ "$watch_rc" -eq 143 ]; then
+            echo 'the watcher was stopped by this step, as it should be'
+          elif [ "$watch_rc" -eq 0 ]; then
+            echo 'the watcher ran to the end, as it should be'
+          else
+            echo "the watcher exited early without tripping: status $watch_rc - a harness bug"
+            tail -30 watcher.log
+            exit 1
+          fi
           df -h / | tail -1; free -m | awk 'NR==2'
           du -sh target/coverage; find target/coverage -name '*.profraw' | wc -l
           echo "the measure's instrumented units:"
@@ -264,6 +397,7 @@ jobs:
           # measure.
           key: coverage-instrumented
           cache-on-failure: true
+          cache-targets: false
       - run: |
           curl -fsSL -o /tmp/cargo-llvm-cov.tgz \
             https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.9.1/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz
@@ -307,6 +441,13 @@ jobs:
           mkdir -p .cargo
           printf '[profile.dev]\ndebug = false\nstrip = true\n\n[profile.test]\ndebug = false\nstrip = true\n' > .cargo/config.toml
           echo "RUSTFLAGS=-C link-arg=-Wl,--no-keep-memory" >> "$GITHUB_ENV"
+      - name: restore the last instrumented build
+        id: restore-build
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: coverage-build-${{ runner.os }}-stable-${{ hashFiles('Cargo.lock') }}-sqlite
+          restore-keys: coverage-build-${{ runner.os }}-stable-${{ hashFiles('Cargo.lock') }}-
       # The image ships dozens of gigabytes of toolchains this job
       # never touches; they go.
       - name: free the runner's disk for the instrumented build
@@ -335,11 +476,71 @@ jobs:
       - name: measure, the postgres backend
         run: |
           set -o pipefail
-          ( while sleep 30; do date -u +%T; df -h / | tail -1; free -m | awk 'NR==2'; du -sh target/coverage 2>/dev/null; \
-              ps -eo pid,rss,pcpu,etime,comm --sort=-rss | head -4 | tee -a watcher.log; \
-              avail=$(df --output=avail -BG / | tail -1 | tr -dc '0-9'); \
-              mem=$(free -m | awk 'NR==2 {print $7}'); \
-              { [ "$avail" -gt 3 ] && [ "$mem" -gt 600 ]; } || { echo 'the runner is out of disk or memory'; df -h /; free -m; ps aux --sort=-rss | head -12; exit 2; }; done ) &
+          # The same watcher-guard as the default measure above: no
+          # SIGPIPE death, and a trip stops the measure while the log
+          # can still say what ate the runner.
+          rm -f guard.trip watcher.log watcher.ps
+          # The absolute floors are late: a leak that eats the runner
+          # kills its agent before 3G/600M arrive. The watch also
+          # trips on GROWTH against this measure's own start, which
+          # fires while there is still room to leave the evidence.
+          start_avail=$(df --output=avail -BG / 2> /dev/null | tail -1 | tr -dc '0-9') || true
+          start_mem=$(free -m 2> /dev/null | awk 'NR==2 {print $7}') || true
+          # The agent can also die of a process or thread leak: servers a
+          # test left behind pile up until the runner cannot fork. The
+          # watch counts processes, threads and the store family every
+          # tick, and trips on growth against this measure's own start.
+          start_procs=$(ps -e --no-headers 2> /dev/null | wc -l | tr -d ' ') || true
+          pgrep -c -f 'scion-(server|daemon|cache)' 2> /dev/null > /dev/null || true
+          ( while sleep 10; do
+              { date -u +%T; df -h / | tail -1; free -m | awk 'NR==2'; du -sh target/coverage 2>/dev/null; } || true
+              { ps -eo pid,rss,pcpu,etime,comm --sort=-rss > watcher.ps && head -4 watcher.ps >> watcher.log; } || true
+              procs=$(ps -e --no-headers 2> /dev/null | wc -l | tr -d ' ') || true
+              threads=$(ps -eLo --no-headers 2> /dev/null | wc -l | tr -d ' ') || true
+              family=$(pgrep -c -f 'scion-(server|daemon|cache)' 2> /dev/null) || true
+              family=${family:-0}
+              # shellcheck disable=SC2034
+              echo "processes=$procs threads=$threads store_family=$family" >> watcher.log || true
+              avail=$(df --output=avail -BG / | tail -1 | tr -dc '0-9' 2> /dev/null) || true
+              mem=$(free -m | awk 'NR==2 {print $7}' 2> /dev/null) || true
+              swap_used=$(free -m 2> /dev/null | awk 'NR==3 {print $3}') || true
+              echo "procs=$procs threads=$threads family=$family mem_avail=${mem:-?}M swap_used=${swap_used:-?}M disk_avail=${avail:-?}G" || true
+              avail_drop=0; mem_drop=0; proc_growth=0
+              if [ -n "${avail:-}" ] && [ -n "${start_avail:-}" ]; then
+                avail_drop=$((start_avail - avail))
+              fi
+              if [ -n "${mem:-}" ] && [ -n "${start_mem:-}" ]; then
+                mem_drop=$((start_mem - mem))
+              fi
+              if [ -n "${procs:-}" ] && [ -n "${start_procs:-}" ]; then
+                proc_growth=$((procs - start_procs))
+              fi
+              if [ "${avail:-10}" -le 3 ] || [ "${mem:-10000}" -le 600 ] || [ "$avail_drop" -ge 6 ] || [ "$mem_drop" -ge 4000 ] || [ "$proc_growth" -ge 500 ] || [ "$family" -ge 200 ]; then
+                {
+                  echo "the runner is out of disk or memory, or is leaking: avail=${avail:-?}G avail_floor=3G free_mem=${mem:-?}M mem_floor=600M disk_drop_since_start=${avail_drop:-?}G mem_drop_since_start=${mem_drop:-?}M processes=$procs (start ${start_procs:-?}, growth $proc_growth, floor +500) store_family=$family (floor 200) threads=$threads"
+                  df -h / || true
+                  free -m || true
+                  { ps -eo pid,rss,pcpu,etime,comm,args --sort=-rss > watcher.top && head -14 watcher.top; } || true
+                  { ps -eo ppid,comm | sort | uniq -c | sort -rn | head -10; } || true
+                } | tee -a watcher.log
+                # The reason goes to a file FIRST: the kill below takes
+                # the measure's process group, and anything this
+                # subshell only teed could die with the flush. The kill
+                # reaches exactly the measure's own session (setsid
+                # above): the negative pgid signals the wrapper, the
+                # runner and every test process. A setsid that failed
+                # would record the step's own group - the guard then
+                # stands down rather than kill its family, and the
+                # numbers below name that.
+                printf 'trip at %s: avail=%s mem=%s disk_drop=%s mem_drop=%s pgid=%s step_pgid=%s\n' "$(date -u +%T)" "${avail:-?}" "${mem:-?}" "${avail_drop:-?}" "${mem_drop:-?}" "$(cat measure.pgid 2> /dev/null || echo none)" "$(ps -o pgid= -p $$ 2> /dev/null | tr -d ' ')" > guard.trip 2> /dev/null || true
+                if [ -f measure.pgid ] && [ "$(ps -o pgid= -p "$(cat measure.pgid)" 2> /dev/null | tr -d ' ')" != "$(ps -o pgid= -p $$ 2> /dev/null | tr -d ' ')" ]; then
+                  kill -TERM -- "-$(cat measure.pgid)" || true
+                else
+                  echo "the guard stands down: no separate measure group (setsid failed?)" >> guard.trip || true
+                fi
+                exit 2
+              fi
+            done ) &
           watcher=$!
           ulimit -v 6291456
           # shellcheck disable=SC1090
@@ -360,10 +561,49 @@ jobs:
           # when the batched ancestry walk lands.
           LLVM_PROFILE_FILE=/dev/null nice -n 19 cargo nextest run \
             --workspace --no-run
-          nice -n 19 cargo nextest run --workspace --no-fail-fast \
-            -E 'package(open-scion-server) and not test(graph_queries_across_many_merges_answer)' \
+          # The measure runs in its own process group (setsid): the
+          # guard's trip kills that group by number, which reaches the
+          # wrapper, the runner and every test process and nothing
+          # else - no name pattern, nothing of the step or the watcher.
+          sum="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          echo "postgres measure starts at $(date -u +%T)" >> "$sum" || true
+          if nice -n 19 cargo nextest run --no-run --workspace -E "package(open-scion-server) and not test(graph_queries_across_many_merges_answer)" > build-postgres.log 2>&1; then
+            echo "postgres build ends at $(date -u +%T)" >> "$sum" || true
+          else
+            echo "the postgres build failed:"
+            tail -40 build-postgres.log
+            exit 1
+          fi
+          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --profile coverage --workspace --no-fail-fast -E "package(open-scion-server) and not test(graph_queries_across_many_merges_answer)"; echo $? > measure.rc' \
             | tee measure-postgres.log
-          kill "$watcher"
+          # The same end-of-step rules as the default measure above.
+          # One wait only: a second wait on the reaped job re-fires
+          # the saved status and, under errexit, kills this step with
+          # it - that was the exit-143 after every green measure. The
+          # watcher ends three ways: 2 = it tripped (the file says
+          # so below), 143 = the kill above, the normal shutdown,
+          # anything else = a harness bug.
+          kill "$watcher" 2> /dev/null || true
+          watch_rc=0
+          wait "$watcher" 2> /dev/null || watch_rc=$?
+          if [ -f guard.trip ]; then
+            echo 'the guard tripped: the measure above was stopped by it'
+            tail -30 watcher.log
+            exit 1
+          fi
+          if [ -f measure.rc ] && [ "$(cat measure.rc)" != "0" ]; then
+            echo "the measure itself failed: nextest status $(cat measure.rc)"
+            exit "$(cat measure.rc)"
+          fi
+          if [ "$watch_rc" -eq 143 ]; then
+            echo 'the watcher was stopped by this step, as it should be'
+          elif [ "$watch_rc" -eq 0 ]; then
+            echo 'the watcher ran to the end, as it should be'
+          else
+            echo "the watcher exited early without tripping: status $watch_rc - a harness bug"
+            tail -30 watcher.log
+            exit 1
+          fi
           # The report maps these bytes; no rebuild may touch them.
           # shellcheck disable=SC2046
           tar czf units-postgres.tgz $(find target/debug -type f -perm -u+x ! -name '*.d' ! -name '*.rlib' ! -name '*.so')

@@ -430,3 +430,96 @@ fn restore_sampled(archive: &std::path::Path, target: &std::path::Path, tx_bytes
         .parse()
         .unwrap_or_else(|e| panic!("the child's peak line does not parse: {peak_text:?}: {e}"))
 }
+
+/// The truncation lands LATE in the stream: the first batch is already
+/// committed when the reader walks into the cut. The design (archive.rs,
+/// `restore_impl`): every batch lands in a staging directory beside the
+/// target, and the target receives the store by ONE rename only after
+/// the whole replay. A late truncation must therefore fail the restore
+/// and leave the target with NO store a server would open - the answer
+/// the operator sees is a refused restore, not a half store.
+#[test]
+fn a_stream_cut_after_the_first_batch_fails_and_leaves_no_store() {
+    const CHAIN_BIG: usize = 64;
+    const MESSAGE_BYTES: usize = 200 * 1024;
+
+    let data = tempfile::tempdir().unwrap();
+    let store = Backend::open_test(data.path()).unwrap();
+    let content = "small file\n".to_string();
+    let blob = store.blobs().put(content.as_bytes()).unwrap();
+    let mut lens = std::collections::HashMap::new();
+    lens.insert(blob, content.len() as u64);
+    store
+        .write(|c| {
+            let repo = c.create_repo("big")?;
+            let mut parent = None::<ChangesetId>;
+            for i in 0..CHAIN_BIG {
+                let cs = changeset_msg(
+                    parent.into_iter().collect(),
+                    vec![b'x'; MESSAGE_BYTES],
+                    &[(&format!("docs/f{i}"), Some(regular(&content)))],
+                );
+                let id = tree::store_changeset(c, repo, &cs, &mut tree::lens_from(&lens))?.0;
+                c.add_repo_blob(repo, blob)?;
+                parent = Some(id);
+            }
+            assert!(c.cas_ref(repo, "main", None, parent.expect("a chain"))?);
+            Ok(())
+        })
+        .unwrap();
+
+    let out = tempfile::tempdir().unwrap().path().join("archive");
+    archive::export(&store, data.path(), None, true, &out)
+        .unwrap_or_else(|e| panic!("export failed: {e:#}"));
+    let victim = out.join("repos").join("big").join("changesets.bin");
+    let full_len = std::fs::metadata(&victim).unwrap().len();
+    assert!(
+        full_len > 8 * BUDGET as u64,
+        "the stream ({full_len} B) must hold several batches (BUDGET {BUDGET} B), \
+         or the cut cannot land past the first batch"
+    );
+
+    // Cut at two budgets in: the first batch (and more) committed, the
+    // reader walks into a record the file no longer holds.
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&victim)
+        .unwrap();
+    f.set_len(2 * BUDGET as u64).unwrap();
+    drop(f);
+
+    let target = tempfile::tempdir().unwrap().path().join("target");
+    let error = archive::restore_with_budget(&out, &target, None, None, BUDGET, Backend::open)
+        .expect_err("a cut stream must not restore");
+    assert!(
+        error.to_string().contains("ends inside a record"),
+        "the refusal must name the torn stream: {error}"
+    );
+
+    // The target holds no store a server would open: the marker, the
+    // database and the objects folder are all absent, and opening the
+    // directory as a store refuses.
+    for existing in ["scion.db", "backend", "objects"] {
+        assert!(
+            !target.join(existing).exists(),
+            "the target must not hold {existing} after a refused restore"
+        );
+    }
+    // (Backend::open on an empty directory CREATES a fresh store by
+    // design - it is not an oracle here.) The staging scratch went with
+    // the failure, and the target is empty for the operator's retry: a
+    // half store would name itself in the listing.
+    let staging = target.with_file_name(format!(
+        "{}.restoring",
+        target.file_name().unwrap().to_string_lossy()
+    ));
+    assert!(!staging.exists(), "the staging scratch must be gone");
+    // A target that was never made at all is the same answer: nothing
+    // of the restore became visible.
+    let left: Vec<_> = match std::fs::read_dir(&target) {
+        Ok(entries) => entries.collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("the target is unreadable: {error}"),
+    };
+    assert!(left.is_empty(), "the target must be empty: {left:?}");
+}
