@@ -193,6 +193,12 @@ jobs:
       - name: measure, the default backend
         run: |
           set -o pipefail
+          # Steps do not share a shell: the 6 GB per-process cap and the
+          # instrumentation flags live in this step too, so the test run
+          # sees the same environment the build compiled with.
+          ulimit -v 6291456
+          # shellcheck disable=SC1090
+          source <(cargo llvm-cov show-env --sh)
           # One .profraw per test process made thousands per job, and
           # the runner was lost four runs in a row with no log (#565).
           # The %4m pool folds them into four files per test binary.
