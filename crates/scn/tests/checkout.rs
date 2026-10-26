@@ -447,6 +447,117 @@ fn store_changesets(store: &Backend, cases: &[Files]) -> Vec<ChangesetId> {
         .unwrap()
 }
 
+/// A tree a hostile server sends may name an entry `.`, `..`, hold a NUL,
+/// or carry a `/` in its name: the format holds raw bytes. The checkout
+/// must refuse the tree before anything is written, and name the path it
+/// refused.
+#[test]
+fn a_tree_with_a_dot_nul_or_slash_name_is_refused_before_anything_is_written() {
+    let blob = |data: &[u8]| Object {
+        kind: ObjectKind::Blob.into(),
+        id: BlobId::of(data).as_bytes().to_vec(),
+        data: data.to_vec(),
+    };
+    let (one, two) = (blob(b"one\n"), blob(b"two\n"));
+    let file = |object: &Object| {
+        Entry::File(FileEntry::new(
+            FileState::Regular {
+                content: BlobId::try_from(object.id.as_slice()).unwrap(),
+                executable: false,
+            },
+            object.data.len() as u64,
+        ))
+    };
+    // Two entries whose names are one and two bytes: each hostile case
+    // patches one of these names byte for byte, so the entry order and
+    // the rest of the encoding stay canonical.
+    let honest = Tree::new(
+        [
+            (PathElem::new("a").unwrap(), file(&one)),
+            (PathElem::new("ok").unwrap(), file(&two)),
+        ]
+        .into(),
+    )
+    .unwrap()
+    .encode();
+    // The hostile name replaces a name of the same length, and the tree's
+    // ID is the hash of its own bytes, so the tree self-verifies: only
+    // the name check can refuse it.
+    for (from, to) in [
+        (&b"a"[..], &b"."[..]),
+        (&b"a"[..], &b"/"[..]),
+        (&b"ok"[..], &b".."[..]),
+        (&b"ok"[..], &b".\0"[..]),
+    ] {
+        let at = honest
+            .windows(from.len())
+            .position(|part| part == from)
+            .unwrap();
+        let mut hostile = honest.clone();
+        hostile[at..at + from.len()].copy_from_slice(to);
+        // The tree ID hashes its own bytes under the tree domain: the same
+        // hash decode_with_id checks, so the hostile tree self-verifies and
+        // only the name check can refuse it.
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"scion\0tree\0v1\0");
+        hash.update(&hostile);
+        let id = TreeId::try_from(hash.finalize().as_bytes().as_slice()).unwrap();
+        let object = Object {
+            kind: ObjectKind::Tree.into(),
+            id: id.as_bytes().to_vec(),
+            data: hostile,
+        };
+        // The blobs the entries name, so a build that lets the tree
+        // decode reaches the write and fails it there, where the refusal
+        // must not be.
+        let mut objects = HashMap::new();
+        for served in [one.clone(), two.clone(), object] {
+            objects.insert(served.id.clone(), served);
+        }
+        let liar = Liar {
+            root: id,
+            objects,
+            // The entries are in path order, so a build that lets the
+            // tree decode gets its blobs and reaches the write.
+            in_path_order: vec![one.id.clone(), two.id.clone()],
+            repo: Mutex::new("in-order".to_owned()),
+        };
+        // Its own runtime, like `start_liar`: the scn call blocks this
+        // thread on a subprocess, and a server on a runtime that never
+        // gets polled would not answer it.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let url = {
+            let listener = runtime
+                .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+                .unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            runtime.spawn(
+                tonic::transport::Server::builder()
+                    .add_service(ObjectsServer::new(liar))
+                    .serve_with_incoming(TcpListenerStream::new(listener)),
+            );
+            url
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("dest");
+        fs::create_dir(&dest).unwrap();
+        // The repo name is the Liar's "in-order" misbehavior: a build
+        // that lets the hostile tree decode gets its blobs in path order
+        // and reaches the write, where the refusal must not be.
+        let out = scn(
+            &url,
+            "in-order",
+            &["checkout", ANY_CHANGESET, "--into", text(&dest)],
+        );
+        assert!(!out.status.success(), "{to:?}: {}", stderr(&out));
+        assert!(stderr(&out).contains("bad path"), "{}", stderr(&out));
+        assert_untouched(&dest);
+    }
+}
+
 #[test]
 fn unsafe_names_fail_before_anything_is_written() {
     let (data, store) = open_store();

@@ -124,3 +124,35 @@ impl fmt::Debug for PathElem {
         fmt_raw(&self.0, f)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The names the object format can carry but a checkout must refuse:
+    /// the dot parts, a NUL, a slash, an empty part. The core check is
+    /// bound here, where it lives.
+    #[test]
+    fn a_path_refuses_the_dot_parts_a_nul_a_slash_and_an_empty_part() {
+        // A one-part path: the whole bytes are one part.
+        for (name, why) in [
+            (b".".as_slice(), PathError::DotPart),
+            (b"..", PathError::DotPart),
+            (b"a\0b", PathError::Nul),
+        ] {
+            assert_eq!(RepoPath::new(name).unwrap_err(), why, "{name:?}");
+            assert_eq!(PathElem::new(name).unwrap_err(), why, "{name:?}");
+        }
+        // A slash separates parts of a path, so RepoPath takes what it
+        // separates and a one-part name is refused for holding one.
+        assert!(RepoPath::new(b"a/b").is_ok());
+        for name in [b"a/b".as_slice(), b"a//b", b"a/../b", b"a/./b"] {
+            assert_eq!(PathElem::new(name).unwrap_err(), PathError::Slash);
+        }
+        // A dot part anywhere in a path is refused, whatever else it holds.
+        for name in [b"a/../b".as_slice(), b"a/./b"] {
+            assert_eq!(RepoPath::new(name).unwrap_err(), PathError::DotPart);
+        }
+        assert_eq!(RepoPath::new(b"a//b").unwrap_err(), PathError::EmptyPart);
+    }
+}
