@@ -21,12 +21,6 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      commit:
-        description: 'optional commit to measure instead of the ref head'
-        required: false
-        default: ''
-        type: string
 
 # Every third-party action is pinned to the commit SHA its version tag
 # named, with the version in a comment, as ci.yml does.
@@ -65,8 +59,6 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.commit != '' && inputs.commit || github.ref }}
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: llvm-tools-preview
@@ -238,33 +230,11 @@ jobs:
           # guard's trip kills that group by number, which reaches the
           # wrapper, the runner and every test process and nothing
           # else - no name pattern, nothing of the step or the watcher.
-          # The loop + device-mapper test runs alone here: it takes the
-          # runner's block layer (sudo, losetup, dmsetup) and its
-          # teardown is best effort - a wedged table stops the agent's
-          # heartbeat with no resource signal (the default job's
-          # losses). It measures under the default backend in the
-          # nightly soak instead.
-          # Bisecting the default job's agent losses (runs 40223621889,
-          # 40230347062, 40234675369, 40238876183): the losses sit at
-          # 49-55 minutes of wall clock with memory and disk flat, in
-          # different test sets. This dispatch runs NOTHING in the
-          # measure: 45 minutes of sleep under the same watcher. The
-          # agent dying anyway convicts the runner, not the suite; the
-          # agent surviving convicts the instrumented build or test
-          # load.
-          # Bisecting the coverage-only slowdown (the baseline run
-          # 40179902432 measured 207 s for 1031 tests; after the
-          # staging-folder suite the same job runs 45+ minutes only
-          # under instrumentation, ~13x). The slow-timeout above
-          # terminates any test over 60 s and names it in the log
-          # while the agent is still alive.
-          # The wedge hunt: the full suite, uncapped within 5 minutes
-          # per try (the old profile's own kill point). Every test that
-          # eats minutes is terminated at 300 s and named in a log that
-          # uploads; if nothing is named, the 45-minute regime is not
-          # per-test wedges and the hunt moves to the machine state.
+          sum="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          echo "default measure starts at $(date -u +%T)" >> "$sum" || true
           setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --workspace --no-fail-fast; echo $? > measure.rc' \
             | tee measure.log
+          echo "default measure ends at $(date -u +%T)" >> "$sum" || true
           # The step must not fail on a watcher that is already gone:
           # a tripped guard exited by design, and its trip file says so
           # below. A watcher that died any other way is a harness bug
@@ -356,8 +326,6 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.commit != '' && inputs.commit || github.ref }}
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: llvm-tools-preview
@@ -595,8 +563,6 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.commit != '' && inputs.commit || github.ref }}
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: llvm-tools-preview
