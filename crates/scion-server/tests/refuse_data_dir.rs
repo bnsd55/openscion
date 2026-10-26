@@ -143,9 +143,9 @@ fn make_archive(into: &Path) -> PathBuf {
     use scion_core::{Changeset, FileState, IdentityTime, RepoPath};
     use scion_server::test_support::meta::{Meta as _, MetaTx as _};
     use scion_server::test_support::tree;
+    use std::os::unix::fs::PermissionsExt as _;
 
     let repo_dir = tempfile::tempdir_in(into).unwrap();
-    use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(repo_dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let store = scion_server::Backend::open_test(repo_dir.path()).unwrap();
     store.blobs().put(b"a\n").unwrap();

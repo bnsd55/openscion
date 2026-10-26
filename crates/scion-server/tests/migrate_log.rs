@@ -7,7 +7,6 @@
 
 use scion_server::Backend;
 use scion_server::test_support::backend::schema_version;
-use std::fs;
 use std::sync::{Arc, Mutex};
 
 /// The version this build's SQLite store climbs to, from the build, not

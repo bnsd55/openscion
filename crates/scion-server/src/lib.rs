@@ -112,9 +112,15 @@ pub(crate) mod write;
 pub mod test_support {
     /// A temp directory the run owns outright: mode 0700, whatever the
     /// umask. The server refuses a data directory that group or others
-    /// can read, and a plain `crate::test_support::private_tempdir()` is 0777 less the
+    /// can read, and a plain `tempfile::tempdir()` is 0777 less the
     /// umask, so a test that opens a store in the temp directory
     /// directly must hold a private one.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the temp directory cannot be made: a test wants to
+    /// stop at once anyway.
+    #[allow(dead_code)]
     #[must_use]
     pub fn private_tempdir() -> tempfile::TempDir {
         use std::os::unix::fs::PermissionsExt as _;

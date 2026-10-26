@@ -3460,8 +3460,6 @@ mod tests {
     /// disappears and this test fails.
     #[test]
     fn a_batch_answers_after_its_blobs_dir_fsyncs() {
-        use tempfile::TempDir;
-
         use DurabilityStep as S;
         let dir = crate::test_support::private_tempdir();
         let store = Store::open(dir.path()).unwrap();
