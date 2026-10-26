@@ -37,10 +37,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # A pull_request run may cancel the run before it; a push to main
-  # may not — a run in progress finishes and verifies the head it ran
-  # on. (This file has no pull_request trigger, so the expression
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'push' }}
+  # An A/B dispatch carries its own group (the run id), so several can
+  # run in parallel; a push to main shares one group - a run in
+  # progress finishes and verifies the head it ran on. (This file has
+  # no pull_request trigger, so the expression
   # reads false on main.)
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
