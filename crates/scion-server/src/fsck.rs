@@ -823,6 +823,160 @@ mod tests {
         );
     }
 
+    /// A tree past a full page of the walk is still checked: a full
+    /// first page never hides the damage of the second.
+    #[test]
+    fn a_tree_past_a_full_page_is_still_checked() {
+        let (_dir, store, _) = store();
+        let _second = land(
+            &store,
+            &cs(None, &[("b.txt", Some(file(&store, b"two\n")))]),
+        );
+        let trees = store
+            .read(|c| c.tree_bodies_after(Vec::new().as_slice(), 1000))
+            .unwrap();
+        assert!(trees.len() >= 2, "{} trees", trees.len());
+        let victim = trees
+            .iter()
+            .map(|(id, _)| id.clone())
+            .max()
+            .expect("the page-two row is whichever id sorts last");
+        store
+            .write(|c| {
+                let mut body: Vec<u8> = c
+                    .query_row(
+                        "SELECT body FROM trees WHERE id = ?1",
+                        [&victim[..]],
+                        |row| row.get(0),
+                    )
+                    .map_err(crate::error::from_sqlite)?;
+                let n = body.len();
+                body[n - 1] ^= 1;
+                c.execute(
+                    "UPDATE trees SET body = ?1 WHERE id = ?2",
+                    rusqlite::params![&body, &victim[..]],
+                )
+                .map_err(crate::error::from_sqlite)?;
+                Ok(())
+            })
+            .unwrap();
+        let report = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap();
+        assert!(
+            has(&report, "tree-bad", &id_string(&victim)),
+            "{:?}",
+            kinds(&report)
+        );
+    }
+
+    /// A history node past a full page of the walk is still checked.
+    #[test]
+    fn a_history_node_past_a_full_page_is_still_checked() {
+        let (_dir, store, _) = store();
+        let _second = land(
+            &store,
+            &cs(None, &[("b.txt", Some(file(&store, b"two\n")))]),
+        );
+        let nodes: Vec<Vec<u8>> = store
+            .read(|c| {
+                Ok(c.history_node_bodies_after(Vec::new().as_slice(), 1000)?
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect())
+            })
+            .unwrap();
+        assert!(nodes.len() >= 2, "{} nodes", nodes.len());
+        let victim = nodes.into_iter().max().unwrap();
+        store
+            .write(|c| {
+                c.execute(
+                    "UPDATE history_nodes SET body = ?1 WHERE id = ?2",
+                    rusqlite::params![&b"not a node"[..], &victim[..]],
+                )
+                .map_err(crate::error::from_sqlite)?;
+                Ok(())
+            })
+            .unwrap();
+        let report = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap();
+        assert!(
+            has(&report, "history-node-bad", &id_string(&victim)),
+            "{:?}",
+            kinds(&report)
+        );
+    }
+
+    /// A `repo_blobs` row past a full page of the walk is still checked:
+    /// the blob its row names is gone, and the check must say so.
+    #[test]
+    fn a_repo_blob_past_a_full_page_is_still_checked() {
+        let (_dir, store, id) = store();
+        let real = first_put(&store, id);
+        let fake = [0xff_u8; 32];
+        assert!(real.as_bytes() < &fake, "the fake row must sort second");
+        store
+            .write(|c| {
+                let mut tx = SqliteTx(c);
+                let repo = tx.repo_id(REPO)?;
+                tx.add_repo_blob(repo, BlobId::from_bytes(fake))?;
+                Ok(())
+            })
+            .unwrap();
+        let report = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap();
+        assert!(
+            has(
+                &report,
+                "blob-missing",
+                &BlobId::from_bytes(fake).to_string()
+            ),
+            "{:?}",
+            kinds(&report)
+        );
+    }
+
+    /// A land row whose changeset is gone: the check names it, so an
+    /// operator hears about the hole instead of reading a clean report.
+    #[test]
+    fn a_land_whose_changeset_is_gone_is_missing() {
+        let (dir, store, _) = store();
+        let repo = store.read(|c| c.repo_id(REPO)).unwrap();
+        let raw = rusqlite::Connection::open(dir.path().join("scion.db")).unwrap();
+        raw.pragma_update(None, "foreign_keys", false).unwrap();
+        raw.execute(
+            "INSERT INTO lands (repo_id, caller, request_key, target_ref, input_cs, state)
+             VALUES (?1, 'test', 'k1', 'main', ?2, 'pending')",
+            rusqlite::params![repo.0, &[7_u8; 32][..]],
+        )
+        .unwrap();
+        drop(raw);
+        let report = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap();
+        assert!(
+            has(&report, "changeset-missing", "named by lands"),
+            "{:?}",
+            kinds(&report)
+        );
+    }
+
+    /// A derived row of a kind this build does not know is old, not
+    /// damage: the report says `old`, and no problem fires, whatever
+    /// the version matches.
+    #[test]
+    fn a_derived_row_of_an_unknown_kind_is_old_not_damage() {
+        let (_dir, store, id) = store();
+        store
+            .write(|c| {
+                c.execute(
+                    "INSERT INTO derived (kind, version, cs, value)
+                     VALUES ('made_up_kind', 1, ?1, ?2)",
+                    rusqlite::params![id.as_bytes(), id.as_bytes()],
+                )
+                .map_err(crate::error::from_sqlite)?;
+                Ok(())
+            })
+            .unwrap();
+        let report = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap();
+        assert!(report.problems.is_empty(), "{:?}", kinds(&report));
+        assert_eq!(report.old, BTreeSet::from([("made_up_kind".to_owned(), 1)]));
+    }
+
     #[test]
     fn a_clean_store_reports_nothing() {
         let (_dir, store, _) = store();
