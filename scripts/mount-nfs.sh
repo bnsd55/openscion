@@ -65,13 +65,22 @@ fi
 
 note "building the debug binaries"
 "$TIMEOUT" 300 cargo build --locked --quiet -p open-scion-server -p open-scion
+# The write path is the unstable-writable-mount build feature, off in
+# this default build. Both builds write the same target path, so the
+# default binary is copied out first and the write checks below run on
+# a feature build. Both builds keep --locked.
+mkdir -p "$WORK/default-bin"
+cp "$BIN/scn" "$WORK/default-bin/scn"
+"$TIMEOUT" 300 cargo build --locked --quiet -p open-scion --features unstable-writable-mount
+mkdir -p "$WORK/feature-bin"
+cp "$BIN/scn" "$WORK/feature-bin/scn-writable"
 
 # The kernel NFS client: the module, and mount.nfs(8).
 sudo modprobe nfs
 command -v mount.nfs > /dev/null || sudo apt-get install -y -qq nfs-common
 
 note "starting the server"
-# D25: the server refuses a missing data directory; create it here.
+# The server refuses a missing data directory (#578); create it here.
 mkdir -p "$WORK/server"
 chmod 700 "$WORK/server"
 "$BIN/scion-server" --data "$WORK/server" ticket-key --out "$WORK/ticket.key" > "$WORK/ticket.pub"
@@ -129,14 +138,15 @@ git -C "$WORK/src" -c user.name=mount-nfs -c user.email=mount-nfs@localhost \
 note "mounting main on $VIEW"
 # mount(2) needs an existing mount point; scn mount does not make one.
 mkdir -p "$VIEW"
-# The writes of (b) and the commit of (c) need --unstable-writable: the
-# v0.1 mount is read-only without it.
-"$BIN/scn" --server "$SERVER" mount --unstable-writable "$VIEW" main \
+# The writes of (b) and the commit of (c) run on the feature build: the
+# default build has no write path, and the check below proves the
+# default build refuses the flag by name.
+"$WORK/feature-bin/scn-writable" --server "$SERVER" mount --unstable-writable "$VIEW" main \
   > "$WORK/mount.log" 2>&1 &
 MOUNT_PID=$!
 echo "$MOUNT_PID" > "$WORK/mount.pid"
 "$TIMEOUT" 30 bash -c 'until grep -q "^sudo mount -t nfs" '"$WORK"'/mount.log 2> /dev/null; do
-  kill -0 '"$MOUNT_PID"' 2> /dev/null || { cat '"$WORK"'/mount.log >&2; die "scn mount died"; }
+  kill -0 '"$MOUNT_PID"' 2> /dev/null || { cat '"$WORK"'/mount.log >&2; exit 1; }
   sleep 0.2
 done' || die "scn mount printed no mount command"
 MOUNT_CMD=$(grep '^sudo mount -t nfs' "$WORK/mount.log" | tail -n 1)
@@ -156,9 +166,11 @@ got=$("$TIMEOUT" 30 cat "$VIEW/README.md")
 "$TIMEOUT" 30 mv "$VIEW/notes.txt" "$VIEW/renamed.txt"
 "$TIMEOUT" 30 rm "$VIEW/README.md"
 
-# (c) The commit from the mount. The session file and the overlay belong to
-# the user, so scn runs as the user, no sudo.
-"$TIMEOUT" 60 "$BIN/scn" --server "$SERVER" commit -m "from the mount" \
+# (c) The commit from the mount, on the feature build: the default
+# build refuses --from-mount by name (that refusal is (e1)'s check).
+# The session file and the overlay belong to the user, so scn runs as
+# the user, no sudo.
+"$TIMEOUT" 60 "$WORK/feature-bin/scn-writable" --server "$SERVER" commit -m "from the mount" \
   --from-mount "$VIEW" \
   > "$WORK/from-mount.out" 2> "$WORK/from-mount.log" || {
   tail -n 20 "$WORK/from-mount.log" >&2
@@ -194,15 +206,27 @@ if "$TIMEOUT" 30 sudo mount -t nfs -o "vers=3,tcp,port=$port,mountport=$port,nol
 fi
 "$TIMEOUT" 30 stat "$VIEW/renamed.txt" > /dev/null || die "the mount died"
 
+# (e1) The default build refuses --unstable-writable by name: it has no
+# write path at all. The mount point exists, so the refusal is the
+# build's, not the mount-point check's.
+mkdir -p "$WORK/refused-view"
+if "$WORK/default-bin/scn" --server "$SERVER" mount --unstable-writable "$WORK/refused-view" main \
+  2> "$WORK/refused.log"; then
+  die "the default build took --unstable-writable"
+fi
+grep -q -- "unstable-writable-mount" "$WORK/refused.log" \
+  || die "the default build's refusal names no flag: $(cat "$WORK/refused.log")"
+note "the default build refuses --unstable-writable by name"
+
 # (e2) A mount without --unstable-writable is read-only: the read works,
 # the write is refused with EROFS, and the commit from it names the flag.
 VIEW2="$WORK/ro-view"
 mkdir -p "$VIEW2"
-"$BIN/scn" --server "$SERVER" mount "$VIEW2" main \
+"$WORK/default-bin/scn" --server "$SERVER" mount "$VIEW2" main \
   > "$WORK/mount-ro.log" 2>&1 &
 RO_PID=$!
 "$TIMEOUT" 30 bash -c 'until grep -q "^sudo mount -t nfs" '"$WORK"'/mount-ro.log 2> /dev/null; do
-  kill -0 '"$RO_PID"' 2> /dev/null || { cat '"$WORK"'/mount-ro.log >&2; die "the read-only scn mount died"; }
+  kill -0 '"$RO_PID"' 2> /dev/null || { cat '"$WORK"'/mount-ro.log >&2; exit 1; }
   sleep 0.2
 done' || die "the read-only mount printed no mount command"
 RO_CMD=$(grep '^sudo mount -t nfs' "$WORK/mount-ro.log" | tail -n 1)
@@ -215,11 +239,11 @@ got=$("$TIMEOUT" 30 cat "$VIEW2/README.md")
 if "$TIMEOUT" 30 bash -c 'echo refused > "'"$VIEW2"'/refused.txt"' 2> /dev/null; then
   die "a read-only mount took a write"
 fi
-RO_COMMIT=$("$TIMEOUT" 60 "$BIN/scn" --server "$SERVER" commit -m "ro" \
+RO_COMMIT=$("$TIMEOUT" 60 "$WORK/default-bin/scn" --server "$SERVER" commit -m "ro" \
   --from-mount "$VIEW2" 2>&1 || true)
-echo "$RO_COMMIT" | grep -q -- "--unstable-writable" \
+echo "$RO_COMMIT" | grep -q -- "unstable-writable-mount" \
   || die "the commit from a read-only mount names no flag: $RO_COMMIT"
-"$TIMEOUT" 60 "$BIN/scn" --server "$SERVER" unmount "$VIEW2" \
+"$TIMEOUT" 60 "$WORK/default-bin/scn" --server "$SERVER" unmount "$VIEW2" \
   > "$WORK/unmount-ro.log" 2>&1 || die "scn unmount of the read-only mount failed"
 sudo umount -f -l "$VIEW2" 2> /dev/null || true
 if mount | grep -q " on $VIEW2 "; then
@@ -229,7 +253,7 @@ kill "$RO_PID" 2> /dev/null || true
 
 # (f) The unmount: scn unmount as the user drops the session record, then
 # the real umount under sudo, and the mount table is clean afterwards.
-"$TIMEOUT" 60 "$BIN/scn" --server "$SERVER" unmount "$VIEW" \
+"$TIMEOUT" 60 "$WORK/feature-bin/scn-writable" --server "$SERVER" unmount "$VIEW" \
   > "$WORK/unmount.log" 2>&1 || die "scn unmount failed"
 sudo umount -f -l "$VIEW" 2> /dev/null || true
 if mount | grep -q " on $VIEW "; then

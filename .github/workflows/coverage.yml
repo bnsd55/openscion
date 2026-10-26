@@ -273,7 +273,7 @@ jobs:
           find target/debug -type f -perm -u+x ! -name '*.d' ! -name '*.rlib' ! -name '*.so' | wc -l
           # The report maps raw counters against these EXACT bytes; a
           # rebuild in the gate produced per-build mapping hashes the
-          # counters could never match (C65's 1,221). The tar carries
+          # counters could never match (#597's 1,221). The tar carries
           # the unit paths target/debug/... so the report reads them
           # where a build would have put them.
           # shellcheck disable=SC2046

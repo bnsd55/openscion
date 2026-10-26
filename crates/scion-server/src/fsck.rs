@@ -682,6 +682,147 @@ mod tests {
         })
     }
 
+    /// The blob root is gone: the check says so by reporting the rows
+    /// that name blobs, not by failing the run. The collector and the
+    /// row passes still see every named blob through the store, so the
+    /// operator sees the damage, and `fsck` still answers at all.
+    #[test]
+    fn a_missing_blob_root_still_reports_the_rows_that_name_blobs() {
+        let (_dir, store, id) = store();
+        let blob = first_put(&store, id);
+        std::fs::remove_dir_all(store.blobs().root()).unwrap();
+        let report = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap();
+        assert!(
+            has(&report, "blob-missing", &blob.to_string()),
+            "{:?}",
+            kinds(&report)
+        );
+    }
+
+    /// The blob root cannot be read: the run says so, loudly, instead
+    /// of answering a report that saw nothing. A root the check cannot
+    /// list is a disk the operator must look at, not a clean store.
+    #[test]
+    fn an_unreadable_blob_root_is_a_loud_error_not_a_clean_report() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        struct Restore(std::path::PathBuf, std::fs::Permissions);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                std::fs::set_permissions(&self.0, self.1.clone()).unwrap();
+            }
+        }
+
+        if rustix::process::geteuid().as_raw() == 0 {
+            eprintln!("skipped: root reads through any mode, the check would mean nothing");
+            return;
+        }
+
+        let (_dir, store, _) = store();
+        let root = store.blobs().root().to_path_buf();
+        let mode = std::fs::metadata(&root).unwrap().permissions();
+        let _restore = Restore(root.clone(), mode);
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let err = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap_err();
+        let text = err.to_string();
+        let shown = root.to_string_lossy().into_owned();
+        assert!(
+            text.contains(&shown) || text.contains("Permission denied"),
+            "the error must name the unreadable root {shown} or the denial: {text}"
+        );
+    }
+
+    /// A tree whose entry length lies about its blob: the stat of every
+    /// file of that entry would lie, so the check names the tree.
+    #[test]
+    fn a_tree_whose_entry_size_lies_is_tree_size() {
+        let (_dir, store, id) = store();
+        let blob = first_put(&store, id);
+        let entry = scion_core::Entry::File(scion_core::FileEntry::new(
+            FileState::Regular {
+                content: blob,
+                executable: false,
+            },
+            999,
+        ));
+        let tree = Tree::new(
+            [(scion_core::PathElem::new("liar.txt").unwrap(), entry)]
+                .into_iter()
+                .collect(),
+        )
+        .unwrap();
+        let (body, tree_id) = tree.encode_with_id();
+        store
+            .write(|c| {
+                c.execute(
+                    "INSERT INTO trees (id, body) VALUES (?1, ?2)",
+                    rusqlite::params![tree_id.as_bytes(), &body],
+                )
+                .map_err(crate::error::from_sqlite)?;
+                Ok(())
+            })
+            .unwrap();
+        let report = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap();
+        assert!(
+            has(&report, "tree-size", &tree_id.to_string()),
+            "{:?}",
+            kinds(&report)
+        );
+    }
+
+    /// A changeset past a full page of the walk is still checked: the
+    /// walk stops on a short page only, so a full first page never
+    /// hides the damage of the second.
+    #[test]
+    fn a_changeset_past_a_full_page_is_still_checked() {
+        let (_dir, store, _) = store();
+        // A second changeset, independent of the first: two rows, two
+        // pages at a batch of one.
+        let _second = land(
+            &store,
+            &cs(None, &[("b.txt", Some(file(&store, b"two\n")))]),
+        );
+        let ids = store
+            .read(|c| {
+                let ids = c.changeset_bodies_after(Vec::new().as_slice(), 1000)?;
+                let mut ids = ids
+                    .into_iter()
+                    .map(|(id, _)| ChangesetId::try_from(id.as_slice()).unwrap())
+                    .collect::<Vec<_>>();
+                ids.sort();
+                Ok(ids)
+            })
+            .unwrap();
+        assert_eq!(ids.len(), 2, "{ids:?}");
+        // The page-two row is whichever id sorts second; corrupt its body.
+        let victim = ids[1];
+        store
+            .write(|c| {
+                let mut body: Vec<u8> = c
+                    .query_row(
+                        "SELECT body FROM changesets WHERE id = ?1",
+                        [victim.as_bytes()],
+                        |row| row.get(0),
+                    )
+                    .map_err(crate::error::from_sqlite)?;
+                let n = body.len();
+                body[n - 1] ^= 1;
+                c.execute(
+                    "UPDATE changesets SET body = ?1 WHERE id = ?2",
+                    rusqlite::params![body, victim.as_bytes()],
+                )
+                .map_err(crate::error::from_sqlite)?;
+                Ok(())
+            })
+            .unwrap();
+        let report = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap();
+        assert!(
+            has(&report, "changeset-bad", &victim.to_string()),
+            "{:?}",
+            kinds(&report)
+        );
+    }
+
     #[test]
     fn a_clean_store_reports_nothing() {
         let (_dir, store, _) = store();

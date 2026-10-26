@@ -1,4 +1,4 @@
-//! The riskiest uncovered Postgres paths (C46, from #597's coverage
+//! The riskiest uncovered Postgres paths (#605, from #597's coverage
 //! run): the store-identity refusals at the open, the off-host
 //! plaintext refusal, and the newer-schema refusal. Each fails if the
 //! path breaks: a refusal that no longer fires is the bug the test

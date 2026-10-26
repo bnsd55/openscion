@@ -39,7 +39,7 @@ printf %s "$SCION_TOKEN" > /srv/scion-token
 The `umask 077` and the printf make the token file private (0600). A
 data directory the server does not find is refused, not created: every
 subcommand except restore answers "<path> does not exist; create it or
-pass --data" (D25), so make the directory before the first command.
+pass --data" (#578), so make the directory before the first command.
 The serve command keeps
 its files private, and serves. The log's `serving` line names the address.
 
@@ -1369,31 +1369,31 @@ checking out through a cache and a daemon beside it.
 
 | | |
 |---|---|
-| Commit | ab6bfdc92314fc41d2a8c5dca0f0a13bd39b5612 the main commit the run measured (the run's own HEAD, fcb947e6, adds the grid's database name only), at [run 40119721010](https://github.com/bnsd55/openscion/actions/runs/40119721010) |
-| Runner | the hosted runner class, by its public label and spec |
+| Commit | 07198dd728c754ad7a79ba526cb2227e620490b0 the main commit the run measured (the run's own HEAD, `62fb2183`, fixes the throughput column's sum only), at [run 40212691905](https://github.com/bnsd55/openscion/actions/runs/40212691905) |
+| Runner | GitHub-hosted `ubuntu-24.04`: 4 vCPU, 16 GiB RAM, ext4 on a ~144 GiB SSD, runner image `ubuntu24 20261023.334.3`, kernel `6.17.0-1022-azure` (the run's `machine.txt` artifact) |
 | Filesystem | the filesystem the run measured, from the run's `machine.txt` artifact (`df -T` on the work directory); the `ubuntu-24.04` class's root disk is ext4 ([support.md](support.md)) |
 | Repetitions | 2 per cell; the table reports the cell's whole run, and the run's raw samples are the workflow run's `capacity.csv` artifact |
 
-| backend | writers | readers | land p99 ms | checkout p50 ms | checkout p99 ms | timeouts | errors | server RSS MiB | landed | blob store KiB per 1k lands | database KiB per 1k lands |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| sqlite | 2 | 0 | 15 | - | - | 0 | 0 | 24 | 2000 | 112318 | - |
-| sqlite | 2 | 5 | 31 | 172 | 238 | 0 | 0 | 31 | 2000 | 112324 | - |
-| sqlite | 2 | 20 | 103 | 683 | 827 | 0 | 0 | 32 | 2000 | 112366 | - |
-| sqlite | 50 | 0 | 228 | - | - | 0 | 0 | 43 | 2000 | 58798 | - |
-| sqlite | 50 | 5 | 490 | 173 | 243 | 0 | 0 | 50 | 2000 | 58848 | - |
-| sqlite | 50 | 20 | 2057 | 685 | 839 | 0 | 0 | 50 | 2000 | 58882 | - |
-| sqlite | 200 | 0 | 958 | - | - | 0 | 0 | 57 | 2000 | 78358 | - |
-| sqlite | 200 | 5 | 2170 | 175 | 248 | 0 | 0 | 74 | 2000 | 78384 | - |
-| sqlite | 200 | 20 | 9924 | 684 | 830 | 0 | 0 | 77 | 2000 | 78364 | - |
-| postgres | 2 | 0 | 64 | - | - | 0 | 0 | 20 | 2000 | 5668 | 87210 |
-| postgres | 2 | 5 | 124 | 253 | 298 | 0 | 0 | 24 | 2000 | 5668 | 87530 |
-| postgres | 2 | 20 | 243 | 879 | 1071 | 0 | 0 | 27 | 2000 | 5668 | 86618 |
-| postgres | 50 | 0 | 2309 | - | - | 0 | 0 | 33 | 2000 | 5668 | 34674 |
-| postgres | 50 | 5 | 4454 | 254 | 301 | 0 | 0 | 38 | 2000 | 5668 | 34558 |
-| postgres | 50 | 20 | 7042 | 877 | 1079 | 0 | 0 | 38 | 2000 | 5664 | 34482 |
-| postgres | 200 | 0 | 9326 | - | - | 0 | 0 | 45 | 2000 | 5668 | 62428 |
-| postgres | 200 | 5 | 18244 | 254 | 296 | 0 | 0 | 63 | 2000 | 5666 | 62366 |
-| postgres | 200 | 20 | 31584 | 869 | 1054 | 0 | 0 | 66 | 2000 | 5668 | 62406 |
+| backend | writers | readers | land p99 ms | checkout p50 ms | checkout p99 ms | timeouts | errors | server RSS MiB | landed | lands per second | blob store KiB per 1k lands | database KiB per 1k lands |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| sqlite | 2 | 0 | 12.6 | - | - | 0 | 0 | 27 | 2000 | 185.5 | 112344 | - |
+| sqlite | 2 | 5 | 28.0 | 170 | 233 | 0 | 0 | 30 | 2000 | 78.4 | 112372 | - |
+| sqlite | 2 | 20 | 91.4 | 671 | 813 | 0 | 0 | 31 | 2000 | 28.7 | 112256 | - |
+| sqlite | 50 | 0 | 216 | - | - | 0 | 0 | 42 | 2000 | 249.8 | 58896 | - |
+| sqlite | 50 | 5 | 461 | 171 | 243 | 0 | 0 | 48 | 2000 | 115.4 | 58864 | - |
+| sqlite | 50 | 20 | 1507 | 678 | 839 | 0 | 0 | 50 | 2000 | 39.6 | 58844 | - |
+| sqlite | 200 | 0 | 906 | - | - | 0 | 0 | 57 | 2000 | 234.4 | 78296 | - |
+| sqlite | 200 | 5 | 1967 | 172 | 246 | 0 | 0 | 74 | 2000 | 106.9 | 78328 | - |
+| sqlite | 200 | 20 | 8751 | 669 | 825 | 0 | 0 | 76 | 2000 | 38.8 | 78388 | - |
+| postgres | 2 | 0 | 59.9 | - | - | 0 | 0 | 20 | 2000 | 21.1 | 5666 | 85454 |
+| postgres | 2 | 5 | 126 | 248 | 290 | 0 | 0 | 23 | 2000 | 11.2 | 5670 | 85078 |
+| postgres | 2 | 20 | 256 | 844 | 1033 | 0 | 0 | 25 | 2000 | 8.0 | 5674 | 87506 |
+| postgres | 50 | 0 | 2233 | - | - | 0 | 0 | 32 | 2000 | 22.4 | 5668 | 34520 |
+| postgres | 50 | 5 | 4478 | 253 | 296 | 0 | 0 | 37 | 2000 | 12.2 | 5668 | 34458 |
+| postgres | 50 | 20 | 7857 | 870 | 1083 | 0 | 0 | 39 | 2000 | 8.3 | 5668 | 34578 |
+| postgres | 200 | 0 | 9249 | - | - | 0 | 0 | 44 | 2000 | 21.8 | 5664 | 62298 |
+| postgres | 200 | 5 | 17017 | 253 | 299 | 0 | 0 | 63 | 2000 | 12.1 | 5668 | 62318 |
+| postgres | 200 | 20 | 29960 | 874 | 1085 | 0 | 0 | 64 | 2000 | 8.3 | 5670 | 62270 |
 
 Every cell runs on a store the cell's own import made: on SQLite a data directory
 the cell created, on Postgres a database the cell dropped and

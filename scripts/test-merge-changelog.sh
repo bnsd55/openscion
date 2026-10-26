@@ -92,6 +92,39 @@ if ! diff -u "$work/expected.md" "$work/CHANGELOG.md"; then
 fi
 echo "merge-changelog: fixture ok"
 
+# A fragment that starts with a front-matter block (a stray "---" first
+# line, the ms: preamble one author added on 2026-10-22) is refused, and
+# the refusal names the file.
+cat >"$work/CHANGELOG.md" <<'EOF'
+# Changelog
+
+## [v0.1.0] - unreleased
+
+### Added
+
+- An existing row.
+EOF
+cat >"$work/changes/14.added.md" <<'EOF'
+---
+ms: "a one-liner that is not a format"
+---
+
+A body that must never merge behind that block.
+EOF
+
+if (cd "$work" && "$here/merge-changelog.sh" v0.1.0) >"$work/out.txt" 2>"$work/err.txt"; then
+    echo "the merge accepted a fragment that starts with ---" >&2
+    exit 1
+fi
+grep -q "changes/14.added.md" "$work/err.txt" || {
+    echo "the refusal does not name the file; it said:" >&2
+    cat "$work/err.txt" >&2
+    exit 1
+}
+
+echo "merge-changelog: fixture ok"
+
+
 # --check: the same rules, nothing merged. A fragment that fails the
 # merge's own contract - front matter, a section the script would
 # silently drop, an empty file, a row marker on the first line - must
@@ -127,7 +160,27 @@ done
 rm -rf "$check/changes"
 mkdir "$check/changes"
 printf 'A thing that passes every rule, no front matter, no row\nmarker on the first line, no indent on any line.\n' >"$check/changes/1.fixed.md"
-(cd "$check" && "$here/merge-changelog.sh" --check) >/dev/null
+# --check reports the work it did: one fragment checked, not "no
+# fragments in changes/" (a silence that hides a full pass).
+(cd "$check" && "$here/merge-changelog.sh" --check) >"$check/out.txt"
+grep -q '^1 fragments pass the checks$' "$check/out.txt" || {
+    echo "--check does not name the fragments it checked; it said:" >&2
+    cat "$check/out.txt" >&2
+    exit 1
+}
+
+# A missing changes/ passes too: the release fold deletes every
+# fragment, git keeps no empty directory, so the tree after the fold
+# has none - and --check ran there on the release branch (2026-10-25:
+# 'find: changes: No such file or directory', set -e's pipefail, 9 red
+# CI jobs). An empty changes/ passed already; the missing one died.
+rm -rf "$check/changes"
+(cd "$check" && "$here/merge-changelog.sh" --check) >"$check/out.txt"
+grep -q '^0 fragments pass the checks$' "$check/out.txt" || {
+    echo "an empty changes/ does not say so; it said:" >&2
+    cat "$check/out.txt" >&2
+    exit 1
+}
 echo "merge-changelog --check: fixture ok"
 
 # The argument is either --check or a release name: a flag nobody reads

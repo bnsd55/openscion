@@ -4021,6 +4021,19 @@ impl MetaTx for PgTx<'_> {
             .is_some())
     }
 
+    /// See the data directory's `repos_naming`: one probe per repo, same
+    /// shape.
+    fn repos_naming(&mut self, blob: &[u8]) -> Result<Vec<RepoId>> {
+        let rows = self.c.query(
+            "SELECT r.repo_id FROM repos r
+             WHERE EXISTS (SELECT 1 FROM repo_blobs rb
+                           WHERE rb.repo_id = r.repo_id AND rb.blob = $1)
+             ORDER BY r.repo_id",
+            &[P::bytes(blob)],
+        )?;
+        Ok(rows.iter().map(|row| RepoId(row.get(0))).collect())
+    }
+
     /// The `(changeset ID, body)` of the changesets after `from`, in ID
     /// order, at most `limit`.
     fn changeset_bodies_after(

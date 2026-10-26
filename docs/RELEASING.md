@@ -2,7 +2,7 @@
 
 How to cut a release of openscion. v0.1.x is a source release: one
 SSH-signed annotated git tag plus one immutable GitHub release with
-notes. Nothing publishes crates: the owner has decided (D12) that no
+notes. Nothing publishes crates: the owner has decided that no
 crate publishes before a real outside consumer exists, so a narrow
 client crate is the only publish ever planned. Nothing here tags by
 itself: each step is run by a person.
@@ -81,8 +81,20 @@ A release is cut through one PR from a branch named
 
 1. **Tag, signed.** Cut an annotated tag from the commit that the
    release notes describe. The owner signs it personally with their SSH
-   key (D18), so the signature a verifier checks is the owner's, not a
-   CI secret's:
+   signing key (the public key file they registered on GitHub as a
+   Signing key), so the signature a verifier checks is the owner's, not
+   a CI secret's.
+
+   Before the first tag, once: register that public key at GitHub
+   Settings → SSH and GPG keys as a **Signing key**, and check the
+   account carries it (the list must not be empty):
+
+   ```sh
+   curl -s https://api.github.com/users/<owner>/ssh_signing_keys | jq length
+   ```
+
+   Then sign. The key file below is an example (an ed25519 key in the
+   default place); pass the public key file you registered:
 
    ```sh
    git -c gpg.format=ssh -c user.signingkey="$HOME/.ssh/id_ed25519.pub" \
@@ -131,7 +143,7 @@ A release is cut through one PR from a branch named
    - **The registry the SBOMs name is not secret; nothing else to
      add.** The workflow needs no key: the tag's SSH signature is
      verified by GitHub at push time against the key on the owner's
-     account (D18), and the build signs nothing of its own — the
+     account, and the build signs nothing of its own — the
      provenance comes from GitHub's hosted builder.
 
    The dry-run proves all of it before the first tag: dispatch the

@@ -18,7 +18,7 @@ SBOM of each shipped binary's crate get a GitHub artifact attestation:
 a DSSE envelope signed by the GitHub-hosted builder, bound to the
 subject's digest. The release step verifies every attestation against
 this repository, then publishes one immutable release. Nothing goes to
-crates.io (D12).
+crates.io.
 
 ## The requirements, one by one
 

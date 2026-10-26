@@ -96,7 +96,7 @@ jobs:
           # The harness drops and creates its databases, so it runs
           # only on a scion_capacity_* database.
           SCION_PG_URL: postgres://postgres@127.0.0.1:5432/scion_capacity_grid
-          CAPACITY_MACHINE: "GitHub ubuntu-24.04 hosted runner: 4 vCPU, 16 GiB RAM, 14 GiB SSD"
+          CAPACITY_MACHINE: "GitHub ubuntu-24.04 hosted runner: 4 vCPU, 16 GiB RAM, ~144 GiB SSD"
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: scripts/capacity.sh
       - name: upload the raw output and the logs

@@ -238,11 +238,12 @@ for backend in sqlite postgres; do
         # carries the land percentiles.
         sleep 10 # the cell's warm start, before bench begins
         if ! "$TIMEOUT" 600 "$BIN/scn" --server "$SERVER" bench --agents "$w" \
-          --lands "$LANDS" --json > "$WORK/bench-$backend-w$w-r$r.json" 2> "$WORK/bench-$backend-w$w-r$r.log"; then
+          --lands "$LANDS" --json > "$WORK/bench-$backend-w$w-r$r-rep$rep.json" 2> "$WORK/bench-$backend-w$w-r$r-rep$rep.log"; then
           # A bench that failed is the cell's data, not the run's
           # failure: the envelope's edge is where errors start. The row
           # records it and the grid goes on.
           echo "bench failed in cell $backend w$w r$r rep$rep (the row records it)" >&2
+          rm -f "$WORK/bench-$backend-w$w-r$r-rep$rep.json"
           bench_fail=1
         fi
         # The readers keep going until this rep's slice of the run is
@@ -285,17 +286,22 @@ for backend in sqlite postgres; do
       # died mid-budget names it in the errors column), but it is not a
       # table column: the bench's own budget paces the lands, so a rate
       # over the cell says what the bench did, not what the store held.
-      if [ "$bench_fail" -eq 0 ] && [ -s "$WORK/bench-$backend-w$w-r$r.json" ]; then
-        land_p99=$(jq -r '.land_ms.p99' "$WORK/bench-$backend-w$w-r$r.json")
+      last_rep_json=$(find "$WORK" -name "bench-$backend-w$w-r$r-rep*.json" | sort -V | tail -n 1)
+      if [ "$bench_fail" -eq 0 ] && [ -f "$last_rep_json" ]; then
+        # The last rep's percentiles stand in the table (rep 1 warms the
+        # cell, rep 2 is the steady state); the throughput sums every
+        # rep the cell ran.
+        land_p99=$(jq -r '.land_ms.p99' "$last_rep_json")
       else
         # No bench report, no land percentiles: the cell says so in the
         # errors column, and the land p99 column stays empty.
         land_p99="-"
       fi
-      c50=$(pct "$WORK/read-times.csv" 0.50)
-      c99=$(pct "$WORK/read-times.csv" 0.99)
-      [ -n "$c50" ] || c50="-"
-      [ -n "$c99" ] || c99="-"
+      lands_per_sec=$(cell_throughput "$WORK"/bench-$backend-w$w-r$r-rep*.json)
+      p50=$(pct "$WORK/read-times.csv" 0.50)
+      p99=$(pct "$WORK/read-times.csv" 0.99)
+      [ -n "$p50" ] || p50="-"
+      [ -n "$p99" ] || p99="-"
       du_sample "$WORK/store-sizes-$backend-w$w-r$r.csv" "$WORK/server" end
       store_end=$(sed -n 's/^[^,]*,//p' "$WORK/store-sizes-$backend-w$w-r$r.csv" | tail -n 1)
       # Per 1,000 lands, divided by the lands the counter measured: a
@@ -309,7 +315,7 @@ for backend in sqlite postgres; do
       else
         db_growth="-"
       fi
-      echo "$backend,$w,$r,$land_p99,$c50,$c99,$reader_timeouts,$errors,$rss_end,$lands_landed,$blob_growth,$db_growth" \
+      echo "$backend,$w,$r,$land_p99,$p50,$p99,$reader_timeouts,$errors,$rss_end,$lands_landed,$lands_per_sec,$blob_growth,$db_growth" \
         >> "$WORK/capacity.csv"
       if [ "$((errors + reader_timeouts))" -gt 0 ]; then
         note "cell $backend w$w r$r: $reader_timeouts timeouts, $errors errors (readers $reader_failures, bench $bench_fail) - recorded, next cell"
@@ -350,10 +356,10 @@ cp "$WORK"/bench-*.json "${RUNNER_TEMP:-/tmp}/capacity-artifacts/" 2> /dev/null 
 row() { printf '%-46s %s\n' "$1" "$2"; }
 echo "capacity envelope: machine $CAPACITY_MACHINE, commit $HEAD_HEX"
 echo
-echo "| backend | writers | readers | land p99 ms | checkout p50 ms | checkout p99 ms | timeouts | errors | server RSS MiB | landed | blob store KiB per 1k lands | database KiB per 1k lands |"
-echo "|---|---|---|---|---|---|---|---|---|---|---|---|"
-while IFS=, read -r backend w r land_p99 c50 c99 timeouts errors rss landed blob_growth db_growth; do
-  echo "| $backend | $w | $r | $land_p99 | $c50 | $c99 | $timeouts | $errors | $((rss / 1024)) | $landed | $blob_growth | $db_growth |"
+echo "| backend | writers | readers | land p99 ms | checkout p50 ms | checkout p99 ms | timeouts | errors | server RSS MiB | landed | lands per second | blob store KiB per 1k lands | database KiB per 1k lands |"
+echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+while IFS=, read -r backend w r land_p99 p50 p99 timeouts errors rss landed lands_per_sec blob_growth db_growth; do
+  echo "| $backend | $w | $r | $land_p99 | $p50 | $p99 | $timeouts | $errors | $((rss / 1024)) | $landed | $lands_per_sec | $blob_growth | $db_growth |"
 done < "$WORK/capacity.csv"
 echo
 row "commit" "$HEAD_HEX"

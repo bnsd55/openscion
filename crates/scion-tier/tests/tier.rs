@@ -1863,3 +1863,76 @@ async fn a_daemons_stderr_stays_quiet_and_colorless_across_gets() {
     );
     drop(child);
 }
+
+/// The cache verifies the ticket's signature on every call: an unsigned
+/// ticket, a ticket of a key the cache holds no public key for, and a
+/// valid ticket with one body byte flipped are all refused with the
+/// signature named, and nothing is served or fetched. The proof that
+/// binds the check to this tier: the refusal lives in this call site
+/// (`Tickets::Verify` -> `parse`), and a cache that reads its tickets
+/// unverified serves every one of these.
+#[tokio::test]
+async fn a_cache_refuses_a_ticket_that_no_key_of_its_signed() {
+    let secret = blob(b"the object a forged ticket must not reach\n");
+    let fake = Fake::new(&[&secret], Duration::ZERO);
+    let upstream = serve_fake(fake.clone()).await;
+    let (_cache, url) = serve_cache(&upstream, CACHE_UPSTREAM_TIMEOUT, &fake.keys()).await;
+    let mut caller = connect(&url, Some(TOKEN)).await;
+
+    // The body of a valid ticket for the object's tree, and its
+    // signature: the raw forms the three refusals are built from.
+    let signed = fake.ticket();
+    // The signature is 64 bytes (Ed25519); the parser refuses a body
+    // that is shorter, so the split at 64 is the real one.
+    let signature_bytes = 64_usize;
+    let (body, _) = signed.split_at(signed.len() - signature_bytes);
+
+    let unsigned = [body, &[0_u8; 64]].concat();
+    let status = get_with(&mut caller, vec![ref_for(&fake, &secret)], unsigned)
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), Code::PermissionDenied, "{status:?}");
+    assert!(status.message().contains("signature"), "{status:?}");
+
+    let stranger = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+    let wrong_key = scion_proto::ticket::sign(
+        &stranger,
+        "r",
+        "test",
+        *fake.root.as_bytes(),
+        scion_proto::ticket::now(),
+    )
+    .unwrap();
+    let status = get_with(&mut caller, vec![ref_for(&fake, &secret)], wrong_key)
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), Code::PermissionDenied, "{status:?}");
+    assert!(status.message().contains("signature"), "{status:?}");
+
+    let mut flipped = signed.clone();
+    // The body layout is version (1 byte), expiry (8), root tree (32),
+    // then the u16 length of the repo name. The flip hits the repo
+    // name's first byte: the length stays small and even, so the body
+    // still parses to exactly a repo, a principal and a root tree - the
+    // shape check cannot refuse it, and the signature is the only check
+    // left that can.
+    let at = 1 + 8 + 32 + 2;
+    flipped[at] ^= 0xff;
+    let status = get_with(&mut caller, vec![ref_for(&fake, &secret)], flipped)
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), Code::PermissionDenied, "{status:?}");
+    assert!(status.message().contains("signature"), "{status:?}");
+
+    assert_eq!(fake.calls(), 0, "nothing was fetched for any of the three");
+}
+
+/// The object ref at the fake's path for `object`, for a caller that
+/// brings its own ticket.
+fn ref_for(fake: &Fake, object: &Object) -> ObjectRef {
+    ObjectRef {
+        kind: object.kind,
+        id: object.id.clone(),
+        path: fake.path(object),
+    }
+}
