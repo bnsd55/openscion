@@ -50,8 +50,8 @@ table=(
     "describe|crates/scion-proto/tests/protocol_surface_v1.golden|docs/protocol-v1.md|."
     "describe|crates/scion-proto/proto/scion.proto|docs/protocol-v1.md|."
     "describe|proto/scion.proto|docs/protocol-v1.md|."
-    "crates/scion-server/tests/archive_v1.golden|docs/archive-format.md|^Version [0-9]+ is this document"
-    "crates/scion-server/tests/archive_golden.rs|docs/archive-format.md|^Version [0-9]+ is this document"
+    "version|crates/scion-server/tests/archive_v1.golden|docs/archive-format.md|^Version [0-9]+ is this document"
+    "version|crates/scion-server/tests/archive_golden.rs|docs/archive-format.md|^Version [0-9]+ is this document"
 )
 
 failed=0
@@ -68,7 +68,11 @@ for row in "${table[@]}"; do
     if ! git diff --name-only "$base" "$head" -- "$golden" | grep -q .; then
         continue
     fi
-    if git diff "$base" "$head" -- "$doc" | grep -E "^[+-].*$pattern" | grep -q .; then
+    # The pattern may itself start with '^' (a line anchor in the
+    # document): anchor it right after the diff marker, so "^[+-]^Version"
+    # is not an impossible match and a version line's move in the diff
+    # is seen.
+    if git diff "$base" "$head" -- "$doc" | grep -E "^[+-]${pattern#^}" | grep -q .; then
         continue
     fi
     if [ "$rule" = version ]; then
