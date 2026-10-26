@@ -35,7 +35,9 @@ certificates and a real token for anything that matters.
   the image always builds with a supported toolchain). The runtime is
   `debian:bookworm-slim` with `ca-certificates`, running as the non-root
   user `scion` (uid 10001); data lives under `/data`, which a named volume
-  owns.
+  owns. `/data` is mode 0700 in the image, so a named volume inherits it
+  at its first creation: the server refuses a data directory that other
+  users can read or write, and the volume starts inside the rule.
 - `docker/compose.yml`: the `server`, `cache`, and a one-shot `scn` runner.
 - `docker/demo.sh`: the script the steps above describe.
 - `docker/compose.postgres.yml`: the Postgres variant's additions, loaded

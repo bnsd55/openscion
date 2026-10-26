@@ -13,7 +13,7 @@ use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt as _;
 
 fuzz_target!(|data: &[u8]| {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let marker = dir.path().join("backend");
     std::fs::write(&marker, data).unwrap();
     #[cfg(unix)]

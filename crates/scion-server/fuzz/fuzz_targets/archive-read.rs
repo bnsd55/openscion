@@ -22,7 +22,7 @@ enum Section {
 }
 
 fuzz_target!(|data: &[u8]| {
-    let dir = tempfile::tempdir().expect("a temp archive");
+    let dir = scion_server::test_support::private_tempdir();
     let archive = dir.path().join("scion-archive-1");
     std::fs::create_dir_all(&archive).expect("the archive directory");
     let (section, body) = match data.first() {
