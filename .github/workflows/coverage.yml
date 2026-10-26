@@ -23,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       vcap:
-        description: 'cap the measure processes' virtual address space at 6 GB'
+        description: 'cap each measure process virtual address space at 6 GB'
         required: false
         default: 'on'
         type: choice
