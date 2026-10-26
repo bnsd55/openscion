@@ -274,7 +274,8 @@ impl Store {
             return Err(io::Error::new(
                 ErrorKind::PermissionDenied,
                 format!(
-                    "{} is open to other users; make it mode 0700",
+                    "{} can be read or written by group or others (fix: chmod 700 {})",
+                    dir.display(),
                     dir.display()
                 ),
             )
@@ -2258,7 +2259,11 @@ mod tests {
         let Err(err) = Store::open(&path) else {
             panic!("the open of a writable data directory must fail");
         };
-        assert!(err.to_string().contains("make it mode 0700"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("can be read or written by group or others (fix: chmod 700"),
+            "{err}"
+        );
         // The same through a parent that another user can change: a
         // group-writable directory without the sticky bit above the data.
         let parent = dir.path().join("shared");

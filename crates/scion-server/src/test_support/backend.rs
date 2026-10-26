@@ -51,6 +51,7 @@ impl Backend {
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn open_test_shared(data: &Path) -> Result<Self> {
+        Self::ensure_private_dir(data);
         if std::env::var("SCION_TEST_BACKEND").as_deref() == Ok("postgres") {
             refuse_damaged_marker(data)?;
             let marker = Marker::read(data);
@@ -65,6 +66,20 @@ impl Backend {
         refuse_postgres_marker(data)?;
         Self::open_shared(data, None, None)
     }
+    /// Makes an existing test data directory private, as the operator's
+    /// `chmod 700` does: the tests pre-create their directories with the
+    /// process umask, and the open refuses one that other users can reach.
+    /// The refusal tests set the open modes after this runs, so they still
+    /// exercise it.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    fn ensure_private_dir(data: &Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        if data.is_dir() {
+            let _ = std::fs::set_permissions(data, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
     /// [`Backend::open_test_shared`], for a store the suite reopens from
     /// another path than the one its first open used: the power suite
     /// reopens from the backing directory, whose path would name a
@@ -77,6 +92,7 @@ impl Backend {
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn open_test_shared_in_schema(data: &Path, schema: &str) -> Result<Self> {
+        Self::ensure_private_dir(data);
         if std::env::var("SCION_TEST_BACKEND").as_deref() == Ok("postgres") {
             refuse_damaged_marker(data)?;
             let marker = Marker::read(data);
@@ -101,6 +117,7 @@ impl Backend {
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn open_test(data: &Path) -> Result<Self> {
+        Self::ensure_private_dir(data);
         if std::env::var("SCION_TEST_BACKEND").as_deref() == Ok("postgres") {
             refuse_damaged_marker(data)?;
             let marker = Marker::read(data);

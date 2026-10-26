@@ -1228,7 +1228,7 @@ fn old_tree(entries: &[(&str, BlobId, bool)]) -> Vec<u8> {
 /// checkout works and fsck is clean.
 #[test]
 fn a_schema_6_data_dir_upgrades_and_checks_out() {
-    let data = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
     // The changeset and blob bytes are the bytes the old release wrote
     // too: #172 changed trees only.
     let store = Store::open(data.path()).unwrap();

@@ -183,6 +183,9 @@ readback() {
 direct() {
   local ref=$1 dir=$2 port out schema
   note "direct: HEAD opens the store of $ref"
+  # The store the old binary made: the chmod is the operator's
+  # documented upgrade step, before HEAD's first open.
+  chmod 700 "$dir/store"
   "$BIN/scion-server" --data "$dir/store" fsck >"$dir/fsck-head.log" 2>&1 || {
     tail -n 20 "$dir/fsck-head.log" >&2
     die "direct ($ref): HEAD cannot open the store"
@@ -238,11 +241,14 @@ refusal() {
     summary "refusal $ref: both builds write schema $ref_schema, so the refusal cannot fire on this pair"
     return 0
   fi
+  # HEAD opens the store the old binary made: the chmod is the
+  # operator's upgrade step, before the first open.
+  chmod 700 "$dir/store"
   note "refusal: the store of HEAD on $ref's binary"
   fresh="$dir/store-of-head"
   # HEAD's binary refuses a missing data directory (#578), and it is
   # the first to touch this one: the import creates it.
-  mkdir -p "$fresh"
+  install -d -m 0700 "$fresh"
   "$BIN/scion-server" --data "$fresh" import "$WORK/head/fixture/src" \
     >"$dir/import-head.log" 2>&1 || die "refusal ($ref): the import of the HEAD store failed"
   if "$dir/bin/scion-server" --data "$fresh" fsck >"$dir/refuse.log" 2>&1; then

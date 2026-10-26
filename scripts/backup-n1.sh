@@ -135,7 +135,10 @@ stop_one "$WORK/n1" server
 summary "backup: the N-1 snapshot and objects are in $WORK/backup"
 
 # UPGRADE: HEAD's binary opens the N-1 store; the migration runs
-# forward, and the acknowledged writes read back through HEAD.
+# forward, and the acknowledged writes read back through HEAD. The
+# chmod is the operator's upgrade step: a store a pre-0700-rule binary
+# or a copy tool left readable is refused, and this names the fix.
+chmod 700 "$WORK/n1/store"
 "$WORK/head/bin/scion-server" --data "$WORK/n1/store" fsck >"$WORK/upgrade-fsck.log" 2>&1 ||
   die "the upgrade open failed: HEAD cannot open the N-1 store"
 mkdir -p "$WORK/upgrade"
@@ -152,7 +155,7 @@ summary "upgrade: HEAD opened the N-1 store and the acknowledged writes read bac
 
 # ROLLBACK: the pre-upgrade backup restores into a fresh directory and
 # serves under the N-1 binary — the same old-schema bytes, so it opens.
-mkdir -p "$WORK/rollback/store"
+install -d -m 0700 "$WORK/rollback/store"
 cp "$WORK/backup/scion.db" "$WORK/rollback/store/scion.db" ||
   die "the restore of the metadata snapshot failed"
 cp -R "$WORK/backup/objects/." "$WORK/rollback/store/objects/" ||

@@ -265,5 +265,9 @@ fn an_open_refuses_a_data_directory_that_group_or_others_can_read() {
     let Err(err) = Backend::open(&path, None, None) else {
         panic!("the open of a readable data directory must fail");
     };
-    assert!(err.to_string().contains("make it mode 0700"), "{err}");
+    assert!(
+        err.to_string()
+            .contains("can be read or written by group or others (fix: chmod 700"),
+        "{err}"
+    );
 }
