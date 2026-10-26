@@ -160,7 +160,14 @@ done
 rm -rf "$check/changes"
 mkdir "$check/changes"
 printf 'A thing that passes every rule, no front matter, no row\nmarker on the first line, no indent on any line.\n' >"$check/changes/1.fixed.md"
-(cd "$check" && "$here/merge-changelog.sh" --check) >/dev/null
+# --check reports the work it did: one fragment checked, not "no
+# fragments in changes/" (a silence that hides a full pass).
+(cd "$check" && "$here/merge-changelog.sh" --check) >"$check/out.txt"
+grep -q '^1 fragments pass the checks$' "$check/out.txt" || {
+    echo "--check does not name the fragments it checked; it said:" >&2
+    cat "$check/out.txt" >&2
+    exit 1
+}
 
 # A missing changes/ passes too: the release fold deletes every
 # fragment, git keeps no empty directory, so the tree after the fold
@@ -168,7 +175,12 @@ printf 'A thing that passes every rule, no front matter, no row\nmarker on the f
 # 'find: changes: No such file or directory', set -e's pipefail, 9 red
 # CI jobs). An empty changes/ passed already; the missing one died.
 rm -rf "$check/changes"
-(cd "$check" && "$here/merge-changelog.sh" --check) >/dev/null
+(cd "$check" && "$here/merge-changelog.sh" --check) >"$check/out.txt"
+grep -q '^0 fragments pass the checks$' "$check/out.txt" || {
+    echo "an empty changes/ does not say so; it said:" >&2
+    cat "$check/out.txt" >&2
+    exit 1
+}
 echo "merge-changelog --check: fixture ok"
 
 # The argument is either --check or a release name: a flag nobody reads
