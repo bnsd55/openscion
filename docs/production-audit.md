@@ -22,7 +22,7 @@ document landed on.
 
 | Finding | Evidence | Status |
 | --- | --- | --- |
-| `scn mount --unstable-writable`: a planted parent symlink can redirect an overlay write outside the mount (final-name-only check). the maintainer's decision: the writable mount leaves the v1 release binary — the write path becomes a build feature, off in release | `crates/scn/src/vfs.rs:1469`, `docs/cli.md:57`, `changes/313.fixed.md` | open, closed when the write path left the release builds (#640) |
+| `scn mount --unstable-writable`: a planted parent symlink can redirect an overlay write outside the mount (final-name-only check). the maintainer's decision: the writable mount leaves the v1 release binary — the write path becomes a build feature, off in release | `crates/scn/src/vfs.rs:1469`, `docs/cli.md:57`, `changes/313.fixed.md` | fixed (#640: the write path is a build feature, off in release; the build flag names it) |
 | Env aliases `SCION_DATA`, `SCION_TOKEN`, `SCION_POSTGRES_URL`, `SCION_POSTGRES_URL_FILE` exist beside their flags | `crates/scion-server/src/main.rs:30,36-44,1290` | fixed by design (each alias is the documented spelling of a flag in `docs/cli.md`; the flag list is the release surface, and the URL env exists so secrets stay off argv) |
 | Test hooks in release binaries: the store fault hooks and the derive test pool build only with `--features test-hooks` | `crates/scion-server/Cargo.toml:61`, `crates/scion-server/src/store.rs:920` | fixed by design (the feature is off in every release build; `release.yml` builds plain `--release`) |
 
@@ -235,6 +235,25 @@ section; its fixes landed as #561. Highlights, with that audit's verdicts:
 | Every third-party action is pinned to a commit SHA with the version in a comment | `.github/workflows/ci.yml:24` and every workflow | fixed (pinned at introduction; the scorecard workflow watches for drift) |
 | Service containers carry version tags, not mutable `latest` | `ci.yml` (the matrix `postgres:16.15/17.11/18.6`, each `@sha256:`-pinned in its include entry), `ci.yml` and `bench.yml` (`postgres:17.11@sha256:...`) | fixed — every services image pins its tag's multi-arch index; `scripts/lint-workflows.sh` fails a services `image:` line without `@sha256:` |
 | Artifacts are built from the protected release tag only | `docs/RELEASING.md`, `docs/verify.md`, `docs/slsa.md` | fixed by design (the release workflow builds on the tag; the provenance doc states the SLSA level) |
+
+## 10. Test strength (mutation testing)
+
+A mutation-testing pass per module: each run flips one comparison or
+guard at a time, and a surviving mutant names a check whose loss no
+test would notice. The table lists the modules run so far, the mutant
+count, what survived, and the pull request whose tests killed each real
+gap.
+
+| Module (the mutants' run) | Mutants | What survived, and what killed it |
+| --- | --- | --- |
+| `gc.rs` (#650) | 94 | 7 shapes: the grace report, the batch walk's end, three blob-root guards, a gone file's age, a corrupt changeset's naming - one test each, linked in #650 |
+| `write.rs` (#649) | 2 shapes | the author-NAME limit (only the email arm was tested) and the message boundary (no test pinned the exact limit) - both bound with red proofs in #649 |
+| the land path (#652) | 3 shapes | the empty name/ref arm, the name limit's boundary, the replan attempt cap - one test each, with the expected mutant outcomes named in #652 |
+| `fsck.rs` (#655, plus the follow-up) | 55 (18 verdicts when the budget stopped the run) | 4 shapes where damage reports clean: an unreadable blob root, a lying tree size, a page-boundary early stop, a missing blob root - one operator-view test each, in #655; the restore's staging pin (#659) adds the late-truncation layer |
+| `ticket.rs` (#648) | 2 shapes | the walk's tree-id content-hash guard (a crafted tree reached a file the real tree does not name) and the ticket lifetime (no test pinned the 15 minutes) - both bound in #648. HIGH while it lasted: the tree-id check was unbound |
+| the cache's signature check (#647) | 1 shape | the tier cache accepted `parse_unverified`: a signature check with no tier-level test. #647 drives a real cache with an unsigned ticket, an unknown key, and a flipped byte - each refused, the upstream untouched. HIGH while it lasted |
+| the restore path (#659, open) | 1 pin | a stream cut after the first batch: the restore fails naming the torn stream, the target holds no store, the staging scratch is gone - #659, in review |
+| the auth paths | - | a run is in progress; this table grows when it reports |
 
 ## The open list (the v1.0 blockers this audit leaves)
 
