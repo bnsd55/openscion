@@ -121,8 +121,7 @@ pub fn export(
     let mut total_members = 0_u64;
     // The archive's root: made recursively and PRIVATE (mode 0700
     // whatever the umask), as the data directory is — the archive holds
-    // every repo whole. A root that exists already keeps its mode: that
-    // is the operator's choice. The parents the operator's path needs
+    // every repo whole. The parents the operator's path needs
     // are made 0700 where they were missing. Each section directory
     // below is a NON-recursive create, so a fold on the disk is an
     // error, not a silent reuse of another repo's directory.

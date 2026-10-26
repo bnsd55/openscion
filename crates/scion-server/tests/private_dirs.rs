@@ -197,8 +197,7 @@ fn serve_starts_with_its_ticket_key_in_a_data_directory_that_it_made() {
 
 /// The export's root is the archive's whole body - every repo's blobs,
 /// changesets and refs - so a new `--out` directory is made private
-/// (0700) whatever the umask, as the data directory is. A root that
-/// exists already keeps the operator's mode.
+/// (0700) whatever the umask, as the data directory is.
 #[test]
 fn an_export_into_a_new_out_makes_it_private_whatever_the_umask() {
     let tmp = private_tempdir();
@@ -232,8 +231,4 @@ fn an_export_into_a_new_out_makes_it_private_whatever_the_umask() {
         ],
     ));
     assert_eq!(mode_of(&out), 0o700, "a new export root");
-
-    // (An existing --out keeps its mode by the helper's rule; the CLI
-    // refuses one outright - "It must not exist" - so the operator's
-    // choice is the only mode an existing directory ever wears.)
 }
