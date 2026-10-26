@@ -21,15 +21,6 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      vcap:
-        description: 'cap each measure process virtual address space at 6 GB'
-        required: false
-        default: 'on'
-        type: choice
-        options:
-          - 'on'
-          - 'off'
 
 # Every third-party action is pinned to the commit SHA its version tag
 # named, with the version in a comment, as ci.yml does.
@@ -206,14 +197,9 @@ jobs:
           # Steps do not share a shell: the 6 GB per-process cap and the
           # instrumentation flags live in this step too, so the test run
           # sees the same environment the build compiled with. The cap
-          # is an A/B suspect: VSZ reserves far exceed RSS in Rust
-          # processes (thread stacks, malloc arenas, the profile
-          # runtime's maps), so the cap can kill an honest process.
-          if [ "${{ inputs.vcap || 'on' }}" = "on" ]; then
-            ulimit -v 6291456
-          else
-            echo "the virtual-address-space cap is off for this run"
-          fi
+          # stays on: an A/B with and without it ran 6 of 6 green both
+          # ways, so it neither causes nor prevents the rare loss.
+          ulimit -v 6291456
           # shellcheck disable=SC1090
           source <(cargo llvm-cov show-env --sh)
           # One .profraw per test process made thousands per job, and
