@@ -265,7 +265,14 @@ importer() {
     "$TIMEOUT" 300 "$BIN/scion-server" --data "$WORK/server" \
       import \
       --rev main "$WORK/src.git" \
-      >> "$WORK/import-soak.log" 2>&1 || echo "import $n failed" >> "$WORK/import-fail.log"
+      >> "$WORK/import-soak.log" 2>&1 || {
+      if [ -e "$WORK/pg-down" ]; then
+        echo "import $n failed inside the Postgres restart window (the fault)" >> "$WORK/import-soak.log"
+      else
+        echo "import $n failed" >> "$WORK/import-fail.log"
+      fi
+    }
+    [ -e "$WORK/pg-down" ] && rm -f "$WORK/pg-down"
     sleep 60
   done
 }
@@ -277,10 +284,15 @@ gcer() {
     n=$((n + 1))
     "$TIMEOUT" 120 "$BIN/scion-server" --data "$WORK/server" \
       gc --dry-run >> "$WORK/gc.log" 2>&1 \
-      || echo "gc-dry $n failed" >> "$WORK/gc-fail.log"
+      || { [ -e "$WORK/pg-down" ] \
+           && echo "gc-dry $n failed inside the Postgres restart window (the fault)" >> "$WORK/gc.log" \
+           || echo "gc-dry $n failed" >> "$WORK/gc-fail.log"; }
     "$TIMEOUT" 120 "$BIN/scion-server" --data "$WORK/server" \
       gc >> "$WORK/gc.log" 2>&1 \
-      || echo "gc $n failed" >> "$WORK/gc-fail.log"
+      || { [ -e "$WORK/pg-down" ] \
+           && echo "gc $n failed inside the Postgres restart window (the fault)" >> "$WORK/gc.log" \
+           || echo "gc $n failed" >> "$WORK/gc-fail.log"; }
+    [ -e "$WORK/pg-down" ] && rm -f "$WORK/pg-down"
     sleep 120
   done
 }
@@ -349,6 +361,10 @@ pg_restart() {
     die "SCION_FAULT_PG=1 needs SCION_FAULT_PG_CMD"
   fi
   PG_RESTARTS=$((PG_RESTARTS + 1))
+  # The window marker: every side loop (import, gc) that touches the
+  # database treats a failure while this file exists as the fault
+  # working, and the first success clears it.
+  : > "$WORK/pg-down"
   sh -c "$SCION_FAULT_PG_CMD" >> "$WORK/pg.log" 2>&1
   local n=0
   until pg_isready -q 2> /dev/null; do
