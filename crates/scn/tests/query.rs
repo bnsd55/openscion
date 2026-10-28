@@ -14,7 +14,7 @@ use scion_server::Backend;
 use scion_server::test_support::meta::Meta as _;
 use scion_server::test_support::meta::MetaTx as _;
 use scion_server::test_support::read::MAX_DIFF_ENTRIES;
-use scion_server::test_support::{service, store::Store, tree};
+use scion_server::test_support::{service, tree};
 use scion_server::{ImportOptions, import_git};
 use serde_json::Value;
 use std::sync::Arc;
