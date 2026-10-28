@@ -256,6 +256,7 @@ import() {
   # directory, made if missing. Every server of every version here opens
   # its own schema, so the pairs never share rows.
   URL=$(pg_url_for "$dir/server")
+  note "import into $(printf %s "$URL" | sed 's/.*search_path%3D//; s/%2Cpublic//')"
   # The server refuses a missing data directory (#578); create it here.
   mkdir -p "$dir/server"
   chmod 700 "$dir/server"

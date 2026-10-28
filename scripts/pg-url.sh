@@ -30,6 +30,9 @@ pg_url_for() {
   local hash
   hash=$(printf '%s' "$canon$tail" | cksum | cut -d' ' -f1)
   local schema="scion_script_$hash"
+  if [ "${SCION_PG_URL_TRACE:-}" = 1 ]; then
+    echo "pg_url_for: data=$data canon=$canon tail=$tail schema=$schema" >&2
+  fi
   command -v psql > /dev/null || {
     echo "FAIL: psql is needed to make the schema $schema" >&2
     return 1
