@@ -10,6 +10,11 @@
 # runner hung.
 set -euo pipefail
 
+# mount-nfs runs its own build and its own timeout resolution, so it does
+# not source common.sh; it sources only the pg_url_for helper.
+# shellcheck source=pg-url.sh source-path=SCRIPTDIR
+. "$(dirname "$0")/pg-url.sh"
+
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 case ${CARGO_TARGET_DIR:-} in
   "") BIN=$ROOT/target/debug ;;
@@ -84,14 +89,10 @@ note "starting the server"
 install -d -m 0700 "$WORK/server"
 chmod 700 "$WORK/server"
 "$BIN/scion-server" --data "$WORK/server" ticket-key --out "$WORK/ticket.key" > "$WORK/ticket.pub"
-# In Postgres mode (SCION_TEST_BACKEND=postgres) the server serves its
-# metadata from the test database; the data directory keeps the marker and
+# The server serves its metadata from Postgres: one schema for this run's
+# data directory, made if missing. The data directory keeps the marker and
 # the blob files, and the checks below prove which backend served.
-PG_ARG=""
-if [ "${SCION_TEST_BACKEND:-}" = postgres ]; then
-  : "${SCION_TEST_POSTGRES_URL:?SCION_TEST_POSTGRES_URL must name the test database}"
-  PG_ARG="--postgres-url $SCION_TEST_POSTGRES_URL"
-fi
+PG_ARG="--postgres-url $(pg_url_for "$WORK/server")"
 # shellcheck disable=SC2086 # the URL holds no spaces
 "$BIN/scion-server" --data "$WORK/server" $PG_ARG serve \
   --listen "127.0.0.1:$SERVER_PORT" \
@@ -103,14 +104,12 @@ echo $! > "$WORK/server.pid"
 # The run proves the backend it was asked for: a Postgres-backed server
 # writes the marker and no SQLite database, so a spawn that lost its
 # --postgres-url fails here, not vacuously as a second SQLite run.
-if [ "${SCION_TEST_BACKEND:-}" = postgres ]; then
-  test -f "$WORK/server/backend" || die "the data directory has no backend marker"
-  test "$(head -n 1 "$WORK/server/backend")" = postgres \
-    || die "the server is not Postgres-backed"
-  test ! -e "$WORK/server/scion.db" \
-    || die "a Postgres-backed server must not keep a SQLite database"
-  note "the server is Postgres-backed (marker, no scion.db)"
-fi
+test -f "$WORK/server/backend" || die "the data directory has no backend marker"
+test "$(head -n 1 "$WORK/server/backend")" = postgres \
+  || die "the server is not Postgres-backed"
+test ! -e "$WORK/server/scion.db" \
+  || die "a Postgres-backed server must not keep a SQLite database"
+note "the server is Postgres-backed (marker, no scion.db)"
 
 # A known changeset with known bytes on main: a one-file git repository,
 # imported (import creates the repo, a commit cannot, so this goes before
@@ -121,7 +120,7 @@ git -C "$WORK/src" add README.md
 git -C "$WORK/src" -c user.name=mount-nfs -c user.email=mount-nfs@localhost \
   commit -qm "seed the repo"
 # The import opens the same backend beside the serving one, so it takes
-# the same `--postgres-url` in Postgres mode, before the subcommand: the
+# the same `--postgres-url` in the same schema, before the subcommand: the
 # flag belongs to the root command.
 # shellcheck disable=SC2086 # the URL holds no spaces
 "$TIMEOUT" 120 "$BIN/scion-server" --data "$WORK/server" $PG_ARG import \
@@ -131,7 +130,7 @@ git -C "$WORK/src" -c user.name=mount-nfs -c user.email=mount-nfs@localhost \
   die "the import failed"
 }
 
-# The mount, as the README says: `scn mount DIR main` as the user. Its own
+# The mount, as docs/cli.md says: `scn mount DIR main` as the user. Its own
 # mount attempt fails (only root may mount), so it prints the sudo command
 # and keeps serving; the script runs that printed command under sudo, and
 # polls until the mount answers.

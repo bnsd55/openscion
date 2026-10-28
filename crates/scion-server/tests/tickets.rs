@@ -11,9 +11,11 @@ use scion_proto::runtime::listen::Limits;
 use scion_proto::runtime::object::{Assembler, Header};
 use scion_proto::v1::objects_client::ObjectsClient;
 use scion_proto::v1::{GetObjectsRequest, GetRootTreeRequest, ObjectKind, ObjectRef};
+use scion_server::Backend;
 use scion_server::Keys;
+use scion_server::test_support::meta::Meta as _;
 use scion_server::test_support::meta::MetaTx as _;
-use scion_server::test_support::{backend::from_store, service, store::Store};
+use scion_server::test_support::service;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tonic::Code;
@@ -38,7 +40,7 @@ async fn server() -> (
     tempfile::TempDir,
 ) {
     let dir = scion_server::test_support::private_tempdir();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Backend::open_test(dir.path()).unwrap();
     let readme = store.blobs().put(CONTENT).unwrap();
     let changeset = Changeset::new(
         Vec::new(),
@@ -75,7 +77,7 @@ async fn server() -> (
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let keys = Keys::generate();
     tokio::spawn(service::serve(
-        from_store(store.clone()),
+        store.clone(),
         listener,
         TOKEN,
         service::ServeOptions {
@@ -275,7 +277,7 @@ async fn server_of_readme() -> (
     tempfile::TempDir,
 ) {
     let dir = scion_server::test_support::private_tempdir();
-    let server_store = Store::open(dir.path()).unwrap();
+    let server_store = Backend::open_test(dir.path()).unwrap();
     let readme = server_store.blobs().put(CONTENT).unwrap();
     let changeset = Changeset::new(
         Vec::new(),
@@ -311,7 +313,7 @@ async fn server_of_readme() -> (
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let keys = Keys::generate();
     tokio::spawn(service::serve(
-        from_store(server_store.clone()),
+        server_store.clone(),
         listener,
         TOKEN,
         service::ServeOptions {
@@ -525,7 +527,7 @@ async fn tiers() -> (Tiers, tokio::sync::oneshot::Sender<()>, tempfile::TempDir)
     use scion_tier::{MemoryStore, Tier};
 
     let dir = scion_server::test_support::private_tempdir();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Backend::open_test(dir.path()).unwrap();
     // One blob in both repos, and one in each alone.
     let shared = store.blobs().put(b"shared\n").unwrap();
     let readme = store.blobs().put(b"# main\n").unwrap();
@@ -551,7 +553,7 @@ async fn tiers() -> (Tiers, tokio::sync::oneshot::Sender<()>, tempfile::TempDir)
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let keys = Keys::generate();
     tokio::spawn(service::serve(
-        from_store(store.clone()),
+        store.clone(),
         listener,
         TOKEN,
         service::ServeOptions {

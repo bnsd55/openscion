@@ -1639,7 +1639,7 @@ pub(crate) mod testing {
     /// order, each an earlier changeset, and puts the file `f{i}`. Returns
     /// the IDs.
     pub(crate) fn insert_graph(
-        c: &Connection,
+        c: &mut dyn MetaTx,
         repo: RepoId,
         parents: &[Vec<usize>],
     ) -> Result<Vec<ChangesetId>> {
@@ -1660,7 +1660,7 @@ pub(crate) mod testing {
     /// Stores a graph as [`insert_graph`] does, where changeset `i` has the
     /// message and the changes that `make(i)` returns.
     fn insert_each(
-        c: &Connection,
+        c: &mut dyn MetaTx,
         repo: RepoId,
         parents: &[Vec<usize>],
         make: impl Fn(usize) -> (Vec<u8>, BTreeMap<RepoPath, Option<FileState>>),
@@ -1677,7 +1677,7 @@ pub(crate) mod testing {
                 changes,
             )
             .expect("changeset fits the format");
-            ids.push(SqliteTx(c).insert_changeset(repo, &cs)?);
+            ids.push(c.insert_changeset(repo, &cs)?);
         }
         Ok(ids)
     }
@@ -1707,7 +1707,7 @@ pub(crate) mod testing {
     /// Stores a history of [`histories`] as [`insert_graph`] does, where
     /// changeset `i` makes the changes `edits[i]`. Returns the IDs.
     pub(crate) fn insert_history(
-        c: &Connection,
+        c: &mut dyn MetaTx,
         repo: RepoId,
         parents: &[Vec<usize>],
         edits: &[Edits],

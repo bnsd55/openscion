@@ -1830,10 +1830,7 @@ mod tests {
         let (repo, ids) = store
             .write(|c| {
                 let repo = c.create_repo("r")?;
-                Ok((
-                    repo,
-                    testing::insert_graph(c.sqlite().unwrap(), repo, parents)?,
-                ))
+                Ok((repo, testing::insert_graph(c, repo, parents)?))
             })
             .unwrap();
         (dir, store, repo, ids)

@@ -24,6 +24,9 @@ need
 make_work bench
 build
 fetch_dataset
+# The bench's server keeps its metadata in Postgres: one schema for this
+# run's data directory, made if missing.
+PG_URL=$(pg_url_for "$WORK/server")
 import_dataset
 # The git server: partial clone needs filters. The warm mirror is made once,
 # before any run, as a CI machine keeps one.

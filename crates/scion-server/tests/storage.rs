@@ -7,7 +7,6 @@ mod common;
 
 use scion_server::test_support::backend::BackendExt;
 use scion_server::test_support::meta::{Meta as _, MetaTx as _, RepoId};
-use scion_server::test_support::store::Store;
 use scion_server::{Backend, Error, StorageClass};
 
 /// A store on the backend the tests run on.
@@ -188,7 +187,7 @@ fn the_blob_hook_refuses_exactly_one_write_per_count() {
     // it one tick after waitpid): a real lock leak still fails the guard.
     drop(store);
     common::spawn_guard::wait_for_lock_release(dir.path());
-    let again = Store::open(dir.path()).unwrap();
+    let again = Backend::open_test(dir.path()).unwrap();
     assert_eq!(
         again.blobs().get(scion_core::BlobId::of(b"a\n")).unwrap(),
         b"a\n"
