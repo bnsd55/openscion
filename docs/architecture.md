@@ -29,7 +29,7 @@ flowchart LR
         ops --> tree["tree.rs: apply, root trees<br/>graph.rs: commit graph<br/>history.rs: path history<br/>derived.rs: derived data"]
         ops --> db["db.rs, store.rs"]
         tree --> db
-        db --> sqlite[("metadata: SQLite, or Postgres")]
+        db --> pg[("metadata: Postgres")]
         ops --> blobs[("objects/blob: zstd files")]
     end
     git[("git repository")] --> imp["scion-server import"]
@@ -66,7 +66,7 @@ How one request flows through the server:
    a `Caller`.
 3. `service.rs` (the `Scion` service) or `objects.rs` (the `Objects` service)
    checks names, IDs and paths, then runs `write.rs`, `land.rs`, `read.rs`
-   or `blame.rs` on a blocking thread (SQLite and the blob folder are
+   or `blame.rs` on a blocking thread (the database and the blob folder are
    synchronous). Both services share one bound: at most 256 run at once,
    and at most 4 of them are `Blame` calls. A
    request times out after 600 s; for a streamed reply that covers only its
@@ -141,20 +141,17 @@ and the decoder rules.
 
 ## 3. Storage
 
-This section describes the SQLite backend: the metadata lives in
-`scion.db` inside one data directory. With `--postgres-url` the server
-keeps the same metadata in a Postgres database instead (same tables, one
-server per database; the Postgres schema is checked against these tables
-by a test), and its rules are in the operations guide
-([`operations.md`](operations.md), "The metadata in Postgres"). The blob
-files stay in the data directory in every backend. What follows is the
-SQLite backend:
+The metadata lives in a Postgres database, at the schema the server's
+URL names (same tables, one server per database; the schema is checked
+against these tables by a test), and its rules are in the operations
+guide ([`operations.md`](operations.md), "The metadata in Postgres").
+The blob files stay in the data directory:
 
 ```text
 <data>/lock                    shared by every process that uses <data>
 <data>/open.lock               held while a process opens <data>
 <data>/server.lock             held by the one server process
-<data>/scion.db                metadata and trees (SQLite)
+<data>/backend                 the marker that binds the directory to its database
 <data>/objects/blob/ab/cd..    one zstd file per blob, named by its ID in hex
 <data>/tmp/                    staging for atomic blob writes and uploads
 ```
@@ -172,7 +169,7 @@ it did, 2 when it could not run. Rows of a derived version this build
 does not know are reported as `derived-old`, and are not damage: the
 steps of the kind remove them (section 4).
 
-**SQLite tables** ([`migrations/`](../crates/scion-server/migrations)):
+**Tables** ([`migrations/`](../crates/scion-server/migrations)):
 
 | Table | Holds |
 |---|---|
@@ -188,12 +185,11 @@ steps of the kind remove them (section 4).
 | `derived` | Derived values by (kind, version, changeset), as bytes that each kind encodes. Rebuildable (section 4). |
 | `git_import` | Git commit ID to changeset, per repo, so a re-import skips known commits. |
 
-Trees live in SQLite, not in the blob folder, so a derivation that writes many
-trees commits them in one transaction. The schema version is
-`PRAGMA user_version`. When a database opens, each migration in
-`migrations/` that is newer than its version runs, in order, in its own
-transaction. A released migration never changes. A build refuses a database
-with a newer version. Version 3 lets a derived value have any length; the
+Trees live in the database, not in the blob folder, so a derivation that
+writes many trees commits them in one transaction. When a database opens,
+each migration in `migrations/` that is newer than its version runs, in
+order, in its own transaction. A released migration never changes. A build
+refuses a database with a newer version. Version 3 lets a derived value have any length; the
 upgrade copies every row. Version 4 adds `repo_blobs`. SQL cannot read the
 blob IDs inside changeset bytes, so the upgrade runs a step in Rust
 (`db::fill_repo_blobs`) in the same transaction: it reads each changeset of
@@ -253,64 +249,35 @@ lock is per process: an import shares the data directory with a server, and
 its writes go through their own stripes. `fsync_dir` covers the rename's
 directory entry.
 
-**Durability rules** (the SQLite backend; on Postgres a returned commit
-is durable: `synchronous_commit=on` is checked at open, so
-`Store::write` returning is the durability point, and the full-flush
-machinery below does not apply).
+**Durability rules.** A metadata commit is durable when the transaction
+returns: every connection runs `synchronous_commit = on`, and the server
+refuses to open a database that turned it off. So a reply that names a
+commit — a ref target from `ResolveRef`, a land state from `GetLand`, a
+tree ID from a derivation — names a commit the database will not lose,
+and the database's own durability rules carry it from there.
 
-- Group commit: concurrent callers share one full drive flush (`F_FULLFSYNC`
-  on macOS). Each caller first makes its writes reach the drive with a plain
-  `fsync`, then waits for a full flush that starts after that, and one
-  waiting caller runs it for all. A failed flush fails every caller that
-  waited for it.
-- A database transaction is durable when `Store::write` returns, or after a
-  later `Store::flush`. WAL with `synchronous = FULL` ends each commit with a
-  plain `fsync`. On macOS that can leave the commit in the drive cache, so
-  `flush` waits for a shared full flush. In the server, SQLite runs no full
-  flush of its own (`fullfsync = OFF`), except in checkpoints
-  (`checkpoint_fullfsync`). An import process is different (below).
-  Elsewhere the commit's `fsync` already flushes the cache. A land waits for
-  the flush after it releases the ref's lock, so queued lands share it.
-- A read waits too. If `Store::read` saw a commit that no full flush covers
-  yet, it waits for one after it gives back its connection. So no reply
-  shows a commit that a power loss can undo, such as a ref target from
-  `ResolveRef` or a land state from `GetLand`. Where `fsync` already flushes
-  the drive cache, no read waits. A land reads with `Store::read_unflushed`,
-  because it flushes before it replies.
-- A read can see a commit before `commit` returns. So each commit is
-  counted twice, under the write lock: in `committing` before its COMMIT
-  runs, and in `committed` after it ends. A read loads `committing` after it
-  ends, so the count covers every commit it saw. A flush covers only
-  `committed`: a commit still in its COMMIT may not have written its log.
-  With `synchronous = FULL`, a commit's log reaches the drive before the
-  commit is visible, so a flush that starts after a read covers what the
-  read saw. The proof is in `Store::wait_durable`.
 - A read that derives a value, such as the root tree for `GetRootTree`,
-  waits for a full flush of that derivation before it replies (section 4).
-  So a client never gets a tree ID that a power loss can undo.
-- A blob is durable after `BlobBatch::sync`: a plain `fsync` of each blob file
-  when written, then of each changed fan-out directory, then a shared full
-  flush.
+  commits the derivation before it replies (section 4). So a client never
+  gets a tree ID that a power loss can undo.
+- A blob is durable after `BlobBatch::sync`: a plain `fsync` of each blob
+  file when written, then of each changed fan-out directory, then a full
+  flush of the drive (`F_FULLFSYNC` on macOS, where a plain `fsync` can
+  leave the bytes in the drive's cache).
 - No committed metadata may name a blob that a crash could lose. `PutBlob`
   syncs its blob before it replies. `CreateChangeset` reads back, hashes and
   syncs every blob it names before its transaction. Git import syncs one blob
-  batch per 1,000 commits before the transaction that records them. A
-  `repo_blobs` row is the exception: `PutBlob` commits it after a plain
-  `fsync` of the blob, and one full flush then covers both before the reply.
-  A crash can keep the row and lose the blob, which grants nothing, because
-  `CreateChangeset` still reads every blob back.
+  batch per 1,000 commits before the transaction that records them.
 - A stored blob still costs a full flush when it is put again or named by a
   changeset: another batch may have written it and not synced yet.
 
 Unit tests check where each flush comes. No test cuts the power: the crash
 suite kills the process, and the kernel keeps what it wrote (section 10).
 
-**Processes that share a data directory** (SQLite backend only: on
-Postgres, one `serve` runs per database — a second fails at open — and an
-import runs beside it without taking that lock). `scion-server import` can run
-while the server runs. The server opens the directory with `Store::open`, an
-import with `Store::open_shared`. Each holds its `flock`s until the last
-`Store` clone is dropped:
+**Processes that share a data directory.** One `serve` runs per database —
+a second fails at open — and an `import` runs beside it: the import takes
+no one-server lock, it writes through its own database session and stages
+its blob files in the same directory. Each process holds its `flock`s on
+the directory until the last `Store` clone is dropped:
 
 | Lock file | Held by |
 |---|---|
@@ -332,12 +299,11 @@ import with `Store::open_shared`. Each holds its `flock`s until the last
   the first process writes its build into `<data>/lock`: the schema version
   and the version of each kind (`store::build`). An open while other
   processes run fails unless its build is the same.
-- **Writes take turns.** SQLite in WAL mode lets one process read while the
-  other writes. A write waits for the write transaction of the other
-  process, up to `busy_timeout` (5 s), and then fails with `UNAVAILABLE`, so
-  the client retries. An import ends a write transaction after 1 s, so a
-  server write waits for at most that plus one commit, and the import stays
-  off the lock 100 ms between two transactions
+- **Writes take turns.** Each write transaction holds the database's rows
+  it touches; a write that waits for another writer's lock gives up after
+  5 s and fails with `UNAVAILABLE`, so the client retries. An import ends a
+  write transaction after 1 s, so a server write waits for at most that
+  plus one commit
   ([#100](https://github.com/bnsd55/openscion/issues/100)). While a server
   write waits, it holds the server's write connection, so the server's
   other writes wait too. Its reads do not: they use the read connections.
@@ -345,17 +311,8 @@ import with `Store::open_shared`. Each holds its `flock`s until the last
   each in a write transaction. The server sees a move that the import made at
   its next land on the ref: each plan reads the head from the database and
   advances the path index to it (section 5).
-- **Durability.** Each process counts and flushes its own commits, and group
-  commit shares a full flush only within one process. A server reply that
-  only reads does not flush for a commit of another process. So a shared
-  `Store` commits with `fullfsync = ON`: SQLite syncs the log with a full
-  flush of the drive cache before the commit becomes visible. The server
-  never sees an import commit that a power loss can undo. In turn, a server
-  commit reaches the drive before the import can see it. So the import runs
-  a full flush before it reports, which covers every write that reached the
-  drive. Its report rests on no server commit that a power loss can undo.
 - **Blobs.** The import syncs each blob batch before the transaction that
-  names its blobs, as in one process. So a blob that the server reaches
+  names its blobs, as the server does. So a blob that the server reaches
   through metadata is durable. The server reads blob files directly, and
   checks each against its ID.
 
@@ -423,8 +380,7 @@ of a directory, and on a put where a file or a directory is in the way.
 read prefixes (`views.rs`). The derivation is a pure function of the rule set
 and the real trees, so its results are a rebuildable cache: one `view_trees`
 row per (repo, rule-set digest, projection version, real tree, path-context
-digest), in the same shape on both backends (SQLite migration 0009, Postgres
-0003). A derivation asks the table at every directory, so a new changeset
+digest), in the same shape on both backends. A derivation asks the table at every directory, so a new changeset
 re-derives only the folders on its changed paths; the rest of the view comes
 from the rows, and the changeset's root row is the row of its real root tree
 under the rule set's full context. Each derivation's write also sweeps at
@@ -559,7 +515,7 @@ sequenceDiagram
     autonumber
     participant A as scn
     participant L as land.rs
-    participant DB as backend (SQLite, or Postgres)
+    participant DB as the metadata database
     A->>L: Land(changeset, ref, request key)
     L->>DB: transaction: insert a pending row and expire old lands, or find the row for this key
     alt row is not pending
@@ -1144,8 +1100,8 @@ is not an error: it removes what it wrote and then dies by the signal, so
 a shell reports 128 plus the signal number, and a shell loop stops too.
 
 `ReadFile` and `ListDir` get the changeset's root tree from `derived`
-(deriving it if the row is missing), then walk trees from SQLite one path part
-at a time. Every read checks that the repo has the changeset. `scn` checks
+(deriving it if the row is missing), then walk trees from the database one
+path part at a time. Every read checks that the repo has the changeset. `scn` checks
 that each changeset it receives hashes to its ID.
 
 `ReadFile` streams the blob from the zstd decoder in parts of 1 MiB:
@@ -1566,7 +1522,7 @@ it to an untrusted network.
 |---|---|---|
 | Authentication | The server knows the principal of each of its tokens: `--token T` makes one principal, `default`, which may read and write every repo, and `--access FILE` maps the BLAKE3 digest of each token to a principal, with which repos it may read and which paths of a repo it may write (a write rule needs a read rule without a prefix, refused at load otherwise: a partial reader cannot write in v0.1). A read rule MAY name a path prefix: a principal whose read rules are all prefixes is a *partial reader* and reads through the view the server derives for it (the `Repo isolation` row). A principal with no rule for a repo cannot see it, so every call answers `NOT_FOUND`, as for a repo that does not exist. The server and each tier compare BLAKE3 digests of the tokens in constant time, and `scion-server hash-token` prints the digest that an access file wants, so the file never holds a token. A tier sends its own token upstream. | A tier knows one token, so one principal upstream. `GetObjects` carries no token: its permission is the read ticket, which the walk of every serving tier checks (see "Read tickets" below). Per-principal caps are on with `--access` (section 2 of protocol-v1); the request and upload-byte counts live in memory. A ticket is not checked against the rules in force: after a reload that narrows its principal, the old ticket works for at most 15 minutes from signing, on the server and the caches; to cut it at once, rotate the ticket key. |
 | Network | The server listens on `127.0.0.1:7878` and `scion-cache` on `127.0.0.1:7879` by default. A non-loopback address is refused unless `--insecure-listen` is given, or the process serves TLS (`--tls-cert` and `--tls-key`; a private CA is trusted by `scn` with `--tls-ca`). With `--tls-client-ca`, a tier must present a client certificate that CA signed. `scion-daemon` listens only on a Unix socket with mode 0600, in a directory that only its user can reach; it refuses any other. `scn` refuses a socket that another user owns. Both refuse a socket or data directory under a directory that another user can change: one that another user owns, or that group or others can write and has no sticky bit. | With TLS, the process trusts the server's certificate only if a CA is given; there are no public roots. Without TLS, the token and all data travel unencrypted: a bearer token over plain TCP to a non-loopback address stays refused. TLS certificates are not checked against hostnames beyond what the CA signs, and there is no revocation ([#14](https://github.com/bnsd55/openscion/issues/14) tracks TLS; revocation has no issue). By choice, as OpenSSH's `StrictModes`, the directory checks refuse a group-writable directory (`chmod go-w` fixes it; with umask 002, new directories are group-writable), and read only the owner and the mode bits, not ACLs: an ACL that lets other users write a directory gets past them. |
-| Data directory | The server's `--data` directory holds the blob files and the ticket key, and the SQLite metadata, unless the metadata is in Postgres (`--postgres-url`; then the directory holds only the blobs and the ticket key). The blobs are content-addressed files, and the metadata answers who may read what only through the server. Every open of a data directory (serve, import, fsck, gc, derive, restore) refuses one that group or others can write, one they can read, and one under a directory that another user can change (`check_ancestors`, as for a socket). The ticket key is wherever `--ticket-key` points, made mode 0600, with the same chain check. A restore makes the target mode 0700, whatever the umask: the staging it renames into place is private (`create_private_dir_all`). An export holds every repo it was exported from whole, so a new `export --out` directory is made mode 0700 whatever the umask, as the data directory is. | The server demands mode 0700 and nothing else: store files keep their own modes, and the private directory guards them. Whoever can read the directory has every blob and every row, and a copied data directory is a full copy of every repo. The same holds for a daemon's store (see "Read tickets"). The machine must be trusted, as the intro says. |
+| Data directory | The server's `--data` directory holds the blob files, the ticket key and the marker; the metadata is in Postgres (`--postgres-url`). The blobs are content-addressed files, and the metadata answers who may read what only through the server. Every open of a data directory (serve, import, fsck, gc, derive, restore) refuses one that group or others can write, one they can read, and one under a directory that another user can change (`check_ancestors`, as for a socket). The ticket key is wherever `--ticket-key` points, made mode 0600, with the same chain check. A restore makes the target mode 0700, whatever the umask: the staging it renames into place is private (`create_private_dir_all`). An export holds every repo it was exported from whole, so a new `export --out` directory is made mode 0700 whatever the umask, as the data directory is. | The server demands mode 0700 and nothing else: store files keep their own modes, and the private directory guards them. Whoever can read the directory has every blob and every row, and a copied data directory is a full copy of every repo. The same holds for a daemon's store (see "Read tickets"). The machine must be trusted, as the intro says. |
 | Repo isolation | Every call first checks the caller's read rule for the repo, and a repo it may not read answers `NOT_FOUND`. A principal whose read rules name prefixes (a *partial reader*) reads `ReadFile` and `ListDir` through the view the server derives from its prefixes, and a path outside them answers exactly as a missing one: the same code and the same text as the same path in a repo where it does not exist. `ResolveRef` resolves as for any caller, and `GetRootTree` mints the read ticket on the view root, so the walk behind the ticket cannot reach a hidden entry. Its history reads (`GetChangeset`, `Log`, `Blame`, `MergeBase`, `IsAncestor`, `Diff`) and every write answer `UNIMPLEMENTED` with one text, before any data is read. For a whole-repo reader, changesets and derived root trees are reached only through `repo_changesets`. A changeset names only blobs of its own repo (`repo_blobs`, section 5), so the path reads reach only the repo's own content. Path history nodes are reached only through the derived value of a changeset that the repo has, and name only changesets on its first-parent history. No answer of the write calls shows whether another repo has a blob: `CreateChangeset` gives the error of content that no repo stored, before any file is read, and `PutBlob` of such content takes the same write path as for new content. Two leaks stay: the rename frees the old file, and the page cache makes a shared blob fast. | `GetObjects` reads only what a read ticket's walk reaches; see "Read tickets" below. |
 | Lands | `GetLand` and request keys are scoped by the caller's principal: two tokens of one principal share a scope, and the retry of a land finds the outcome of its request key. | With `--token`, every caller is the same principal, `default`, so all callers share one scope. |
 | Checkout | `scn checkout` writes into a private temp directory with a random name. It renames it onto a new destination, or moves its entries up into an existing empty directory that the user owns, never over an entry already there. It never follows a symlink while writing or removing, fails on names that the filesystem folds together, and refuses control characters, bidirectional text controls, `.git` and `.scion` before it writes anything (section 7). On failure, or on SIGINT, SIGTERM or SIGHUP, the destination stays as it was. | The directory that gets the checkout (an existing destination, or a new one's parent) must not be writable by all users, unless it has the sticky bit: they could swap parts of the checkout. An existing destination that breaks this is refused. Members of a group that can write it are trusted. Where the filesystem has no rename that never replaces (NFS), any empty mode 0700 directory of the user at a top-level directory name counts as the checkout's claim after `mkdirat` fails with `EEXIST`, and is replaced. Where it has no hard links either (some FUSE filesystems), any symlink of the user with the same target at a top-level symlink name counts as made after `symlinkat` fails with `EEXIST`, and is kept. This is for a lost NFS version 3 reply, but a trusted user (the owner, a group member, root) can also put such an entry there: it is taken, and no data is lost. A filesystem that shows one owner for every entry (a FUSE or SMB mount with `-o uid=`) passes every ownership check. In the temp directory, an entry found after `EEXIST` that is what the call makes counts as made, unless a recorded path in the same directory has its inode. A filesystem that folds names but shows another inode number under each name (CIFS with `noserverino`, FUSE without `use_ino`) would let such a fold through only for two empty files or two symlinks with one target: the two paths then share one entry, with the same content. A folded directory always fails: each directory that the checkout made already holds an entry. The check reads only the mode bits, not ACLs: an ACL that lets other users add or delete entries gets past it. No Windows rules: Windows is unsupported, so device names and names that end
@@ -1717,8 +1673,7 @@ reopens the store from the backing directory, where it checks the same
 invariants as the crash suite. So the suite tests sync-before-reply: a
 reply that went out before the data was fsynced is lost by the cut, and
 the check fails. It caught a mutation without the fsync of a blob file
-before its row, and a mutation with SQLite's `synchronous = OFF`. What
-it does not prove:
+before its row. What it does not prove:
 
 - A drive's volatile cache, or a directory entry lost for lack of a
   directory fsync: the cut models what the process had not fsynced on

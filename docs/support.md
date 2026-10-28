@@ -26,13 +26,13 @@ marked supported here.
 | Component | OS | Arch | Data filesystem | Postgres | Status | CI job | Why |
 |---|---|---|---|---|---|---|---|
 | scion-server | Linux | x64 | ext4 | — | supported | `test` (ci.yml) | The default runner disk; the whole workspace suite runs on it |
-| scion-server | Linux | x64 | ext4 | 16 | experimental | `test-postgres` (ci.yml) | Tested in CI; not yet recommended for production or relied on for data-safety evidence. Runs nightly and on release candidates |
-| scion-server | Linux | x64 | ext4 | 17 | experimental | `test-postgres` (ci.yml) | Tested in CI; not yet recommended for production or relied on for data-safety evidence. The one major that also runs per push, on data-path changes |
-| scion-server | Linux | x64 | ext4 | 18 | experimental | `test-postgres` (ci.yml) | Tested in CI; not yet recommended for production or relied on for data-safety evidence. Runs nightly and on release candidates |
+| scion-server | Linux | x64 | ext4 | 16 | supported | `test-postgres` (ci.yml) | The metadata store; the suite runs on it. Runs nightly and on release candidates |
+| scion-server | Linux | x64 | ext4 | 17 | supported | `test-postgres` (ci.yml) | The metadata store; the suite runs on it. The one major that also runs per push, on data-path changes |
+| scion-server | Linux | x64 | ext4 | 18 | supported | `test-postgres` (ci.yml) | The metadata store; the suite runs on it. Runs nightly and on release candidates |
 | scion-server | Linux | x64 | ext4 | 15 | unsupported | — | Upstream supports 15 until November 2027, but the project does not claim it yet; one matrix line adds it when an operator asks |
 | scion-server | Linux | x64 | tmpfs | — | supported | `test` (ci.yml) | The `disk_full` step fills a real tmpfs (`SCION_DISK_REQUIRE=1`) |
 | scion-server | Linux | arm64 | ext4 | — | best effort | `test-arm64` (ci.yml) | The arm64 suite runs nightly and on release candidates, not per push; the cell is best effort until v0.8, and the Linux arm64 binaries return with the v0.8 support wave |
-| scion-server | Linux | arm64 | ext4 | 17 | best effort | — | No job runs Postgres on arm64; the Postgres-backed arm64 run comes with the Postgres-major wave |
+| scion-server | Linux | arm64 | ext4 | 17 | best effort | `test-arm64` (ci.yml) | The arm64 suite runs nightly and on release candidates, not per push; the runner names the same test database its suite reads |
 | scion-server | Linux | x64 | xfs | — | best effort | `test-xfs` (ci.yml) | Every store the server suite opens lands on a real xfs loop device (TMPDIR); the job runs nightly and on release candidates, not per push |
 | scion-server | Linux | x64 | ext4 | — | best effort | `test-restore-ceiling` (ci.yml) | The streamed restore's RSS ceiling (`archive_restore_stream`) runs release-shaped on main pushes, the nightly and dispatches — not on pull requests, where the fixture's disk cost buys nothing; the job measures the restore's own peak against the twin's baseline |
 | scion-server | macOS | arm64 | APFS | — | supported | `test-macos` (ci.yml) | Native `macos-15` runner, full workspace suite; the runner's disk is APFS |
@@ -61,14 +61,13 @@ experimental row may name the scheduled job that still runs it — the
 test checks that the named job exists — and flips to supported only
 when that job runs the cell per push.
 
-Postgres majors are promised per cell, not as a family. Every Postgres
-cell is **experimental** in v0.1.0: tested in CI, but not yet
-recommended for production or relied on for data-safety evidence —
-SQLite is the backend the alpha builds its evidence on. The
-`test-postgres` job runs Postgres 17 per push (on data-path changes),
-and all three supported-upstream majors (16, 17, 18) nightly and on
-release candidates; adding a major is one service line plus its suite
-minutes — the cell row is added when the job runs it.
+Postgres majors are promised per cell, not as a family. Postgres is
+the supported metadata store: the server keeps its metadata in
+Postgres 16, 17 or 18, and a SQLite data directory is not opened.
+The `test-postgres` job runs Postgres 17 per push (on data-path
+changes), and all three supported-upstream majors (16, 17, 18) nightly
+and on release candidates; adding a major is one service line plus its
+suite minutes — the cell row is added when the job runs it.
 
 ## Severity levels
 

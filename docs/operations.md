@@ -13,9 +13,10 @@ when the drills of docs/drills/ lose their template.
 The pieces:
 
 - `scion-server` — the one process that stores and lands. One data directory
-  holds everything: `scion.db` (metadata and trees, SQLite), `objects/` (one
-  zstd file per blob), `tmp/` (staging), and three lock files. A second
-  server on the same directory refuses to start.
+  holds the blob files and the marker: `objects/` (one zstd file per blob),
+  `tmp/` (staging), and three lock files; the metadata (changesets, trees,
+  refs) sits in Postgres, at the schema the URL names. A second server on
+  the same directory refuses to start.
 - `scion-cache` — a regional tier in front of the server. Keeps objects in
   memory and answers object reads only: a client resolves refs and gets its
   read tickets from the server, which the tier refuses to serve itself.
@@ -274,12 +275,12 @@ every user of this node may read the repo whole; snapshot only such repos.
 
 ### The metadata in Postgres
 
-By default the data directory keeps its metadata in its own SQLite file. With
-`--postgres-url`, the server keeps it in a Postgres database instead, so it
-can be administered and replicated with the Postgres tooling you already
-run, and outlives one machine. The blob files stay in the data directory in
-every backend: they are the big majority of the bytes, and the database
-never stores them.
+The server keeps its metadata in a Postgres database, so it can be
+administered and replicated with the Postgres tooling you already run, and
+outlives one machine. The blob files stay in the data directory: they are
+the big majority of the bytes, and the database never stores them. A SQLite
+data directory is not opened - there are no users, so there is no
+migration.
 
 The URL carries the database's credentials, so give it as a file the
 owner alone may read, not on the command line: a value on the command
@@ -354,17 +355,12 @@ SCION_POSTGRES_URL='postgres://user@dbhost/scion?sslmode=require' \
   key alone after 60 s. An `advisory` row in `pg_locks` is one of
   these, held by this server by design, not a stuck client to kill.
 - A write that waits for another writer's lock gives up after 5 s and
-  answers unavailable, like the SQLite store past its busy timeout; the
-  client retries.
-- `fsck` and `gc` serve every backend: on a Postgres-backed server they
-  run against the database through the same metadata interface, and the
-  blob files stay in the data directory either way. The directory's own
-  marker still refuses an open whose `--postgres-url` names another
-  backend.
-- The choice is recorded in the data directory's `backend` file: a
-  `--postgres-url` open refuses a directory that holds SQLite metadata, and
-  a plain open refuses a directory it names, so a second, empty store
-  cannot grow beside the database. The first open also mints a store UUID
+  answers unavailable; the client retries.
+- `fsck` and `gc` run against the database through the same metadata
+  interface, and the blob files stay in the data directory.
+- The choice is recorded in the data directory's `backend` file: a plain
+  open refuses a directory whose marker names a database, so a second,
+  empty store cannot grow beside the database. The first open also mints a store UUID
   and writes it in the database and the marker's second line: an open of
   the database against a directory that names another store is refused
   with both UUIDs, so a restore that mixes a database with the wrong
@@ -398,9 +394,6 @@ SCION_POSTGRES_URL='postgres://user@dbhost/scion?sslmode=require' \
   connections carry the tighter bounds (`keepalives_idle` 30 s, a 30 s
   TCP user timeout), so the reverse - this server noticing a dead
   database - is bounded by the server, not the database.
-- The SQLite store has none of this: one file is opened by one process at
-  the kernel level, so there is no lock to lose and no fence. The notes
-  above that name the one-server lock and the fence are Postgres only.
 - Re-pairing a lost marker: if an open refuses with "this database names
   the store ..., but the data directory carries no marker of it" and the
   directory IS the one this database was served with — its blob files
@@ -687,11 +680,9 @@ What an acknowledged write has survived, before you need a backup:
   file was renamed into `objects/`, the directories of every new file were
   fsynced, and the drive's write cache was flushed. The server does not
   answer from its page cache: a power cut after the reply can lose nothing
-  the caller was told was stored, on either backend — the blob path is the
-  data directory's in both.
+  the caller was told was stored — the blob path is the data directory's.
 - A **land** is answered after its blobs were synced as above and its
-  metadata commit was made durable. On SQLite, the commit fsyncs the WAL
-  (`synchronous = FULL`); on Postgres, every connection runs
+  metadata commit was made durable. Every connection runs
   `synchronous_commit = on`, and the server refuses to open a database
   that turned it off. A land's reply therefore names a commit the
   database will not lose, and the database's own durability rules carry
@@ -843,17 +834,15 @@ Proof: crates/scion-server/tests/archive_attacks.rs::a_restored_store_does_not_c
 The schema version lives in the database. On open, a server migrates an
 older schema forward, one migration per released version, each in one
 transaction, with its progress in the log (a migration can take a while:
-schema 4 walks every repo's changesets; on Postgres, schema 5 renumbers
-the changeset parents from one to zero, the numbering SQLite always
-wrote). Two rules:
+schema 4 walks every repo's changesets; schema 5 renumbers
+the changeset parents from one to zero). Two rules:
 
 - A database with a **newer** schema than the binary refuses to open:
   `corrupt data: database schema version 7 is newer than this build (6)`.
-  Run the old binary until you can upgrade, or restore a backup. Never edit
-  `user_version` by hand.
-- If other processes (an `import`, a `fsck`) share the directory, a
-  migration waits for them to stop: the error says `stop the other processes
-  that use ...`. One process at a time migrates.
+  Run the old binary until you can upgrade, or restore a backup.
+- Other servers take the schema's advisory lock: one process migrates at
+  a time, and an open that waits longer than 5 s answers busy, and the
+  caller retries.
 
 ### A failed migration
 
@@ -863,12 +852,13 @@ is the rule that names the case:
 
 1. The open refuses with `schema version N is newer than this build`:
    the data ran on a newer build than this binary. The fix is the old
-   binary, or the restore of section 3. Never edit `user_version` by
-   hand: the version is the migration's bookmark, and a hand-moved one
-   leaves the database half-migrated in a way no migration can finish.
-2. The start waits with `stop the other processes that use ...`: another
-   process holds the directory. Stop it; the migration runs on the next
-   start.
+   binary, or the restore of section 3. Never edit the schema version
+   in the database by hand: the version is the migration's bookmark,
+   and a hand-moved one leaves the database half-migrated in a way no
+   migration can finish.
+2. The open answers busy (the 5 s clock above): another server holds
+   the schema's migration lock. It finishes its migration; this one
+   retries and serves.
 
 After the fix, the server starts and serves; `fsck` says the store is
 whole.
@@ -927,9 +917,10 @@ the old binary on the data as it is; if it did, restore the pre-upgrade
 backup (section 3) and run the old binary on the copy. After a
 migration, rollback means restoring the backup taken before the
 upgrade: the old binary refuses the new schema - that refusal is the
-stop, and the backup is the recovery. Never edit `user_version` by
-hand - the version is the migration's bookmark, and a hand-moved one
-leaves the database half-migrated in a way no migration can finish.
+stop, and the backup is the recovery. Never edit the schema version in
+the database by hand - the version is the migration's bookmark, and a
+hand-moved one leaves the database half-migrated in a way no migration
+can finish.
 The run-the-old-binary arm is the version matrix's drill, #431: the
 pre-upgrade backup restores and serves under the N-1 binary. The
 restore arm is the failed-migration section's Proof: the test forges a
@@ -1169,8 +1160,9 @@ log.
 - `a connection waits: the most connections are open` — the server is at
   `--max-connections` and new clients queue. Raise the cap or add caches.
 - `the database stayed busy` / `the database stayed busy; the batch
-  retries` — SQLite contention, usually an import beside a live server.
-  Rare bursts are fine; constant ones mean the disk is too slow.
+  retries` — a lock or connection the caller could not get inside the
+  clock, usually an import beside a live server. Rare bursts are fine;
+  constant ones mean the database is under-provisioned.
 - `stored blob is corrupt` / `rewriting a corrupt blob file` — the store
   found damage on disk. Run `fsck`, then restore the named blobs from a
   backup.
@@ -1389,9 +1381,9 @@ checking out through a cache and a daemon beside it.
 | postgres | 200 | 5 | 17017 | 253 | 299 | 0 | 0 | 63 | 2000 | 12.1 | 5668 | 62318 |
 | postgres | 200 | 20 | 29960 | 874 | 1085 | 0 | 0 | 64 | 2000 | 8.3 | 5670 | 62270 |
 
-Every cell runs on a store the cell's own import made: on SQLite a data directory
-the cell created, on Postgres a database the cell dropped and
-recreated, so a cell's numbers are the store's at its own size, and
+Every cell runs on a store the cell's own import made: a database the
+cell dropped and recreated, so a cell's numbers are the store's at its
+own size, and
 the growth column is the cell's own lands' bytes. The timeouts column
 counts reader attempts the 60-second checkout timeout killed; it is
 its own column because a hang is a finding, not noise. The errors
@@ -1410,10 +1402,9 @@ The growth splits into two columns, both divided by the lands the
 server's counter measured - a cell that lost lands reports its own
 bytes over its own lands, never the plan's. The blob store column
 measures the cell's data directory; the database column measures the
-database the cell reset (`pg_database_size`), so a Postgres row cannot
-look complete while the rows it grew sit unmeasured in the service
-container. SQLite has no separate database, so its database column is
-"-". RSS is the server's
+database the cell reset (`pg_database_size`), so a row cannot look
+complete while the rows it grew sit unmeasured in the service
+container. RSS is the server's
 at the end of the cell: a capacity cell is minutes long, not the hours a
 warm-up would need, so it is a level, not a leak bound - the leak bound
 is the soak's.

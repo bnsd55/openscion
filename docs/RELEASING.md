@@ -66,7 +66,8 @@ A release is cut through one PR from a branch named
    ```
 5. **A clean-checkout build and quick-start smoke.** From a fresh
    clone of the tagged commit, build the workspace and run the
-   README's `Try it` flow end to end. The tagged commit is also the
+   README's `Try it` flow end to end (it needs the Postgres container
+   the flow starts, so Docker runs on the machine doing this). The tagged commit is also the
    operator's source for the binaries (see `docs/operations.md`,
    "Upgrades"): a source release says so in its notes (the binaries
    build from this tag: `git checkout <tag>; cargo build --release
