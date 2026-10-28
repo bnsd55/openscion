@@ -391,7 +391,7 @@ fn two_changesets_lens(
 #[test]
 fn ls_shows_the_size_of_every_entry_that_carries_one() {
     let data = scion_server::test_support::private_tempdir();
-    let store = scion_server::test_support::backend::from_store(Store::open(data.path()).unwrap());
+    let store = Backend::open_test(data.path()).unwrap();
     let read = b"one two three"; // 13 bytes
     let link = b"a.md"; // 4 bytes
     let empty = b"";
