@@ -565,8 +565,8 @@ jobs:
           cache-workspace-crates: true
       - run: cargo test -p open-scion-server
         env:
-          # The Postgres job proves backend parity, not more cases; the
-          # SQLite jobs already run 2000.
+          # The Postgres majors prove version parity, not more cases;
+          # the main job on 17 already runs 2000.
           PROPTEST_CASES: "64"
           SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
@@ -588,7 +588,7 @@ jobs:
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
       - name: block-level power cuts (dm-log-writes), on Postgres
         run: |
-          # replay-log, pinned as in the SQLite job above.
+          # replay-log, pinned as in the main job above.
           git clone https://github.com/josefbacik/log-writes "$RUNNER_TEMP/dlw"
           git -C "$RUNNER_TEMP/dlw" checkout 7b70d8a6863c5de30933d42a7672d35d01d2dc6c
           gcc -O2 -o "$RUNNER_TEMP/replay-log" "$RUNNER_TEMP/dlw/replay-log.c" "$RUNNER_TEMP/dlw/log-writes.c"
@@ -940,16 +940,11 @@ jobs:
         env:
           SCION_LAZYFS: ${{ runner.temp }}/lazyfs
           SCION_LAZYFS_TRACE_DIR: ${{ runner.temp }}/lazyfs-trace
-        run: cargo test -p open-scion-server --test power
-      - name: run (postgres)
-        env:
-          SCION_LAZYFS: ${{ runner.temp }}/lazyfs
-          SCION_LAZYFS_TRACE_DIR: ${{ runner.temp }}/lazyfs-trace
           SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
         # One server of the database at a time: the binary's Postgres open
         # takes the database's one-server lock, so the suite runs serially
-        # here. The SQLite run above stays parallel.
+        # here.
         run: cargo test -p open-scion-server --test power -- --test-threads=1
       # The suite writes the LazyFS ops trace to
       # $SCION_LAZYFS_TRACE_DIR/lazyfs-r<N>.log; on a failure the trace
@@ -1008,9 +1003,10 @@ jobs:
       # force-unmounts and kills the server and the mount on any exit, so
       # a failed step cannot hang the runner until this cap. The server's
       # metadata lives in Postgres, in the schema pg_url_for names for its
-      # data dir; one run proves the mount of that half.
+      # data dir; the run proves the mount of that half.
       - name: run the mount script
         env:
+          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
         run: timeout 600 scripts/mount-nfs.sh
 
