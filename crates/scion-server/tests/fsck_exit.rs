@@ -10,14 +10,14 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
-use scion_server::test_support::store::Store;
+use scion_server::Backend;
 
 /// The `scion-server fsck` exit-code table.
 #[test]
 fn the_exit_codes_of_fsck() {
     // 0: a clean directory.
     let dir = scion_server::test_support::private_tempdir();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Backend::open_test(dir.path()).unwrap();
     let _blob = store.blobs().put(b"clean\n").unwrap();
     drop(store);
     assert_eq!(
@@ -58,11 +58,20 @@ fn the_exit_codes_of_fsck() {
 
 /// Runs `scion-server --data <dir> fsck` and returns its status.
 fn fsck(data: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_scion-server"))
-        .args(["--data"])
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scion-server"));
+    // The binary needs the same URL rule every suite uses: on Postgres,
+    // the data directory's own schema.
+    if Backend::test_is_postgres() {
+        cmd.arg("--postgres-url").arg(common::postgres_url(data));
+    }
+    cmd.args(["--data"])
         .arg(data)
         .arg("fsck")
         .env("NO_COLOR", "1")
         .output()
         .unwrap()
 }
+
+// Every test binary compiles this file and uses its own subset of it.
+#[path = "common/mod.rs"]
+mod common;
