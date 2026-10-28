@@ -22,7 +22,7 @@
 # whole chain down - cache and daemon too - the rest the server alone,
 # so most restarts prove the clients resume against a restarted
 # upstream through a live tier. Optional: a Postgres restart on the pg
-# backend (SCION_FAULT_PG=1 with SCION_PG_URL and SCION_FAULT_PG_CMD,
+# backend (SCION_FAULT_PG=1 with SCION_FAULT_PG_CMD,
 # the command that restarts Postgres).
 #
 # After every restart: the server lock is free (a flock probe, the
@@ -92,11 +92,11 @@ fi
 # `docker restart soak-pg`.
 # The Postgres URL reaches every scion-server this script raises
 # (serve, import, gc, fsck) through the env, which decides the backend;
-# the argv form is deprecated and serve no longer takes it (capacity.sh
-# does the same).
-if [ -n "${SCION_PG_URL:-}" ]; then
-  export SCION_POSTGRES_URL=$SCION_PG_URL
-fi
+# the argv form is deprecated and serve no longer takes it. The backend
+# is not optional anymore: every server here opens the schema PG_URL
+# names (pg_url_for), and the restart fault acts on the database that
+# schema lives in. The export itself sits with the PG_URL assignment
+# below, after make_work, where the URL exists.
 
 # classifies LOG: 0 if every failure LINE in LOG is one this load
 # expects. soak.sh's list, plus the transport lines a kill makes: a
@@ -121,6 +121,8 @@ classifies() {
       # after them carries the client's error, which the patterns above
       # classify.
       *checkout*\ *failed*) ;;
+      *import*\ *failed*) ;;
+      *gc*\ *failed*) ;;
       *"checked out"*"from"*) ;;
       *) return 1 ;;
     esac
@@ -139,6 +141,13 @@ else
   build
 fi
 fetch_dataset
+# The fault soak's server keeps its metadata in Postgres: one schema for
+# this run's data directory, made if missing. The URL also reaches every
+# scion-server this script raises (serve, import, gc, fsck) through the
+# env, which decides the backend; the argv form is deprecated and serve
+# no longer takes it.
+PG_URL=$(pg_url_for "$WORK/server")
+export SCION_POSTGRES_URL=$PG_URL
 import_dataset
 start_scion
 # The PID that holds the server's port is the server (soak.sh: the PID
@@ -258,7 +267,10 @@ importer() {
     "$TIMEOUT" 300 "$BIN/scion-server" --data "$WORK/server" \
       import \
       --rev main "$WORK/src.git" \
-      >> "$WORK/import-soak.log" 2>&1 || echo "import $n failed" >> "$WORK/import-fail.log"
+      >> "$WORK/import-soak.log" 2>&1 || {
+      echo "import $n failed" >> "$WORK/import-fail.log"
+      tail -n 3 "$WORK/import-soak.log" >> "$WORK/import-fail.log"
+    }
     sleep 60
   done
 }
@@ -270,10 +282,10 @@ gcer() {
     n=$((n + 1))
     "$TIMEOUT" 120 "$BIN/scion-server" --data "$WORK/server" \
       gc --dry-run >> "$WORK/gc.log" 2>&1 \
-      || echo "gc-dry $n failed" >> "$WORK/gc-fail.log"
+      || { echo "gc-dry $n failed" >> "$WORK/gc-fail.log"; tail -n 3 "$WORK/gc.log" >> "$WORK/gc-fail.log"; }
     "$TIMEOUT" 120 "$BIN/scion-server" --data "$WORK/server" \
       gc >> "$WORK/gc.log" 2>&1 \
-      || echo "gc $n failed" >> "$WORK/gc-fail.log"
+      || { echo "gc $n failed" >> "$WORK/gc-fail.log"; tail -n 3 "$WORK/gc.log" >> "$WORK/gc-fail.log"; }
     sleep 120
   done
 }
@@ -631,19 +643,12 @@ row "samples" "$rows"
 # New rows go at the end of the summary (the owner's report template
 # reads the lines above; the harness vacuity audit of 2026-10-23).
 row "kills planned -> done" "$planned_kills -> $done_kills"
-# The backend the run really served, from the data dir, against the
-# one the run asked for: the server runs Postgres when SCION_PG_URL is
-# set (SCION_PG_URL decides, the same test as the export above), whatever SCION_FAULT_PG
-# says (#561 review F2). A soak asked for one store that ran on
-# another fails, and the summary names what ran either way.
-asked_backend=sqlite
-[ -n "${SCION_PG_URL:-}" ] && asked_backend=postgres
+# The backend the run really served, from the data dir: the fault soak
+# runs the Postgres store, and served_backend refuses anything else. A
+# run whose data dir says another backend fails, and the summary names
+# what ran either way.
 served=$(served_backend "$WORK/server")
-row "backend (asked -> data dir)" "$asked_backend -> $served"
-if [ "$served" != "$asked_backend" ]; then
-  echo "FAIL: asked for $asked_backend, the data dir says $served" >&2
-  fail=1
-fi
+row "backend (data dir)" "$served"
 # The Postgres restarts this run made (0 on the SQLite backend; the
 # fault-soak-postgres job's summary shows the fault really ran).
 [ "${SCION_FAULT_PG:-0}" = "1" ] && row "postgres restarts" "$PG_RESTARTS"

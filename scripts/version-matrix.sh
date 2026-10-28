@@ -85,19 +85,51 @@ unset SCION_SERVER SCION_REPO SCION_DATA SCION_DAEMON_DATA SCION_AUTHOR
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 export SCION_TOKEN=matrix SCION_UPSTREAM_TOKEN=matrix NO_COLOR=1
 
+# pg_db_for DATA_DIR: the URL of a fresh DATABASE of this run's own,
+# dropped and created here. The matrix is the one script that runs two
+# server versions against one database server, and the older builds do
+# not keep the `options` a schema URL rides (5ae458a5 landed after the
+# pinned N-1): a schema URL would leave every version on the database's
+# public schema, where the pairs would share rows - what the dispatch
+# of 2026-10-28 proved. A database name is the one address every
+# version understands, and a drop and create gives every pair a clean
+# store, which the pairs want anyway.
+pg_db_for() {
+  local data=$1
+  local cur=$data
+  local tail=""
+  local base=${SCION_TEST_POSTGRES_URL:?SCION_TEST_POSTGRES_URL must name the test database}
+  base=${base%%\?*}
+  while [ ! -e "$cur" ]; do
+    tail="/$(basename "$cur")$tail"
+    cur=$(dirname "$cur")
+  done
+  local canon
+  canon=$(cd "$cur" && pwd -P)
+  local hash
+  hash=$(printf '%s' "$canon$tail" | shasum -a 256 | cut -c1-16)
+  local db="scion_matrix_$hash"
+  local admin="${base%/*}/postgres"
+  psql "$admin" -X -q -v ON_ERROR_STOP=1 \
+    -c "DROP DATABASE IF EXISTS \"$db\"" \
+    -c "CREATE DATABASE \"$db\"" > /dev/null || {
+    echo "FAIL: cannot create the database $db" >&2
+    return 1
+  }
+  printf '%s/%s' "${base%/*}" "$db"
+}
+
 die() {
   echo "version-matrix: $*" >&2
   exit 1
 }
 
-# The stand-in ladder of scripts/store-upgrade.sh (#428): until
-# the first release tag, N-1 is the newest of these two pinned commits,
-# chosen where the store schema changed (8: read rules per folder, 9:
-# view memo). One resolution, two users: whoever lands second rebases
-# onto the other's form.
+# The stand-in ladder: until the first release tag, N-1 is the newest
+# commit before the SQLite removal whose Postgres path passed the
+# Postgres suite (780b894d, it has #231's schema URL options and #252's
+# integer read fix); from v0.1.0 on, N-1 is the previous release tag.
 STANDIN_TAGS=(
-  32a6117bf54510450b1bfea10b6c873dcb383207 # view memo: schema 9 (newest)
-  afe1c4db878f38fa22bd6adddd57a8c410668db5 # read rules per folder: schema 8
+  780b894d7e6e3f29a6b266c122dc021fbb885ca1 # the last main before the SQLite removal
 )
 
 note() { echo "-- $*" >&2; }
@@ -243,13 +275,21 @@ make_repo() {
 # import DIR SERVER_BIN: a fresh store of SERVER_BIN's version, with the
 # repo of make_repo in it, and its ticket key made. The store's version
 # is the server's, so every pair starts from what its own server wrote.
+# URL: the Postgres URL the last import made, global so the pair
+# functions' serve and fsck lines open the same schema the import did.
+URL=""
 import() {
   local dir=$1 srv=$2
+  # The server keeps its metadata in Postgres: one schema for this data
+  # directory, made if missing. Every server of every version here opens
+  # its own schema, so the pairs never share rows.
+  URL=$(pg_db_for "$dir/server")
+  note "import into ${URL##*/}"
   # The server refuses a missing data directory (#578); create it here.
   mkdir -p "$dir/server"
   chmod 700 "$dir/server"
   make_repo "$dir"
-  "$srv/scion-server" --data "$dir/server" import "$dir/src" \
+  "$srv/scion-server" --data "$dir/server" --postgres-url "$URL" import "$dir/src" \
     >"$dir/import.out" 2>"$dir/import.log" || {
     tail -n 5 "$dir/import.log" >&2
     die "pair '$PAIR' ($SIDE): the import failed"
@@ -412,7 +452,7 @@ pair_1() {
   dir=$(mktemp -d "$WORK/pair1-$side.XXXXXX")
   note "pair 1 ($side)"
   import "$dir" "$srv"
-  port=$(start server "$dir" "$srv/scion-server" port --data "$dir/server" serve \
+  port=$(start server "$dir" "$srv/scion-server" port --data "$dir/server" --postgres-url "$URL" serve \
     --listen 127.0.0.1:0 --ticket-key "$dir/ticket.key")
   story "$dir" "http://127.0.0.1:$port"
   stop "$dir"
@@ -427,7 +467,7 @@ pair_2() {
   dir=$(mktemp -d "$WORK/pair2-$side.XXXXXX")
   note "pair 2 ($side)"
   import "$dir" "$srv"
-  sport=$(start server "$dir" "$srv/scion-server" port --data "$dir/server" serve \
+  sport=$(start server "$dir" "$srv/scion-server" port --data "$dir/server" --postgres-url "$URL" serve \
     --listen 127.0.0.1:0 --ticket-key "$dir/ticket.key" \
     --metrics-listen 127.0.0.1:0)
   mport=$(metrics_port "$dir/server.log")
@@ -485,7 +525,7 @@ pair_3() {
   # exit unlink cannot remove the next daemon's live socket.
   sock="$SOCK-$side"
   rm -f "$sock"
-  sport=$(start server "$dir" "$BIN/scion-server" port --data "$dir/server" serve \
+  sport=$(start server "$dir" "$BIN/scion-server" port --data "$dir/server" --postgres-url "$URL" serve \
     --listen 127.0.0.1:0 --ticket-key "$dir/ticket.key")
   mkdir -p "$dir/daemon-data"
   chmod 700 "$dir/daemon-data"
@@ -524,7 +564,7 @@ pair_5() {
   # would catch it.
   "$cache/scion-server" --data "$dir/server" ticket-key --out "$dir/wrong.key" \
     >"$dir/wrong.pub" || die "pair '$PAIR' ($SIDE): the second ticket-key failed"
-  sport=$(start server "$dir" "$srv/scion-server" port --data "$dir/server" serve \
+  sport=$(start server "$dir" "$srv/scion-server" port --data "$dir/server" --postgres-url "$URL" serve \
     --listen 127.0.0.1:0 --ticket-key "$dir/ticket.key")
   # The positive: the server's ticket verifies on the other version's
   # tier, and the read matches the source.
@@ -570,7 +610,7 @@ pair_6() {
   dir=$(mktemp -d "$WORK/pair6-$side.XXXXXX")
   note "pair 6 ($side)"
   import "$dir" "$BIN"
-  sport=$(start server "$dir" "$BIN/scion-server" port --data "$dir/server" serve \
+  sport=$(start server "$dir" "$BIN/scion-server" port --data "$dir/server" --postgres-url "$URL" serve \
     --listen 127.0.0.1:0 --ticket-key "$dir/ticket.key")
   # The cache of one version writes the snapshot. Its memory store only
   # holds what went through it, so a checkout through the cache first,
@@ -632,9 +672,9 @@ pair_4() {
   dir=$(mktemp -d "$WORK/pair4.XXXXXX")
   note "pair 4 (N opens N-1)"
   import "$dir" "$PREV_BIN"
-  "$BIN/scion-server" --data "$dir/server" fsck >"$dir/fsck.log" 2>&1 ||
+  "$BIN/scion-server" --data "$dir/server" --postgres-url "$URL" fsck >"$dir/fsck.log" 2>&1 ||
     die "pair '$PAIR' ($SIDE): the N server cannot open the N-1 store"
-  port=$(start server "$dir" "$BIN/scion-server" port --data "$dir/server" serve \
+  port=$(start server "$dir" "$BIN/scion-server" port --data "$dir/server" --postgres-url "$URL" serve \
     --listen 127.0.0.1:0 --ticket-key "$dir/ticket.key")
   story "$dir" "http://127.0.0.1:$port"
   stop "$dir"
@@ -650,9 +690,10 @@ pair_4() {
   fi
   SIDE='N-1 refuses N'
   note "pair 4 ($SIDE)"
-  "$BIN/scion-server" --data "$dir/server2" import "$dir/src" >/dev/null 2>&1 ||
+  URL=$(pg_db_for "$dir/server2")
+  "$BIN/scion-server" --data "$dir/server2" --postgres-url "$URL" import "$dir/src" >/dev/null 2>&1 ||
     die "pair '$PAIR' ($SIDE): the import of the N store failed"
-  if "$PREV_BIN/scion-server" --data "$dir/server2" fsck >"$dir/refuse.log" 2>&1; then
+  if "$PREV_BIN/scion-server" --data "$dir/server2" --postgres-url "$URL" fsck >"$dir/refuse.log" 2>&1; then
     die "pair '$PAIR' ($SIDE): the N-1 server accepted a store of N"
   fi
   grep -q 'newer than this build' "$dir/refuse.log" ||

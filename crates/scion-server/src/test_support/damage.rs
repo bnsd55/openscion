@@ -40,6 +40,9 @@ pub(crate) fn serial() -> Option<std::sync::MutexGuard<'static, ()>> {
     }
 }
 
+/// The kind of a derived row.
+pub(crate) type DerivedRow = (String, i64, Vec<u8>, Vec<u8>);
+
 // -- damage: one function per kind -------------------------------------
 
 /// Corrupts the stored body of one changeset: the id stays, the bytes lie.
@@ -297,6 +300,161 @@ pub(crate) fn first_history_node_id(backend: &Backend) -> Result<Option<[u8; 32]
     }
 }
 
+/// Every derived row, as `(kind, version, cs, value)`: what the
+/// derived tests assert about.
+pub(crate) fn derived_rows(backend: &Backend) -> Result<Vec<DerivedRow>> {
+    let data = data_dir(backend);
+    if Backend::test_is_postgres() {
+        pg_with(data, |client| {
+            let rows = client
+                .query(
+                    "SELECT kind, version, cs, value FROM derived ORDER BY kind, version, cs",
+                    &[],
+                )
+                .map_err(map_pg_error)?;
+            Ok(rows
+                .iter()
+                .map(|r| {
+                    (
+                        r.get::<_, String>(0),
+                        r.get::<_, i64>(1),
+                        r.get::<_, Vec<u8>>(2),
+                        r.get::<_, Vec<u8>>(3),
+                    )
+                })
+                .collect())
+        })
+    } else {
+        raw_sqlite(data, false, |c| {
+            let mut stmt = c.prepare(
+                "SELECT kind, version, cs, value FROM derived ORDER BY kind, version, cs",
+            )?;
+            let mapped = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            })?;
+            let mut rows = Vec::new();
+            for row in mapped {
+                rows.push(row?);
+            }
+            Ok(rows)
+        })
+    }
+}
+
+/// Downgrades every derived row of `kind` to version 0: the shape an
+/// older build left behind, which the next write must remove. Returns
+/// the count it made.
+pub(crate) fn downgrade_derived_rows(backend: &Backend, kind: &str) -> Result<u64> {
+    let data = data_dir(backend);
+    if Backend::test_is_postgres() {
+        pg_with(data, |client| {
+            client
+                .execute(
+                    "INSERT INTO derived (kind, version, cs, value)
+                     SELECT kind, 0, cs, value FROM derived WHERE kind = $1",
+                    &[&kind],
+                )
+                .map_err(map_pg_error)
+        })
+    } else {
+        raw_sqlite(data, false, |c| {
+            c.execute(
+                "INSERT INTO derived (kind, version, cs, value)
+                 SELECT kind, 0, cs, value FROM derived WHERE kind = ?1",
+                rusqlite::params![kind],
+            )
+            .map(|n| n as u64)
+        })
+    }
+}
+
+// -- the two forms ------------------------------------------------------
+
+/// The data directory of a backend: its blob files sit two folders
+/// in, under `objects/blob`.
+fn data_dir(backend: &Backend) -> &Path {
+    backend
+        .blobs()
+        .root()
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("the blob root sits in the data directory")
+}
+
+/// Runs one closure on a raw SQLite connection of the data directory.
+/// `no_foreign_keys` turns the keys off first, the way the raw tests
+/// made schema-forbidden rows.
+fn raw_sqlite<T>(
+    data: &Path,
+    no_foreign_keys: bool,
+    f: impl FnOnce(&mut rusqlite::Connection) -> rusqlite::Result<T>,
+) -> Result<T> {
+    let mut c = rusqlite::Connection::open(data.join("scion.db")).map_err(from_sqlite)?;
+    if no_foreign_keys {
+        c.pragma_update(None, "foreign_keys", false)
+            .map_err(from_sqlite)?;
+    }
+    let out = f(&mut c).map_err(from_sqlite)?;
+    drop(c);
+    Ok(out)
+}
+
+/// The raw client of one schema, kept for the whole test run: every
+/// damage call reuses it, so a parallel suite cannot exhaust the
+/// database's connection slots. The schema of the data directory keys
+/// the cache; one global lock keeps the map itself safe, and the
+/// damage of one call holds it, so damages of one schema never race.
+fn pg_with<T>(data: &Path, f: impl FnOnce(&mut postgres::Client) -> Result<T>) -> Result<T> {
+    static CLIENTS: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<String, postgres::Client>>,
+    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let schema = test_schema(data);
+    let mut cache = CLIENTS.lock().expect("the client cache never poisons");
+    if !cache.contains_key(&schema) {
+        let mut client =
+            postgres::Client::connect(&test_url()?, postgres::NoTls).map_err(map_pg_error)?;
+        client
+            .batch_execute(&format!("SET search_path = \"{schema}\""))
+            .map_err(map_pg_error)?;
+        cache.insert(schema.clone(), client);
+    }
+    f(cache.get_mut(&schema).unwrap())
+}
+
+/// Runs one statement on the raw client of the directory's schema.
+fn exec(data: &Path, sql: &str) -> Result<()> {
+    pg_with(data, |client| {
+        client.batch_execute(sql).map_err(map_pg_error)
+    })
+}
+
+/// A byte string as a Postgres hex literal.
+fn pg_bytes(v: &[u8]) -> String {
+    let mut s = String::from("'\\x");
+    for b in v {
+        let _ = write!(s, "{b:02x}");
+    }
+    s.push_str("'::bytea");
+    s
+}
+
+/// A text string as a quoted Postgres literal.
+fn pg_text(v: &str) -> String {
+    format!("'{}'", v.replace('\'', "''"))
+}
+
+/// The first 32 bytes of an id row, as an array.
+fn id_of(v: &[u8]) -> [u8; 32] {
+    let mut id = [0_u8; 32];
+    id.copy_from_slice(&v[..32]);
+    id
+}
+
 /// The count of the lands whose state is `landed`.
 pub(crate) fn landed_rows(backend: &Backend) -> Result<i64> {
     let data = data_dir(backend);
@@ -437,86 +595,4 @@ pub(crate) fn age_pending_lands(backend: &Backend, secs: i64) -> Result<()> {
         })
         .map(|_| ())
     }
-}
-
-// -- the two forms ------------------------------------------------------
-
-/// The data directory of a backend: its blob files sit two folders
-/// in, under `objects/blob`.
-fn data_dir(backend: &Backend) -> &Path {
-    backend
-        .blobs()
-        .root()
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("the blob root sits in the data directory")
-}
-
-/// Runs one closure on a raw SQLite connection of the data directory.
-/// `no_foreign_keys` turns the keys off first, the way the raw tests
-/// made schema-forbidden rows.
-fn raw_sqlite<T>(
-    data: &Path,
-    no_foreign_keys: bool,
-    f: impl FnOnce(&mut rusqlite::Connection) -> rusqlite::Result<T>,
-) -> Result<T> {
-    let mut c = rusqlite::Connection::open(data.join("scion.db")).map_err(from_sqlite)?;
-    if no_foreign_keys {
-        c.pragma_update(None, "foreign_keys", false)
-            .map_err(from_sqlite)?;
-    }
-    let out = f(&mut c).map_err(from_sqlite)?;
-    drop(c);
-    Ok(out)
-}
-
-/// The raw client of one schema, kept for the whole test run: every
-/// damage call reuses it, so a parallel suite cannot exhaust the
-/// database's connection slots. The schema of the data directory keys
-/// the cache; one global lock keeps the map itself safe, and the
-/// damage of one call holds it, so damages of one schema never race.
-fn pg_with<T>(data: &Path, f: impl FnOnce(&mut postgres::Client) -> Result<T>) -> Result<T> {
-    static CLIENTS: std::sync::LazyLock<
-        std::sync::Mutex<std::collections::HashMap<String, postgres::Client>>,
-    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    let schema = test_schema(data);
-    let mut cache = CLIENTS.lock().expect("the client cache never poisons");
-    if !cache.contains_key(&schema) {
-        let mut client =
-            postgres::Client::connect(&test_url()?, postgres::NoTls).map_err(map_pg_error)?;
-        client
-            .batch_execute(&format!("SET search_path = \"{schema}\""))
-            .map_err(map_pg_error)?;
-        cache.insert(schema.clone(), client);
-    }
-    f(cache.get_mut(&schema).unwrap())
-}
-
-/// Runs one statement on the raw client of the directory's schema.
-fn exec(data: &Path, sql: &str) -> Result<()> {
-    pg_with(data, |client| {
-        client.batch_execute(sql).map_err(map_pg_error)
-    })
-}
-
-/// A byte string as a Postgres hex literal.
-fn pg_bytes(v: &[u8]) -> String {
-    let mut s = String::from("'\\x");
-    for b in v {
-        let _ = write!(s, "{b:02x}");
-    }
-    s.push_str("'::bytea");
-    s
-}
-
-/// A text string as a quoted Postgres literal.
-fn pg_text(v: &str) -> String {
-    format!("'{}'", v.replace('\'', "''"))
-}
-
-/// The first 32 bytes of an id row, as an array.
-fn id_of(v: &[u8]) -> [u8; 32] {
-    let mut id = [0_u8; 32];
-    id.copy_from_slice(&v[..32]);
-    id
 }

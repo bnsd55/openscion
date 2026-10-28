@@ -1366,8 +1366,8 @@ a bottom. The table below is the published envelope
 ([#387](https://github.com/bnsd55/openscion/issues/387)): every cell is a
 run of [`scripts/capacity.sh`](../scripts/capacity.sh) on a GitHub-hosted
 runner of the class named in the caption, with the dataset of
-[benchmarks.md](benchmarks.md) (tokio at a pinned commit), SQLite or
-Postgres behind the server, `scn bench` landing through it and readers
+[benchmarks.md](benchmarks.md) (tokio at a pinned commit), Postgres
+behind the server, `scn bench` landing through it and readers
 checking out through a cache and a daemon beside it.
 
 | | |
@@ -1379,15 +1379,6 @@ checking out through a cache and a daemon beside it.
 
 | backend | writers | readers | land p99 ms | checkout p50 ms | checkout p99 ms | timeouts | errors | server RSS MiB | landed | lands per second | blob store KiB per 1k lands | database KiB per 1k lands |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| sqlite | 2 | 0 | 12.6 | - | - | 0 | 0 | 27 | 2000 | 185.5 | 112344 | - |
-| sqlite | 2 | 5 | 28.0 | 170 | 233 | 0 | 0 | 30 | 2000 | 78.4 | 112372 | - |
-| sqlite | 2 | 20 | 91.4 | 671 | 813 | 0 | 0 | 31 | 2000 | 28.7 | 112256 | - |
-| sqlite | 50 | 0 | 216 | - | - | 0 | 0 | 42 | 2000 | 249.8 | 58896 | - |
-| sqlite | 50 | 5 | 461 | 171 | 243 | 0 | 0 | 48 | 2000 | 115.4 | 58864 | - |
-| sqlite | 50 | 20 | 1507 | 678 | 839 | 0 | 0 | 50 | 2000 | 39.6 | 58844 | - |
-| sqlite | 200 | 0 | 906 | - | - | 0 | 0 | 57 | 2000 | 234.4 | 78296 | - |
-| sqlite | 200 | 5 | 1967 | 172 | 246 | 0 | 0 | 74 | 2000 | 106.9 | 78328 | - |
-| sqlite | 200 | 20 | 8751 | 669 | 825 | 0 | 0 | 76 | 2000 | 38.8 | 78388 | - |
 | postgres | 2 | 0 | 59.9 | - | - | 0 | 0 | 20 | 2000 | 21.1 | 5666 | 85454 |
 | postgres | 2 | 5 | 126 | 248 | 290 | 0 | 0 | 23 | 2000 | 11.2 | 5670 | 85078 |
 | postgres | 2 | 20 | 256 | 844 | 1033 | 0 | 0 | 25 | 2000 | 8.0 | 5674 | 87506 |

@@ -22,6 +22,21 @@ jobs:
     # Two release builds, the N-1 one often from cache, then seven pair
     # runs of the smoke story; 60 minutes bounds a hung build.
     timeout-minutes: 60
+    services:
+      # Every pair's server keeps its metadata in Postgres, in the schema
+      # pg_url_for names for its data dir.
+      postgres:
+        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        env:
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: scion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       # Full history, with tags: the matrix resolves N-1 from the tags
       # behind HEAD and checks the chosen commit out as a worktree, and
@@ -80,6 +95,8 @@ jobs:
           # place after the script, so the cache step above it can save
           # the N-1 target dir (rust-cache's post step runs last).
           PREV_SRC: ${{ github.workspace }}/prev
+          # The database every pair's server opens its schema in.
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
         run: |
           # 55 min: the builds and the pairs, under the job's own cap.
           timeout 3300 scripts/version-matrix.sh
