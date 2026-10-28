@@ -558,13 +558,12 @@ mod tests {
         // One flush for the blob before the commit, and one for the
         // commit where a plain fsync leaves it in the drive cache.
         //
-        // FINDING, on Postgres only: the Postgres write path flushes the
-        // blob before the commit but its commit does not full-flush the
-        // blob group the way the SQLite commit's own fsync does, so the
-        // delta is 1, not 1 + FSYNC_LEAVES_DRIVE_CACHE. The durability
-        // claim (the blob is durable before the changeset) holds on
-        // Postgres: pg.rs's put_changeset full-flushes before its own
-        // commit (pg.rs:4352). Reported to the lead.
+        // On Postgres the one flush before the commit is already a full
+        // flush where the drive cache needs it: pg.rs's flush calls
+        // blobs.full_flush() under FSYNC_LEAVES_DRIVE_CACHE, and the
+        // commit's own durability is Postgres's (synchronous_commit=on,
+        // checked at open). SQLite needs the second full flush because
+        // its own database file sits on the same drive.
         if Backend::test_is_postgres() {
             assert_eq!(store.blobs().full_flushes() - before, 1);
         } else {
