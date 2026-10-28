@@ -122,6 +122,7 @@ classifies() {
       # classify.
       *checkout*\ *failed*) ;;
       *import*\ *failed*) ;;
+      *gc*\ *failed*) ;;
       *"checked out"*"from"*) ;;
       *) return 1 ;;
     esac
@@ -281,10 +282,10 @@ gcer() {
     n=$((n + 1))
     "$TIMEOUT" 120 "$BIN/scion-server" --data "$WORK/server" \
       gc --dry-run >> "$WORK/gc.log" 2>&1 \
-      || echo "gc-dry $n failed" >> "$WORK/gc-fail.log"
+      || { echo "gc-dry $n failed" >> "$WORK/gc-fail.log"; tail -n 3 "$WORK/gc.log" >> "$WORK/gc-fail.log"; }
     "$TIMEOUT" 120 "$BIN/scion-server" --data "$WORK/server" \
       gc >> "$WORK/gc.log" 2>&1 \
-      || echo "gc $n failed" >> "$WORK/gc-fail.log"
+      || { echo "gc $n failed" >> "$WORK/gc-fail.log"; tail -n 3 "$WORK/gc.log" >> "$WORK/gc-fail.log"; }
     sleep 120
   done
 }
