@@ -823,7 +823,7 @@ impl Pg {
         data: &Path,
         marker: Marker,
     ) -> Result<Self> {
-        Self::open_in(url, ca, readers, data, None, false, marker)
+        Self::open_in(url, ca, readers, data, None, false, marker, None)
     }
 
     /// [`Pg::open`], as the one server process of the database: a second
@@ -844,11 +844,11 @@ impl Pg {
         // setup asks the database `current_schema()` and locks that, so
         // parallel servers of distinct schemas do not fence each other,
         // and a plain URL fences the whole default schema.
-        Self::open_in(url, ca, readers, data, None, true, marker)
+        Self::open_in(url, ca, readers, data, None, true, marker, None)
     }
 
     /// [`Pg::open`], in the search path of `schema` when it is set.
-    #[allow(clippy::unused_self)]
+    #[allow(clippy::unused_self, clippy::too_many_arguments)]
     fn open_in(
         url: &str,
         ca: Option<&Path>,
@@ -857,6 +857,9 @@ impl Pg {
         schema: Option<&str>,
         exclusive: bool,
         marker: Marker,
+        // The derive walks to run with, or the default cap when `None`.
+        // The test constructor of the walk caps passes its own.
+        flights: Option<crate::derived::DeriveFlights>,
     ) -> Result<Self> {
         let options = base_options();
         let fence = Arc::new(Fence::new());
@@ -895,7 +898,9 @@ impl Pg {
             blobs,
             writers: Mutex::new(0),
             write_woken: Condvar::new(),
-            derive: crate::derived::DeriveFlights::new(crate::store::DERIVE_WALKS_CAP),
+            derive: flights.unwrap_or_else(|| {
+                crate::derived::DeriveFlights::new(crate::store::DERIVE_WALKS_CAP)
+            }),
             #[cfg(any(test, feature = "test-hooks"))]
             hooks: crate::store::test_hooks::ImportHooks::default(),
             metrics: std::sync::OnceLock::new(),
@@ -3140,15 +3145,18 @@ impl MetaTx for PgTx<'_> {
              WHERE kind = $1 AND version = $2 AND cs = ANY($3)",
             &[P::text(kind), P::i64(version), P::bytea_array(cs)],
         )?;
-        let mut found = rows
+        let found = rows
             .into_iter()
             .map(|row| {
                 let cs: Vec<u8> = row.get(0);
                 Ok((to_id(&cs)?, row.get::<_, Option<Vec<u8>>>(1)))
             })
             .collect::<Result<std::collections::HashMap<_, _>>>()?;
+        // Answered from the map without removing it: a batch may name the
+        // same id twice (two merges can share a side parent), and each
+        // ask gets the row - the reply has one entry per ASKED id.
         ids.iter()
-            .map(|id| Ok(found.remove(id).flatten()))
+            .map(|id| Ok(found.get(id).cloned().flatten()))
             .collect()
     }
 
@@ -3494,12 +3502,15 @@ impl MetaTx for PgTx<'_> {
                 "SELECT id, body FROM trees WHERE id = ANY($1)",
                 &[P::bytea_array(keys.clone())],
             )?;
-            let mut bodies: std::collections::HashMap<Vec<u8>, Vec<u8>> = rows
+            let bodies: std::collections::HashMap<Vec<u8>, Vec<u8>> = rows
                 .into_iter()
                 .map(|row| (row.get::<_, Vec<u8>>(0), row.get::<_, Vec<u8>>(1)))
                 .collect();
+            // Answered from the map without removing it: one tree can sit
+            // under two paths, so a batch may name the same id twice, and
+            // each ask gets the body.
             for key in keys {
-                out.push(bodies.remove(&key));
+                out.push(bodies.get(&key).cloned());
             }
         }
         Ok(out)

@@ -67,6 +67,10 @@ else
   build
 fi
 fetch_dataset
+# The soak's server keeps its metadata in Postgres: one schema for this
+# run's data directory, made if missing.
+# shellcheck disable=SC2034 # import_dataset and start_scion read it
+PG_URL=$(pg_url_for "$WORK/server")
 import_dataset
 start_scion
 # common.sh's start(1) runs the server under /usr/bin/time, so the PID
@@ -112,7 +116,7 @@ importer() {
   local n=0
   while [ "$(date +%s)" -lt "$END" ]; do
     n=$((n + 1))
-    "$TIMEOUT" 300 "$BIN/scion-server" --data "$WORK/server" import \
+    "$TIMEOUT" 300 "$BIN/scion-server" --data "$WORK/server" --postgres-url "$PG_URL" import \
       --rev main "$WORK/src.git" \
       >> "$WORK/import-soak.log" 2>&1 || echo "import $n failed" >> "$WORK/import-fail.log"
     sleep 60
@@ -124,9 +128,9 @@ gcer() {
   local n=0
   while [ "$(date +%s)" -lt "$END" ]; do
     n=$((n + 1))
-    "$TIMEOUT" 120 "$BIN/scion-server" --data "$WORK/server" gc --dry-run \
+    "$TIMEOUT" 120 "$BIN/scion-server" --data "$WORK/server" --postgres-url "$PG_URL" gc --dry-run \
       >> "$WORK/gc.log" 2>&1 || echo "gc-dry $n failed" >> "$WORK/gc-fail.log"
-    "$TIMEOUT" 120 "$BIN/scion-server" --data "$WORK/server" gc \
+    "$TIMEOUT" 120 "$BIN/scion-server" --data "$WORK/server" --postgres-url "$PG_URL" gc \
       >> "$WORK/gc.log" 2>&1 || echo "gc $n failed" >> "$WORK/gc-fail.log"
     sleep 120
   done
@@ -305,17 +309,12 @@ fi
 row "store size first -> last" "$(sed -n 1p "$WORK/metrics-store.csv" | cut -d, -f2) KB -> \
 $(tail -n 1 "$WORK/metrics-store.csv" | cut -d, -f2) KB"
 row "p99 early -> late" "${early:-?} ms -> ${late:-?} ms"
-# The backend the run really served, from the data dir, against the
-# one the run asked for (the soak serves the default store): a run
-# asked for one store that got another fails, and the summary names
-# what ran either way. served_backend comes from common.sh.
-asked_backend=sqlite
+# The backend the run really served, from the data dir: the soak runs
+# the Postgres store, and served_backend refuses anything else (no
+# marker means a SQLite store ran, a damaged marker means a damaged
+# store). served_backend comes from common.sh.
 served=$(served_backend "$WORK/server")
-row "backend (asked -> data dir)" "$asked_backend -> $served"
-if [ "$served" != "$asked_backend" ]; then
-  echo "FAIL: asked for $asked_backend, the data dir says $served" >&2
-  fail=1
-fi
+row "backend (data dir)" "$served"
 [ "${fail:-0}" -eq 0 ] || die "the soak failed its bounds"
 
 stop_scion

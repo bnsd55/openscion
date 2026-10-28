@@ -16,6 +16,9 @@ note "smoke: building the release binaries"
   -p open-scion-server -p open-scion-tier -p open-scion
 
 make_work smoke
+# The server keeps its metadata in Postgres: one schema for this run's
+# data directory, made if missing.
+PG_URL=$(pg_url_for "$WORK/server")
 # The server refuses a missing data directory (#578), and the daemon
 # refuses one open to other users: the same prep every script does.
 mkdir -p "$WORK/server"
@@ -32,7 +35,7 @@ git init -q --bare --initial-branch=main "$WORK/src.git"
 git -C "$WORK/src.git" fetch -q "$WORK/src" main
 SEED_HEX=$(git -C "$WORK/src" rev-parse main)
 git -C "$WORK/src.git" update-ref refs/heads/main "$SEED_HEX"
-"$BIN/scion-server" --data "$WORK/server" import --rev main "$WORK/src.git" \
+"$BIN/scion-server" --data "$WORK/server" --postgres-url "$PG_URL" import --rev main "$WORK/src.git" \
   > /dev/null 2> "$WORK/import.log" || {
   tail -n 20 "$WORK/import.log" >&2
   die "the import failed"
