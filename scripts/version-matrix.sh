@@ -124,14 +124,12 @@ die() {
   exit 1
 }
 
-# The stand-in ladder of scripts/store-upgrade.sh (#428): until
-# the first release tag, N-1 is the newest of these two pinned commits,
-# chosen where the store schema changed (8: read rules per folder, 9:
-# view memo). One resolution, two users: whoever lands second rebases
-# onto the other's form.
+# The stand-in ladder: until the first release tag, N-1 is the newest
+# commit before the SQLite removal whose Postgres path passed the
+# Postgres suite (780b894d, it has #231's schema URL options and #252's
+# integer read fix); from v0.1.0 on, N-1 is the previous release tag.
 STANDIN_TAGS=(
-  32a6117bf54510450b1bfea10b6c873dcb383207 # view memo: schema 9 (newest)
-  afe1c4db878f38fa22bd6adddd57a8c410668db5 # read rules per folder: schema 8
+  780b894d7e6e3f29a6b266c122dc021fbb885ca1 # the last main before the SQLite removal
 )
 
 note() { echo "-- $*" >&2; }
