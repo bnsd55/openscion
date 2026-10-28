@@ -122,8 +122,11 @@ echo "cell_start,reps,landed" > /dev/null
 }
 # The Postgres URL reaches every scion-server through the env, which
 # postgres_url_of reads quietly. The env decides the backend of every
-# server this run raises, so it is set here, once.
+# server this run raises, so it is set here, once, and PG_URL carries
+# it for common.sh's start_scion (the same database the reset made).
 export SCION_POSTGRES_URL=$SCION_PG_URL
+# shellcheck disable=SC2034 # common.sh's start_scion reads it
+PG_URL=$SCION_PG_URL
 for w in $WRITERS; do
   for r in $READERS; do
     note "cell w$w r$r"
