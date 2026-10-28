@@ -829,7 +829,12 @@ jobs:
         with:
           tool: protoc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo test --workspace
+      # `timeout` keeps the step's log on a run that overruns: a job the
+      # 40-minute ceiling kills keeps no log, so the slow test's name
+      # would be invisible. 2100 s (35 min) leaves the disk_full step
+      # its share, and --no-fail-fast lets the run name every suite
+      # that was slow or hung, not just the first.
+      - run: timeout 2100 cargo test --workspace --no-fail-fast
         env:
           PROPTEST_CASES: "2000"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
