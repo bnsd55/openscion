@@ -256,6 +256,7 @@ import() {
   # The server refuses a missing data directory (#578); create it here.
   mkdir -p "$dir/server"
   chmod 700 "$dir/server"
+  make_repo "$dir"
   "$srv/scion-server" --data "$dir/server" --postgres-url "$url" import "$dir/src" \
     >"$dir/import.out" 2>"$dir/import.log" || {
     tail -n 5 "$dir/import.log" >&2
