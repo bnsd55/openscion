@@ -823,7 +823,7 @@ impl Pg {
         data: &Path,
         marker: Marker,
     ) -> Result<Self> {
-        Self::open_in(url, ca, readers, data, None, false, marker)
+        Self::open_in(url, ca, readers, data, None, false, marker, None)
     }
 
     /// [`Pg::open`], as the one server process of the database: a second
@@ -844,11 +844,11 @@ impl Pg {
         // setup asks the database `current_schema()` and locks that, so
         // parallel servers of distinct schemas do not fence each other,
         // and a plain URL fences the whole default schema.
-        Self::open_in(url, ca, readers, data, None, true, marker)
+        Self::open_in(url, ca, readers, data, None, true, marker, None)
     }
 
     /// [`Pg::open`], in the search path of `schema` when it is set.
-    #[allow(clippy::unused_self)]
+    #[allow(clippy::unused_self, clippy::too_many_arguments)]
     fn open_in(
         url: &str,
         ca: Option<&Path>,
@@ -857,6 +857,9 @@ impl Pg {
         schema: Option<&str>,
         exclusive: bool,
         marker: Marker,
+        // The derive walks to run with, or the default cap when `None`.
+        // The test constructor of the walk caps passes its own.
+        flights: Option<crate::derived::DeriveFlights>,
     ) -> Result<Self> {
         let options = base_options();
         let fence = Arc::new(Fence::new());
@@ -895,7 +898,9 @@ impl Pg {
             blobs,
             writers: Mutex::new(0),
             write_woken: Condvar::new(),
-            derive: crate::derived::DeriveFlights::new(crate::store::DERIVE_WALKS_CAP),
+            derive: flights.unwrap_or_else(|| {
+                crate::derived::DeriveFlights::new(crate::store::DERIVE_WALKS_CAP)
+            }),
             #[cfg(any(test, feature = "test-hooks"))]
             hooks: crate::store::test_hooks::ImportHooks::default(),
             metrics: std::sync::OnceLock::new(),
