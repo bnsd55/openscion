@@ -130,7 +130,7 @@ git -C "$WORK/src" -c user.name=mount-nfs -c user.email=mount-nfs@localhost \
   die "the import failed"
 }
 
-# The mount, as the README says: `scn mount DIR main` as the user. Its own
+# The mount, as docs/cli.md says: `scn mount DIR main` as the user. Its own
 # mount attempt fails (only root may mount), so it prints the sudo command
 # and keeps serving; the script runs that printed command under sudo, and
 # polls until the mount answers.

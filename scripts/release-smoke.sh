@@ -152,6 +152,12 @@ run_story() {
   "$BIN/scn" blame main:README.md >"$WORK/blame.out"
   grep -q . "$WORK/blame.out" || die "step 'blame' failed (umask $UMASK_RUN)"
 
+  # The sparse checkout, as the quick start prints it: only the named
+  # paths land on disk, and the file reads back whole.
+  step checkout "$BIN/scn" checkout main --sparse hello.rs --into "$WORK/work"
+  grep -q 'pub fn main' "$WORK/work/hello.rs" \
+    || die "step 'checkout' did not write hello.rs (umask $UMASK_RUN)"
+
   # Write, as an agent does: commit, land, and read back through main.
   printf 'hello from the release smoke test\n' >"$WORK/hello.txt"
   CS=$("$BIN/scn" commit -m "add hello" --put hello.txt="$WORK/hello.txt") ||
