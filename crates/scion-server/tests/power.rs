@@ -1050,7 +1050,15 @@ async fn import_process_races_the_server_on_the_same_blob() {
     // Only now the import runs. Its write of the blob waits for the
     // writer's flock, the way any other process's write would.
     let import = common::spawn_guard::across_spawn(|| {
-        Command::new(env!("CARGO_BIN_EXE_scion-server"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_scion-server"));
+        // The import child takes the same URL rule every spawned server
+        // takes: the store's own schema, the one the server it races
+        // serves.
+        if Backend::test_is_postgres() {
+            let url = common::postgres_url(&data);
+            command.arg("--postgres-url").arg(url);
+        }
+        command
             .args([
                 "--data",
                 data.to_str().unwrap(),
