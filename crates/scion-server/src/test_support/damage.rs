@@ -455,6 +455,28 @@ fn id_of(v: &[u8]) -> [u8; 32] {
     id
 }
 
+/// How many view rows the store holds: the tests of the view memo count
+/// the rows a derivation adds. SQLite reads its table; Postgres reads
+/// the schema's table off the runtime's raw client.
+pub(crate) fn view_tree_rows(backend: &Backend) -> Result<usize> {
+    let data = data_dir(backend);
+    if Backend::test_is_postgres() {
+        pg_with(data, |client| {
+            let row = client
+                .query_one("SELECT count(*) FROM view_trees", &[])
+                .map_err(map_pg_error)?;
+            Ok(usize::try_from(row.get::<_, i64>(0)).expect("a row count fits"))
+        })
+    } else {
+        raw_sqlite(data, false, |c| {
+            c.query_row("SELECT count(*) FROM view_trees", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|n| usize::try_from(n).expect("a row count fits"))
+        })
+    }
+}
+
 /// The count of the lands whose state is `landed`.
 pub(crate) fn landed_rows(backend: &Backend) -> Result<i64> {
     let data = data_dir(backend);
@@ -550,7 +572,7 @@ pub(crate) fn land_rows_by_caller_key(backend: &Backend, caller: &str, key: &str
 }
 
 /// Moves the time one land finished `secs` into the past.
-pub(crate) fn age_land(backend: &Backend, land_id: i64, secs: i64) -> Result<()> {
+pub(crate) fn age_land(backend: &Backend, land_id: i64, secs: i64) -> Result<usize> {
     let data = data_dir(backend);
     if Backend::test_is_postgres() {
         pg_with(data, |client| {
@@ -559,8 +581,8 @@ pub(crate) fn age_land(backend: &Backend, land_id: i64, secs: i64) -> Result<()>
                     "UPDATE lands SET finished_at = finished_at - $2 WHERE land_id = $1",
                     &[&land_id, &secs],
                 )
-                .map_err(map_pg_error)?;
-            Ok(())
+                .map_err(map_pg_error)
+                .map(|n| usize::try_from(n).expect("a row count fits"))
         })
     } else {
         raw_sqlite(data, false, |c| {
@@ -569,7 +591,6 @@ pub(crate) fn age_land(backend: &Backend, land_id: i64, secs: i64) -> Result<()>
                 rusqlite::params![land_id, secs],
             )
         })
-        .map(|_| ())
     }
 }
 

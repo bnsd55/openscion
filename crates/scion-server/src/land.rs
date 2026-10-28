@@ -1622,9 +1622,11 @@ mod tests {
             matches!(self.get(out.land_id), Err(Error::NotFound(_)))
         }
 
-        /// Moves the time a land finished `secs` into the past.
+        /// Moves the time a land finished `secs` into the past, and
+        /// checks that the row was there.
         fn age(&self, land_id: i64, secs: i64) {
-            damage::age_land(&self.store, land_id, secs).unwrap();
+            let aged = damage::age_land(&self.store, land_id, secs).unwrap();
+            assert_eq!(aged, 1);
         }
 
         fn main(&self) -> RefState {
@@ -1826,7 +1828,7 @@ mod tests {
     #[test]
     fn an_error_reply_waits_for_the_pending_row_to_be_durable() {
         let _serial = damage::serial();
-        let f = fixture();
+        let f = fixture_shared();
         // The index starts at B, so the import below moves main past it,
         // and the plan's next step checks the deadline before it derives
         // anything.
@@ -1865,8 +1867,17 @@ mod tests {
             f.store.flushed_upto(),
             commits_before + 1,
         );
-        let state = damage::land_state_by_key(&f.store, "k").unwrap();
-        assert_eq!(state, "pending");
+        // The row is still pending: it answers `pending_lands`, the
+        // metadata trait both backends serve.
+        assert!(
+            f.store
+                .read(|c| {
+                    let repo = c.repo_id("r")?;
+                    Ok(c.pending_lands(repo)?.iter().any(|l| l.request_key == "k"))
+                })
+                .unwrap(),
+            "the land row is not pending"
+        );
     }
 
     #[test]

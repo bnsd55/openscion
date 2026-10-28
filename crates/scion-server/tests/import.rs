@@ -1363,11 +1363,6 @@ fn an_import_batch_waits_out_a_busy_write_lock() {
 
 #[test]
 fn an_import_that_stays_busy_fails_with_the_busy_error() {
-    // Asserts the rows of the data directory's database.
-    if skip_on_postgres("simulates the data directory's busy write lock") {
-        return;
-    }
-
     let git = Git::init();
     let rev = git.fast_commits(0, 60);
     let (_dir, store) = open_store();
@@ -1378,24 +1373,23 @@ fn an_import_that_stays_busy_fails_with_the_busy_error() {
     let error = try_import(&store, &git, &rev).unwrap_err();
     assert!(error.is_busy(), "{error:?}");
     // Nothing was written: the ref is not there, and no changeset is.
-    let refs: i64 = store
-        .read(|c| {
-            c.sqlite()
-                .unwrap()
-                .query_row("SELECT count(*) FROM refs", [], |row| row.get(0))
-                .map_err(scion_server::test_support::error::from_sqlite)
-        })
-        .unwrap();
-    assert_eq!(refs, 0);
-    let cs: i64 = store
-        .read(|c| {
-            c.sqlite()
-                .unwrap()
-                .query_row("SELECT count(*) FROM changesets", [], |row| row.get(0))
-                .map_err(scion_server::test_support::error::from_sqlite)
-        })
-        .unwrap();
-    assert_eq!(cs, 0);
+    // The reads are through the metadata traits, so the same assert runs
+    // on both backends.
+    let repo_id = store.read(|c| c.repo_id("r")).unwrap();
+    assert!(
+        store
+            .read(|c| c.get_ref(repo_id, "main"))
+            .unwrap()
+            .is_none(),
+        "no ref row"
+    );
+    assert!(
+        store
+            .read(|c| c.imported_commits(repo_id))
+            .unwrap()
+            .is_empty(),
+        "no changeset row"
+    );
 }
 
 /// The Postgres hold of a batch boundary: a client of the test schema
@@ -1554,9 +1548,6 @@ fn an_import_that_loses_disk_space_fails_and_is_not_retried() {
 
 #[test]
 fn a_rolled_back_import_batch_verifies_again_when_it_reruns() {
-    if skip_on_postgres("counts the import's verification passes, a SQLite test hook") {
-        return;
-    }
     let git = Git::init();
     let rev = git.fast_commits(0, 40);
     // A clean import of the same history checks every commit once; its walk
