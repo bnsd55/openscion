@@ -98,13 +98,17 @@ run_story() {
   WORK=$(mktemp -d "${TMPDIR:-/tmp}/scion-smoke.XXXXXX")
   chmod 700 "$WORK"
   note "run under umask $UMASK_RUN in $WORK"
+  # The server keeps its metadata in Postgres: one schema for this run's
+  # data directory, made if missing. psql names the test database through
+  # SCION_TEST_POSTGRES_URL.
+  PG_URL=$(pg_url_for "$WORK/server")
 
   step repo make_repo
 
   # The server refuses a missing data directory (#578); create it here.
   install -d -m 0700 "$WORK/server"
   chmod 700 "$WORK/server"
-  step import "$BIN/scion-server" --data "$WORK/server" import "$WORK/src"
+  step import "$BIN/scion-server" --data "$WORK/server" --postgres-url "$PG_URL" import "$WORK/src"
 
   # The ticket key, as the README prints it: the server signs with the
   # private half, and every object read carries a ticket it minted.
@@ -114,7 +118,7 @@ run_story() {
   # The server on a port the OS chooses: `--listen 127.0.0.1:0`, and the
   # log's `serving listen=` line names the port, so the story never races
   # another test for a fixed port.
-  SCION_TOKEN=smoke "$BIN/scion-server" --data "$WORK/server" serve \
+  SCION_TOKEN=smoke "$BIN/scion-server" --data "$WORK/server" --postgres-url "$PG_URL" serve \
     --listen 127.0.0.1:0 --ticket-key "$WORK/ticket.key" \
     >"$WORK/server.log" 2>&1 &
   SERVER_PID=$!
@@ -148,6 +152,12 @@ run_story() {
   "$BIN/scn" blame main:README.md >"$WORK/blame.out"
   grep -q . "$WORK/blame.out" || die "step 'blame' failed (umask $UMASK_RUN)"
 
+  # The sparse checkout, as the quick start prints it: only the named
+  # paths land on disk, and the file reads back whole.
+  step checkout "$BIN/scn" checkout main --sparse hello.rs --into "$WORK/work"
+  grep -q 'pub fn main' "$WORK/work/hello.rs" \
+    || die "step 'checkout' did not write hello.rs (umask $UMASK_RUN)"
+
   # Write, as an agent does: commit, land, and read back through main.
   printf 'hello from the release smoke test\n' >"$WORK/hello.txt"
   CS=$("$BIN/scn" commit -m "add hello" --put hello.txt="$WORK/hello.txt") ||
@@ -161,18 +171,14 @@ run_story() {
 
   # fsck while the server runs, as the README says is safe: it must be
   # clean. Its exit code says so (0 clean, 1 damage, 2 cannot run).
-  step fsck "$BIN/scion-server" --data "$WORK/server" fsck
+  step fsck "$BIN/scion-server" --data "$WORK/server" --postgres-url "$PG_URL" fsck
 
-  # The backend the run really served, from the data dir, against the
-  # one the run asked for (the smoke serves the default store): a run
-  # asked for one store that got another fails, and the summary names
-  # what ran either way. served_backend comes from common.sh.
-  asked_backend=sqlite
+  # The backend the run really served, from the data dir: the smoke runs
+  # the Postgres store, and served_backend refuses anything else (a no
+  # marker means a SQLite store ran, a damaged marker means a damaged
+  # store). served_backend comes from common.sh.
   served=$(served_backend "$WORK/server")
-  note "backend (asked -> data dir): $asked_backend -> $served"
-  if [ "$served" != "$asked_backend" ]; then
-    die "asked for $asked_backend, the data dir says $served (umask $UMASK_RUN)"
-  fi
+  note "backend (data dir): $served"
 
   # Clean shutdown: the first signal starts the drain, and the process
   # exits 0 when the drain is done. TERM, not INT: a script's background

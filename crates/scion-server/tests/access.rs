@@ -17,9 +17,7 @@ use scion_proto::v1::{
 use std::sync::Arc;
 
 use scion_server::Access;
-use scion_server::test_support::backend::from_store;
 use scion_server::test_support::meta::Meta as _;
-use scion_server::test_support::store::Store;
 
 /// The second repo of the two-world comparisons: its tree holds `docs`
 /// only, so the same path is genuinely missing there.
@@ -1694,7 +1692,7 @@ fn a_partial_reader_case(paths: &[String], rule_seeds: &[u16]) -> Result<(), Tes
     // The store: a chain of changesets whose tip tree holds every path,
     // and each file's blob, as an upload would leave them.
     let dir = scion_server::test_support::private_tempdir();
-    let store = from_store(Store::open(dir.path()).unwrap());
+    let store = Backend::open_test(dir.path()).unwrap();
     let tip = store
         .write(|c| {
             let repo = c.create_repo(REPO)?;
@@ -1727,7 +1725,7 @@ fn a_partial_reader_case(paths: &[String], rule_seeds: &[u16]) -> Result<(), Tes
         .cloned()
         .collect();
     let dir_b = scion_server::test_support::private_tempdir();
-    let store_b = from_store(Store::open(dir_b.path()).unwrap());
+    let store_b = Backend::open_test(dir_b.path()).unwrap();
     let tip_b = store_b
         .write(|c| {
             let repo = c.create_repo(REPO)?;
