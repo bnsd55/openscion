@@ -805,7 +805,7 @@ jobs:
     # release candidate's dispatch prove them, a push does not.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 40
+    timeout-minutes: 60
     services:
       # The suite's Postgres tests read this database; the backend the
       # tests choose is unchanged for now (SCION_TEST_BACKEND stays
@@ -830,14 +830,27 @@ jobs:
           tool: protoc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # `timeout` keeps the step's log on a run that overruns: a job the
-      # 40-minute ceiling kills keeps no log, so the slow test's name
-      # would be invisible. 2100 s (35 min) leaves the disk_full step
-      # its share, and --no-fail-fast lets the run name every suite
-      # that was slow or hung, not just the first.
-      - run: timeout 2100 cargo test --workspace --no-fail-fast
+      # ceiling kills keeps no log, so the slow test's name would be
+      # invisible. 2100 s (35 min) leaves the disk_full step its share,
+      # and --no-fail-fast lets the run name every suite that was slow
+      # or hung, not just the first. Every line is stamped with the
+      # wall-clock time and tee'd to a file a later step uploads, so a
+      # cancelled run still carries the evidence; pipefail keeps the
+      # step's verdict cargo's. A child that outlives cargo's TERM (a
+      # spawned server holding the pipe) gets KILLed 60 s later.
+      - run: |
+          set -o pipefail
+          timeout -k 60 2100 cargo test --workspace --no-fail-fast 2>&1             | while IFS= read -r l; do printf '%s %s\n' "$(date -u +%H:%M:%S)" "$l"; done             | tee "$RUNNER_TEMP/arm64-test.log"
         env:
           PROPTEST_CASES: "2000"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+      - name: the arm64 suite's log, even on a cancelled run
+        if: always()
+        uses: actions/upload-artifact@cf430e03199b7602de923a90af5b2fce3d4b4c13 # v7.0.2
+        with:
+          name: arm64-test-log
+          path: ${{ runner.temp }}/arm64-test.log
+          if-no-files-found: ignore
       - name: a real disk full (tmpfs)
         run: cargo test -p open-scion-server --test disk_full
         env:
