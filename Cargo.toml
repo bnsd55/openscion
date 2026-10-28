@@ -38,7 +38,7 @@ nfsserve = "0.11"
 prost = "0.14"
 proptest = "1.12"
 rcgen = "0.14"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 rustix = { version = "1.1", features = ["fs", "process"] }
 serde_json = "1.0"
 base64 = "0.23"
