@@ -11,8 +11,8 @@ use std::process::{Child, Command, Stdio};
 
 use prost::Message as _;
 use scion_core::{Changeset, FileState, IdentityTime, RepoPath};
-use scion_server::test_support::meta::MetaTx;
-use scion_server::test_support::store::Store;
+use scion_server::Backend;
+use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use tokio::net::TcpStream;
 
 mod common;
@@ -38,7 +38,7 @@ fn author() -> IdentityTime {
 /// whose root-to-head diff names `NAMES` long entries, so one reply is
 /// far over the h2 send buffer.
 fn seed(data: &Path) -> (scion_core::ChangesetId, scion_core::ChangesetId) {
-    let store = Store::open(data).unwrap();
+    let store = Backend::open_test(data).unwrap();
     let blob = store.blobs().put(b"x".to_vec().as_slice()).unwrap();
     let root = Changeset::new(
         vec![],
@@ -109,6 +109,13 @@ fn token_file(dir: &Path) -> PathBuf {
 /// replies hold about 65 KB each.
 fn spawn_server(data: &Path, token: &Path, lever: Option<&str>) -> (Child, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_scion-server"));
+    // The child needs the same URL rule every suite uses: on Postgres,
+    // the data directory's own schema.
+    if Backend::test_is_postgres() {
+        command
+            .arg("--postgres-url")
+            .arg(common::postgres_url(data));
+    }
     command
         .arg("--data")
         .arg(data)

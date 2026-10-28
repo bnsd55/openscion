@@ -2276,6 +2276,7 @@ fn file_state(state: FileState) -> v1::FileState {
 #[cfg(test)]
 mod tests {
     use crate::backend::Backend;
+    use crate::db;
     use std::time::Instant;
 
     use scion_core::{Changeset, FileState, IdentityTime};
@@ -3399,37 +3400,6 @@ mod tests {
         (blockers, arrived_rx)
     }
 
-    /// root ─ a, and root ─ b: the three changesets of the query cap's
-    /// fixture, stored through the metadata trait, so the test runs on
-    /// the backend the environment names.
-    fn insert_fork(
-        c: &mut dyn crate::meta::MetaTx,
-        repo: crate::meta::RepoId,
-    ) -> Result<Vec<ChangesetId>> {
-        let cs = |parents: Vec<ChangesetId>, name: &str| {
-            Changeset::new(
-                parents,
-                IdentityTime::new(b"a".to_vec(), b"a@x".to_vec(), 0, 0)
-                    .expect("identity fits the format"),
-                None,
-                name.as_bytes().to_vec(),
-                [(
-                    scion_core::RepoPath::new(name).unwrap(),
-                    Some(scion_core::FileState::Regular {
-                        content: scion_core::BlobId::of(name.as_bytes()),
-                        executable: false,
-                    }),
-                )]
-                .into(),
-            )
-            .expect("changeset fits the format")
-        };
-        let root = c.insert_changeset(repo, &cs(vec![], "f0"))?;
-        let a = c.insert_changeset(repo, &cs(vec![root], "f1"))?;
-        let b = c.insert_changeset(repo, &cs(vec![root], "f2"))?;
-        Ok(vec![root, a, b])
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn at_most_max_graph_queries_run_at_once() {
         // root ─ a, and root ─ b. The pool is the server's size: the test
@@ -3439,7 +3409,7 @@ mod tests {
         let ids = store
             .write(|c| {
                 let repo = c.create_repo("r")?;
-                insert_fork(c, repo)
+                db::testing::insert_graph(c, repo, &[vec![], vec![0], vec![0]])
             })
             .unwrap();
         let bytes = |i: usize| ids[i].as_bytes().to_vec();

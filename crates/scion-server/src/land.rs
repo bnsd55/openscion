@@ -2740,7 +2740,7 @@ mod tests {
             let (repo, ids) = store
                 .write(|c| {
                     let repo = c.create_repo("r")?;
-                    Ok((repo, testing::insert_history(c.sqlite().unwrap(), repo, &parents, &edits)?))
+                    Ok((repo, testing::insert_history(c, repo, &parents, &edits)?))
                 })
                 .unwrap();
             let lands = Lands::default();

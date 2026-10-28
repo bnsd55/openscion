@@ -368,6 +368,21 @@ jobs:
       ${{ !cancelled() && (needs.tier.result == 'success' || needs.tier.result == 'skipped') && !github.event.pull_request.draft && needs.tier.outputs.docs_only != 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    services:
+      # The scripts' servers keep their metadata in Postgres: the smoke
+      # below (start-scion-smoke) opens the database this service names.
+      postgres:
+        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        env:
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: scion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -387,8 +402,11 @@ jobs:
       # no per-PR job otherwise: the dispatch scripts (soak, bench,
       # capacity, version-matrix) start the daemon, the suite does not.
       # A few seconds: start the stack through common.sh, one call
-      # through the daemon, stop.
+      # through the daemon, stop. The stack's server keeps its metadata
+      # in Postgres, in the schema pg_url_for names for its data dir.
       - name: the shell stack starts (server, cache, daemon)
+        env:
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
         run: scripts/start-scion-smoke.sh
       - name: the work tree is still clean after the tests
         run: |
@@ -649,6 +667,21 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
+      # macOS runs no service containers, so the suite's Postgres tests
+      # get a Homebrew postgresql@17: its data directory lives in the
+      # runner's temp, and the URL the suite reads names the database the
+      # step created. Full paths: postgresql@17 is keg-only, so a bare
+      # initdb may be another Postgres the image carries, and GITHUB_PATH
+      # only reaches later steps. The version line proves 17 in the log.
+      - name: postgres on macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew install postgresql@17
+          PG=$(brew --prefix postgresql@17)/bin
+          "$PG/postgres" --version
+          "$PG/initdb" --username=postgres --auth=trust "$RUNNER_TEMP/pgdata"
+          "$PG/pg_ctl" -D "$RUNNER_TEMP/pgdata" -l "$RUNNER_TEMP/pg.log" start
+          "$PG/createdb" -U postgres -h 127.0.0.1 scion
       # The Linux lint job never compiles macOS-only code (the ACL FFI
       # module among it), so clippy runs here, before the tests: same
       # warm cache, a couple of minutes on a job that already builds
@@ -659,6 +692,7 @@ jobs:
         env:
           # A pull request runs 500 cases, main and the nightly 2000.
           PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '500' || '2000' }}
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
       - name: the work tree is still clean after the tests
         run: |
           # New untracked files count too (a stray bench-output.txt);
@@ -897,14 +931,13 @@ jobs:
           sudo apt-get install -y -qq nfs-common
       # The script wraps every external command in `timeout`, and its trap
       # force-unmounts and kills the server and the mount on any exit, so
-      # a failed step cannot hang the runner until this cap.
+      # a failed step cannot hang the runner until this cap. The server's
+      # metadata lives in Postgres, in the schema pg_url_for names for its
+      # data dir; one run proves the mount of that half.
       - name: run the mount script
+        env:
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
         run: timeout 600 scripts/mount-nfs.sh
-      - name: run the mount script (postgres)
-        run: |
-          SCION_TEST_BACKEND=postgres \
-          SCION_TEST_POSTGRES_URL=postgres://postgres:scion@localhost:5432/scion \
-          timeout 600 scripts/mount-nfs.sh
 
   publish-check:
     name: publish check
@@ -983,10 +1016,8 @@ jobs:
           tags: open-scion-demo
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: run the demo (SQLite)
+      - name: run the demo
         run: sh docker/demo.sh
-      - name: run the demo (Postgres)
-        run: sh docker/demo.sh postgres
 
   fuzz:
     name: fuzz smoke (60 s)
@@ -1059,10 +1090,42 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The smoke's server keeps its metadata in Postgres, in the schema
+      # pg_url_for names for its data dir. Linux starts the database in a
+      # container (service containers do not run on the macOS image);
+      # macOS starts its own below.
+      - name: postgres on Linux
+        if: runner.os == 'Linux'
+        run: |
+          docker run -d --name postgres \
+            -e POSTGRES_PASSWORD=scion -e POSTGRES_DB=scion \
+            -p 5432:5432 \
+            postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+          for _ in $(seq 1 30); do
+            docker exec postgres pg_isready -U postgres >/dev/null 2>&1 && break
+            sleep 1
+          done
+          docker exec postgres pg_isready -U postgres || { docker logs postgres; exit 1; }
+      # The macOS image runs no service containers: a Homebrew Postgres,
+      # started before the smoke and left to the runner.
+      - name: postgres on macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew install postgresql@17
+          # Full paths: postgresql@17 is keg-only, so a bare initdb may be
+          # another Postgres the image carries, and GITHUB_PATH only
+          # reaches later steps. The version line proves 17 in the log.
+          PG=$(brew --prefix postgresql@17)/bin
+          "$PG/postgres" --version
+          "$PG/initdb" --username=postgres --auth=trust "$RUNNER_TEMP/pgdata"
+          "$PG/pg_ctl" -D "$RUNNER_TEMP/pgdata" -l "$RUNNER_TEMP/pg.log" start
+          "$PG/createdb" -U postgres -h 127.0.0.1 scion
       # The README quick start on the release binaries, twice (umask 022
       # and 002): import, ticket-key, serve, scn reads and writes, fsck,
       # and a one-signal shutdown that must exit 0, on Linux and macOS.
       - run: scripts/release-smoke.sh
+        env:
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
 
   nightly-streak:
     name: nightly streak
