@@ -92,11 +92,11 @@ fi
 # `docker restart soak-pg`.
 # The Postgres URL reaches every scion-server this script raises
 # (serve, import, gc, fsck) through the env, which decides the backend;
-# the argv form is deprecated and serve no longer takes it (capacity.sh
-# does the same).
-if [ -n "${SCION_PG_URL:-}" ]; then
-  export SCION_POSTGRES_URL=$SCION_PG_URL
-fi
+# the argv form is deprecated and serve no longer takes it. The backend
+# is not optional anymore: every server here opens the schema PG_URL
+# names (pg_url_for), and the restart fault acts on the database that
+# schema lives in.
+export SCION_POSTGRES_URL=$PG_URL
 
 # classifies LOG: 0 if every failure LINE in LOG is one this load
 # expects. soak.sh's list, plus the transport lines a kill makes: a
@@ -139,6 +139,9 @@ else
   build
 fi
 fetch_dataset
+# The fault soak's server keeps its metadata in Postgres: one schema for
+# this run's data directory, made if missing.
+PG_URL=$(pg_url_for "$WORK/server")
 import_dataset
 start_scion
 # The PID that holds the server's port is the server (soak.sh: the PID
