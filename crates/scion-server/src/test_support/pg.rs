@@ -165,7 +165,7 @@ impl Pg {
         // The test store is the one server of its schema: it takes the
         // per-schema one-server lock, and its loss fences the process,
         // exactly as a serve does on the database key.
-        Self::open_in(url, None, readers, data, Some(schema), true, marker)
+        Self::open_in(url, None, readers, data, Some(schema), true, marker, None)
     }
     /// [`Pg::open_test`], as a process that does not land: it makes the
     /// schema the same way and takes no one-server lock, and its loss
@@ -180,7 +180,30 @@ impl Pg {
         marker: Marker,
     ) -> Result<Self> {
         prepare_test_schema(url, schema)?;
-        Self::open_in(url, None, readers, data, Some(schema), false, marker)
+        Self::open_in(url, None, readers, data, Some(schema), false, marker, None)
+    }
+    /// [`PgClient::open_test_shared`], with the derive walks built for
+    /// `flights`: the tests of the walk caps, which change the numbers,
+    /// never the machinery.
+    pub(crate) fn open_test_shared_with_flights(
+        url: &str,
+        schema: &str,
+        readers: usize,
+        data: &Path,
+        marker: Marker,
+        flights: crate::derived::DeriveFlights,
+    ) -> Result<Self> {
+        prepare_test_schema(url, schema)?;
+        Self::open_in(
+            url,
+            None,
+            readers,
+            data,
+            Some(schema),
+            false,
+            marker,
+            Some(flights),
+        )
     }
     /// The import's test hooks and busy-retry count.
     #[cfg(any(test, feature = "test-hooks"))]
