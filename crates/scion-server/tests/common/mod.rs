@@ -1094,11 +1094,26 @@ impl LandsReader {
     /// SQLite path: opening `scion.db` beside a Postgres server would
     /// create a file the restart refuses, so Postgres reads the schema.
     pub(crate) fn open(data: &Path) -> Self {
+        Self::open_reopened(data, data)
+    }
+
+    /// Opens the read for a store the suite reopened under another
+    /// directory's schema (`start_reopened`): the rows live in
+    /// `schema_source`'s schema, whatever path `dir` names, whose own
+    /// name would be a fresh, empty schema. SQLite ignores the source:
+    /// the metadata is the directory's file either way.
+    pub(crate) fn open_reopened(data: &Path, schema_source: &Path) -> Self {
         if Backend::test_is_postgres() {
-            let url = postgres_url(data);
+            let schema = Backend::test_schema(schema_source).expect("postgres mode names a schema");
+            let url = std::env::var("SCION_TEST_POSTGRES_URL")
+                .expect("SCION_TEST_POSTGRES_URL must name the test database");
             let client = std::thread::spawn(move || {
-                postgres::Client::connect(&url, postgres::NoTls)
-                    .expect("the server's schema connects")
+                let mut client = postgres::Client::connect(&url, postgres::NoTls)
+                    .expect("the server's schema connects");
+                client
+                    .batch_execute(&format!("SET search_path TO {schema}"))
+                    .expect("the store's schema is reachable");
+                client
             })
             .join()
             .unwrap();
@@ -1189,7 +1204,7 @@ fn metadata(
             named.extend(states.iter().filter_map(FileState::blob));
         }
     }
-    let pending = LandsReader::open(dir).counts().1;
+    let pending = LandsReader::open_reopened(dir, schema_source).counts().1;
     (named, pending)
 }
 
