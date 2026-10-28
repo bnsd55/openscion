@@ -297,9 +297,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     services:
-      # The suite's Postgres tests read this database; the backend the
-      # tests choose is unchanged for now (SCION_TEST_BACKEND stays
-      # unset), and the URL is in place for the switch.
+      # The suite's Postgres tests read this database: the backend they
+      # choose is Postgres, and the URL names the database this service
+      # runs.
       postgres:
         image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
         env:
@@ -337,6 +337,7 @@ jobs:
           cargo test -p open-scion-server "${server_args[@]}"
           cargo test -p open-scion "${cli_args[@]}"
         env:
+          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
 
   supply-chain:
@@ -429,6 +430,8 @@ jobs:
           # The fast tier: a pull request runs 500 cases, main, the
           # nightly and a dispatch the full 2000.
           PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '500' || '2000' }}
+          SCION_TEST_BACKEND: postgres
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
       # The daemon startup rules (#592's data-dir gate) are exercised by
       # no per-PR job otherwise: the dispatch scripts (soak, bench,
       # capacity, version-matrix) start the daemon, the suite does not.
@@ -484,9 +487,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
-      # The suite's Postgres tests read this database; the backend the
-      # tests choose is unchanged for now (SCION_TEST_BACKEND stays
-      # unset), and the URL is in place for the switch.
+      # The suite's Postgres tests read this database: the backend they
+      # choose is Postgres, and the URL names the database this service
+      # runs.
       postgres:
         image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
         env:
@@ -512,6 +515,7 @@ jobs:
       - name: the streamed restore stays under its ceiling
         run: cargo test --release -p open-scion-server --test archive_restore_stream a_big_restore -- --nocapture
         env:
+          SCION_TEST_BACKEND: postgres
           SCION_TEST_RESTORE_BIG: "1"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
       - name: the whole-file read would not (the guard is not vacuous)
@@ -683,9 +687,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     services:
-      # The suite's Postgres tests read this database; the backend the
-      # tests choose is unchanged for now (SCION_TEST_BACKEND stays
-      # unset), and the URL is in place for the switch.
+      # The suite's Postgres tests read this database: the backend they
+      # choose is Postgres, and the URL names the database this service
+      # runs.
       postgres:
         image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
         env:
@@ -711,6 +715,7 @@ jobs:
       # and the from-mount suite, which the default build compiles out.
       - run: cargo test -p open-scion --features unstable-writable-mount
         env:
+          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
 
   test-macos:
@@ -758,10 +763,10 @@ jobs:
         env:
           # A pull request runs 500 cases, main and the nightly 2000.
           PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '500' || '2000' }}
+          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
       - name: the work tree is still clean after the tests
         run: |
-          # New untracked files count too (a stray bench-output.txt);
           # target/ is gitignored, so the build stays out of the report.
           dirty=$(git status --porcelain --untracked-files=all)
           if [ -n "$dirty" ]; then
@@ -807,9 +812,9 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 40
     services:
-      # The suite's Postgres tests read this database; the backend the
-      # tests choose is unchanged for now (SCION_TEST_BACKEND stays
-      # unset), and the URL is in place for the switch.
+      # The suite's Postgres tests read this database: the backend they
+      # choose is Postgres, and the URL names the database this service
+      # runs.
       postgres:
         image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
         env:
@@ -853,9 +858,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
-      # The suite's Postgres tests read this database; the backend the
-      # tests choose is unchanged for now (SCION_TEST_BACKEND stays
-      # unset), and the URL is in place for the switch.
+      # The suite's Postgres tests read this database: the backend they
+      # choose is Postgres, and the URL names the database this service
+      # runs.
       postgres:
         image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
         env:
@@ -889,8 +894,9 @@ jobs:
       - run: TMPDIR=/mnt/xfs cargo test -p open-scion-server
         env:
           # The xfs job proves filesystem parity, not more cases; the
-          # SQLite job on the runner disk already runs 2000.
+          # main job on the runner disk already runs 2000.
           PROPTEST_CASES: "64"
+          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
       - name: the loop device goes away
         if: always()
@@ -1088,9 +1094,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     services:
-      # The suite's Postgres tests read this database; the backend the
-      # tests choose is unchanged for now (SCION_TEST_BACKEND stays
-      # unset), and the URL is in place for the switch.
+      # The suite's Postgres tests read this database: the backend they
+      # choose is Postgres, and the URL names the database this service
+      # runs.
       postgres:
         image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
         env:
@@ -1119,6 +1125,7 @@ jobs:
       # grpcurl release and checks its sha256 before it runs.
       - run: scripts/grpc-conformance.sh
         env:
+          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
 
   docker:
@@ -1150,9 +1157,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     services:
-      # The suite's Postgres tests read this database; the backend the
-      # tests choose is unchanged for now (SCION_TEST_BACKEND stays
-      # unset), and the URL is in place for the switch.
+      # The suite's Postgres tests read this database: the backend they
+      # choose is Postgres, and the URL names the database this service
+      # runs.
       postgres:
         image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
         env:
@@ -1183,6 +1190,9 @@ jobs:
         with:
           tool: cargo-fuzz
       - name: fuzz the parsers
+        env:
+          SCION_TEST_BACKEND: postgres
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
         run: |
           # The prebuilt cargo-fuzz defaults to a musl target, where the
           # address sanitizer cannot run. The targets run four at a time:
