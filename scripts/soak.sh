@@ -116,7 +116,7 @@ importer() {
   local n=0
   while [ "$(date +%s)" -lt "$END" ]; do
     n=$((n + 1))
-    "$TIMEOUT" 300 "$BIN/scion-server" --data "$WORK/server" import \
+    "$TIMEOUT" 300 "$BIN/scion-server" --data "$WORK/server" --postgres-url "$PG_URL" import \
       --rev main "$WORK/src.git" \
       >> "$WORK/import-soak.log" 2>&1 || echo "import $n failed" >> "$WORK/import-fail.log"
     sleep 60
@@ -128,9 +128,9 @@ gcer() {
   local n=0
   while [ "$(date +%s)" -lt "$END" ]; do
     n=$((n + 1))
-    "$TIMEOUT" 120 "$BIN/scion-server" --data "$WORK/server" gc --dry-run \
+    "$TIMEOUT" 120 "$BIN/scion-server" --data "$WORK/server" --postgres-url "$PG_URL" gc --dry-run \
       >> "$WORK/gc.log" 2>&1 || echo "gc-dry $n failed" >> "$WORK/gc-fail.log"
-    "$TIMEOUT" 120 "$BIN/scion-server" --data "$WORK/server" gc \
+    "$TIMEOUT" 120 "$BIN/scion-server" --data "$WORK/server" --postgres-url "$PG_URL" gc \
       >> "$WORK/gc.log" 2>&1 || echo "gc $n failed" >> "$WORK/gc-fail.log"
     sleep 120
   done
