@@ -40,6 +40,9 @@ pub(crate) fn serial() -> Option<std::sync::MutexGuard<'static, ()>> {
     }
 }
 
+/// The kind of a derived row.
+pub(crate) type DerivedRow = (String, i64, Vec<u8>, Vec<u8>);
+
 // -- damage: one function per kind -------------------------------------
 
 /// Corrupts the stored body of one changeset: the id stays, the bytes lie.
@@ -293,6 +296,79 @@ pub(crate) fn first_history_node_id(backend: &Backend) -> Result<Option<[u8; 32]
                 Some(row) => Ok(Some(id_of(&row?))),
                 None => Ok(None),
             }
+        })
+    }
+}
+
+/// Every derived row, as `(kind, version, cs, value)`: what the
+/// derived tests assert about.
+pub(crate) fn derived_rows(backend: &Backend) -> Result<Vec<DerivedRow>> {
+    let data = data_dir(backend);
+    if Backend::test_is_postgres() {
+        pg_with(data, |client| {
+            let rows = client
+                .query(
+                    "SELECT kind, version, cs, value FROM derived ORDER BY kind, version, cs",
+                    &[],
+                )
+                .map_err(map_pg_error)?;
+            Ok(rows
+                .iter()
+                .map(|r| {
+                    (
+                        r.get::<_, String>(0),
+                        r.get::<_, i64>(1),
+                        r.get::<_, Vec<u8>>(2),
+                        r.get::<_, Vec<u8>>(3),
+                    )
+                })
+                .collect())
+        })
+    } else {
+        raw_sqlite(data, false, |c| {
+            let mut stmt = c.prepare(
+                "SELECT kind, version, cs, value FROM derived ORDER BY kind, version, cs",
+            )?;
+            let mapped = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            })?;
+            let mut rows = Vec::new();
+            for row in mapped {
+                rows.push(row?);
+            }
+            Ok(rows)
+        })
+    }
+}
+
+/// Downgrades every derived row of `kind` to version 0: the shape an
+/// older build left behind, which the next write must remove. Returns
+/// the count it made.
+pub(crate) fn downgrade_derived_rows(backend: &Backend, kind: &str) -> Result<u64> {
+    let data = data_dir(backend);
+    if Backend::test_is_postgres() {
+        pg_with(data, |client| {
+            client
+                .execute(
+                    "INSERT INTO derived (kind, version, cs, value)
+                     SELECT kind, 0, cs, value FROM derived WHERE kind = $1",
+                    &[&kind],
+                )
+                .map_err(map_pg_error)
+        })
+    } else {
+        raw_sqlite(data, false, |c| {
+            c.execute(
+                "INSERT INTO derived (kind, version, cs, value)
+                 SELECT kind, 0, cs, value FROM derived WHERE kind = ?1",
+                rusqlite::params![kind],
+            )
+            .map(|n| n as u64)
         })
     }
 }

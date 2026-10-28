@@ -158,6 +158,48 @@ impl Backend {
         refuse_postgres_marker(data)?;
         Self::open(data, None, None)
     }
+    /// Opens the backend that `SCION_TEST_BACKEND` names, with the
+    /// derive walks built for `walks` in flight and `walk_bytes` of
+    /// shared budget, for the tests of the walk caps. Both backends
+    /// apply the caps (the Postgres backend builds its flights with the
+    /// default cap); this only changes the numbers. The flights are
+    /// built before the backend opens: production types stay immutable.
+    ///
+    /// # Errors
+    ///
+    /// What `open_test` returns.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn open_test_with_walks(
+        data: &Path,
+        walks: usize,
+        walk_bytes: crate::memory::Bytes,
+    ) -> Result<Self> {
+        Self::ensure_private_dir(data);
+        let flights = crate::derived::DeriveFlights::with_walk_bytes(walks, walk_bytes.clone());
+        if std::env::var("SCION_TEST_BACKEND").as_deref() == Ok("postgres") {
+            refuse_damaged_marker(data)?;
+            let marker = Marker::read(data);
+            refuse_sqlite_dir(data)?;
+            let pg = Pg::open_test_shared_with_flights(
+                &test_url()?,
+                &test_schema(data),
+                PG_TEST_READERS,
+                data,
+                marker,
+                flights,
+            )?;
+            marker_agrees(data, pg.store_uuid())?;
+            return Ok(Self {
+                inner: Inner::Postgres(pg),
+            });
+        }
+        refuse_postgres_marker(data)?;
+        let store = Store::open_with_walk_bytes(data, walks, walk_bytes)?;
+        Ok(Self {
+            inner: Inner::Sqlite(store),
+        })
+    }
     /// Whether `SCION_TEST_BACKEND` names Postgres. A test that asserts the
     /// rows of the data directory's database skips itself on Postgres: its
     /// assertions are about the SQLite schema, which the schema drift test
