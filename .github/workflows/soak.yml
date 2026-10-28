@@ -189,6 +189,7 @@ jobs:
           # service container, the only postgres image on the runner.
           # The backend itself is not optional anymore: every server the
           # script raises opens the schema SCION_TEST_POSTGRES_URL names.
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           SCION_FAULT_PG: "1"
           SCION_FAULT_PG_CMD: docker restart ${{ job.services.postgres.id }}
           # soak-fault.sh's restart wait runs bare `pg_isready`, whose
