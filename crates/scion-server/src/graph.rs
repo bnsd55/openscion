@@ -975,13 +975,6 @@ mod tests {
             parents in proptest::prop_oneof![testing::graphs(20), sparse_graphs(20)],
             pairs in proptest::collection::vec(any::<(Sample, Sample)>(), PAIRS),
         ) {
-            // The walk's batch loads refuse a node the derivation has not
-            // stored yet; on SQLite the walk stores every node it passes.
-            // The Postgres derive's reach is a later slice of the plan.
-            if Backend::test_is_postgres() {
-                eprintln!("skip on postgres: the derive walk's batch loads");
-                return Ok(());
-            }
             let (_dir, store, repo, ids) = store_graph(&parents);
             let histories = histories(&parents);
             let ancestors = ancestors(&parents);
