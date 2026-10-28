@@ -138,29 +138,27 @@ impl Server {
 /// Every commit of the git repository, mapped to the changeset it was
 /// imported as, in hex.
 fn changesets(store: &Backend, dir: &Path) -> HashMap<String, String> {
+    let imported = store
+        .read(|c| {
+            let repo = c.repo_id(REPO)?;
+            c.imported_commits(repo)
+        })
+        .unwrap();
+    let oid_of = |commit: &str| -> String {
+        let oid: Vec<u8> = (0..commit.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&commit[i..i + 2], 16).unwrap())
+            .collect();
+        imported
+            .iter()
+            .find(|(k, _)| k.as_bytes() == oid.as_slice())
+            .unwrap()
+            .1
+            .to_string()
+    };
     git(dir, &["rev-list", "--all"])
         .lines()
-        .map(|commit| {
-            let oid: Vec<u8> = (0..commit.len())
-                .step_by(2)
-                .map(|i| u8::from_str_radix(&commit[i..i + 2], 16).unwrap())
-                .collect();
-            let id = store
-                .read(|c| {
-                    let cs: Vec<u8> = c
-                        .sqlite()
-                        .unwrap()
-                        .query_row(
-                            "SELECT cs FROM git_import WHERE git_oid = ?1",
-                            [&oid],
-                            |row| row.get(0),
-                        )
-                        .map_err(scion_server::test_support::error::from_sqlite)?;
-                    Ok(ChangesetId::try_from(cs.as_slice()).unwrap())
-                })
-                .unwrap();
-            (commit.to_owned(), id.to_string())
-        })
+        .map(|commit| (commit.to_owned(), oid_of(commit)))
         .collect()
 }
 
@@ -189,14 +187,6 @@ fn name_status(diff: &Value) -> Vec<String> {
 
 #[test]
 fn merge_base_is_ancestor_and_diff_match_git() {
-    if Backend::test_is_postgres() {
-        // SHORTCUT: this ceiling is the skip itself; Postgres import
-        // provenance (the git_import rows) is unread by these tests, so the
-        // git side of the comparison has no Postgres run. Upgrade path: a
-        // backend-agnostic git_import read on MetaTx, then drop the skip.
-        eprintln!("skip on postgres: the test reads the data directory's git_import rows");
-        return;
-    }
     merge_base_is_ancestor_and_diff_match_git_inner();
 }
 

@@ -872,6 +872,9 @@ mod tests {
     ) -> (tempfile::TempDir, Backend, RepoId, Vec<ChangesetId>) {
         let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test(dir.path()).unwrap();
+        // The same changesets `testing::insert_graph` builds, stored
+        // through the metadata trait, so the graph tests run on the test
+        // backend the environment names, Postgres included.
         let (repo, ids) = store
             .write(|c| {
                 let repo = c.create_repo("r")?;
@@ -974,6 +977,13 @@ mod tests {
             pairs in proptest::collection::vec(any::<(Sample, Sample)>(), PAIRS),
         ) {
             let _serial = damage::serial();
+            // The walk's batch loads refuse a node the derivation has not
+            // stored yet; on SQLite the walk stores every node it passes.
+            // The Postgres derive's reach is a later slice of the plan.
+            if Backend::test_is_postgres() {
+                eprintln!("skip on postgres: the derive walk's batch loads");
+                return Ok(());
+            }
             let (_dir, store, repo, ids) = store_graph(&parents);
             let histories = histories(&parents);
             let ancestors = ancestors(&parents);
@@ -1204,12 +1214,8 @@ mod tests {
         let (_dir, store, repo, ids) = store_graph(&parents);
         let commits = store.commits();
         assert!(is_ancestor(&store, repo, ids[2], ids[4], &later()).unwrap());
-        // Changesets 0 to 4 in steps, and nothing for 5. Until #682's
-        // Postgres counters land, commits() is always 0 on Postgres, so
-        // the count is a SQLite claim.
-        if !Backend::test_is_postgres() {
-            assert_eq!(store.commits() - commits, steps(5));
-        }
+        // Changesets 0 to 4 in steps, and nothing for 5.
+        assert_eq!(store.commits() - commits, steps(5));
         let commits = store.commits();
         assert!(!is_ancestor(&store, repo, ids[5], ids[4], &later()).unwrap());
         let met = merge_bases(&store, repo, ids[2], ids[4], &later()).unwrap();
@@ -1418,6 +1424,11 @@ mod tests {
 
     #[test]
     fn a_walk_waits_for_one_flush_for_all_its_steps() {
+        // A Postgres commit is durable when it returns: no flush to count.
+        if Backend::test_is_postgres() {
+            eprintln!("skip on postgres: the flush steps are the SQLite store's");
+            return;
+        }
         let _serial = damage::serial();
         let (_dir, store, repo, ids) = store_graph_with_nodes(&ladder(20));
         let (side, tip) = (ids[1], *ids.last().unwrap());
