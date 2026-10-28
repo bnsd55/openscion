@@ -46,26 +46,53 @@ fn the_exit_codes_of_fsck() {
         "a damaged store exits 1"
     );
 
-    // 2: cannot run. A database no store can open cannot be checked.
+    // 2: cannot run. The metadata store cannot be opened at all, so
+    // fsck cannot check anything. The reason names the engine: on
+    // SQLite the directory's scion.db is not a database file; on
+    // Postgres the URL names a port nothing listens on. Either way the
+    // run cannot begin, and the exit code is the same 2.
     let broken = scion_server::test_support::private_tempdir();
-    fs::write(broken.path().join("scion.db"), b"not a database at all\n").unwrap();
-    assert_eq!(
-        fsck(broken.path()).status.code(),
-        Some(2),
-        "a store that cannot open exits 2"
-    );
+    if Backend::test_is_postgres() {
+        let url = "postgres://postgres:scion@127.0.0.1:1/scion";
+        assert_eq!(
+            fsck_with(broken.path(), &["--postgres-url".as_ref(), url.as_ref()])
+                .status
+                .code(),
+            Some(2),
+            "a metadata store that cannot be reached exits 2"
+        );
+    } else {
+        fs::write(broken.path().join("scion.db"), b"not a database at all\n").unwrap();
+        assert_eq!(
+            fsck(broken.path()).status.code(),
+            Some(2),
+            "a store that cannot open exits 2"
+        );
+    }
 }
 
 /// Runs `scion-server --data <dir> fsck` and returns its status.
 fn fsck(data: &Path) -> Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scion-server"));
     // The binary needs the same URL rule every suite uses: on Postgres,
     // the data directory's own schema.
-    if Backend::test_is_postgres() {
-        cmd.arg("--postgres-url").arg(common::postgres_url(data));
-    }
+    let url = if Backend::test_is_postgres() {
+        common::postgres_url(data)
+    } else {
+        String::new()
+    };
+    let extra = if Backend::test_is_postgres() {
+        vec!["--postgres-url".as_ref(), url.as_ref()]
+    } else {
+        vec![]
+    };
+    fsck_with(data, &extra)
+}
+
+fn fsck_with(data: &Path, extra: &[&std::ffi::OsStr]) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scion-server"));
     cmd.args(["--data"])
         .arg(data)
+        .args(extra)
         .arg("fsck")
         .env("NO_COLOR", "1")
         .output()
