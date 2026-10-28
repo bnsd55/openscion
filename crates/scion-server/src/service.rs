@@ -3407,7 +3407,7 @@ mod tests {
         let ids = store
             .write(|c| {
                 let repo = c.create_repo("r")?;
-                db::testing::insert_graph(c.sqlite().unwrap(), repo, &[vec![], vec![0], vec![0]])
+                db::testing::insert_graph(c, repo, &[vec![], vec![0], vec![0]])
             })
             .unwrap();
         let bytes = |i: usize| ids[i].as_bytes().to_vec();
