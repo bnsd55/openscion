@@ -22,7 +22,6 @@ pg_url_for() {
   local cur=$data
   local tail=""
   local base=${SCION_TEST_POSTGRES_URL:?SCION_TEST_POSTGRES_URL must name the test database}
-  base=${base%%\?*}
   while [ ! -e "$cur" ]; do
     tail="/$(basename "$cur")$tail"
     cur=$(dirname "$cur")
@@ -44,5 +43,10 @@ pg_url_for() {
     echo "FAIL: cannot create schema $schema in the test database" >&2
     return 1
   }
-  printf '%s?options=--search_path%%3D%s%%2Cpublic' "$base" "$schema"
+  # The base's own parameters stay (sslmode on a remote test database);
+  # options is appended with the separator the base leaves (the same
+  # rule tests/common/mod.rs's postgres_url follows).
+  local sep='?'
+  case $base in *\?*) sep='&' ;; esac
+  printf '%s%soptions=--search_path%%3D%s%%2Cpublic' "$base" "$sep" "$schema"
 }

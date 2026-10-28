@@ -1096,10 +1096,14 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew install postgresql@17
-          echo "$(brew --prefix)/opt/postgresql@17/bin" >> "$GITHUB_PATH"
-          initdb --username=postgres --auth=trust "$RUNNER_TEMP/pgdata"
-          pg_ctl -D "$RUNNER_TEMP/pgdata" -l "$RUNNER_TEMP/pg.log" start
-          createdb -U postgres -h 127.0.0.1 scion
+          # Full paths: postgresql@17 is keg-only, so a bare initdb may be
+          # another Postgres the image carries, and GITHUB_PATH only
+          # reaches later steps. The version line proves 17 in the log.
+          PG=$(brew --prefix postgresql@17)/bin
+          "$PG/postgres" --version
+          "$PG/initdb" --username=postgres --auth=trust "$RUNNER_TEMP/pgdata"
+          "$PG/pg_ctl" -D "$RUNNER_TEMP/pgdata" -l "$RUNNER_TEMP/pg.log" start
+          "$PG/createdb" -U postgres -h 127.0.0.1 scion
       # The README quick start on the release binaries, twice (umask 022
       # and 002): import, ticket-key, serve, scn reads and writes, fsck,
       # and a one-signal shutdown that must exit 0, on Linux and macOS.
