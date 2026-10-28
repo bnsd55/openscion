@@ -710,7 +710,6 @@ mod tests {
     use super::*;
     use crate::backend::Backend;
     use crate::pg::damage;
-    use crate::store::Store;
 
     /// A file cut in two parts anywhere after its first 8,000 bytes has
     /// the same chunks as when it comes whole, also where a part ends
