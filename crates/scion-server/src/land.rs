@@ -2678,16 +2678,9 @@ mod tests {
         // share; `d` and `d/e` for `d/e/g`; `c1` and `c2` are files, so
         // nothing below them.
         //
-        // FINDING, on Postgres only: the node bound is 6, not 3 - the
-        // changeset bound holds (1), so the land still reads its paths
-        // and not the history, but the Postgres land reads three more
-        // nodes than the SQLite land. Reported to the lead; the bound
-        // half stays a SQLite claim until that is explained.
-        if Backend::test_is_postgres() {
-            assert_eq!(reads[0], (1, 6));
-        } else {
-            assert_eq!(reads[0], (1, 3));
-        }
+        // The count is one increment per node read: history::get_row
+        // (history.rs:644) counts for both backends.
+        assert_eq!(reads[0], (1, 3));
     }
 
     /// The rule of the walk that checked old bases before path history

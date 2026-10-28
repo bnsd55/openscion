@@ -3915,14 +3915,6 @@ impl MetaTx for PgTx<'_> {
     ///
     /// [`Error::Corrupt`] if absent or if it does not match its ID.
     fn get_history_node(&mut self, id: NodeId) -> Result<(Vec<u8>, usize)> {
-        #[cfg(test)]
-        if self
-            .history_pending
-            .as_deref()
-            .is_none_or(|pending| !pending.contains_key(id.0.as_slice()))
-        {
-            crate::history::NODE_READS.set(crate::history::NODE_READS.get() + 1);
-        }
         if self.cs_batching
             && let Some(body) = self
                 .history_pending
