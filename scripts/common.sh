@@ -16,6 +16,9 @@ CACHE_PORT=${CACHE_PORT:-17879}
 SERVER_METRICS_PORT=${SERVER_METRICS_PORT:-17880}
 CACHE_METRICS_PORT=${CACHE_METRICS_PORT:-17881}
 
+# shellcheck source=pg-url.sh source-path=SCRIPTDIR
+. "$(dirname "${BASH_SOURCE[0]}")/pg-url.sh"
+
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 case ${CARGO_TARGET_DIR:-} in
   "") BIN=$ROOT/target/release ;;
@@ -73,20 +76,27 @@ kib_per_1k() {
   fi
 }
 
+# pg_url_for lives in pg-url.sh, sourced below: the scripts that do not
+# source this file (mount-nfs.sh) source that one directly.
+
 # served_backend DATA_DIR: what the store the server ran on really is,
-# read from the data directory. backend.rs writes the `backend` marker
-# only for Postgres, so no marker file means SQLite; a marker file with
-# any other first line is damage, not SQLite, and reads as unknown:<line>
-# — the caller fails on it rather than passing a damaged store off as
-# either backend (#561 review F3).
+# read from the data directory, asserted Postgres. The server's metadata
+# store is Postgres: a directory with no backend marker ran SQLite, and
+# a marker with any other first line is damage, not SQLite, and reads
+# as unknown:<line> - either way the caller fails on it rather than
+# passing a store off as what the run asked for (#561 review F3).
 served_backend() {
   local dir=$1 line f="$1/backend"
-  [ -f "$f" ] || { echo sqlite; return 0; }
+  if [ ! -f "$f" ]; then
+    echo "FAIL: the data dir $dir has no backend marker: the server did not run Postgres-backed" >&2
+    return 1
+  fi
   line=$(head -n 1 "$f" 2> /dev/null || true)
-  case $line in
-    postgres) echo postgres ;;
-    *) echo "unknown:$line" ;;
-  esac
+  if [ "$line" != postgres ]; then
+    echo "FAIL: the data dir $dir is not Postgres-backed (the marker says ${line:-nothing})" >&2
+    return 1
+  fi
+  echo postgres
 }
 
 # du_sample CSV DATA_DIR NOW: append the store's size as `NOW,size`.
@@ -163,13 +173,16 @@ fetch_dataset() {
 }
 
 # Imports $WORK/src.git into a new server data directory, $WORK/server, and
-# sets $COMMITS. Its times are in $WORK/import.log.
+# sets $COMMITS. Its times are in $WORK/import.log. The metadata lands in
+# the database schema pg_url_for names for the directory: set PG_URL from
+# pg_url_for before calling this.
 import_dataset() {
   note "importing"
+  : "${PG_URL:?set PG_URL with pg_url_for before importing}"
   # The server refuses a missing data directory (#578); create it here.
   mkdir -p "$WORK/server"
   chmod 700 "$WORK/server"
-  /usr/bin/time -p "$BIN/scion-server" --data "$WORK/server" import --rev main "$WORK/src.git" \
+  /usr/bin/time -p "$BIN/scion-server" --data "$WORK/server" --postgres-url "$PG_URL" import --rev main "$WORK/src.git" \
     > "$WORK/import.out" 2> "$WORK/import.log" || {
     tail -n 20 "$WORK/import.log" >&2
     die "import failed"
@@ -416,10 +429,11 @@ stop() {
 # once in $WORK and keeps from run to run, and the cache verifies with the
 # key's public half. The daemon only forwards the tickets.
 start_scion() {
+  : "${PG_URL:?set PG_URL with pg_url_for before starting the stack}"
   if [ ! -f "$WORK/ticket.key" ]; then
     "$BIN/scion-server" --data "$WORK/server" ticket-key --out "$WORK/ticket.key" > "$WORK/ticket.pub"
   fi
-  start server serving "$BIN/scion-server" --data "$WORK/server" serve \
+  start server serving "$BIN/scion-server" --data "$WORK/server" --postgres-url "$PG_URL" serve \
     --listen "127.0.0.1:$SERVER_PORT" \
     --ticket-key "$WORK/ticket.key" \
     --metrics-listen "127.0.0.1:$SERVER_METRICS_PORT"

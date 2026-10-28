@@ -877,25 +877,7 @@ mod tests {
         let (repo, ids) = store
             .write(|c| {
                 let repo = c.create_repo("r")?;
-                let mut ids: Vec<ChangesetId> = Vec::new();
-                for (i, of) in parents.iter().enumerate() {
-                    let path = format!("f{i}");
-                    let state = FileState::Regular {
-                        content: BlobId::of(path.as_bytes()),
-                        executable: false,
-                    };
-                    let cs = Changeset::new(
-                        of.iter().map(|&p| ids[p]).collect(),
-                        IdentityTime::new(b"a".to_vec(), b"a@x".to_vec(), 0, 0)
-                            .expect("identity fits the format"),
-                        None,
-                        path.clone().into_bytes(),
-                        [(RepoPath::new(path).unwrap(), Some(state))].into(),
-                    )
-                    .expect("changeset fits the format");
-                    ids.push(c.insert_changeset(repo, &cs)?);
-                }
-                Ok((repo, ids))
+                Ok((repo, testing::insert_graph(c, repo, parents)?))
             })
             .unwrap();
         (dir, store, repo, ids)

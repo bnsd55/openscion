@@ -3,7 +3,9 @@ name: soak-72h
 # is rented for it. Dispatch-only: it never runs on a schedule, a pull
 # request, or a push. It needs one self-hosted runner that carries the
 # scion-soak label and no other job does; scripts/soak-runner-setup.md
-# registers it and deletes the VM after.
+# registers it and deletes the VM after. The runner needs Postgres 17
+# reachable at the URL SCION_TEST_POSTGRES_URL names: the soak's server
+# keeps its metadata there, one schema per data directory.
 on:
   workflow_dispatch:
 

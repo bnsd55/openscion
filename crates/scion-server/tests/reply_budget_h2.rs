@@ -7,12 +7,12 @@ use scion_proto::runtime::auth::Bearer;
 use scion_proto::runtime::listen::Limits;
 use scion_proto::v1::scion_client::ScionClient;
 use scion_proto::v1::{DiffRequest, PutBlobRequest};
-use scion_server::test_support::backend::from_store;
-use scion_server::test_support::meta::MetaTx;
+use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use std::sync::Arc;
 
+use scion_server::Backend;
 use scion_server::Metrics;
-use scion_server::test_support::{service, store::Store};
+use scion_server::test_support::service;
 
 use prost::Message as _;
 use tokio::net::TcpStream;
@@ -28,7 +28,7 @@ fn author() -> IdentityTime {
 }
 
 /// Stores `repo` with `root` as its root changeset.
-fn seed_root(store: &Store, root: &Changeset) -> scion_core::ChangesetId {
+fn seed_root(store: &Backend, root: &Changeset) -> scion_core::ChangesetId {
     store
         .write(|c| {
             let repo = c.create_repo(REPO)?;
@@ -43,7 +43,7 @@ fn seed_root(store: &Store, root: &Changeset) -> scion_core::ChangesetId {
 /// reply is refused, which is the proof the holds are counted.
 async fn served_repo(names: usize) -> (tempfile::TempDir, DiffRequest, String) {
     let dir = scion_server::test_support::private_tempdir();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Backend::open_test(dir.path()).unwrap();
     let root = Changeset::new(
         vec![],
         author(),
@@ -65,7 +65,7 @@ async fn served_repo(names: usize) -> (tempfile::TempDir, DiffRequest, String) {
     let addr = listener.local_addr().unwrap();
     let budget = 600_000;
     tokio::spawn(service::serve(
-        from_store(store.clone()),
+        store.clone(),
         listener,
         TOKEN,
         service::ServeOptions {

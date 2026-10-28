@@ -55,6 +55,13 @@ use crate::store::Blobs;
 #[path = "test_support/pg.rs"]
 pub(crate) mod test_hooks;
 
+/// The damage tests make: one function per kind, each doing the SQLite
+/// or the Postgres form. A child module of `pg` (same as `test_hooks`)
+/// so its Postgres arm can reach this file's error mapping.
+#[cfg(test)]
+#[path = "test_support/damage.rs"]
+pub(crate) mod damage;
+
 /// The schema version this build makes and reads.
 pub(crate) const PG_SCHEMA_VERSION: u32 = 5;
 
@@ -3190,15 +3197,18 @@ impl MetaTx for PgTx<'_> {
              WHERE kind = $1 AND version = $2 AND cs = ANY($3)",
             &[P::text(kind), P::i64(version), P::bytea_array(cs)],
         )?;
-        let mut found = rows
+        let found = rows
             .into_iter()
             .map(|row| {
                 let cs: Vec<u8> = row.get(0);
                 Ok((to_id(&cs)?, row.get::<_, Option<Vec<u8>>>(1)))
             })
             .collect::<Result<std::collections::HashMap<_, _>>>()?;
+        // Answered from the map without removing it: a batch may name the
+        // same id twice (two merges can share a side parent), and each
+        // ask gets the row - the reply has one entry per ASKED id.
         ids.iter()
-            .map(|id| Ok(found.remove(id).flatten()))
+            .map(|id| Ok(found.get(id).cloned().flatten()))
             .collect()
     }
 
@@ -3544,12 +3554,15 @@ impl MetaTx for PgTx<'_> {
                 "SELECT id, body FROM trees WHERE id = ANY($1)",
                 &[P::bytea_array(keys.clone())],
             )?;
-            let mut bodies: std::collections::HashMap<Vec<u8>, Vec<u8>> = rows
+            let bodies: std::collections::HashMap<Vec<u8>, Vec<u8>> = rows
                 .into_iter()
                 .map(|row| (row.get::<_, Vec<u8>>(0), row.get::<_, Vec<u8>>(1)))
                 .collect();
+            // Answered from the map without removing it: one tree can sit
+            // under two paths, so a batch may name the same id twice, and
+            // each ask gets the body.
             for key in keys {
-                out.push(bodies.remove(&key));
+                out.push(bodies.get(&key).cloned());
             }
         }
         Ok(out)
