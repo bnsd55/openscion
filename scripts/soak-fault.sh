@@ -95,8 +95,8 @@ fi
 # the argv form is deprecated and serve no longer takes it. The backend
 # is not optional anymore: every server here opens the schema PG_URL
 # names (pg_url_for), and the restart fault acts on the database that
-# schema lives in.
-export SCION_POSTGRES_URL=$PG_URL
+# schema lives in. The export itself sits with the PG_URL assignment
+# below, after make_work, where the URL exists.
 
 # classifies LOG: 0 if every failure LINE in LOG is one this load
 # expects. soak.sh's list, plus the transport lines a kill makes: a
@@ -140,8 +140,12 @@ else
 fi
 fetch_dataset
 # The fault soak's server keeps its metadata in Postgres: one schema for
-# this run's data directory, made if missing.
+# this run's data directory, made if missing. The URL also reaches every
+# scion-server this script raises (serve, import, gc, fsck) through the
+# env, which decides the backend; the argv form is deprecated and serve
+# no longer takes it.
 PG_URL=$(pg_url_for "$WORK/server")
+export SCION_POSTGRES_URL=$PG_URL
 import_dataset
 start_scion
 # The PID that holds the server's port is the server (soak.sh: the PID

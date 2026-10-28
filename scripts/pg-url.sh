@@ -6,15 +6,17 @@
 # pg_url_for DATA_DIR: the Postgres URL whose search_path names this
 # data dir's schema, created here if missing. The base URL comes from
 # SCION_TEST_POSTGRES_URL; the schema is `scion_script_<hash of the
-# dir's path>`, the same rule the test suite's own schema follows (the
-# hash of the deepest existing ancestor's canonical form, with the
-# missing tail spelled as the caller did), so the name is the same
-# before and after the directory exists, one directory's metadata never
-# answers another directory's reads, and a rerun finds the schema it
-# left. psql makes the schema: the server refuses a URL whose
-# search_path names no existing schema, and the release binary creates
-# none. The URL rides `options=--search_path=<schema>,public`, the
-# spelling the server's own tests use.
+# dir's path>`, the test suite's own naming rule (test_support's
+# backend.rs): the canonical form of the deepest existing ancestor,
+# with the missing tail spelled as the caller did, so the name is the
+# same before and after the directory exists and one directory's
+# metadata never answers another directory's reads. The hash is the
+# first 16 hex digits of a SHA-256 - a 64-bit name a CRC would let two
+# paths collide on. A rerun finds the schema it left. psql makes the
+# schema: the server refuses a URL whose search_path names no existing
+# schema, and the release binary creates none. The URL rides
+# `options=--search_path=<schema>,public`, the spelling the server's
+# own tests use.
 pg_url_for() {
   local data=$1
   local cur=$data
@@ -28,7 +30,7 @@ pg_url_for() {
   local canon
   canon=$(cd "$cur" && pwd -P)
   local hash
-  hash=$(printf '%s' "$canon$tail" | cksum | cut -d' ' -f1)
+  hash=$(printf '%s' "$canon$tail" | shasum -a 256 | cut -c1-16)
   local schema="scion_script_$hash"
   if [ "${SCION_PG_URL_TRACE:-}" = 1 ]; then
     echo "pg_url_for: data=$data canon=$canon tail=$tail schema=$schema" >&2
