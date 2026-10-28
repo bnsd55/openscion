@@ -1234,7 +1234,6 @@ fn per_sec(count: usize, since: Instant) -> u128 {
 #[cfg(test)]
 mod tests {
     use crate::backend::Backend;
-    use crate::store::Store;
     use std::fs;
     use std::process::Command;
     use std::sync::Arc;
@@ -1298,7 +1297,7 @@ mod tests {
         };
         let import = |cache_entries| {
             let data = crate::test_support::private_tempdir();
-            let store = Backend::sqlite(Store::open(data.path()).unwrap());
+            let store = Backend::open_test(data.path()).unwrap();
             import_with_cache(&store, "main", dir, &opts, cache_entries, MAX_CHANGES).unwrap()
         };
         let tiny = import(2);
@@ -1320,7 +1319,7 @@ mod tests {
         git(dir, &["commit", "-q", "-m", "add"]);
 
         let data = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open(data.path()).unwrap());
+        let store = Backend::open_test(data.path()).unwrap();
         let opts = |rev: &str| ImportOptions {
             rev: rev.into(),
             target_ref: "main".into(),
@@ -1370,7 +1369,7 @@ mod tests {
         git(dir, &["commit", "-q", "-m", "one"]);
 
         let data = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open(data.path()).unwrap());
+        let store = Backend::open_test(data.path()).unwrap();
         let opts = ImportOptions {
             rev: "main".into(),
             target_ref: "main".into(),
@@ -1401,8 +1400,8 @@ mod tests {
     fn a_land_while_the_import_checks_the_ref_is_never_overwritten() {
         crate::store::spawn_guard::prime_gix_lookup();
         let data = crate::test_support::private_tempdir();
-        let server = Backend::sqlite(Store::open(data.path()).unwrap());
-        let importer = Backend::sqlite(Store::open_shared(data.path()).unwrap());
+        let server = Backend::open_test(data.path()).unwrap();
+        let importer = Backend::open_test_shared(data.path()).unwrap();
         // main is at root. Git has root ─ tip, and a land puts X on root.
         let changeset = |parents, message: &str| {
             Changeset::new(
@@ -1481,8 +1480,8 @@ mod tests {
     #[test]
     fn an_import_that_keeps_losing_the_ref_swap_gives_up() {
         let data = crate::test_support::private_tempdir();
-        let server = Backend::sqlite(Store::open(data.path()).unwrap());
-        let importer = Backend::sqlite(Store::open_shared(data.path()).unwrap());
+        let server = Backend::open_test(data.path()).unwrap();
+        let importer = Backend::open_test_shared(data.path()).unwrap();
         // main is at root. The chain root <- a1 <- a2 <- a3 <- tip hangs
         // under it, so every mover target is still an ancestor of the
         // imported tip and the import never hears "diverged".
@@ -1611,8 +1610,8 @@ mod tests {
             );
         }
         let data = crate::test_support::private_tempdir();
-        let server = Backend::sqlite(Store::open(data.path()).unwrap());
-        let importer = Backend::sqlite(Store::open_shared(data.path()).unwrap());
+        let server = Backend::open_test(data.path()).unwrap();
+        let importer = Backend::open_test_shared(data.path()).unwrap();
         let opts = ImportOptions {
             rev: "main".into(),
             target_ref: "main".into(),
@@ -1663,7 +1662,7 @@ mod tests {
             );
         }
         let data = crate::test_support::private_tempdir();
-        let importer = Backend::sqlite(Store::open(data.path()).unwrap());
+        let importer = Backend::open_test(data.path()).unwrap();
         let opts = ImportOptions {
             rev: "main".into(),
             target_ref: "main".into(),
