@@ -11,6 +11,7 @@ use scion_core::{Changeset, FileState, IdentityTime, RepoPath};
 use scion_proto::runtime::listen::Limits;
 use scion_server::Backend;
 use scion_server::Quotas;
+use scion_server::test_support::meta::Meta as _;
 use scion_server::test_support::meta::MetaTx as _;
 use scion_server::test_support::service;
 use std::sync::Arc;
