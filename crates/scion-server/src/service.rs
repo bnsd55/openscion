@@ -2276,7 +2276,6 @@ fn file_state(state: FileState) -> v1::FileState {
 #[cfg(test)]
 mod tests {
     use crate::backend::Backend;
-    use crate::db;
     use std::time::Instant;
 
     use scion_core::{Changeset, FileState, IdentityTime};
@@ -2875,16 +2874,19 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(10), "the job ends");
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
-        let sql = "SELECT state FROM lands WHERE request_key = 'claim-wait'";
-        let state: String = store
-            .read(|c| {
-                c.sqlite()
-                    .unwrap()
-                    .query_row(sql, [], |row| row.get(0))
-                    .map_err(crate::error::from_sqlite)
-            })
-            .unwrap();
-        assert_eq!(state, "pending");
+        // The land is pending: its row answers `pending_lands`, the
+        // metadata trait both backends serve.
+        assert!(
+            store
+                .read(|c| {
+                    let repo = c.repo_id("r")?;
+                    Ok(c.pending_lands(repo)?
+                        .iter()
+                        .any(|l| l.request_key == "claim-wait"))
+                })
+                .unwrap(),
+            "the land row is not pending"
+        );
         let main = store.read(|c| {
             let repo = c.repo_id("r")?;
             c.get_ref(repo, "main")
@@ -2998,18 +3000,17 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
 
-        let sql = "SELECT state FROM lands WHERE request_key = 'k'";
-        let row = store
-            .read(|c| {
-                c.sqlite()
-                    .unwrap()
-                    .query_row(sql, [], |row| row.get::<_, String>(0))
-                    .map_err(crate::error::from_sqlite)
-            })
-            .unwrap_err();
+        // No land was recorded: no pending row answers for the key. (The
+        // metadata trait reads pending lands; a row in a final state would
+        // have shown in the audit, whose failed line is asserted below.)
         assert!(
-            format!("{row:?}").contains("QueryReturnedNoRows"),
-            "no land was recorded: {row:?}"
+            !store
+                .read(|c| {
+                    let repo = c.repo_id("r")?;
+                    Ok(c.pending_lands(repo)?.iter().any(|l| l.request_key == "k"))
+                })
+                .unwrap(),
+            "a land row was recorded"
         );
         let text = std::fs::read_to_string(&audit_path).unwrap();
         assert_eq!(
@@ -3398,15 +3399,47 @@ mod tests {
         (blockers, arrived_rx)
     }
 
+    /// root ─ a, and root ─ b: the three changesets of the query cap's
+    /// fixture, stored through the metadata trait, so the test runs on
+    /// the backend the environment names.
+    fn insert_fork(
+        c: &mut dyn crate::meta::MetaTx,
+        repo: crate::meta::RepoId,
+    ) -> Result<Vec<ChangesetId>> {
+        let cs = |parents: Vec<ChangesetId>, name: &str| {
+            Changeset::new(
+                parents,
+                IdentityTime::new(b"a".to_vec(), b"a@x".to_vec(), 0, 0)
+                    .expect("identity fits the format"),
+                None,
+                name.as_bytes().to_vec(),
+                [(
+                    scion_core::RepoPath::new(name).unwrap(),
+                    Some(scion_core::FileState::Regular {
+                        content: scion_core::BlobId::of(name.as_bytes()),
+                        executable: false,
+                    }),
+                )]
+                .into(),
+            )
+            .expect("changeset fits the format")
+        };
+        let root = c.insert_changeset(repo, &cs(vec![], "f0"))?;
+        let a = c.insert_changeset(repo, &cs(vec![root], "f1"))?;
+        let b = c.insert_changeset(repo, &cs(vec![root], "f2"))?;
+        Ok(vec![root, a, b])
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn at_most_max_graph_queries_run_at_once() {
-        // root ─ a, and root ─ b.
+        // root ─ a, and root ─ b. The pool is the server's size: the test
+        // holds every read connection, so the cap's wait is visible.
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::open_test(dir.path()).unwrap();
+        let store = Backend::open_test_with_readers(dir.path(), crate::store::READERS).unwrap();
         let ids = store
             .write(|c| {
                 let repo = c.create_repo("r")?;
-                db::testing::insert_graph(c.sqlite().unwrap(), repo, &[vec![], vec![0], vec![0]])
+                insert_fork(c, repo)
             })
             .unwrap();
         let bytes = |i: usize| ids[i].as_bytes().to_vec();

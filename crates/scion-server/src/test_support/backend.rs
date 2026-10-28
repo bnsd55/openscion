@@ -8,11 +8,19 @@
 use std::path::Path;
 
 use super::{
-    Backend, BackendTx, Inner, Marker, PG_READERS, Store, marker_agrees, refuse_damaged_marker,
+    Backend, BackendTx, Inner, Marker, Store, marker_agrees, refuse_damaged_marker,
     refuse_postgres_marker, refuse_sqlite_dir,
 };
 use crate::error::Result;
 use crate::pg::Pg;
+
+/// The reader-pool size of a test backend. Tests run many backends at
+/// once - the lib suite runs its tests on threads, and each backend
+/// holds one write connection plus its readers - so the pool is far
+/// under the server's [`READERS`](crate::store::READERS): a pool of the
+/// server's size saturates the test database's `max_connections` before
+/// the suite finishes (E53300, "too many clients").
+const PG_TEST_READERS: usize = 2;
 
 impl Backend {
     /// A backend on the data directory's own store, for the crate's
@@ -56,8 +64,13 @@ impl Backend {
             refuse_damaged_marker(data)?;
             let marker = Marker::read(data);
             refuse_sqlite_dir(data)?;
-            let pg =
-                Pg::open_test_shared(&test_url()?, &test_schema(data), PG_READERS, data, marker)?;
+            let pg = Pg::open_test_shared(
+                &test_url()?,
+                &test_schema(data),
+                PG_TEST_READERS,
+                data,
+                marker,
+            )?;
             marker_agrees(data, pg.store_uuid())?;
             return Ok(Self {
                 inner: Inner::Postgres(pg),
@@ -97,7 +110,7 @@ impl Backend {
             refuse_damaged_marker(data)?;
             let marker = Marker::read(data);
             refuse_sqlite_dir(data)?;
-            let pg = Pg::open_test_shared(&test_url()?, schema, PG_READERS, data, marker)?;
+            let pg = Pg::open_test_shared(&test_url()?, schema, PG_TEST_READERS, data, marker)?;
             marker_agrees(data, pg.store_uuid())?;
             return Ok(Self {
                 inner: Inner::Postgres(pg),
@@ -117,12 +130,26 @@ impl Backend {
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn open_test(data: &Path) -> Result<Self> {
+        Self::open_test_with_readers(data, PG_TEST_READERS)
+    }
+
+    /// [`Backend::open_test`], with the reader pool the caller names: the
+    /// tests of a pool's cap need the server's pool size, while the rest
+    /// of the suite runs far under it so the test database's
+    /// `max_connections` holds.
+    ///
+    /// # Errors
+    ///
+    /// As [`Backend::open_test`].
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn open_test_with_readers(data: &Path, readers: usize) -> Result<Self> {
         Self::ensure_private_dir(data);
         if std::env::var("SCION_TEST_BACKEND").as_deref() == Ok("postgres") {
             refuse_damaged_marker(data)?;
             let marker = Marker::read(data);
             refuse_sqlite_dir(data)?;
-            let pg = Pg::open_test(&test_url()?, &test_schema(data), PG_READERS, data, marker)?;
+            let pg = Pg::open_test(&test_url()?, &test_schema(data), readers, data, marker)?;
             marker_agrees(data, pg.store_uuid())?;
             return Ok(Self {
                 inner: Inner::Postgres(pg),

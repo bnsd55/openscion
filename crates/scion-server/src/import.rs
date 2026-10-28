@@ -1649,6 +1649,13 @@ mod tests {
 
     #[test]
     fn an_import_that_is_alone_runs_its_batch_in_one_transaction() {
+        // An import on Postgres always shares the schema with a server
+        // (the shared flag names Postgres outright), so the budget always
+        // applies there: the alone shape has no Postgres form.
+        if Backend::test_is_postgres() {
+            eprintln!("skip on postgres: the budget always applies on Postgres");
+            return;
+        }
         crate::store::spawn_guard::prime_gix_lookup();
         let repo = crate::test_support::private_tempdir();
         let dir = repo.path();

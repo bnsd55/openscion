@@ -4707,7 +4707,10 @@ mod pool_tests {
             return None;
         }
         let data = crate::test_support::private_tempdir();
-        let backend = crate::backend::Backend::open_test(data.path()).unwrap();
+        // The pool tests hold the whole reader pool: they need the
+        // server's pool size, not the suite's small test pool.
+        let backend =
+            crate::backend::Backend::open_test_with_readers(data.path(), READERS).unwrap();
         let pg = backend
             .as_postgres()
             .cloned()
