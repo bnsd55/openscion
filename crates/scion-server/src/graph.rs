@@ -827,7 +827,6 @@ fn node(c: &mut dyn MetaTx, id: ChangesetId) -> Result<Node> {
 #[cfg(test)]
 mod tests {
     use crate::backend::Backend;
-    use crate::store::Store;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
@@ -838,12 +837,14 @@ mod tests {
     use super::*;
     use crate::db::testing;
     use crate::derived::steps;
+    use crate::pg::damage;
 
     /// A cold commit graph and a past deadline: the query refuses instead of
     /// deriving the graph first. On main, where the derive ran without the
     /// deadline, this call returned a result.
     #[test]
     fn a_query_with_a_past_deadline_derives_nothing() {
+        let _serial = damage::serial();
         let parents = vec![vec![], vec![0], vec![0], vec![1, 2]];
         let (_dir, store, repo, ids) = store_graph(&parents);
         let past = Deadline::new(Instant::now());
@@ -870,7 +871,7 @@ mod tests {
         parents: &[Vec<usize>],
     ) -> (tempfile::TempDir, Backend, RepoId, Vec<ChangesetId>) {
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let store = Backend::open_test(dir.path()).unwrap();
         let (repo, ids) = store
             .write(|c| {
                 let repo = c.create_repo("r")?;
@@ -972,6 +973,7 @@ mod tests {
             parents in proptest::prop_oneof![testing::graphs(20), sparse_graphs(20)],
             pairs in proptest::collection::vec(any::<(Sample, Sample)>(), PAIRS),
         ) {
+            let _serial = damage::serial();
             let (_dir, store, repo, ids) = store_graph(&parents);
             let histories = histories(&parents);
             let ancestors = ancestors(&parents);
@@ -1128,7 +1130,8 @@ mod tests {
         // busy the machine is.
         const N: usize = 4_096;
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let store = Backend::open_test(dir.path()).unwrap();
+        let _serial = damage::serial();
         let (repo, ids, side) = deep_chain(&store, N);
         let tip = ids[N - 1];
         // Myers bounds a walk down to a depth by about 3 log2 n moves.
@@ -1196,12 +1199,17 @@ mod tests {
 
     #[test]
     fn an_old_database_derives_the_graph_in_steps_on_first_query() {
+        let _serial = damage::serial();
         let parents: Vec<Vec<usize>> = vec![vec![], vec![0], vec![0], vec![1, 2], vec![3], vec![]];
         let (_dir, store, repo, ids) = store_graph(&parents);
         let commits = store.commits();
         assert!(is_ancestor(&store, repo, ids[2], ids[4], &later()).unwrap());
-        // Changesets 0 to 4 in steps, and nothing for 5.
-        assert_eq!(store.commits() - commits, steps(5));
+        // Changesets 0 to 4 in steps, and nothing for 5. Until #682's
+        // Postgres counters land, commits() is always 0 on Postgres, so
+        // the count is a SQLite claim.
+        if !Backend::test_is_postgres() {
+            assert_eq!(store.commits() - commits, steps(5));
+        }
         let commits = store.commits();
         assert!(!is_ancestor(&store, repo, ids[5], ids[4], &later()).unwrap());
         let met = merge_bases(&store, repo, ids[2], ids[4], &later()).unwrap();
@@ -1238,6 +1246,7 @@ mod tests {
         // changeset that branched from the one before. `side` branched from
         // the 100th, and is not merged.
         const N: usize = 20_000;
+        let _serial = damage::serial();
         let mut parents: Vec<Vec<usize>> = vec![vec![]];
         let mut history = vec![0];
         for i in 1..N {
@@ -1332,6 +1341,7 @@ mod tests {
 
     #[test]
     fn a_walk_stops_at_its_deadline() {
+        let _serial = damage::serial();
         // The walks from the tip go through every merge down to `side`.
         let (_dir, store, repo, ids) = store_graph(&ladder(100));
         let (side, tip) = (ids[1], *ids.last().unwrap());
@@ -1369,6 +1379,7 @@ mod tests {
 
     #[test]
     fn a_walk_blocks_no_write_and_no_read() {
+        let _serial = damage::serial();
         let (_dir, store, repo, ids) = store_graph_with_nodes(&ladder(20));
         let (side, tip) = (ids[1], *ids.last().unwrap());
         let mut paint = Paint::new(
@@ -1407,6 +1418,7 @@ mod tests {
 
     #[test]
     fn a_walk_waits_for_one_flush_for_all_its_steps() {
+        let _serial = damage::serial();
         let (_dir, store, repo, ids) = store_graph_with_nodes(&ladder(20));
         let (side, tip) = (ids[1], *ids.last().unwrap());
         let mut paint = Paint::new(
@@ -1435,8 +1447,16 @@ mod tests {
         assert_eq!(bases, [side]);
         assert!(cost.steps > 1, "{cost:?}");
         // None where the commit's own fsync flushes the drive cache.
-        let flushes = store.blobs().full_flushes() - before;
-        assert_eq!(flushes, u64::from(crate::store::FSYNC_LEAVES_DRIVE_CACHE));
+        //
+        // On Postgres the count is 0: the commit's durability is
+        // Postgres's (synchronous_commit=on, checked at open), and a
+        // commit whose changeset names no new blob file full-flushes
+        // nothing - unlike SQLite, whose own database file sits on the
+        // same drive, so its commit fsyncs the blob group too.
+        if !Backend::test_is_postgres() {
+            let flushes = store.blobs().full_flushes() - before;
+            assert_eq!(flushes, u64::from(crate::store::FSYNC_LEAVES_DRIVE_CACHE));
+        }
     }
 
     /// The parents batch changes no walk's read count: every changeset the
@@ -1447,6 +1467,7 @@ mod tests {
     /// statement: the merge's parents read became the merge's node read.
     #[test]
     fn the_parents_batch_counts_the_same_reads() {
+        let _serial = damage::serial();
         let (_dir, store, repo, ids) = store_graph(&ladder(100));
         let (side, tip) = (ids[1], *ids.last().unwrap());
         let floor = store.read(|c| c.generation(repo, side)).unwrap();
