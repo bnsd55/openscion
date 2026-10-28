@@ -56,7 +56,6 @@ jobs:
     if: github.event_name == 'pull_request' && !github.event.pull_request.draft
     outputs:
       docs_only: ${{ steps.files.outputs.docs_only }}
-      pg: ${{ steps.files.outputs.pg }}
       macos: ${{ steps.files.outputs.macos }}
       workflows: ${{ steps.files.outputs.workflows }}
       deps: ${{ steps.files.outputs.deps }}
@@ -73,7 +72,6 @@ jobs:
           # any read of its content.
           files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/${{ github.event.pull_request.number }}/files" --jq '.[] | "\(.status) \(.filename)"')
           docs_only=true
-          pg=false
           macos=false
           workflows=false
           deps=false
@@ -86,34 +84,6 @@ jobs:
             case "$file" in
               docs/*|*.md|changes/*) ;;
               *) docs_only=false ;;
-            esac
-            # Server code, and tests that opt into the Postgres
-            # backend: the server's correctness depends on the
-            # Postgres transaction order, so any change under the
-            # server's src runs the Postgres tests; a test opts in
-            # when its text names the shared backend or the env var,
-            # and the globs catch the ones named pg or postgres, new
-            # ones included.
-            case "$file" in
-              crates/scion-server/src/*|\
-              crates/scion-server/migrations/*|\
-              crates/scion-server/tests/*pg*.rs|\
-              crates/scion-server/tests/*postgres*.rs) pg=true ;;
-              crates/scion-server/tests/*.rs)
-                # A file the pull request deletes has no content, so
-                # it is skipped before the read; the path rules above
-                # already applied to it. A file that cannot be read
-                # runs Postgres rather than skipping it.
-                if [ "$status" = removed ]; then
-                  :
-                elif ! content=$(gh api "repos/$GITHUB_REPOSITORY/contents/$file?ref=${{ github.event.pull_request.head.sha }}" --jq '.content' 2>/dev/null); then
-                  pg=true
-                  echo "::notice::cannot read $file, running Postgres to be safe"
-                elif printf '%s' "$content" | base64 -d 2>/dev/null \
-                  | grep -q 'open_test\|SCION_TEST_BACKEND\|SCION_TEST_POSTGRES_URL'; then
-                  pg=true
-                fi
-                ;;
             esac
             # macOS or filesystem code: the tier store, the scn vfs
             # and mount path, the permission checks — the ACL and
@@ -136,7 +106,6 @@ jobs:
             case "$file" in
               .github/workflows/*|scripts/release*)
                 workflows=true
-                pg=true
                 macos=true
                 ;;
             esac
@@ -156,8 +125,7 @@ jobs:
             # and the suite itself in tests/power.rs, so a pull request
             # that touches either can break the power-loss job - which
             # never ran on a pull request before. The power output
-            # makes the pull request run it, the way pg runs the
-            # Postgres tests.
+            # makes the pull request run it.
             case "$file" in
               crates/scion-server/tests/common/*|\
               crates/scion-server/tests/power.rs) power=true ;;
@@ -176,7 +144,6 @@ jobs:
           done <<< "$files"
           {
             echo "docs_only=$docs_only"
-            echo "pg=$pg"
             echo "macos=$macos"
             echo "workflows=$workflows"
             echo "deps=$deps"
@@ -550,20 +517,19 @@ jobs:
   test-postgres:
     name: test (postgres ${{ matrix.version }})
     needs: tier
-    # Risk tier: a pull request that touches Postgres or metadata code
-    # also runs this job, on one Postgres version as today. Main, the
-    # nightly and a dispatch always run it.
+    # Fast tier: every event, but on a pull request only a ready,
+    # non-docs-only one - every suite is Postgres now, so the push that
+    # runs the suite runs the Postgres majors too.
     if: >-
-      ${{ !cancelled() && (github.event_name != 'pull_request' || (needs.tier.result == 'success' && !github.event.pull_request.draft && needs.tier.outputs.docs_only != 'true' && needs.tier.outputs.pg == 'true')) }}
+      ${{ !cancelled() && (github.event_name != 'pull_request' || (needs.tier.result == 'success' && !github.event.pull_request.draft && needs.tier.outputs.docs_only != 'true')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         # Every Postgres cell is experimental in v0.1.0. Postgres 17 is
-        # the one major that runs per push (on data-path changes, through
-        # the tier rule above); the 16 and 18 cells are best effort and
-        # run nightly and on a release candidate's dispatch.
+        # the one major that runs per push; the 16 and 18 cells are best
+        # effort and run nightly and on a release candidate's dispatch.
         version: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('["16.15", "17.11", "18.6"]') || fromJSON('["17.11"]') }}
         # The digest pins. A tag can move to new bytes; a digest cannot
         # (production-audit.md section 9). Each include entry pins the
