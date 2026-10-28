@@ -331,9 +331,8 @@ fn store_batch(
 ) -> Result<()> {
     #[cfg(test)]
     let slow_record = SLOW_RECORD.with(Cell::get);
-    // A Postgres database has one writer: a long batch holds it, like a
-    // shared data directory's write lock does. The budget applies to both.
-    let shared = store.is_shared() || store.as_postgres().is_some();
+    // A Postgres database has one writer: a long batch holds it, and the
+    // budget keeps its turn short.
     let mut rest = prepared;
     while !rest.is_empty() {
         let mut taken = 0;
@@ -351,7 +350,7 @@ fn store_batch(
             let lens = crate::tree::lens_of_puts(
                 store,
                 rest.iter()
-                    .flat_map(|(_, cs, _)| crate::db::puts(cs))
+                    .flat_map(|(_, cs, _)| crate::meta::puts(cs))
                     .map(|(_, blob)| blob),
             )?;
             let result = store.write(|c| {
@@ -404,7 +403,7 @@ fn store_batch(
                     }
                     provenance.push((*commit, id));
                     taken += 1;
-                    if shared && started_tx.elapsed() >= TX_BUDGET {
+                    if started_tx.elapsed() >= TX_BUDGET {
                         break;
                     }
                     #[cfg(any(test, feature = "test-hooks"))]
@@ -439,7 +438,7 @@ fn store_batch(
             commits_per_sec = per_sec(*done, started),
             "importing git commits"
         );
-        if shared && !rest.is_empty() {
+        if !rest.is_empty() {
             // A server write that waited for this transaction takes the lock
             // here, before the next one begins.
             std::thread::sleep(TX_YIELD);

@@ -235,25 +235,6 @@ impl Error {
     }
 }
 
-/// Classifies a SQLite engine error, once, where it is built: a busy
-/// database is not a database failure (the transaction rolled back and
-/// wrote nothing), a full one is the server's own shortage, and the rest
-/// keep the engine's error as the source. The test seams export it, so
-/// the integration tests convert the way the crate does.
-// The test seam re-exports this (test_support.error), and
-// unreachable_pub does not see through a re-export.
-#[allow(unreachable_pub)]
-#[must_use]
-pub fn from_sqlite(e: rusqlite::Error) -> Error {
-    if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) {
-        Error::Storage(Storage::busy(e))
-    } else if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull) {
-        Error::Storage(Storage::disk_full(e))
-    } else {
-        Error::Storage(Storage::internal(e))
-    }
-}
-
 /// An error's display text with its causes, for a log line: the display
 /// names the context, and the sources carry the engine's detail. The
 /// same walk serves every error that wraps another, so a wrapped cause
@@ -361,71 +342,12 @@ impl From<Error> for Status {
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::ffi;
     use tonic::Code;
 
     use super::*;
 
-    /// A SQLite error of a chosen engine code.
-    fn db(code: std::ffi::c_int) -> Error {
-        from_sqlite(rusqlite::Error::SqliteFailure(ffi::Error::new(code), None))
-    }
-
-    /// A busy store answers `unavailable`, so the client retries: the
-    /// transaction rolled back and wrote nothing.
-    #[test]
-    fn a_busy_store_is_unavailable_with_the_fixed_reply() {
-        let status = Status::from(db(ffi::SQLITE_BUSY));
-        assert_eq!(status.code(), Code::Unavailable);
-        assert_eq!(status.message(), "the database is busy; retry");
-        assert!(db(ffi::SQLITE_BUSY).is_busy());
-    }
-
-    /// An out-of-space store answers `resource_exhausted` with the fixed
-    /// reply, the same shortage as the file path's.
-    #[test]
-    fn an_out_of_space_store_is_resource_exhausted_with_the_fixed_reply() {
-        let status = Status::from(db(ffi::SQLITE_FULL));
-        assert_eq!(status.code(), Code::ResourceExhausted);
-        assert_eq!(
-            status.message(),
-            "the server is out of disk space; retry later"
-        );
-        assert!(!db(ffi::SQLITE_FULL).is_busy());
-    }
-
-    /// The engine refusing the work for its own reasons stays internal,
-    /// and its detail stays in the server log, not in the reply.
-    #[test]
-    fn a_store_failure_is_internal_with_the_fixed_reply() {
-        let status = Status::from(db(ffi::SQLITE_CORRUPT));
-        assert_eq!(status.code(), Code::Internal);
-        assert_eq!(status.message(), "internal error");
-    }
-
-    /// The engine's own error stays reachable through `source()`, for the
-    /// log and for the tests that name the cause: the error's source is
-    /// the [`Storage`], and the storage's source is the engine's error.
-    #[test]
-    fn the_engine_error_stays_reachable_through_source() {
-        let e = db(ffi::SQLITE_CORRUPT);
-        let Error::Storage(storage) = &e else {
-            panic!("{e:?}")
-        };
-        assert_eq!(storage.class(), StorageClass::Internal);
-        let source = std::error::Error::source(&e).expect("the storage is the source");
-        let storage = source.downcast_ref::<Storage>().expect("it is the storage");
-        let source = std::error::Error::source(storage).expect("the engine error is the source");
-        let cause = source
-            .downcast_ref::<rusqlite::Error>()
-            .expect("it is the engine's own error");
-        assert_eq!(
-            cause.sqlite_error_code(),
-            Some(rusqlite::ErrorCode::DatabaseCorrupt)
-        );
-    }
-
     /// A cancelled call maps to its own code, not a deadline's.
+
     #[test]
     fn a_cancelled_call_answers_cancelled_not_deadline_exceeded() {
         let err = Error::Cancelled("its call has gone".to_owned());

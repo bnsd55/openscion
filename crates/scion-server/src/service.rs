@@ -273,22 +273,21 @@ pub async fn serve(
     } = options;
     let access = Arc::new(access.into());
     let auth = access.auth();
-    let fence = store.fence_flag();
-    // The backend records into the registry: the Postgres pool's wait,
+    // The backend records into the registry into the registry: the Postgres pool's wait,
     // busy readers and tx age (which this task keeps fresh), and on both
     // backends the blob full flushes, the derive-walk gauges and the
     // collector-key wait.
     store.set_metrics(Arc::clone(&metrics));
+    let fence = store.fence_flag();
     let worker = Worker::new(store);
     let lands = Arc::new(Lands::new(pending_lands, Some(Arc::clone(&metrics))));
     let (stop_tx, stop_rx) = watch::channel(());
-    // The fence of a Postgres server that lost its database to another
-    // process: it resolves the same shutdown the operator's signal does,
-    // so the health service answers NOT_SERVING and tonic finishes the
-    // open calls; a short grace later the process exits, and a supervisor
-    // restart either takes the lock back or is refused at open. SQLite
-    // has no fence (None), so this task never runs.
-    let fence_stop = fence.clone().map(|fence| (fence, stop_tx.clone()));
+    let stop_fence = stop_tx.clone();
+    // The fence of a server that lost its database to another process:
+    // it resolves the same shutdown the operator's signal does, so the
+    // health service answers NOT_SERVING and tonic finishes the open
+    // calls; a short grace later the process exits, and a supervisor
+    // restart either takes the lock back or is refused at open.
     tokio::spawn(async move {
         shutdown.await;
         let _ = stop_tx.send(());
@@ -316,7 +315,8 @@ pub async fn serve(
             let _ = stopped.changed().await;
         }
     };
-    if let Some((fence, stop_tx)) = fence_stop {
+    {
+        let stop_tx = stop_fence;
         tokio::spawn(async move {
             while !fence.load(std::sync::atomic::Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(100)).await;

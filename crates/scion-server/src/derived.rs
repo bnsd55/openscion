@@ -807,7 +807,7 @@ fn derive_steps<K: Kind>(
                     store,
                     changesets
                         .iter()
-                        .flat_map(|cs| crate::db::puts(cs).map(|(_, blob)| blob)),
+                        .flat_map(|cs| crate::meta::puts(cs).map(|(_, blob)| blob)),
                 )
             })?
         } else {
@@ -990,7 +990,7 @@ mod tests {
     use scion_core::{BlobId, FileState, IdentityTime, RepoPath};
 
     use super::*;
-    use crate::db::testing;
+    use crate::meta::testing;
     use crate::pg::damage;
     use crate::store::{FSYNC_LEAVES_DRIVE_CACHE, SCHEMA_VERSION, migrate};
     use crate::tree::{self, RootTree};

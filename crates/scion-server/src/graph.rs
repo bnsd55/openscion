@@ -836,7 +836,7 @@ mod tests {
     use scion_core::{BlobId, FileState, IdentityTime, RepoPath};
 
     use super::*;
-    use crate::db::testing;
+    use crate::meta::testing;
     use crate::derived::steps;
 
     /// A cold commit graph and a past deadline: the query refuses instead of

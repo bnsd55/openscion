@@ -1275,9 +1275,8 @@ type HistoryPending = std::collections::HashMap<Vec<u8>, Vec<u8>>;
 /// of the client, so a `PgTx` is a plain client handle: it stays covariant
 /// in its lifetime, which the backend enum's transaction needs.
 ///
-/// `pub` with the unreachable-pub allow, like [`SqliteTx`](crate::db::SqliteTx):
-/// [`Meta::Tx`] names it, and the trait re-exports through
-/// `test_support::meta`.
+/// `pub` with the unreachable-pub allow: [`Meta::Tx`] names it, and the
+/// trait re-exports through `test_support::meta`.
 #[allow(unreachable_pub)]
 pub struct PgTx<'a> {
     c: &'a mut PgClient,
@@ -4445,122 +4444,6 @@ mod tests {
         assert_eq!(merged_options(Some(""), OWN), OWN);
     }
 
-    /// A Postgres store of schema version 1 opens on this build, migrates
-    /// forward through every migration it has not run, and serves what it
-    /// held ([#318]). The fixture is the schema of
-    /// `migrations/postgres/0001` with the rows an old build's write
-    /// paths left: one repo, its root changeset, the blobs it names, and
-    /// its ref. The plain open runs migrations 2 to the end under the
-    /// schema lock, and the shared asserts of `backend::old_store` run
-    /// the rest. Postgres only: it needs the test database.
-    #[test]
-    fn a_store_of_schema_version_1_opens_upgrades_and_serves() {
-        if !crate::Backend::test_is_postgres() {
-            return;
-        }
-        let url = crate::backend::test_hooks::test_url().unwrap();
-        let dir = crate::test_support::private_tempdir();
-        let schema = crate::backend::test_hooks::test_schema(dir.path());
-        // The blob files, made by this build's writer and copied into the
-        // old store's object folder: blob files carry no schema.
-        let (blob_a, blob_b) = {
-            let scratch = crate::test_support::private_tempdir();
-            let store = crate::store::Store::open(scratch.path()).unwrap();
-            let a = store.blobs().put(old_store::A).unwrap();
-            let b = store.blobs().put(old_store::B).unwrap();
-            for id in [a, b] {
-                // The file of `id` sits at objects/blob/<2 hex>/<rest>;
-                // the copy must land at the same place in the old store's
-                // object folder. A prefix strip would miss: an open may
-                // spell the same directory through its canonical path.
-                let (_, from) = store.blobs().location(id);
-                let hex = id.to_string();
-                let to = dir
-                    .path()
-                    .join("objects")
-                    .join("blob")
-                    .join(&hex[..2])
-                    .join(&hex[2..]);
-                std::fs::create_dir_all(to.parent().unwrap()).unwrap();
-                std::fs::copy(from, &to).unwrap();
-            }
-            (a, b)
-        };
-        // The metadata at version 1: the schema of 0001, the ledger at 1,
-        // and the rows an old build's write paths left.
-        let cs = old_store::changeset(blob_a, blob_b);
-        let (body, id) = cs.encode_with_id();
-        {
-            let mut db = Client::connect(&url, NoTls).unwrap();
-            db.batch_execute(&format!(
-                "CREATE SCHEMA {schema}; SET search_path TO {schema}"
-            ))
-            .unwrap();
-            db.batch_execute(super::PG_MIGRATIONS[0]).unwrap();
-            // The ledger is not a migration file: an old build's open
-            // made it under its lock, at the shape of `migrate_under_lock`.
-            db.batch_execute(
-                "CREATE TABLE IF NOT EXISTS schema_migrations (
-                     version BIGINT PRIMARY KEY,
-                     name    TEXT NOT NULL
-                 )",
-            )
-            .unwrap();
-            db.batch_execute(
-                "INSERT INTO schema_migrations (version, name) \
-                 VALUES (1, 'postgres schema')",
-            )
-            .unwrap();
-            db.execute("INSERT INTO repos (repo_id, name) VALUES (1, 'main')", &[])
-                .unwrap();
-            db.execute(
-                "INSERT INTO changesets (id, gen, body) VALUES ($1, 1, $2)",
-                &[&P::bytes(&id.as_bytes()[..]), &P::bytes(&body)],
-            )
-            .unwrap();
-            db.execute(
-                "INSERT INTO repo_changesets (repo_id, cs) VALUES (1, $1)",
-                &[&P::bytes(&id.as_bytes()[..])],
-            )
-            .unwrap();
-            db.execute(
-                "INSERT INTO repo_blobs (repo_id, blob) VALUES (1, $1), (1, $2)",
-                &[
-                    &P::bytes(&blob_a.as_bytes()[..]),
-                    &P::bytes(&blob_b.as_bytes()[..]),
-                ],
-            )
-            .unwrap();
-            db.execute(
-                "INSERT INTO refs (repo_id, name, target, version) \
-                 VALUES (1, 'main', $1, 1)",
-                &[&P::bytes(&id.as_bytes()[..])],
-            )
-            .unwrap();
-        }
-        // A plain open of this build runs the migrations it has not run,
-        // under the schema's lock, and serves.
-        let pg = Pg::open_test(
-            &url,
-            &schema,
-            2,
-            dir.path(),
-            crate::backend::Marker::read(dir.path()),
-        )
-        .unwrap();
-        let ledger: i64 = {
-            let mut db = Client::connect(&url, NoTls).unwrap();
-            db.batch_execute(&format!("SET search_path TO {schema}"))
-                .unwrap();
-            db.query_one("SELECT max(version) FROM schema_migrations", &[])
-                .unwrap()
-                .get(0)
-        };
-        assert_eq!(ledger, i64::from(super::PG_SCHEMA_VERSION));
-        let backend = crate::Backend::postgres(pg);
-        old_store::assert_serves(&backend, &cs, id, blob_a, blob_b);
-    }
-
     /// The shipped Postgres migrations are frozen, like the SQLite ones
     /// (the twin test in store.rs): a database an old build made was
     /// built from these files as they shipped, and an edit would cut it
@@ -4659,21 +4542,12 @@ mod pool_tests {
     use crate::store::READERS;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
-    /// A Postgres backend of a test database, or [`None`] on SQLite: the
-    /// pool is a Postgres shape, so the pool tests skip the data
-    /// directory.
-    fn pg() -> Option<Pg> {
-        if !crate::backend::Backend::test_is_postgres() {
-            eprintln!("skip on sqlite: the reader pool is Postgres");
-            return None;
-        }
+    /// A Postgres backend of a test database.
+    fn pg() -> Pg {
         let data = crate::test_support::private_tempdir();
-        let backend = crate::backend::Backend::open_test(data.path()).unwrap();
-        let pg = backend
-            .as_postgres()
-            .cloned()
-            .expect("the env named postgres");
-        Some(pg)
+        crate::backend::Backend::open_test(data.path())
+            .unwrap()
+            .into_pg()
     }
 
     /// A transaction whose connection dies mid-way leaves the worker's
@@ -4684,7 +4558,7 @@ mod pool_tests {
     /// forever.
     #[test]
     fn a_read_whose_connection_died_mid_transaction_recovers() {
-        let Some(pg) = pg() else { return };
+        let pg = pg();
         // One reader client, out of the pool, in a transaction.
         let mut reader = pg.inner.readers.take(READER_WAIT).unwrap();
         let client = reader.client();
@@ -4716,7 +4590,7 @@ mod pool_tests {
     /// reader comes back to the pool.
     #[test]
     fn a_read_statement_past_its_bound_is_cancelled() {
-        let Some(pg) = pg() else { return };
+        let pg = pg();
         let err = pg
             .read_bounded(
                 |tx| {
@@ -4747,7 +4621,7 @@ mod pool_tests {
     /// `Unavailable`, instead of blocking to its deadline.
     #[test]
     fn a_call_that_waits_past_the_pool_bound_is_refused() {
-        let Some(pg) = pg() else { return };
+        let pg = pg();
         let pg = Arc::new(pg);
         let busy = Arc::new(AtomicUsize::new(0));
         let holds: Vec<_> = (0..READERS)
@@ -4803,7 +4677,7 @@ mod pool_tests {
     /// ceiling keeps this a fast failure that names the step.
     #[test]
     fn a_reader_taken_and_given_back_is_taken_again() {
-        let Some(pg) = pg() else { return };
+        let pg = pg();
         let pg = Arc::new(pg);
         let done = Arc::new(AtomicUsize::new(0));
         std::thread::scope(|scope| {
@@ -4843,7 +4717,7 @@ mod pool_tests {
     /// to zero when the reads are done.
     #[test]
     fn the_pool_records_its_waits_and_its_busy_readers() {
-        let Some(pg) = pg() else { return };
+        let pg = pg();
         let metrics = Arc::new(Metrics::default());
         pg.set_metrics(Arc::clone(&metrics));
         let pg = Arc::new(pg);
@@ -4922,7 +4796,7 @@ mod pool_tests {
     /// back to zero when it ends.
     #[test]
     fn the_tx_age_gauge_tracks_the_oldest_open_read() {
-        let Some(pg) = pg() else { return };
+        let pg = pg();
         let pg = Arc::new(pg);
         assert_eq!(pg.tx_age(), Duration::ZERO);
         let hold = {

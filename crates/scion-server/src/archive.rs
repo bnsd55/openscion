@@ -403,7 +403,7 @@ pub struct RestoreReport {
 pub fn restore(
     archive: &Path,
     data: &Path,
-    postgres_url: Option<&str>,
+    postgres_url: &str,
     postgres_ca: Option<&Path>,
 ) -> Result<RestoreReport> {
     restore_impl(
@@ -469,9 +469,9 @@ fn mutation_whole_file() -> bool {
 pub fn restore_with(
     archive: &Path,
     data: &Path,
-    postgres_url: Option<&str>,
+    postgres_url: &str,
     postgres_ca: Option<&Path>,
-    open: impl FnOnce(&Path, Option<&str>, Option<&Path>) -> Result<Backend>,
+    open: impl FnOnce(&Path, &str, Option<&Path>) -> Result<Backend>,
 ) -> Result<RestoreReport> {
     restore_impl(
         archive,
@@ -495,10 +495,10 @@ pub fn restore_with(
 pub fn restore_with_budget(
     archive: &Path,
     data: &Path,
-    postgres_url: Option<&str>,
+    postgres_url: &str,
     postgres_ca: Option<&Path>,
     tx_bytes: usize,
-    open: impl FnOnce(&Path, Option<&str>, Option<&Path>) -> Result<Backend>,
+    open: impl FnOnce(&Path, &str, Option<&Path>) -> Result<Backend>,
 ) -> Result<RestoreReport> {
     restore_impl(archive, data, postgres_url, postgres_ca, tx_bytes, open)
 }
@@ -509,10 +509,10 @@ pub fn restore_with_budget(
 fn restore_impl(
     archive: &Path,
     data: &Path,
-    postgres_url: Option<&str>,
+    postgres_url: &str,
     postgres_ca: Option<&Path>,
     tx_bytes: usize,
-    open: impl FnOnce(&Path, Option<&str>, Option<&Path>) -> Result<Backend>,
+    open: impl FnOnce(&Path, &str, Option<&Path>) -> Result<Backend>,
 ) -> Result<RestoreReport> {
     for existing in ["scion.db", MARKER, "objects"] {
         if data.join(existing).exists() {
@@ -547,7 +547,8 @@ fn restore_impl(
     // database the URL names: drop that schema before the replay, so
     // the replay starts empty whatever the last run left. A live store
     // is safe: its server holds the one-server lock the drop takes.
-    if let Some(url) = postgres_url {
+    {
+        let url = postgres_url;
         crate::pg::reset_schema(url, postgres_ca).map_err(|error| match error {
             Error::Corrupt(why) if why.contains("names a store") => {
                 // The refusal's truth: the schema may hold a complete
@@ -623,8 +624,7 @@ start a server on it, or restore into a new schema",
             // On Postgres the replay committed whole batches before it
             // failed: drop the schema they sit in, best effort, so the
             // operator's retry against the same database starts empty.
-            if let Some(url) = postgres_url
-                && let Err(why) = crate::pg::reset_own_staging(url, postgres_ca)
+            if let Err(why) = crate::pg::reset_own_staging(postgres_url, postgres_ca)
             {
                 tracing::warn!(error = %why, "cannot drop the restored database's schema");
             }
@@ -651,10 +651,10 @@ fn carry_back_audit(staging: &Path, data: &Path) -> bool {
 fn restore_into_with(
     archive: &Path,
     data: &Path,
-    postgres_url: Option<&str>,
+    postgres_url: &str,
     postgres_ca: Option<&Path>,
     tx_bytes: usize,
-    open: impl FnOnce(&Path, Option<&str>, Option<&Path>) -> Result<Backend>,
+    open: impl FnOnce(&Path, &str, Option<&Path>) -> Result<Backend>,
 ) -> Result<RestoreReport> {
     let manifest = read_manifest(archive)?;
     let names = repo_names(&manifest)?;

@@ -845,7 +845,7 @@ fn settle(
     tree::fill_root_tree(store, repo, head.target)?;
     // The blob lengths the tree build needs, read before the write
     // transaction, so the write connection does no file I/O.
-    let lens = tree::lens_of_puts(store, crate::db::puts(&rebased).map(|(_, blob)| blob))?;
+    let lens = tree::lens_of_puts(store, crate::meta::puts(&rebased).map(|(_, blob)| blob))?;
     let landed = store.commit(|c| {
         let (id, _) = tree::store_changeset(c, repo, &rebased, &mut tree::lens_from(&lens))?;
         if !c.cas_ref(repo, target, Some(head.version), id)? {
@@ -1452,7 +1452,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::db::testing;
+    use crate::meta::testing;
     use crate::store::FSYNC_LEAVES_DRIVE_CACHE;
     use scion_core::{BlobId, Entry, FileEntry, IdentityTime};
 

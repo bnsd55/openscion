@@ -810,15 +810,10 @@ async fn main() -> anyhow::Result<()> {
     // versions of a kind, which a running server of an older build may
     // read, so it opens as the server.
     // The Postgres URL of the flags: the file form wins (the two cannot
-    // be given together), the argv form warns, the env is quiet.
+    // be given together), the argv form warns, the env is quiet. Every
+    // command needs one; `hash-token` reads none of the store, but a
+    // missing URL is refused once, here, before anything runs.
     let postgres_url = postgres_url_of(&cli)?;
-    // A CA without a URL from any source is refused here, after the
-    // resolution: clap cannot see the file and env forms.
-    if cli.postgres_ca.is_some() && postgres_url.is_none() {
-        anyhow::bail!(
-            "--postgres-ca needs a Postgres URL: give --postgres-url, --postgres-url-file or SCION_POSTGRES_URL"
-        );
-    }
     // `verify` and `restore` run without a store: verify reads only the
     // archive, and restore makes a data directory of its own. Handle them
     // before the store opens, so a restore's empty target stays empty of
@@ -840,7 +835,7 @@ async fn main() -> anyhow::Result<()> {
                 audit,
                 &cli.data,
                 &archive,
-                postgres_url.as_deref(),
+                &postgres_url,
                 cli.postgres_ca.as_deref(),
             )
             .await;
@@ -873,11 +868,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let store = match cli.command {
         Command::Import { .. } | Command::Gc { .. } | Command::Export { .. } => {
-            Backend::open_shared(
-                &cli.data,
-                postgres_url.as_deref(),
-                cli.postgres_ca.as_deref(),
-            )
+            Backend::open_shared(&cli.data, &postgres_url, cli.postgres_ca.as_deref())
         }
         Command::HashToken { .. } => return hash_token(),
         Command::TicketKey { out, audit_file } => {
@@ -891,11 +882,7 @@ async fn main() -> anyhow::Result<()> {
         }
         // `fsck` cannot run when the store cannot open, and its table
         // says that is 2, not the generic open failure's 1.
-        Command::Fsck => match Backend::open_shared(
-            &cli.data,
-            postgres_url.as_deref(),
-            cli.postgres_ca.as_deref(),
-        ) {
+        Command::Fsck => match Backend::open_shared(&cli.data, &postgres_url, cli.postgres_ca.as_deref()) {
             Ok(store) => Ok(store),
             Err(e) => {
                 eprintln!("scion-server fsck: {e}");
@@ -910,11 +897,9 @@ async fn main() -> anyhow::Result<()> {
         Command::Verify { .. } | Command::Restore { .. } => {
             unreachable!("handled before the store opens")
         }
-        Command::Serve { .. } | Command::Derive { .. } => Backend::open(
-            &cli.data,
-            postgres_url.as_deref(),
-            cli.postgres_ca.as_deref(),
-        ),
+        Command::Serve { .. } | Command::Derive { .. } => {
+            Backend::open(&cli.data, &postgres_url, cli.postgres_ca.as_deref())
+        }
     }
     .with_context(|| format!("cannot open data directory {}", cli.data.display()))?;
     // A one-shot command removes its own staging folder when it ends -
@@ -1365,22 +1350,30 @@ fn secret_file(file: &Path) -> anyhow::Result<String> {
     Ok(token.to_owned())
 }
 
-/// The Postgres URL of the CLI: the file form wins (clap refuses both
-/// at once), the argv form warns, the env is quiet.
-fn postgres_url_of(cli: &Cli) -> anyhow::Result<Option<String>> {
-    if let Some(file) = &cli.postgres_url_file {
-        return Ok(Some(secret_file(file)?));
-    }
-    if let Some(url) = &cli.postgres_url {
+/// The Postgres URL of the CLI, required: the file form wins (clap
+/// refuses both at once), the argv form warns, the env is quiet. Every
+/// command that opens the store needs one: the metadata has nowhere
+/// else to live.
+fn postgres_url_of(cli: &Cli) -> anyhow::Result<String> {
+    let url = if let Some(file) = &cli.postgres_url_file {
+        secret_file(file)?
+    } else if let Some(url) = &cli.postgres_url {
         warn_argv_secret(
             "--postgres-url",
             "--postgres-url-file (or SCION_POSTGRES_URL)",
         );
-        return Ok(Some(url.clone()));
-    }
-    Ok(std::env::var("SCION_POSTGRES_URL")
+        url.clone()
+    } else if let Some(url) = std::env::var("SCION_POSTGRES_URL")
         .ok()
-        .filter(|u| !u.is_empty()))
+        .filter(|u| !u.is_empty())
+    {
+        url
+    } else {
+        anyhow::bail!(
+            "no Postgres URL: give --postgres-url, --postgres-url-file or SCION_POSTGRES_URL"
+        );
+    };
+    Ok(url)
 }
 
 /// The rules of `serve`: exactly one of `--token` (one principal with

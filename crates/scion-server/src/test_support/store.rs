@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use super::{BlobId, Blobs, Result, Store};
+use super::{BlobId, Blobs};
 
 /// A step the tests run at a counted batch boundary of the import, with
 /// the count of batches done so far.
@@ -189,84 +189,6 @@ pub(super) fn persist_logged(
     tmp.persist(path).map_err(|e| e.error)?;
     log.record(DurabilityStep::Rename(id));
     Ok(())
-}
-
-impl Store {
-    /// The durability steps this store's blob path ran, oldest first,
-    /// for the order test under the test-hooks seam.
-    #[doc(hidden)]
-    #[must_use]
-    #[cfg(any(test, feature = "test-hooks"))]
-    pub fn durability_steps(&self) -> Vec<DurabilityStep> {
-        self.inner.blobs.log.steps()
-    }
-    /// Commits made so far.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-hooks"))]
-    #[must_use]
-    pub fn commits(&self) -> u64 {
-        self.inner.committed.load(Ordering::Acquire)
-    }
-    /// The commit count a completed flush last covered: every commit
-    /// below it is durable.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-hooks"))]
-    #[must_use]
-    pub fn flushed_upto(&self) -> u64 {
-        self.inner.flushed.load(Ordering::Acquire)
-    }
-    /// Sets how many of the next commits fail as a busy database. Tests of
-    /// the import's busy retry use it: the failing transaction ran and
-    /// rolled back, so the retry re-runs it whole.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-hooks"))]
-    pub fn fail_next_commits(&self, n: u32) {
-        self.inner
-            .fail_commits
-            .store(u64::from(n), Ordering::Relaxed);
-    }
-    /// Sets how long the write connection waits for a busy database. Tests
-    /// use it to make a busy lock fail fast, so a retry is deterministic.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-hooks"))]
-    pub fn set_busy_timeout(&self, timeout: Duration) {
-        let _ = self.lock().busy_timeout(timeout);
-    }
-    /// The import's test hooks and busy-retry count.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-hooks"))]
-    #[must_use]
-    pub fn hooks(&self) -> &ImportHooks {
-        &self.inner.hooks
-    }
-    /// Caps the database file at its current size plus `extra` pages, for
-    /// the out-of-space tests: the next write that must grow the file
-    /// fails with the real disk-full.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-hooks"))]
-    pub fn cap_database_pages(&self, extra: i64) {
-        let db = self.lock();
-        let pages: i64 = db
-            .query_row("PRAGMA page_count", [], |row| row.get(0))
-            .unwrap_or(0);
-        db.pragma_update(None, "max_page_count", pages + extra)
-            .unwrap();
-    }
-    /// Lifts the page cap again, back to the largest file SQLite allows.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-hooks"))]
-    pub fn release_database_pages(&self) {
-        let db = self.lock();
-        db.pragma_update(None, "max_page_count", 0x7FFF_FFFFi64)
-            .unwrap();
-    }
-    /// Write transactions run so far.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-hooks"))]
-    #[must_use]
-    pub fn txes(&self) -> u64 {
-        self.inner.txes.load(Ordering::Relaxed)
-    }
 }
 
 impl Blobs {
