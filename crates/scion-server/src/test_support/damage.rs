@@ -378,3 +378,25 @@ fn id_of(v: &[u8]) -> [u8; 32] {
     id.copy_from_slice(&v[..32]);
     id
 }
+
+/// How many view rows the store holds: the tests of the view memo count
+/// the rows a derivation adds. SQLite reads its table; Postgres reads
+/// the schema's table off the runtime's raw client.
+pub(crate) fn view_tree_rows(backend: &Backend) -> Result<usize> {
+    let data = data_dir(backend);
+    if Backend::test_is_postgres() {
+        pg_with(data, |client| {
+            let row = client
+                .query_one("SELECT count(*) FROM view_trees", &[])
+                .map_err(map_pg_error)?;
+            Ok(usize::try_from(row.get::<_, i64>(0)).expect("a row count fits"))
+        })
+    } else {
+        raw_sqlite(data, false, |c| {
+            c.query_row("SELECT count(*) FROM view_trees", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|n| usize::try_from(n).expect("a row count fits"))
+        })
+    }
+}

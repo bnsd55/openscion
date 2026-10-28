@@ -2276,6 +2276,7 @@ fn file_state(state: FileState) -> v1::FileState {
 #[cfg(test)]
 mod tests {
     use crate::backend::Backend;
+    use crate::db;
     use std::time::Instant;
 
     use scion_core::{Changeset, FileState, IdentityTime};

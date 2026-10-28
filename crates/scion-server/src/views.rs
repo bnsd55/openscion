@@ -288,7 +288,6 @@ fn context_digest(ctx: &Context) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::Store;
     use proptest::prelude::*;
     use proptest::test_runner::TestCaseError;
     use scion_core::{Changeset, FileEntry, FileState, PathElem};
@@ -321,15 +320,6 @@ mod tests {
     fn store() -> (tempfile::TempDir, Backend) {
         let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test(dir.path()).unwrap();
-        (dir, store)
-    }
-
-    /// The tests that count the view rows read the SQLite table (`rows`
-    /// below); the metadata trait has no count read, so they keep the
-    /// SQLite store.
-    fn sqlite_store() -> (tempfile::TempDir, Backend) {
-        let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
         (dir, store)
     }
 
@@ -1022,24 +1012,18 @@ mod tests {
         (dir, store, repo, tip, digest)
     }
 
-    /// How many view rows `store` holds.
-    fn rows(store: &Backend) -> i64 {
-        let store = store.as_sqlite().expect("the view tests run on SQLite");
-        // `SqliteTx` derefs to the connection.
-        store
-            .read(|c| {
-                c.query_row("SELECT count() FROM view_trees", [], |row| row.get(0))
-                    .map_err(crate::error::from_sqlite)
-            })
-            .unwrap()
+    /// How many view rows `store` holds, on either backend: the count
+    /// goes through the damage module's two arms, so the row-count tests
+    /// run on both engines.
+    fn rows(store: &Backend) -> usize {
+        crate::pg::damage::view_tree_rows(store).unwrap()
     }
 
     /// A memo row serves a later derivation of the same real tree under
     /// the same context, without a walk, on any changeset that reaches it.
     #[test]
     fn a_stored_row_serves_the_next_derivation_without_a_walk() {
-        // Counts the view rows (`rows`): the SQLite store.
-        let (dir, store) = sqlite_store();
+        let (dir, store) = store();
         let (_dir, store, repo, tip, digest) = repo_of_two_folders_on(dir, store);
         let prefixes: Vec<RepoPath> = ["left/x", "right/y"]
             .iter()
@@ -1103,8 +1087,7 @@ mod tests {
     /// the rest comes from the rows, and their view IDs do not move.
     #[test]
     fn a_changed_folder_rederives_only_its_path() {
-        // Counts the view rows (`rows`): the SQLite store.
-        let (dir, store) = sqlite_store();
+        let (dir, store) = store();
         let (_dir, store, repo, tip, digest) = repo_of_two_folders_on(dir, store);
         let prefixes: Vec<RepoPath> = ["left/x", "right/y"]
             .iter()
