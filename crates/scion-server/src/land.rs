@@ -1837,7 +1837,7 @@ mod tests {
     /// its row, before any settle work runs.
     #[test]
     fn an_error_reply_waits_for_the_pending_row_to_be_durable() {
-        let f = fixture();
+        let f = fixture_shared();
         // The index starts at B, so the import below moves main past it,
         // and the plan's next step checks the deadline before it derives
         // anything.
@@ -1876,20 +1876,17 @@ mod tests {
             f.store.flushed_upto(),
             commits_before + 1,
         );
-        let state: String = f
-            .store
-            .read(|c| {
-                c.sqlite()
-                    .unwrap()
-                    .query_row(
-                        "SELECT state FROM lands WHERE request_key = 'k'",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .map_err(crate::error::from_sqlite)
-            })
-            .unwrap();
-        assert_eq!(state, "pending");
+        // The row is still pending: it answers `pending_lands`, the
+        // metadata trait both backends serve.
+        assert!(
+            f.store
+                .read(|c| {
+                    let repo = c.repo_id("r")?;
+                    Ok(c.pending_lands(repo)?.iter().any(|l| l.request_key == "k"))
+                })
+                .unwrap(),
+            "the land row is not pending"
+        );
     }
 
     #[test]

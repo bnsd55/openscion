@@ -25,7 +25,6 @@ use scion_proto::v1::{
     LandResponse, LandState, PutBlobRequest, ResolveRefRequest,
 };
 use scion_server::Backend;
-use scion_server::test_support::backend::BackendExt;
 use scion_server::test_support::backend::from_store;
 use scion_server::test_support::meta::Meta as _;
 use scion_server::test_support::meta::MetaTx as _;
@@ -1064,6 +1063,18 @@ pub(crate) async fn diff(
     }
 }
 
+/// A client of the test schema, for the raw-row reads the ledger's
+/// metadata cross-check makes: the tables carry the same names and
+/// columns on both engines, so the same SQL reads either.
+fn raw_with_schema(schema: &str) -> postgres::Client {
+    let url = std::env::var("SCION_TEST_POSTGRES_URL").expect("the test database's URL");
+    let mut db =
+        postgres::Client::connect(&url, postgres::NoTls).expect("the test database connects");
+    db.batch_execute(&format!("SET search_path TO {schema}"))
+        .expect("the schema's rows are readable");
+    db
+}
+
 pub(crate) fn pending_lands(c: &rusqlite::Connection) -> i64 {
     let pending = "SELECT count(*) FROM lands WHERE state = 'pending'";
     c.query_row(pending, [], |row| row.get(0)).unwrap()
@@ -1083,11 +1094,26 @@ impl LandsReader {
     /// SQLite path: opening `scion.db` beside a Postgres server would
     /// create a file the restart refuses, so Postgres reads the schema.
     pub(crate) fn open(data: &Path) -> Self {
+        Self::open_reopened(data, data)
+    }
+
+    /// Opens the read for a store the suite reopened under another
+    /// directory's schema (`start_reopened`): the rows live in
+    /// `schema_source`'s schema, whatever path `dir` names, whose own
+    /// name would be a fresh, empty schema. SQLite ignores the source:
+    /// the metadata is the directory's file either way.
+    pub(crate) fn open_reopened(data: &Path, schema_source: &Path) -> Self {
         if Backend::test_is_postgres() {
-            let url = postgres_url(data);
+            let schema = Backend::test_schema(schema_source).expect("postgres mode names a schema");
+            let url = std::env::var("SCION_TEST_POSTGRES_URL")
+                .expect("SCION_TEST_POSTGRES_URL must name the test database");
             let client = std::thread::spawn(move || {
-                postgres::Client::connect(&url, postgres::NoTls)
-                    .expect("the server's schema connects")
+                let mut client = postgres::Client::connect(&url, postgres::NoTls)
+                    .expect("the server's schema connects");
+                client
+                    .batch_execute(&format!("SET search_path TO {schema}"))
+                    .expect("the store's schema is reachable");
+                client
             })
             .join()
             .unwrap();
@@ -1142,50 +1168,82 @@ impl Drop for LandsReader {
 /// The blobs that the changeset and tree rows of the database name, and the
 /// number of pending lands. Rows in `seen` are skipped, and new rows added:
 /// a row never changes.
-pub(crate) fn metadata(store: &Backend, seen: &mut HashSet<Vec<u8>>) -> (BTreeSet<BlobId>, i64) {
-    // The rows of the data directory's own database: this helper asserts the
-    // storage's internals, which only the SQLite backend holds.
-    let Some(raw) = store.sqlite() else {
-        // SHORTCUT: this ceiling is the empty walk; the Postgres rows are
-        // unread by this test, so the metadata-named cross-check has no
-        // Postgres run (the files on disk still verify, and the RPC-side
-        // ledger checks still run). Upgrade path: a MetaTx listing for
-        // changesets and trees, then drop the branch.
-        return (BTreeSet::new(), 0);
+/// The blobs that the changeset and tree rows of the metadata name, and
+/// the number of pending lands. Rows in `seen` are skipped, and new rows
+/// added: a row never changes. The rows come from the store's own
+/// backend engine-neutrally: the data directory's database on SQLite,
+/// the store's schema on Postgres.
+fn metadata(
+    store: &Backend,
+    dir: &Path,
+    schema_source: &Path,
+    seen: &mut HashSet<Vec<u8>>,
+) -> (BTreeSet<BlobId>, i64) {
+    let schema = if Backend::test_is_postgres() {
+        Some(Backend::test_schema(schema_source).expect("postgres mode names a schema"))
+    } else {
+        None
     };
-    raw.read(|c| {
-        let mut named = BTreeSet::new();
-        for table in ["changesets", "trees"] {
-            let mut rows = c
-                .prepare(&format!("SELECT id, body FROM {table}"))
-                .map_err(scion_server::test_support::error::from_sqlite)?;
-            let rows = rows
-                .query_map([], |row| {
-                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })
-                .map_err(scion_server::test_support::error::from_sqlite)?;
-            for row in rows {
-                let (id, body) = row.map_err(scion_server::test_support::error::from_sqlite)?;
-                if !seen.insert(id) {
-                    continue;
-                }
-                let states: Vec<FileState> = if table == "changesets" {
-                    let changes = Changeset::decode(&body).unwrap().changes().clone();
-                    changes.into_values().flatten().collect()
-                } else {
-                    let entries = Tree::decode(&body).unwrap().entries().clone().into_values();
-                    let file = |entry| match entry {
-                        Entry::File(file) => Some(file.state()),
-                        Entry::Dir(_) => None,
-                    };
-                    entries.filter_map(file).collect()
-                };
-                named.extend(states.iter().filter_map(FileState::blob));
+    let mut named = BTreeSet::new();
+    for table in ["changesets", "trees"] {
+        for (id, body) in raw_rows(store, schema.as_deref(), table) {
+            if !seen.insert(id) {
+                continue;
             }
+            let states: Vec<FileState> = if table == "changesets" {
+                let changes = Changeset::decode(&body).unwrap().changes().clone();
+                changes.into_values().flatten().collect()
+            } else {
+                let entries = Tree::decode(&body).unwrap().entries().clone().into_values();
+                let file = |entry| match entry {
+                    Entry::File(file) => Some(file.state()),
+                    Entry::Dir(_) => None,
+                };
+                entries.filter_map(file).collect()
+            };
+            named.extend(states.iter().filter_map(FileState::blob));
         }
-        Ok((named, pending_lands(c)))
-    })
-    .unwrap()
+    }
+    let pending = LandsReader::open_reopened(dir, schema_source).counts().1;
+    (named, pending)
+}
+
+/// The (id, body) rows of one metadata table, engine-neutrally: the data
+/// directory's own database on SQLite, the store's schema on Postgres.
+fn raw_rows(store: &Backend, schema: Option<&str>, table: &str) -> Vec<(Vec<u8>, Vec<u8>)> {
+    if Backend::test_is_postgres() {
+        let (schema, table) = (schema.map(str::to_string), table.to_string());
+        // The sync client's connect and queries block on the connection's
+        // own runtime, so they cannot run inside a tokio runtime: like
+        // the URL helper, they run on a thread of their own.
+        std::thread::spawn(move || {
+            let mut db = raw_with_schema(&schema.expect("postgres mode names a schema"));
+            db.query(&format!("SELECT id, body FROM {table} ORDER BY id"), &[])
+                .expect("the table reads")
+                .iter()
+                .map(|row| (row.get(0), row.get(1)))
+                .collect::<Vec<(Vec<u8>, Vec<u8>)>>()
+        })
+        .join()
+        .unwrap()
+    } else {
+        store
+            .read(|c| {
+                let raw = c.sqlite().expect("the data directory's connection");
+                let mut stmt = raw
+                    .prepare(&format!("SELECT id, body FROM {table}"))
+                    .map_err(scion_server::test_support::error::from_sqlite)?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    })
+                    .map_err(scion_server::test_support::error::from_sqlite)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(scion_server::test_support::error::from_sqlite)?;
+                Ok(rows)
+            })
+            .unwrap()
+    }
 }
 
 /// Every blob file under `<data>/objects/blob`, by its ID.
@@ -1391,7 +1449,7 @@ pub(crate) async fn check(
     // directory walks another path, whose name would be a fresh, empty
     // schema.
     let store = open_store_shared_reopened(data, schema_source);
-    let (named, pending) = metadata(&store, &mut checked.rows);
+    let (named, pending) = metadata(&store, data, schema_source, &mut checked.rows);
     assert_eq!(pending, 0, "every land sent was retried");
     let files = blob_files(data);
     for id in named.into_iter().chain(files) {

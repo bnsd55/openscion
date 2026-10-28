@@ -166,6 +166,15 @@ struct PgInner {
     /// keeps its own.
     #[cfg(any(test, feature = "test-hooks"))]
     hooks: crate::store::test_hooks::ImportHooks,
+    /// The commit seams the tests share with the SQLite store: the
+    /// commits made, the write transactions run, and how many of the
+    /// next commits fail as a busy database.
+    #[cfg(any(test, feature = "test-hooks"))]
+    committed: std::sync::atomic::AtomicU64,
+    #[cfg(any(test, feature = "test-hooks"))]
+    txes: std::sync::atomic::AtomicU64,
+    #[cfg(any(test, feature = "test-hooks"))]
+    fail_commits: std::sync::atomic::AtomicU64,
     /// The operator metrics, set once by the server before it serves: a
     /// commit's wait for the collector's advisory key records how long
     /// it waited. Empty in import, fsck and gc, which export none.
@@ -903,6 +912,12 @@ impl Pg {
             }),
             #[cfg(any(test, feature = "test-hooks"))]
             hooks: crate::store::test_hooks::ImportHooks::default(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            committed: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(any(test, feature = "test-hooks"))]
+            txes: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(any(test, feature = "test-hooks"))]
+            fail_commits: std::sync::atomic::AtomicU64::new(0),
             metrics: std::sync::OnceLock::new(),
         });
         // The probe of a server that lost its lock: once a minute the
@@ -1130,6 +1145,18 @@ impl Pg {
             Ok(value) => {
                 let unflushed = tx.cs_pending.as_deref().is_some_and(|p| !p.is_empty())
                     || tx.derived_pending.as_deref().is_some_and(|p| !p.is_empty());
+                #[cfg(any(test, feature = "test-hooks"))]
+                if self.inner.fail_commits.load(Ordering::Relaxed) > 0 {
+                    self.inner.fail_commits.fetch_sub(1, Ordering::Relaxed);
+                    // Counted as ended, as a real failed commit is: the
+                    // transaction rolls back below, nothing was written,
+                    // exactly as a busy commit ends on SQLite.
+                    self.inner.committed.fetch_add(1, Ordering::Release);
+                    let _ = tx.rollback();
+                    let fail =
+                        std::io::Error::other("the commit was made to fail by the test hook");
+                    return Err(Error::Storage(Storage::busy(fail)));
+                }
                 if unflushed {
                     // A caller that turned the importer's batching on and
                     // ended the transaction without the flush would
@@ -1149,7 +1176,12 @@ impl Pg {
                         "the transaction holds changeset rows it never flushed".to_owned(),
                     ));
                 }
-                tx.commit()?;
+                #[cfg(any(test, feature = "test-hooks"))]
+                self.inner.committed.fetch_add(1, Ordering::Release);
+                let committed = tx.commit();
+                #[cfg(any(test, feature = "test-hooks"))]
+                self.inner.txes.fetch_add(1, Ordering::Relaxed);
+                committed?;
                 Ok(value)
             }
             Err(error) => {
@@ -1168,6 +1200,31 @@ impl Pg {
     /// As [`Pg::commit`].
     pub(crate) fn write<T>(&self, f: impl FnOnce(&mut PgTx<'_>) -> Result<T>) -> Result<T> {
         self.commit(f)
+    }
+
+    /// Commits made so far: the seam the tests of the batching watch,
+    /// the same shape as the SQLite store's counter.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[must_use]
+    pub(crate) fn commits(&self) -> u64 {
+        self.inner.committed.load(Ordering::Acquire)
+    }
+
+    /// Write transactions run so far: the batching tests' counter, the
+    /// same shape as the SQLite store's.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[must_use]
+    pub(crate) fn txes(&self) -> u64 {
+        self.inner.txes.load(Ordering::Relaxed)
+    }
+
+    /// Sets how many of the next commits fail as a busy database: the
+    /// transaction runs and rolls back, so the retry re-runs it whole.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) fn fail_next_commits(&self, n: u32) {
+        self.inner
+            .fail_commits
+            .store(u64::from(n), Ordering::Relaxed);
     }
 
     /// Takes the write client, counted as a writer that waits: the
@@ -4545,7 +4602,9 @@ mod pool_tests {
     /// A Postgres backend of a test database.
     fn pg() -> Pg {
         let data = crate::test_support::private_tempdir();
-        crate::backend::Backend::open_test(data.path())
+        // The pool tests hold the whole reader pool: they need the
+        // server's pool size, not the suite's small test pool.
+        crate::backend::Backend::open_test_with_readers(data.path(), READERS)
             .unwrap()
             .into_pg()
     }

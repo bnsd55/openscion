@@ -2277,7 +2277,6 @@ fn file_state(state: FileState) -> v1::FileState {
 mod tests {
     use crate::backend::Backend;
     use crate::db;
-    use crate::store::Store;
     use std::time::Instant;
 
     use scion_core::{Changeset, FileState, IdentityTime};
@@ -2387,7 +2386,7 @@ mod tests {
 
     fn file_store(content: &[u8]) -> (tempfile::TempDir, Backend, ChangesetId, BlobId) {
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let store = Backend::open_test(dir.path()).unwrap();
         let blob = store.blobs().put(content).unwrap();
         let state = FileState::Regular {
             content: blob,
@@ -2748,7 +2747,7 @@ mod tests {
     /// the land's plan walks back.
     fn dropped_call_fixture() -> (tempfile::TempDir, Backend, ChangesetId, ChangesetId) {
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let store = Backend::open_test(dir.path()).unwrap();
         let blob = store.blobs().put(b"x").unwrap();
         let put = |parents, path: &str| {
             Changeset::new(
@@ -2876,16 +2875,19 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(10), "the job ends");
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
-        let sql = "SELECT state FROM lands WHERE request_key = 'claim-wait'";
-        let state: String = store
-            .read(|c| {
-                c.sqlite()
-                    .unwrap()
-                    .query_row(sql, [], |row| row.get(0))
-                    .map_err(crate::error::from_sqlite)
-            })
-            .unwrap();
-        assert_eq!(state, "pending");
+        // The land is pending: its row answers `pending_lands`, the
+        // metadata trait both backends serve.
+        assert!(
+            store
+                .read(|c| {
+                    let repo = c.repo_id("r")?;
+                    Ok(c.pending_lands(repo)?
+                        .iter()
+                        .any(|l| l.request_key == "claim-wait"))
+                })
+                .unwrap(),
+            "the land row is not pending"
+        );
         let main = store.read(|c| {
             let repo = c.repo_id("r")?;
             c.get_ref(repo, "main")
@@ -2999,18 +3001,17 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
 
-        let sql = "SELECT state FROM lands WHERE request_key = 'k'";
-        let row = store
-            .read(|c| {
-                c.sqlite()
-                    .unwrap()
-                    .query_row(sql, [], |row| row.get::<_, String>(0))
-                    .map_err(crate::error::from_sqlite)
-            })
-            .unwrap_err();
+        // No land was recorded: no pending row answers for the key. (The
+        // metadata trait reads pending lands; a row in a final state would
+        // have shown in the audit, whose failed line is asserted below.)
         assert!(
-            format!("{row:?}").contains("QueryReturnedNoRows"),
-            "no land was recorded: {row:?}"
+            !store
+                .read(|c| {
+                    let repo = c.repo_id("r")?;
+                    Ok(c.pending_lands(repo)?.iter().any(|l| l.request_key == "k"))
+                })
+                .unwrap(),
+            "a land row was recorded"
         );
         let text = std::fs::read_to_string(&audit_path).unwrap();
         assert_eq!(
@@ -3126,7 +3127,7 @@ mod tests {
         scion_core::BlobId,
     ) {
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let store = Backend::open_test(dir.path()).unwrap();
         let one = store.blobs().put(b"one\n").unwrap();
         let two = store.blobs().put(b"two\n").unwrap();
         let state = |blob| {
@@ -3201,7 +3202,7 @@ mod tests {
         // main moved past the changeset's parent, so the land's plan has
         // a walk to make: the spent deadline stops it at its first check.
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let store = Backend::open_test(dir.path()).unwrap();
         let blob = store.blobs().put(b"x").unwrap();
         let put = |parents, path: &str| {
             Changeset::new(
@@ -3294,7 +3295,7 @@ mod tests {
     /// grow the metadata file.
     fn landed_store() -> (tempfile::TempDir, Backend, ChangesetId) {
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let store = Backend::open_test(dir.path()).unwrap();
         let blob = store.blobs().put(b"x").unwrap();
         let mut files = Vec::new();
         for i in 0..2000 {
@@ -3401,9 +3402,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn at_most_max_graph_queries_run_at_once() {
-        // root ─ a, and root ─ b.
+        // root ─ a, and root ─ b. The pool is the server's size: the test
+        // holds every read connection, so the cap's wait is visible.
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let store = Backend::open_test_with_readers(dir.path(), crate::store::READERS).unwrap();
         let ids = store
             .write(|c| {
                 let repo = c.create_repo("r")?;
@@ -3509,7 +3511,7 @@ mod tests {
     #[tokio::test]
     async fn a_worker_panic_does_not_reach_the_client() {
         let dir = crate::test_support::private_tempdir();
-        let worker = Worker::new(Backend::sqlite(Store::open(dir.path()).unwrap()));
+        let worker = Worker::new(Backend::open_test(dir.path()).unwrap());
         let status = worker
             .run(|_| -> Result<()> { panic!("secret detail") })
             .await

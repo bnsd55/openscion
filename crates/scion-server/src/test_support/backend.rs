@@ -7,9 +7,17 @@
 
 use std::path::Path;
 
-use super::{Backend, Marker, PG_READERS, marker_agrees, refuse_damaged_marker, refuse_sqlite_dir};
+use super::{Backend, Marker, marker_agrees, refuse_damaged_marker, refuse_sqlite_dir};
 use crate::error::Result;
 use crate::pg::Pg;
+
+/// The reader-pool size of a test backend. Tests run many backends at
+/// once - the lib suite runs its tests on threads, and each backend
+/// holds one write connection plus its readers - so the pool is far
+/// under the server's [`READERS`](crate::store::READERS): a pool of the
+/// server's size saturates the test database's `max_connections` before
+/// the suite finishes (E53300, "too many clients").
+const PG_TEST_READERS: usize = 2;
 
 impl Backend {
     /// The advisory-lock key of the test schema's one-server lock, for
@@ -29,9 +37,21 @@ impl Backend {
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn open_test_shared(data: &Path) -> Result<Self> {
-        Self::open_test_in_schema_with(data, test_schema(data), |url, schema, readers, data, marker| {
-            Pg::open_test_shared(url, schema, readers, data, marker)
-        })
+        Self::open_test_with_readers(data, PG_TEST_READERS, Pg::open_test_shared)
+    }
+    /// [`Backend::open_test_shared`], for a store the suite reopens from
+    /// another path than the one its first open used: the power suite
+    /// reopens from the backing directory, whose path would name a
+    /// fresh, empty schema, while the metadata lives in the database the
+    /// first open filled. The schema follows the store, not the path.
+    ///
+    /// # Errors
+    ///
+    /// What the database returns, and a missing test URL.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn open_test_shared_in_schema(data: &Path, schema: &str) -> Result<Self> {
+        Self::open_test_in_schema_with(data, schema, PG_TEST_READERS, Pg::open_test_shared)
     }
     /// Makes an existing test data directory private, as the operator's
     /// `chmod 700` does: the tests pre-create their directories with the
@@ -47,24 +67,9 @@ impl Backend {
         }
     }
 
-    /// [`Backend::open_test_shared`], for a store the suite reopens from
-    /// another path than the one its first open used: the power suite
-    /// reopens from the backing directory, whose path would name a
-    /// fresh, empty schema, while the metadata lives in the database the
-    /// first open filled. The schema follows the store, not the path.
-    ///
-    /// # Errors
-    ///
-    /// What the database returns, and a missing test URL.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-hooks"))]
-    pub fn open_test_shared_in_schema(data: &Path, schema: &str) -> Result<Self> {
-        Self::open_test_in_schema_with(data, schema, Pg::open_test_shared)
-    }
-
-    /// Opens a test backend on `data`, with the opener `open` (the
-    /// one-server or the shared one): the shared shape of every test
-    /// open.
+    /// Opens a test backend on `data`, with the reader pool the suite
+    /// runs: far under the server's pool, so the test database's
+    /// `max_connections` holds.
     ///
     /// # Errors
     ///
@@ -72,21 +77,49 @@ impl Backend {
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn open_test(data: &Path) -> Result<Self> {
-        Self::open_test_in_schema_with(data, test_schema(data), Pg::open_test)
+        Self::open_test_with_readers(data, PG_TEST_READERS)
+    }
+
+    /// [`Backend::open_test`], with the reader pool the caller names: the
+    /// tests of a pool's cap need the server's pool size, while the rest
+    /// of the suite runs far under it so the test database's
+    /// `max_connections` holds.
+    ///
+    /// # Errors
+    ///
+    /// As [`Backend::open_test`].
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn open_test_with_readers(data: &Path, readers: usize) -> Result<Self> {
+        Self::open_test_in_schema_with(data, &test_schema(data), readers, Pg::open_test)
+    }
+
+    /// [`Backend::open_test_with_readers`], on the schema the caller
+    /// names: a store the suite reopens from another path than the one
+    /// its first open used. The schema follows the store, not the path.
+    ///
+    /// # Errors
+    ///
+    /// As [`Backend::open_test`].
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn open_test_shared_in_schema_named(data: &Path, schema: &str) -> Result<Self> {
+        Self::open_test_in_schema_with(data, schema, PG_TEST_READERS, Pg::open_test_shared)
     }
 
     /// [`Backend::open_test`], with the opener chosen: the one seam the
     /// open shapes share.
     fn open_test_in_schema_with(
         data: &Path,
-        schema: String,
+        schema: &str,
+        readers: usize,
         open: impl FnOnce(&str, &str, usize, &Path, Marker) -> Result<Pg>,
     ) -> Result<Self> {
         Self::ensure_private_dir(data);
         refuse_damaged_marker(data)?;
         let marker = Marker::read(data);
         refuse_sqlite_dir(data)?;
-        let pg = open(&test_url()?, &schema, PG_READERS, data, marker)?;
+        let pg = open(&test_url()?, schema, readers, data, marker)?;
         marker_agrees(data, pg.store_uuid())?;
         Ok(Self { pg })
     }
@@ -114,7 +147,7 @@ impl Backend {
         let pg = Pg::open_test_shared_with_flights(
             &test_url()?,
             &test_schema(data),
-            PG_READERS,
+            PG_TEST_READERS,
             data,
             marker,
             flights,
@@ -192,6 +225,28 @@ impl Backend {
     #[must_use]
     pub fn test_schema(data: &Path) -> String {
         test_schema(data)
+    }
+    /// Write transactions run so far: the tests of the batching watch
+    /// the count.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[must_use]
+    pub fn txes(&self) -> u64 {
+        self.pg.txes()
+    }
+    /// Commits made so far: the transactions of the write connection.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[must_use]
+    pub fn commits(&self) -> u64 {
+        self.pg.commits()
+    }
+    /// Sets how many of the next commits fail as a busy database: the
+    /// transaction ran and rolled back, so the retry re-runs it whole.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn fail_next_commits(&self, n: u32) {
+        self.pg.fail_next_commits(n);
     }
     /// The import's test hooks and busy-retry count.
     #[doc(hidden)]
