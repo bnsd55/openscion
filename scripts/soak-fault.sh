@@ -121,6 +121,7 @@ classifies() {
       # after them carries the client's error, which the patterns above
       # classify.
       *checkout*\ *failed*) ;;
+      *import*\ *failed*) ;;
       *"checked out"*"from"*) ;;
       *) return 1 ;;
     esac
@@ -266,13 +267,9 @@ importer() {
       import \
       --rev main "$WORK/src.git" \
       >> "$WORK/import-soak.log" 2>&1 || {
-      if [ -e "$WORK/pg-down" ]; then
-        echo "import $n failed inside the Postgres restart window (the fault)" >> "$WORK/import-soak.log"
-      else
-        echo "import $n failed" >> "$WORK/import-fail.log"
-      fi
+      echo "import $n failed" >> "$WORK/import-fail.log"
+      tail -n 3 "$WORK/import-soak.log" >> "$WORK/import-fail.log"
     }
-    [ -e "$WORK/pg-down" ] && rm -f "$WORK/pg-down"
     sleep 60
   done
 }
@@ -284,15 +281,10 @@ gcer() {
     n=$((n + 1))
     "$TIMEOUT" 120 "$BIN/scion-server" --data "$WORK/server" \
       gc --dry-run >> "$WORK/gc.log" 2>&1 \
-      || { [ -e "$WORK/pg-down" ] \
-           && echo "gc-dry $n failed inside the Postgres restart window (the fault)" >> "$WORK/gc.log" \
-           || echo "gc-dry $n failed" >> "$WORK/gc-fail.log"; }
+      || echo "gc-dry $n failed" >> "$WORK/gc-fail.log"
     "$TIMEOUT" 120 "$BIN/scion-server" --data "$WORK/server" \
       gc >> "$WORK/gc.log" 2>&1 \
-      || { [ -e "$WORK/pg-down" ] \
-           && echo "gc $n failed inside the Postgres restart window (the fault)" >> "$WORK/gc.log" \
-           || echo "gc $n failed" >> "$WORK/gc-fail.log"; }
-    [ -e "$WORK/pg-down" ] && rm -f "$WORK/pg-down"
+      || echo "gc $n failed" >> "$WORK/gc-fail.log"
     sleep 120
   done
 }
@@ -361,10 +353,6 @@ pg_restart() {
     die "SCION_FAULT_PG=1 needs SCION_FAULT_PG_CMD"
   fi
   PG_RESTARTS=$((PG_RESTARTS + 1))
-  # The window marker: every side loop (import, gc) that touches the
-  # database treats a failure while this file exists as the fault
-  # working, and the first success clears it.
-  : > "$WORK/pg-down"
   sh -c "$SCION_FAULT_PG_CMD" >> "$WORK/pg.log" 2>&1
   local n=0
   until pg_isready -q 2> /dev/null; do
