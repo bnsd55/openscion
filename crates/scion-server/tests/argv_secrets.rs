@@ -242,7 +242,16 @@ impl Canary {
             .as_nanos();
         let schema = format!("scion_leak_{name}_{}", suffix & 0xffff);
         let role = format!("scion_leak_{name}_{}", suffix & 0xffff);
-        let password = format!("canary-{name}-{suffix}");
+        // The canary is 16 bytes of system randomness: no constant feeds
+        // it, so a leak that prints it is a leak of this run's own
+        // secret, and nothing in the source reads as a credential.
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).expect("system randomness");
+        let password: String = bytes.iter().fold(String::new(), |mut text, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(text, "{byte:02x}");
+            text
+        });
         // The host, port and name the canary URL keeps from the admin
         // one, taken before the guard takes the string.
         let host = host_of(&admin).to_owned();
