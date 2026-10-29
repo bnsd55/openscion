@@ -1,6 +1,6 @@
 //! The gRPC front end. Parses requests, runs the work on a blocking thread
-//! (`SQLite` and the object folder are synchronous), and maps errors to status
-//! codes.
+//! (the database and the object folder are synchronous), and maps errors
+//! to status codes.
 
 // Every pub item of this module is re-exported by the test seam
 // (`test_support` in lib.rs), and unreachable_pub does not see
@@ -100,7 +100,7 @@ const TX_AGE_PERIOD: Duration = Duration::from_secs(5);
 
 /// Keeps the `scion_pg_tx_age_seconds` gauge current: the age of the
 /// oldest open Postgres read transaction, sampled every [`TX_AGE_PERIOD`]
-/// until `stop` resolves. On SQLite the sample is always zero.
+/// until `stop` resolves.
 async fn pg_tx_age_sample(store: Backend, metrics: Arc<Metrics>, mut stop: watch::Receiver<()>) {
     let mut tick = tokio::time::interval(TX_AGE_PERIOD);
     loop {
@@ -2276,7 +2276,7 @@ fn file_state(state: FileState) -> v1::FileState {
 #[cfg(test)]
 mod tests {
     use crate::backend::Backend;
-    use crate::db;
+    use crate::meta::testing;
     use std::time::Instant;
 
     use scion_core::{Changeset, FileState, IdentityTime};
@@ -3328,13 +3328,18 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn at_most_max_graph_queries_run_at_once() {
         // root ─ a, and root ─ b. The pool is the server's size: the test
-        // holds every read connection, so the cap's wait is visible.
+        // holds every read connection, so the cap's wait is visible. The
+        // gate keeps it alone among the suite's backends, or the database
+        // runs out of connections (E53300).
+        let _pool = crate::pg::pool_tests::SERVER_SIZED_POOL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test_with_readers(dir.path(), crate::store::READERS).unwrap();
         let ids = store
             .write(|c| {
                 let repo = c.create_repo("r")?;
-                db::testing::insert_graph(c, repo, &[vec![], vec![0], vec![0]])
+                testing::insert_graph(c, repo, &[vec![], vec![0], vec![0]])
             })
             .unwrap();
         let bytes = |i: usize| ids[i].as_bytes().to_vec();

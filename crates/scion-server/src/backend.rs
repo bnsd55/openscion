@@ -238,12 +238,6 @@ impl Backend {
         Ok(Self { pg })
     }
 
-    /// A backend on a prepared Postgres handle, for the crate's tests.
-    #[cfg(test)]
-    pub(crate) fn postgres(pg: Pg) -> Self {
-        Self { pg }
-    }
-
     /// The backend's database, for the crate's tests.
     #[cfg(test)]
     pub(crate) fn into_pg(self) -> Pg {

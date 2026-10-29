@@ -523,10 +523,7 @@ impl Dir {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::Backend;
-    use crate::db::SqliteTx;
     use crate::meta::Meta as _;
-    use crate::store::Store;
     use scion_core::{BlobId, Changeset, IdentityTime};
     /// `(path, Some(content))` puts a regular file; `(path, None)` deletes.
     type Edits<'a> = &'a [(&'a str, Option<&'a str>)];
@@ -549,10 +546,13 @@ mod tests {
         RepoPath::new(p).unwrap()
     }
 
-    /// Runs `f` in one write transaction on a fresh store.
-    fn with_db<T>(f: impl FnOnce(&mut SqliteTx<'_>) -> Result<T>) -> T {
+    /// Runs `f` in one write transaction on a fresh test store.
+    fn with_db<T>(f: impl FnOnce(&mut crate::backend::BackendTx<'_>) -> Result<T>) -> T {
         let dir = crate::test_support::private_tempdir();
-        Store::open(dir.path()).unwrap().write(f).unwrap()
+        crate::Backend::open_test(dir.path())
+            .unwrap()
+            .write(f)
+            .unwrap()
     }
 
     fn files(c: &mut dyn MetaTx, root: TreeId) -> Vec<String> {

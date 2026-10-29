@@ -1,12 +1,13 @@
-//! The metadata storage that a server needs, as one trait, with SQLite
-//! behind it ([#47](https://github.com/bnsd55/openscion/issues/47)).
+//! The metadata storage that a server needs, as one trait, with Postgres
+//! behind it.
 //!
-//! [`Store`] is the SQLite implementation: one data directory, one write
-//! connection, readers around it, and the group flush that makes a reply
-//! wait for durability. Its queries are [`MetaTx`] methods, split by table
-//! owner: the shared tables in `db.rs`, the tables of lands in `land.rs`,
-//! and so on. A backend that many servers share implements the same traits
-//! with its own transaction type, and the callers do not change.
+//! [`Pg`] is the implementation: one shared database, one write
+//! connection per server, readers around it, and the group flush that
+//! makes a reply wait for durability. Its queries are [`MetaTx`] methods,
+//! split by table owner: the shared tables in `pg.rs`, the tables of
+//! lands in `land.rs`, and so on. Callers match behavior through the
+//! methods, never the engine, so the engine is a private change of the
+//! server crate.
 //!
 //! The seven methods of [`Meta`] keep today's semantics, because the
 //! durability rules of protocol section 4 must hold in every backend:

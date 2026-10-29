@@ -19,12 +19,10 @@
 //! The layers, bottom up. The private ones carry no links: they are not
 //! API, and their names here are orientation, not references.
 //!
-//! - `backend` and `meta`: one metadata trait over two backends: a data
-//!   directory on this machine (`store`: SQLite for metadata and trees),
-//!   and a Postgres database (`pg`) for the metadata instead. The blob
-//!   files stay on local disk in both: one blob folder per server. One
-//!   server runs per database: a second one is refused at open. What a
-//!   user touches is [`Backend`].
+//! - `backend` and `meta`: one metadata trait over the Postgres backend
+//!   (`pg`), with the blob files on local disk (one blob folder per
+//!   server). One server runs per database: a second one is refused at
+//!   open. What a user touches is [`Backend`].
 //! - `derived`: one mechanism for every kind of derived data, which
 //!   `backfill_root_tree` and its two sibling functions drive.
 //! - `tree`: apply changesets to trees and derive each changeset's root

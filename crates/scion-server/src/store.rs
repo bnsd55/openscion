@@ -1328,7 +1328,6 @@ pub(crate) fn fsync_dir(path: &Path) -> io::Result<()> {
 pub(crate) mod spawn_guard {
     use super::{flock, lock_file};
     use rustix::fs::FlockOperation;
-    use rustix::io::Errno;
     use std::path::Path;
     use std::sync::RwLock;
     use std::time::{Duration, Instant};
@@ -1631,7 +1630,7 @@ mod tests {
                         drop(reopen);
                         break;
                     }
-                    Err(e) if std::time::Instant::now() < deadline => {
+                    Err(_) if std::time::Instant::now() < deadline => {
                         std::thread::sleep(Duration::from_millis(20));
                     }
                     Err(e) => panic!("the store never reopened: {e}"),

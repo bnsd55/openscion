@@ -960,10 +960,9 @@ fn copy_blobs(data: &Path, archive: &Path, ids: &[BlobId]) -> Result<()> {
 
 /// The metadata of `name`, as ONE read transaction holds it: the
 /// snapshot every section of an export shares. The explicit read
-/// transaction is what makes the claim true on SQLite: each statement
-/// would otherwise see its own snapshot, and a land that commits
-/// between them would leave a ref naming a changeset the archive does
-/// not hold.
+/// transaction (REPEATABLE READ) is what makes the claim true: a land
+/// that commits between the section's statements leaves the snapshot
+/// holding exactly what the section named.
 fn snapshot_section(store: &Backend, name: &str) -> Result<RepoSection> {
     store.read_snapshot(|tx| {
         let repo_id = tx.repo_id(name)?;
