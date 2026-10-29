@@ -666,7 +666,7 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
         // past the whole measured land (up to 11/8 of it): a kill after
         // the reply still shows the new ending.
         let factor = k % 11 + 1;
-        std::thread::sleep(step.mul_f64(scale) * factor);
+        std::thread::sleep(step.mul_f64(scale) * u32::try_from(factor).unwrap());
         server.kill_and_wait();
         let _ = handle.join();
 
