@@ -57,11 +57,9 @@ fn spawn_with(extra: &[&str], data: &Path, log: &Path) -> Server {
         .unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_scion-server"));
     cmd.arg("--data").arg(data);
-    // Postgres mode: the same schema the test helpers filled (the marker
-    // file in the data directory makes a plain SQLite start refuse).
-    if scion_server::Backend::test_is_postgres() {
-        cmd.arg("--postgres-url").arg(common::postgres_url(data));
-    }
+    // The same schema the test helpers filled: the server serves the
+    // rows the test wrote, not a fresh schema.
+    cmd.arg("--postgres-url").arg(common::postgres_url(data));
     let child = cmd
         .args(["serve", "--token", common::TOKEN, "--listen", "127.0.0.1:0"])
         .args(extra)
@@ -157,7 +155,7 @@ fn terminate(child: &Child) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_server_serves_until_shutdown_starts() {
-    let data = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
     let log_dir = data.path().join("log");
     fs::create_dir(&log_dir).unwrap();
     let log = log_dir.join("server.log");
@@ -197,7 +195,7 @@ async fn the_server_serves_until_shutdown_starts() {
 /// in-flight calls are cut, the log says so, and the process exits 1.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_second_signal_ends_the_drain_of_an_open_call() {
-    let data = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
     let log_dir = data.path().join("log");
     fs::create_dir(&log_dir).unwrap();
     let log = log_dir.join("server.log");
@@ -301,7 +299,7 @@ async fn wait_url(log: &Path) -> String {
 /// drain exits 0.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_drain_finishes_its_in_flight_calls_and_the_store_keeps_the_promise() {
-    let data = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
     let log_dir = data.path().join("log");
     let hooks = data.path().join("hooks");
     fs::create_dir(&log_dir).unwrap();
@@ -469,11 +467,9 @@ async fn after_the_restart(
     }
     let mut fsck = Command::new(env!("CARGO_BIN_EXE_scion-server"));
     fsck.arg("--data").arg(data);
-    // On Postgres the store lives in the database; a bare fsck would
-    // read the data directory's SQLite and report what is not there.
-    if scion_server::Backend::test_is_postgres() {
-        fsck.arg("--postgres-url").arg(common::postgres_url(data));
-    }
+    // The store lives in the database; the URL names the schema the
+    // server served.
+    fsck.arg("--postgres-url").arg(common::postgres_url(data));
     let clean = fsck.arg("fsck").output().unwrap();
     assert_eq!(clean.status.code(), Some(0), "fsck is clean");
     drop(again);
@@ -482,7 +478,7 @@ async fn after_the_restart(
 /// and the log names the cut, and a later retry works against a restart.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_drain_bound_cuts_the_calls_past_it() {
-    let data = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
     let log_dir = data.path().join("log");
     fs::create_dir(&log_dir).unwrap();
     let log = log_dir.join("server.log");

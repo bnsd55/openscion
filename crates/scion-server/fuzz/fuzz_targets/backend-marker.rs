@@ -13,20 +13,14 @@ use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt as _;
 
 fuzz_target!(|data: &[u8]| {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let marker = dir.path().join("backend");
     std::fs::write(&marker, data).unwrap();
     #[cfg(unix)]
     std::fs::set_permissions(&marker, Permissions::from_mode(0o600)).unwrap();
 
-    // Both opens ride the marker check before anything else: a SQLite
-    // open (no URL) and a Postgres-shaped one (the URL never reached -
-    // the check precedes the contact). Clean open or clean refusal;
-    // never a panic.
-    let _ = scion_server::Backend::open(dir.path(), None, None);
-    let _ = scion_server::Backend::open(
-        dir.path(),
-        Some("postgres://127.0.0.1:5/scion"),
-        None,
-    );
+    // Both opens ride the marker check before anything else: an open
+    // whose URL never resolves (the check precedes the contact, and the
+    // host is not local). Clean open or clean refusal; never a panic.
+    let _ = scion_server::Backend::open(dir.path(), "postgres://127.0.0.1:5/scion", None);
 });

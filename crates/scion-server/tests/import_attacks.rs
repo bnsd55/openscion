@@ -22,7 +22,7 @@ struct Git(TempDir);
 
 impl Git {
     fn init() -> Self {
-        let git = Self(tempfile::tempdir().unwrap());
+        let git = Self(scion_server::test_support::private_tempdir());
         git.run(&["init", "-q", "-b", "main"]);
         git
     }
@@ -131,7 +131,7 @@ fn opts() -> ImportOptions {
 }
 
 fn open_store() -> (TempDir, Backend) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     (dir, store)
 }
@@ -447,4 +447,25 @@ fn a_gitlink_never_follows_its_commit() {
         Err(e) => panic!("a gitlink is opaque, its commit is not fetched: {e:?}"),
     }
     assert!(fs::read_dir(git.path()).is_ok());
+}
+
+/// A zone shorter than `+hhmm` (`+1`, or a bare `+`) is a date git
+/// cannot write: the import refuses it instead of panicking.
+#[test]
+fn a_short_zone_is_refused_not_a_panic() {
+    for offset in ["+1", "+"] {
+        let git = Git::init();
+        let tree = plain_tree(&git);
+        let head = commit(
+            &tree,
+            &[
+                author_line(offset),
+                "committer Ada <ada@example.com> 1700000000 +0000".to_owned(),
+            ],
+            "short zone\n",
+        );
+        let head = git.object("commit", &head);
+        git.force_main(&head);
+        refusal(&git, &format!("zone {offset:?} is refused"));
+    }
 }

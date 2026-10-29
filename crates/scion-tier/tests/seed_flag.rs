@@ -25,6 +25,15 @@ fn snapshot_of(dir: &Path) -> std::path::PathBuf {
     path
 }
 
+/// A temp directory the run owns outright: mode 0700, whatever the
+/// umask. The daemon refuses a seed or a store under a directory that
+/// group or others can write.
+fn private_dir() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    dir
+}
+
 /// A data directory that exists and is private, as an operator makes
 /// before the daemon starts: the daemon refuses a missing one (that is
 /// `refuse_data_dir`'s business), and the seed tests exercise the seed,
@@ -60,7 +69,7 @@ fn daemon(data: &Path, snapshot: &Path, flag: bool) -> std::process::Output {
 
 #[test]
 fn seeding_without_the_flag_is_refused() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let snapshot = snapshot_of(dir.path());
     let out = daemon(&real_data(dir.path()), &snapshot, false);
     assert!(!out.status.success(), "{out:?}");
@@ -110,7 +119,7 @@ fn the_flag_without_a_seed_is_refused() {
 /// reports it, then serves. The process is killed by its own PID.
 #[test]
 fn the_flag_lets_a_seed_through() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let snapshot = snapshot_of(dir.path());
     let data = real_data(dir.path());
     let mut child = Command::new(env!("CARGO_BIN_EXE_scion-daemon"))

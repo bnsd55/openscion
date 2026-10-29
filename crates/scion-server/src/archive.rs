@@ -119,13 +119,13 @@ pub fn export(
     let mut total_refs = 0_u64;
     let mut total_lands = 0_u64;
     let mut total_members = 0_u64;
-    // The archive's root: made recursively, as before — the operator
-    // names a path whose parents may not exist, and the fold risk this
-    // module guards is between REPO names, not in the operator's own
-    // path. Each section directory below is a NON-recursive create, so
-    // a fold on the disk is an error, not a silent reuse of another
-    // repo's directory.
-    make_dir(out)?;
+    // The archive's root: made recursively and PRIVATE (mode 0700
+    // whatever the umask), as the data directory is — the archive holds
+    // every repo whole. The parents the operator's path needs
+    // are made 0700 where they were missing. Each section directory
+    // below is a NON-recursive create, so a fold on the disk is an
+    // error, not a silent reuse of another repo's directory.
+    scion_proto::runtime::auth::create_private_dir_all(out)?;
     let repos_dir = out.join("repos");
     fs::DirBuilder::new()
         .create(&repos_dir)
@@ -403,7 +403,7 @@ pub struct RestoreReport {
 pub fn restore(
     archive: &Path,
     data: &Path,
-    postgres_url: Option<&str>,
+    postgres_url: &str,
     postgres_ca: Option<&Path>,
 ) -> Result<RestoreReport> {
     restore_impl(
@@ -469,9 +469,9 @@ fn mutation_whole_file() -> bool {
 pub fn restore_with(
     archive: &Path,
     data: &Path,
-    postgres_url: Option<&str>,
+    postgres_url: &str,
     postgres_ca: Option<&Path>,
-    open: impl FnOnce(&Path, Option<&str>, Option<&Path>) -> Result<Backend>,
+    open: impl FnOnce(&Path, &str, Option<&Path>) -> Result<Backend>,
 ) -> Result<RestoreReport> {
     restore_impl(
         archive,
@@ -495,10 +495,10 @@ pub fn restore_with(
 pub fn restore_with_budget(
     archive: &Path,
     data: &Path,
-    postgres_url: Option<&str>,
+    postgres_url: &str,
     postgres_ca: Option<&Path>,
     tx_bytes: usize,
-    open: impl FnOnce(&Path, Option<&str>, Option<&Path>) -> Result<Backend>,
+    open: impl FnOnce(&Path, &str, Option<&Path>) -> Result<Backend>,
 ) -> Result<RestoreReport> {
     restore_impl(archive, data, postgres_url, postgres_ca, tx_bytes, open)
 }
@@ -509,10 +509,10 @@ pub fn restore_with_budget(
 fn restore_impl(
     archive: &Path,
     data: &Path,
-    postgres_url: Option<&str>,
+    postgres_url: &str,
     postgres_ca: Option<&Path>,
     tx_bytes: usize,
-    open: impl FnOnce(&Path, Option<&str>, Option<&Path>) -> Result<Backend>,
+    open: impl FnOnce(&Path, &str, Option<&Path>) -> Result<Backend>,
 ) -> Result<RestoreReport> {
     for existing in ["scion.db", MARKER, "objects"] {
         if data.join(existing).exists() {
@@ -540,12 +540,15 @@ fn restore_impl(
         tracing::warn!(staging = %staging.display(), "removing a staging directory a killed restore left behind");
         fs::remove_dir_all(&staging)?;
     }
-    fs::create_dir_all(&staging)?;
+    // The staging becomes the target by one rename, so its mode is the
+    // restored store's mode: private, whatever the umask of the run.
+    scion_proto::runtime::auth::create_private_dir_all(&staging)?;
     // The metadata of a killed restore's committed batches sits in the
     // database the URL names: drop that schema before the replay, so
     // the replay starts empty whatever the last run left. A live store
     // is safe: its server holds the one-server lock the drop takes.
-    if let Some(url) = postgres_url {
+    {
+        let url = postgres_url;
         crate::pg::reset_schema(url, postgres_ca).map_err(|error| match error {
             Error::Corrupt(why) if why.contains("names a store") => {
                 // The refusal's truth: the schema may hold a complete
@@ -621,9 +624,7 @@ start a server on it, or restore into a new schema",
             // On Postgres the replay committed whole batches before it
             // failed: drop the schema they sit in, best effort, so the
             // operator's retry against the same database starts empty.
-            if let Some(url) = postgres_url
-                && let Err(why) = crate::pg::reset_own_staging(url, postgres_ca)
-            {
+            if let Err(why) = crate::pg::reset_own_staging(postgres_url, postgres_ca) {
                 tracing::warn!(error = %why, "cannot drop the restored database's schema");
             }
             Err(error)
@@ -649,10 +650,10 @@ fn carry_back_audit(staging: &Path, data: &Path) -> bool {
 fn restore_into_with(
     archive: &Path,
     data: &Path,
-    postgres_url: Option<&str>,
+    postgres_url: &str,
     postgres_ca: Option<&Path>,
     tx_bytes: usize,
-    open: impl FnOnce(&Path, Option<&str>, Option<&Path>) -> Result<Backend>,
+    open: impl FnOnce(&Path, &str, Option<&Path>) -> Result<Backend>,
 ) -> Result<RestoreReport> {
     let manifest = read_manifest(archive)?;
     let names = repo_names(&manifest)?;
@@ -959,10 +960,9 @@ fn copy_blobs(data: &Path, archive: &Path, ids: &[BlobId]) -> Result<()> {
 
 /// The metadata of `name`, as ONE read transaction holds it: the
 /// snapshot every section of an export shares. The explicit read
-/// transaction is what makes the claim true on SQLite: each statement
-/// would otherwise see its own snapshot, and a land that commits
-/// between them would leave a ref naming a changeset the archive does
-/// not hold.
+/// transaction (REPEATABLE READ) is what makes the claim true: a land
+/// that commits between the section's statements leaves the snapshot
+/// holding exactly what the section named.
 fn snapshot_section(store: &Backend, name: &str) -> Result<RepoSection> {
     store.read_snapshot(|tx| {
         let repo_id = tx.repo_id(name)?;

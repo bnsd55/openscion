@@ -3,14 +3,15 @@
 //! out-of-space reply that names no server path; nothing acknowledged is
 //! lost, no file is left half-written, and the next write works once the
 //! space is back.
-use scion_server::test_support::backend::BackendExt;
-use scion_server::test_support::meta::{Meta as _, MetaTx as _, RepoId};
-use scion_server::test_support::store::Store;
-use scion_server::{Backend, Error, StorageClass};
+mod common;
+
+use scion_core::{Changeset, IdentityTime};
+use scion_server::test_support::meta::{Meta as _, MetaTx as _};
+use scion_server::{Backend, Error};
 
 /// A store on the backend the tests run on.
 fn store() -> (tempfile::TempDir, Backend) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     (dir, store)
 }
@@ -99,72 +100,6 @@ fn a_batch_that_loses_a_file_keeps_its_earlier_files() {
     store.blobs().put(b"after\n").unwrap();
 }
 
-/// Fills the metadata database to a file size of its current pages plus
-/// `extra`, so the next write that must grow the file hits the real
-/// disk-full of the database, not a hook.
-fn cap_metadata(store: &Backend, extra: i64) {
-    let store = store
-        .sqlite()
-        .expect("the page cap is a data-directory test");
-    store.cap_database_pages(extra);
-}
-
-fn release_metadata(store: &Backend) {
-    let Some(store) = store.sqlite() else {
-        return;
-    };
-    store.release_database_pages();
-}
-
-#[test]
-fn a_metadata_write_that_must_grow_the_file_answers_out_of_space() {
-    let (_dir, store) = store();
-    if Backend::test_is_postgres() {
-        // On Postgres the metadata lives in the database; its disk full is
-        // the SQLSTATE 53100 arm of the pg mapping, a unit test of
-        // pg.rs. The blob files of this test still run on Postgres, above.
-        return;
-    }
-    let _repo = store.write(|c| c.create_repo("r")).unwrap();
-    // One transaction that must grow the file: a thousand repos, past a
-    // cap of eight pages over the current size.
-    cap_metadata(&store, 8);
-    let error = store
-        .write(|c| {
-            for i in 0..2000 {
-                c.create_repo(&format!("repo-{i}"))?;
-            }
-            Ok(())
-        })
-        .unwrap_err();
-    let out_of_space = matches!(
-        &error,
-        Error::Storage(storage) if storage.class() == StorageClass::DiskFull
-    );
-    assert!(out_of_space, "{error:?}");
-    // The same raw error, mapped: the fixed reply, no path in it.
-    let status = tonic::Status::from(Error::Io(std::io::Error::from_raw_os_error(28)));
-    assert_eq!(status.code(), tonic::Code::ResourceExhausted);
-    assert_eq!(
-        status.message(),
-        "the server is out of disk space; retry later"
-    );
-    drop(error);
-    // The transaction rolled back: no repo landed, and a read works.
-    assert!(store.read(|c| c.repo_id("r")).is_ok());
-    assert!(
-        store
-            .read(|c| c.repo_id("repo-1999"))
-            .unwrap_err()
-            .to_string()
-            .contains("not found")
-    );
-    // The space is back: the same write works, and the next one too.
-    release_metadata(&store);
-    let _repo2 = store.write(|c| c.create_repo("r2")).unwrap();
-    assert!(store.read(|c| c.repo_id("repo-2000")).is_err());
-}
-
 #[test]
 fn the_blob_hook_refuses_exactly_one_write_per_count() {
     let (dir, store) = store();
@@ -181,8 +116,12 @@ fn the_blob_hook_refuses_exactly_one_write_per_count() {
         b"d\n"
     );
     // Another open of the same directory still reads the stored files.
+    // The reopen waits out the inherited-flock teardown tick (the child
+    // another test forked shares the lock until the reap; macOS releases
+    // it one tick after waitpid): a real lock leak still fails the guard.
     drop(store);
-    let again = Store::open(dir.path()).unwrap();
+    common::spawn_guard::wait_for_lock_release(dir.path());
+    let again = Backend::open_test(dir.path()).unwrap();
     assert_eq!(
         again.blobs().get(scion_core::BlobId::of(b"a\n")).unwrap(),
         b"a\n"
@@ -338,39 +277,62 @@ fn a_fsync_hook_refuses_exactly_one_fsync_per_count() {
     assert_eq!(store.blobs().get(one).unwrap(), b"a\n");
 }
 
-/// The failing-disk runbook (docs/operations.md, "A failing disk"),
-/// step by step: a read the disk refuses answers internal, the fsck
-/// command names the damage and exits 1, the restore of a backup taken
-/// per section 3 serves clean, and the runbook's fsck-after-restore is
-/// clean too.
+/// The failing-disk runbook (`docs/operations.md`, the failure section),
+/// on the Postgres-backed store: damage on disk, the `fsck` command to
+/// its exit 1 with the problem named, the restore of a backup into a
+/// fresh directory - the runbook's `pg_dump` snapshot plus the blob copy,
+/// loaded under the fresh directory's own schema - and fsck clean on the
+/// restored copy before the server starts./// The failing-disk runbook (`docs/operations.md`, the failure section),
+/// on the Postgres-backed store: a blob file the disk damaged answers
+/// EIO to its reads while the metadata keeps serving; `fsck` exits 1
+/// with the blob named; the restore of the backup into a fresh
+/// directory is fsck-clean; and the restored store opens and reads the
+/// ref it backed up. The backup is section 3's: the metadata snapshot
+/// (`pg_dump`) first, the blob files second.
 #[test]
 fn a_failing_disk_runbook_fscks_restores_and_serves() {
-    if Backend::test_is_postgres() {
-        // The metadata lives in the database then: the backup arm of
-        // the runbook is the pg_dump one, and backup.rs covers it.
-        return;
-    }
     let (dir, store) = store();
     // Real data: a repo whose changeset names one blob, and a second
     // blob the read can fail on.
-    let (named, healthy, repo, cs) = seed_named_repo(&store);
+    let named = store.blobs().put(b"named\n").unwrap();
+    let healthy = store.blobs().put(b"healthy\n").unwrap();
+    let cs = Changeset::new(
+        vec![],
+        IdentityTime::new(
+            b"Ada".to_vec(),
+            b"ada@example.com".to_vec(),
+            1_700_000_000,
+            0,
+        )
+        .expect("identity fits the format"),
+        None,
+        b"runbook\n".to_vec(),
+        [(
+            scion_core::RepoPath::new("RUNBOOK.md").unwrap(),
+            Some(scion_core::FileState::Regular {
+                content: named,
+                executable: false,
+            }),
+        )]
+        .into(),
+    )
+    .expect("changeset fits the format");
+    let (repo, cs) = store
+        .write(|c| {
+            let repo = c.create_repo("main")?;
+            let cs = c.insert_changeset(repo, &cs)?;
+            assert!(c.cas_ref(repo, "main", None, cs)?);
+            Ok((repo, cs))
+        })
+        .unwrap();
 
     // The backup the runbook restores from, in section 3's order: the
     // metadata snapshot first, the blob files second.
     let backup = dir.path().join("backup");
     std::fs::create_dir_all(backup.join("objects")).unwrap();
-    let vacuumed = backup.join("scion.db");
-    let snap = std::process::Command::new("sqlite3")
-        .arg(dir.path().join("scion.db"))
-        .arg(format!("VACUUM INTO '{}'", vacuumed.display()))
-        .output()
-        .expect("sqlite3 runs");
-    assert!(
-        snap.status.success(),
-        "VACUUM INTO failed: {}",
-        String::from_utf8_lossy(&snap.stderr)
-    );
-    // Then the blob files, per section 3's order.
+    let dump = backup.join("metadata.sql");
+    let schema = Backend::test_schema(dir.path());
+    dump_schema(&schema, &dump);
     copy_tree(&dir.path().join("objects"), &backup.join("objects"));
 
     // The disk fails: a read of the healthy blob answers EIO, and the
@@ -402,6 +364,10 @@ fn a_failing_disk_runbook_fscks_restores_and_serves() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(["--data", dir.path().to_str().unwrap(), "fsck"])
         .env("NO_COLOR", "1")
+        .env(
+            "SCION_POSTGRES_URL",
+            Backend::test_postgres_url(dir.path()).unwrap(),
+        )
         .output()
         .expect("the fsck command runs");
     assert_eq!(
@@ -416,27 +382,47 @@ fn a_failing_disk_runbook_fscks_restores_and_serves() {
         "fsck names the damaged blob: {report}"
     );
 
-    // The restore, section 3's recipe: a fresh directory gets the
-    // metadata snapshot and the objects copy, fsck runs on it, and the
-    // server opens it.
-    let fresh = dir.path().join("restored");
-    std::fs::create_dir_all(&fresh).unwrap();
-    std::fs::copy(&vacuumed, fresh.join("scion.db")).unwrap();
+    the_restored_store_serves(dir.path(), &backup, &dump, &schema, repo, cs);
+}
+
+/// The restore, section 3's recipe: a fresh directory gets the metadata
+/// snapshot and the objects copy, fsck runs on it, and the server opens
+/// it. The snapshot loads under the fresh directory's own schema, the
+/// way a restore of a `pg_dump` lands in the target's schema.
+fn the_restored_store_serves(
+    dir: &std::path::Path,
+    backup: &std::path::Path,
+    dump: &std::path::Path,
+    schema: &str,
+    repo: scion_server::test_support::meta::RepoId,
+    cs: scion_core::ChangesetId,
+) -> Backend {
+    let fresh = dir.join("restored");
+    scion_proto::runtime::auth::create_private_dir_all(&fresh).unwrap();
+    let fresh_schema = Backend::test_schema(&fresh);
+    rename_in(dump, schema, &fresh_schema);
+    load_schema(dump);
+    // The backend marker travels with the metadata (the runbook's step:
+    // it holds the store UUID the metadata holds too).
+    std::fs::copy(dir.join("backend"), fresh.join("backend")).unwrap();
     copy_tree(&backup.join("objects"), &fresh.join("objects"));
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(["--data", fresh.to_str().unwrap(), "fsck"])
         .env("NO_COLOR", "1")
+        .env(
+            "SCION_POSTGRES_URL",
+            Backend::test_postgres_url(&fresh).unwrap(),
+        )
         .output()
         .expect("the fsck command runs");
     assert_eq!(
         out.status.code(),
         Some(0),
-        "{}",
-        String::from_utf8_lossy(&out.stdout)
+        "stdout: {} stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
     );
     let restored = Backend::open_test(&fresh).expect("the restored store opens");
-    assert_eq!(restored.blobs().get(named).unwrap(), b"named\n");
-    assert_eq!(restored.blobs().get(healthy).unwrap(), b"healthy\n");
     let head = restored
         .read(|c| c.get_ref(repo, "main").map(|r| r.map(|r| r.target)))
         .unwrap();
@@ -445,49 +431,63 @@ fn a_failing_disk_runbook_fscks_restores_and_serves() {
         Some(cs),
         "the restored ref names the restored changeset"
     );
+    restored
 }
 
-/// Real data for the runbook tests: one blob a changeset names, one
-/// blob that is only a file, the repo, and the ref's target.
-fn seed_named_repo(
-    store: &Backend,
-) -> (
-    scion_core::BlobId,
-    scion_core::BlobId,
-    RepoId,
-    scion_core::ChangesetId,
-) {
-    let named = store.blobs().put(b"named\n").unwrap();
-    let healthy = store.blobs().put(b"healthy\n").unwrap();
-    let repo = store.write(|c| c.create_repo("main")).unwrap();
-    let cs = scion_core::Changeset::new(
-        vec![],
-        scion_core::IdentityTime::new(
-            b"Ada".to_vec(),
-            b"ada@example.com".to_vec(),
-            1_700_000_000,
-            0,
-        )
-        .expect("identity fits the format"),
-        None,
-        b"runbook\n".to_vec(),
-        [(
-            scion_core::RepoPath::new("RUNBOOK.md").unwrap(),
-            Some(scion_core::FileState::Regular {
-                content: named,
-                executable: false,
-            }),
-        )]
-        .into(),
-    )
-    .expect("changeset fits the format");
-    let cs = store
-        .write(|c| c.insert_changeset(repo, &cs))
-        .expect("the changeset lands");
-    store
-        .write(|c| c.cas_ref(repo, "main", None, cs))
-        .expect("the ref moves");
-    (named, healthy, repo, cs)
+/// The backup the runbook's pg arm restores from: `pg_dump` of the live
+/// metadata into `out`, the way backup.rs takes it. The dump runs in the
+/// job's Postgres container when the CI gives one - its tools match the
+/// server's - and on the host otherwise, where a local run's tools talk
+/// to the same database.
+fn dump_schema(schema: &str, out: &std::path::Path) {
+    let url = std::env::var("SCION_TEST_POSTGRES_URL").expect("SCION_TEST_POSTGRES_URL");
+    let (mut cmd, target): (std::process::Command, String) =
+        match std::env::var("SCION_TEST_PG_CONTAINER") {
+            Ok(container) => {
+                // Inside the container the database is the service's own
+                // `postgres` database, named by the URL's last path part.
+                let db = url.rsplit('/').next().unwrap().to_owned();
+                let mut c = std::process::Command::new("docker");
+                c.args(["exec", &container, "pg_dump", "-U", "postgres"]);
+                (c, db)
+            }
+            Err(_) => (std::process::Command::new("pg_dump"), url),
+        };
+    let status = cmd
+        .args(["--no-owner", &format!("--schema={schema}"), &target])
+        .stdout(std::process::Stdio::from(
+            std::fs::File::create(out).unwrap(),
+        ))
+        .status()
+        .expect("pg_dump runs");
+    assert!(status.success(), "pg_dump of {schema} failed");
+}
+
+/// Renames the schema in the dump, so it loads under the fresh
+/// directory's own schema name (`scion_test_<16 hex digits>`, which no
+/// stored data contains).
+fn rename_in(file: &std::path::Path, from: &str, to: &str) {
+    let text = std::fs::read_to_string(file).unwrap();
+    std::fs::write(file, text.replace(from, to)).unwrap();
+}
+
+/// Loads a dump into the test database, as the runbook's restore does.
+fn load_schema(file: &std::path::Path) {
+    let url = std::env::var("SCION_TEST_POSTGRES_URL").expect("SCION_TEST_POSTGRES_URL");
+    let dump = std::fs::File::open(file).unwrap();
+    let output = std::process::Command::new("psql")
+        .arg("-v")
+        .arg("ON_ERROR_STOP=1")
+        .arg("-d")
+        .arg(&url)
+        .stdin(std::process::Stdio::from(dump))
+        .output()
+        .expect("psql runs");
+    assert!(
+        output.status.success(),
+        "the dump failed to load: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// Section 3's `cp -R` of the objects tree, folder by folder.

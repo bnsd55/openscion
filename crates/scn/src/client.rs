@@ -579,9 +579,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_socket_through_a_symlinked_directory_is_reached_at_its_resolved_path() {
-        let tmp = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::DirBuilderExt as _;
+
+        let tmp = scion_server::test_support::private_tempdir();
         let real = tmp.path().join("real");
-        fs::create_dir(&real).unwrap();
+        fs::DirBuilder::new().mode(0o700).create(&real).unwrap();
         let _listener = std::os::unix::net::UnixListener::bind(real.join("daemon.sock")).unwrap();
         // A link whose name is too long for a socket address (104 bytes on
         // macOS, 108 on Linux): only the resolved path can connect.

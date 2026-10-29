@@ -26,13 +26,13 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
-    /// The data directory. Holds the SQLite database and the objects.
+    /// The data directory. Holds the objects and the backend marker file.
     #[arg(long, global = true, env = "SCION_DATA", default_value = "scion-data")]
     data: PathBuf,
-    /// Serve metadata from Postgres at this URL instead of the SQLite
-    /// database of the data directory. The URL holds the credentials, so it
-    /// is never logged. Prefer `--postgres-url-file` or `SCION_POSTGRES_URL`:
-    /// a URL on the command line is readable by every local account (`ps`).
+    /// Serve metadata from Postgres at this URL. The URL holds the
+    /// credentials, so it is never logged. Prefer `--postgres-url-file` or
+    /// `SCION_POSTGRES_URL`: a URL on the command line is readable by every
+    /// local account (`ps`).
     #[arg(long, global = true, value_name = "URL")]
     postgres_url: Option<String>,
     /// File with the Postgres URL, read like the access file: the owner
@@ -48,7 +48,9 @@ struct Cli {
     postgres_url_file: Option<PathBuf>,
     /// Verify the certificate of the Postgres server with this CA (PEM).
     /// Required when `--postgres-url` names a host that is not local.
-    #[arg(long, global = true, requires = "postgres_url", value_name = "FILE")]
+    /// The URL may come from any source: `--postgres-url`,
+    /// `--postgres-url-file` or `SCION_POSTGRES_URL`.
+    #[arg(long, global = true, value_name = "FILE")]
     postgres_ca: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
@@ -541,7 +543,7 @@ async fn restore_command(
     audit: scion_server::Audit,
     data: &Path,
     archive: &Path,
-    postgres_url: Option<&str>,
+    postgres_url: &str,
     postgres_ca: Option<&Path>,
 ) -> anyhow::Result<()> {
     let what = serde_json::json!({ "what": "restore" });
@@ -803,19 +805,22 @@ async fn main() -> anyhow::Result<()> {
         _ => None,
     };
     // `hash-token`, `verify`, and `restore` need no data directory (verify
-    // reads only the archive; restore makes a new one). An import does not
-    // land, so it can run beside the server. `derive` removes rows of older
-    // versions of a kind, which a running server of an older build may
-    // read, so it opens as the server.
-    // The Postgres URL of the flags: the file form wins (the two cannot
-    // be given together), the argv form warns, the env is quiet.
-    let postgres_url = postgres_url_of(&cli)?;
+    // reads only the archive; restore makes a new one), and `hash-token`
+    // and `ticket-key` read no store, so none of the four needs the
+    // Postgres URL. An import does not land, so it can run beside the
+    // server. `derive` removes rows of older versions of a kind, which a
+    // running server of an older build may read, so it opens as the
+    // server.
     // `verify` and `restore` run without a store: verify reads only the
     // archive, and restore makes a data directory of its own. Handle them
     // before the store opens, so a restore's empty target stays empty of
     // one, and an archive check opens nothing at all.
     match cli.command {
         Command::Verify { archive } => verify_command(&archive),
+        // `hash-token` reads none of the store: it runs before the URL
+        // is resolved, so an operator who hashes a token needs no
+        // database.
+        Command::HashToken { .. } => return hash_token(),
         Command::Restore {
             archive,
             audit_file,
@@ -827,11 +832,14 @@ async fn main() -> anyhow::Result<()> {
             scion_proto::runtime::auth::create_private_dir_all(&cli.data)
                 .with_context(|| format!("cannot create {}", cli.data.display()))?;
             let audit = cli_audit(&cli.data, audit_file.as_deref())?;
+            // Restore makes a store, so it needs the URL.
+            let postgres_url =
+                postgres_url_of(cli.postgres_url_file.as_ref(), cli.postgres_url.as_ref())?;
             return restore_command(
                 audit,
                 &cli.data,
                 &archive,
-                cli.postgres_url.as_deref(),
+                &postgres_url,
                 cli.postgres_ca.as_deref(),
             )
             .await;
@@ -841,19 +849,12 @@ async fn main() -> anyhow::Result<()> {
     // A missing data directory is refused, not created (#578). Every
     // subcommand that touches a store or writes into the directory must
     // find it there; `restore` is the one command whose job is to
-    // create one, `verify` reads only the archive, and `hash-token`
-    // touches no store. A silent `./scion-data` in whatever directory a
+    // create one, and `verify`, `hash-token` and `ticket-key` returned
+    // above. A silent `./scion-data` in whatever directory a
     // run happened to start in has bitten once already: ticket-key
     // wrote an audit log into the cwd's default, where CI's ACL
     // refused it.
-    if let Err(refusal) = if matches!(
-        cli.command,
-        Command::Verify { .. } | Command::Restore { .. } | Command::HashToken { .. }
-    ) {
-        Ok(())
-    } else {
-        refuse_missing_data_dir(&cli.data)
-    } {
+    if let Err(refusal) = refuse_missing_data_dir(&cli.data) {
         if matches!(cli.command, Command::Fsck) {
             // fsck's exit table promises 2 for "could not run"
             // (docs/stability.md, 1.x): the refusal is that case.
@@ -862,52 +863,66 @@ async fn main() -> anyhow::Result<()> {
         }
         return Err(refusal);
     }
+    // `ticket-key` writes the key file and the audit log, and reads no
+    // store: it runs before the URL is resolved, so a key run needs no
+    // database.
+    if let Command::TicketKey { out, audit_file } = cli.command {
+        // The key file lives wherever the operator says; the audit
+        // log lives in the data directory, as for every other
+        // command. A run that cannot record refuses to make the key.
+        scion_proto::runtime::auth::create_private_dir_all(&cli.data)
+            .with_context(|| format!("cannot create {}", cli.data.display()))?;
+        let audit = cli_audit(&cli.data, audit_file.as_deref())?;
+        return ticket_key_command(audit, &out).await;
+    }
+    // Every remaining command opens the store, so all of them need the
+    // Postgres URL: resolve it once, here. The commands that read none
+    // of the store - `verify`, `hash-token`, `ticket-key` - returned
+    // above, and never refuse a missing one. `fsck`'s exit table
+    // promises 2 for "could not run", and a missing URL is that case;
+    // the other commands fail with the generic open failure's 1.
+    let postgres_url =
+        match postgres_url_of(cli.postgres_url_file.as_ref(), cli.postgres_url.as_ref()) {
+            Ok(url) => url,
+            Err(why) => {
+                if matches!(cli.command, Command::Fsck) {
+                    eprintln!("scion-server fsck: {why:#}");
+                    std::process::exit(2);
+                }
+                return Err(why);
+            }
+        };
     let store = match cli.command {
         Command::Import { .. } | Command::Gc { .. } | Command::Export { .. } => {
-            Backend::open_shared(
-                &cli.data,
-                postgres_url.as_deref(),
-                cli.postgres_ca.as_deref(),
-            )
-        }
-        Command::HashToken { .. } => return hash_token(),
-        Command::TicketKey { out, audit_file } => {
-            // The key file lives wherever the operator says; the audit
-            // log lives in the data directory, as for every other
-            // command. A run that cannot record refuses to make the key.
-            scion_proto::runtime::auth::create_private_dir_all(&cli.data)
-                .with_context(|| format!("cannot create {}", cli.data.display()))?;
-            let audit = cli_audit(&cli.data, audit_file.as_deref())?;
-            return ticket_key_command(audit, &out).await;
+            Backend::open_shared(&cli.data, &postgres_url, cli.postgres_ca.as_deref())
         }
         // `fsck` cannot run when the store cannot open, and its table
         // says that is 2, not the generic open failure's 1.
-        Command::Fsck => match Backend::open_shared(
-            &cli.data,
-            postgres_url.as_deref(),
-            cli.postgres_ca.as_deref(),
-        ) {
-            Ok(store) => Ok(store),
-            Err(e) => {
-                eprintln!("scion-server fsck: {e}");
-                // `exit` skips destructors: safe on this path, because
-                // nothing was opened yet — the store refused to open,
-                // so there is no lock to release and nothing buffered.
-                std::process::exit(2);
+        Command::Fsck => {
+            match Backend::open_shared(&cli.data, &postgres_url, cli.postgres_ca.as_deref()) {
+                Ok(store) => Ok(store),
+                Err(e) => {
+                    eprintln!("scion-server fsck: {e}");
+                    // `exit` skips destructors: safe on this path, because
+                    // nothing was opened yet — the store refused to open,
+                    // so there is no lock to release and nothing buffered.
+                    std::process::exit(2);
+                }
             }
-        },
-        // `verify` and `restore` ended the function above: verify exits,
-        // and restore returns.
-        Command::Verify { .. } | Command::Restore { .. } => {
+        }
+        // `verify`, `restore`, `hash-token` and `ticket-key` ended the
+        // function above: verify exits, and the others return.
+        Command::Verify { .. }
+        | Command::Restore { .. }
+        | Command::HashToken { .. }
+        | Command::TicketKey { .. } => {
             unreachable!("handled before the store opens")
         }
-        Command::Serve { .. } | Command::Derive { .. } => Backend::open(
-            &cli.data,
-            postgres_url.as_deref(),
-            cli.postgres_ca.as_deref(),
-        ),
+        Command::Serve { .. } | Command::Derive { .. } => {
+            Backend::open(&cli.data, &postgres_url, cli.postgres_ca.as_deref())
+        }
     }
-    .with_context(|| format!("cannot open data directory {}", cli.data.display()))?;
+    .with_context(|| format!("cannot open the store at {}", cli.data.display()))?;
     // A one-shot command removes its own staging folder when it ends -
     // success, error, or panic - so the next open's sweep has nothing of
     // a live run to call a crash's leftover. The guard is armed after
@@ -1186,7 +1201,11 @@ fn serve_flags(args: &ServeArgs) -> anyhow::Result<ServeFlags> {
     let token = match (&args.token, &args.token_file) {
         (Some(_), Some(_)) => unreachable!("clap refuses --token with --token-file"),
         (Some(_), None) => {
-            warn_argv_secret("--token", "--token-file (or SCION_TOKEN)");
+            warn_argv_secret(
+                "--token",
+                "--token-file (or SCION_TOKEN)",
+                "the argv form is deprecated and goes away in a later release",
+            );
             args.token.clone()
         }
         (None, Some(file)) => Some(secret_file(file)?),
@@ -1327,20 +1346,20 @@ async fn serve(
 
 /// The stderr warning of a secret that arrived on the command line: ps
 /// and `/proc/$$/cmdline` show it to every local account, and it lands
-/// in shell history. The argv form stays for now (the owner's call: warn
-/// first, remove in a later minor); the replacement reads a file that
-/// the checked read of the access file protects.
-fn argv_secret_warning(flag: &str, replacement: &str) -> String {
+/// in shell history. The argv form goes away: `--postgres-url` in
+/// v0.2.0 (the owner's call), the rest in a later minor; the
+/// replacement reads a file that the checked read of the access file
+/// protects.
+fn argv_secret_warning(flag: &str, replacement: &str, removal: &str) -> String {
     format!(
         "warning: {flag} put a secret on the command line, which ps and \
          /proc/$$/cmdline show to every local account, and which lands in \
-         shell history; use {replacement} instead (the argv form is \
-         deprecated and goes away in a later release)"
+         shell history; use {replacement} instead ({removal})"
     )
 }
 
-fn warn_argv_secret(flag: &str, replacement: &str) {
-    eprintln!("{}", argv_secret_warning(flag, replacement));
+fn warn_argv_secret(flag: &str, replacement: &str, removal: &str) {
+    eprintln!("{}", argv_secret_warning(flag, replacement, removal));
 }
 
 /// A secret from a file the checked read protects, trimmed: the owner
@@ -1356,22 +1375,32 @@ fn secret_file(file: &Path) -> anyhow::Result<String> {
     Ok(token.to_owned())
 }
 
-/// The Postgres URL of the CLI: the file form wins (clap refuses both
-/// at once), the argv form warns, the env is quiet.
-fn postgres_url_of(cli: &Cli) -> anyhow::Result<Option<String>> {
-    if let Some(file) = &cli.postgres_url_file {
-        return Ok(Some(secret_file(file)?));
-    }
-    if let Some(url) = &cli.postgres_url {
+/// The Postgres URL of the CLI, required: the file form wins (clap
+/// refuses both at once), the argv form warns, the env is quiet. Every
+/// command that opens the store needs one: the metadata has nowhere
+/// else to live. The fields come in one at a time, because a caller
+/// that matched its command out of `Cli` holds a partially moved value.
+fn postgres_url_of(url_file: Option<&PathBuf>, url_arg: Option<&String>) -> anyhow::Result<String> {
+    let url = if let Some(file) = url_file {
+        secret_file(file)?
+    } else if let Some(url) = url_arg {
         warn_argv_secret(
             "--postgres-url",
             "--postgres-url-file (or SCION_POSTGRES_URL)",
+            "--postgres-url will be removed in v0.2.0",
         );
-        return Ok(Some(url.clone()));
-    }
-    Ok(std::env::var("SCION_POSTGRES_URL")
+        url.clone()
+    } else if let Some(url) = std::env::var("SCION_POSTGRES_URL")
         .ok()
-        .filter(|u| !u.is_empty()))
+        .filter(|u| !u.is_empty())
+    {
+        url
+    } else {
+        anyhow::bail!(
+            "no Postgres URL: give --postgres-url, --postgres-url-file or SCION_POSTGRES_URL"
+        );
+    };
+    Ok(url)
 }
 
 /// The rules of `serve`: exactly one of `--token` (one principal with
@@ -1533,7 +1562,11 @@ fn hash_token() -> anyhow::Result<()> {
         (Some(_), Some(_)) => unreachable!("clap refuses --token with --token-file"),
         (None, Some(file)) => secret_file(file)?,
         (Some(_), None) => {
-            warn_argv_secret("--token", "--token-file, SCION_TOKEN or stdin");
+            warn_argv_secret(
+                "--token",
+                "--token-file, SCION_TOKEN or stdin",
+                "the argv form is deprecated and goes away in a later release",
+            );
             let token = token.expect("the argv form is given");
             let trimmed = token.trim();
             anyhow::ensure!(
@@ -1569,6 +1602,16 @@ fn hash_token() -> anyhow::Result<()> {
 #[cfg(test)]
 mod key_file_tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// A temp directory the run owns outright: mode 0700, whatever the
+    /// umask. The server refuses a data directory group or others can
+    /// read, and a plain temp directory is 0777 less the umask.
+    fn private_tempdir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir
+    }
 
     fn write_key(dir: &Path, name: &str, mode: u32, text: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1580,21 +1623,21 @@ mod key_file_tests {
 
     #[test]
     fn a_private_seed_reads_back_trimmed() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let file = write_key(dir.path(), "seed", 0o600, "  abcd \n");
         assert_eq!(read_hex(&file, true).unwrap(), "abcd");
     }
 
     #[test]
     fn a_public_key_reads_back() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let file = write_key(dir.path(), "old", 0o644, "abcd\n");
         assert_eq!(read_hex(&file, false).unwrap(), "abcd");
     }
 
     #[test]
     fn a_group_readable_seed_file_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let file = write_key(dir.path(), "seed", 0o640, "abcd");
         let err = read_hex(&file, true).unwrap_err().to_string();
         assert!(err.contains("read by group or others"), "{err}");
@@ -1602,7 +1645,7 @@ mod key_file_tests {
 
     #[test]
     fn a_group_writable_public_key_file_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let file = write_key(dir.path(), "old", 0o664, "abcd");
         let err = read_hex(&file, false).unwrap_err().to_string();
         assert!(err.contains("written by group or others"), "{err}");
@@ -1614,7 +1657,7 @@ mod key_file_tests {
     /// whichever file the path names when the read happens.
     #[test]
     fn a_symlinked_key_is_refused_with_a_perfect_target() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let target = write_key(dir.path(), "real", 0o600, "abcd");
         let link = dir.path().join("seed");
         std::os::unix::fs::symlink(&target, &link).unwrap();
@@ -1629,6 +1672,16 @@ mod key_file_tests {
 #[cfg(test)]
 mod access_file_tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// A temp directory the run owns outright: mode 0700, whatever the
+    /// umask. The server refuses a data directory group or others can
+    /// read, and a plain temp directory is 0777 less the umask.
+    fn private_tempdir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir
+    }
 
     fn write_access(dir: &Path, name: &str, mode: u32, text: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1656,7 +1709,7 @@ mod access_file_tests {
 
     #[test]
     fn an_access_file_the_group_or_others_can_read_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let file = write_access(dir.path(), "access", 0o644, "# rules\n");
         let err = load_access(None, None, Some(file)).unwrap_err().to_string();
         assert!(err.contains("read by group or others"), "{err}");
@@ -1664,7 +1717,7 @@ mod access_file_tests {
 
     #[test]
     fn a_private_access_file_parses() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let file = write_access(dir.path(), "access", 0o600, "# rules\n");
         let (_, single) = load_access(None, None, Some(file)).unwrap();
         assert!(!single);
@@ -1672,7 +1725,7 @@ mod access_file_tests {
 
     #[test]
     fn a_symlinked_access_file_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let target = write_access(dir.path(), "real", 0o600, "# rules\n");
         let link = dir.path().join("access");
         std::os::unix::fs::symlink(&target, &link).unwrap();

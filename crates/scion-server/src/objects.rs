@@ -592,7 +592,6 @@ fn of(key: &Key) -> (ObjectKind, [u8; 32]) {
 #[cfg(test)]
 mod tests {
     use crate::backend::Backend;
-    use crate::store::Store;
     use std::io::Read as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -622,7 +621,7 @@ mod tests {
     }
 
     /// The length of a blob's stored file.
-    fn packed_len(store: &Store, key: Key) -> usize {
+    fn packed_len(store: &Backend, key: Key) -> usize {
         let Key::Blob(id) = key else {
             panic!("not a blob")
         };
@@ -641,18 +640,20 @@ mod tests {
     // test sees the second object hold its share, however busy the machine.
     #[tokio::test(start_paused = true)]
     async fn a_client_that_stops_reading_is_cut_off_and_frees_its_budget() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
-        let raw = store.as_sqlite().expect("the client tests run on SQLite");
+        // The client mechanics read the blob files' packed sizes
+        // (`packed_len`): the test measures the object bytes on the store's
+        // own files.
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
         let keys: Vec<Key> = [b"one".as_slice(), b"second", b"three"]
             .iter()
             .map(|data| Key::Blob(store.blobs().put(data).unwrap()))
             .collect();
-        let second = packed_len(raw, keys[1]);
+        let second = packed_len(&store, keys[1]);
         // Files of two sizes, so the free budget shows which object holds a
         // share. With one size, the first object, before it is sent, looks
         // like the second.
-        assert_ne!(packed_len(raw, keys[0]), second);
+        assert_ne!(packed_len(&store, keys[0]), second);
         let budget = 1000;
         let in_flight = Arc::new(Semaphore::new(budget));
         let stall = Duration::from_millis(50);
@@ -691,8 +692,8 @@ mod tests {
             read_object(store, key, plan)
         }
 
-        let dir = tempfile::tempdir().unwrap();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
         let a = Key::Blob(store.blobs().put(b"a blob").unwrap());
         let budget = 1000;
         let in_flight = Arc::new(Semaphore::new(budget));
@@ -733,8 +734,8 @@ mod tests {
     // fails the call before any object is read.
     #[tokio::test]
     async fn a_walk_bigger_than_the_free_budget_ends_resource_exhausted() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
         let a = Key::Blob(store.blobs().put(b"a blob").unwrap());
         let budget = 1000;
         let in_flight = Arc::new(Semaphore::new(budget));
@@ -772,8 +773,8 @@ mod tests {
     /// deadline, not after the 30 s limit.
     #[tokio::test]
     async fn a_wait_for_room_ends_before_the_deadline() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
         let a = Key::Blob(store.blobs().put(b"a blob").unwrap());
         let in_flight = Arc::new(Semaphore::new(1000));
         let _others = reply::try_take(&in_flight, 1000).unwrap();
@@ -812,8 +813,8 @@ mod tests {
             read_object(store, key, plan)
         }
 
-        let dir = tempfile::tempdir().unwrap();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
         let content = vec![b'x'; 5000];
         let key = Key::Blob(store.blobs().put(&content).unwrap());
         let in_flight =
@@ -861,8 +862,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_blob_goes_out_as_its_stored_file_in_parts_or_unpacked() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
         // Over three parts once packed: bytes that do not compress.
         let mut state = 1_u64;
         let content: Vec<u8> = (0..3 * CHUNK_BYTES + 100)
@@ -935,8 +936,8 @@ mod tests {
     fn a_ticket_walk_stops_before_it_decodes_past_the_budget() {
         use scion_core::{Entry, FileEntry, FileState, PathElem, Tree};
         use std::collections::BTreeMap;
-        let dir = tempfile::tempdir().unwrap();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
         // A middle tree whose one file entry has a wide name, so its body
         // is hundreds of bytes, under a root of one small entry, over a
         // leaf the ref ends at.
@@ -1020,7 +1021,7 @@ mod tests {
     fn a_tree_size_reads_the_octets_of_a_stored_tree() {
         use scion_core::Tree;
         use std::collections::BTreeMap;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test(dir.path()).unwrap();
         let tree = Tree::new(BTreeMap::new()).expect("tree fits the format");
         let id = store.write(|c| c.put_tree(&tree)).unwrap();
@@ -1037,7 +1038,7 @@ mod tests {
         use crate::meta::MetaTx as _;
         use scion_core::{Changeset, IdentityTime};
         use std::collections::BTreeMap;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test(dir.path()).unwrap();
         let repo = store.write(|c| c.create_repo("fsck-rows")).unwrap();
         // The derived table's foreign key names a stored changeset.

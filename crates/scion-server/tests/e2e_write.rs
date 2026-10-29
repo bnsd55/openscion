@@ -77,7 +77,7 @@ fn regular(content: BlobId) -> FileState {
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn uploaded_file_reads_back_through_a_created_changeset() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     let readme = store.blobs().put(b"# hello\n").unwrap();
     let root = store

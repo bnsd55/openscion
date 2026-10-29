@@ -5,8 +5,7 @@ up a server and a cache, both with TLS, seeds a repo with one commit, and
 checks it out through the cache.
 
 ```sh
-sh docker/demo.sh           # the server keeps its metadata in SQLite
-sh docker/demo.sh postgres  # the server keeps its metadata in Postgres
+sh docker/demo.sh
 ```
 
 What it does:
@@ -35,18 +34,21 @@ certificates and a real token for anything that matters.
   the image always builds with a supported toolchain). The runtime is
   `debian:bookworm-slim` with `ca-certificates`, running as the non-root
   user `scion` (uid 10001); data lives under `/data`, which a named volume
-  owns.
-- `docker/compose.yml`: the `server`, `cache`, and a one-shot `scn` runner.
+  owns. `/data` is mode 0700 in the image, so a named volume inherits it
+  at its first creation: the server refuses a data directory that other
+  users can read or write, and the volume starts inside the rule. A bind
+  mount keeps the host directory's own mode instead, so the operator
+  makes it private first: `chmod 700 <host dir>`.
+- `docker/compose.yml`: the `server`, the `postgres` database its metadata
+  lives in, the `cache`, and a one-shot `scn` runner.
 - `docker/demo.sh`: the script the steps above describe.
-- `docker/compose.postgres.yml`: the Postgres variant's additions, loaded
-  on top of `docker/compose.yml` by `docker/demo.sh postgres`.
 
-## The Postgres variant
+## The database
 
-`sh docker/demo.sh postgres` runs the same checkout with the server's
-metadata in a `postgres:17` container. `docker/compose.postgres.yml` adds
-the database and re-points the server at it with `--postgres-url`; the
-server's data directory keeps only the marker file and the ticket key.
+The demo's server keeps its metadata in a `postgres:17` container, which
+`docker/compose.yml` carries and points the server at with
+`--postgres-url`; the server's data directory keeps only the marker file
+and the ticket key.
 
 The database's traffic leaves the machine, so #178's rule applies: the
 URL names `sslmode=require`, and `--postgres-ca` checks the database's

@@ -676,9 +676,10 @@ mod tests {
 
     use super::*;
 
-    /// A temp directory, and its owner.
+    /// A private temp directory (mode 0700, whatever the umask), and its
+    /// owner.
     fn tempdir() -> (tempfile::TempDir, u32) {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::runtime::private_tempdir();
         let me = fs::metadata(tmp.path()).unwrap().uid();
         (tmp, me)
     }
@@ -695,9 +696,6 @@ mod tests {
     #[test]
     fn private_directories_are_made_0700_and_existing_ones_keep_their_mode() {
         let (tmp, me) = tempdir();
-        // The temp directory's own mode is the umask's: set it, so only the
-        // directories made below it are judged.
-        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
         // Every part that is made is private, not only the last one. The
         // run's umask, 002 or 022, would leave 0775 or 0755 on a plain mkdir.
         create_private_dir_all(&tmp.path().join("a/b/c")).unwrap();

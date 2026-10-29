@@ -17,12 +17,12 @@ use scion_core::{
 };
 
 use crate::backend::Backend;
-use crate::db;
 use crate::deadline::Deadline;
 use crate::derived::{self, Kind};
 use crate::error::{ApplyError, Error, Result};
 use crate::graph::CommitGraph;
 use crate::history::PathHistory;
+use crate::meta as db;
 use crate::meta::{MetaTx, RepoId};
 
 /// The byte length of a blob, as the tree entries carry it. The store reads
@@ -523,10 +523,7 @@ impl Dir {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::Backend;
-    use crate::db::SqliteTx;
     use crate::meta::Meta as _;
-    use crate::store::Store;
     use scion_core::{BlobId, Changeset, IdentityTime};
     /// `(path, Some(content))` puts a regular file; `(path, None)` deletes.
     type Edits<'a> = &'a [(&'a str, Option<&'a str>)];
@@ -549,10 +546,13 @@ mod tests {
         RepoPath::new(p).unwrap()
     }
 
-    /// Runs `f` in one write transaction on a fresh store.
-    fn with_db<T>(f: impl FnOnce(&mut SqliteTx<'_>) -> Result<T>) -> T {
-        let dir = tempfile::tempdir().unwrap();
-        Store::open(dir.path()).unwrap().write(f).unwrap()
+    /// Runs `f` in one write transaction on a fresh test store.
+    fn with_db<T>(f: impl FnOnce(&mut crate::backend::BackendTx<'_>) -> Result<T>) -> T {
+        let dir = crate::test_support::private_tempdir();
+        crate::Backend::open_test(dir.path())
+            .unwrap()
+            .write(f)
+            .unwrap()
     }
 
     fn files(c: &mut dyn MetaTx, root: TreeId) -> Vec<String> {
@@ -872,8 +872,8 @@ mod tests {
             "b4717ab9e5bbd8b20c844a4236fededbea08e83cedbd871731fa9e948a0cbac8",
         ];
         for stored in [true, false] {
-            let dir = tempfile::tempdir().unwrap();
-            let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+            let dir = crate::test_support::private_tempdir();
+            let store = Backend::open_test(dir.path()).unwrap();
             // The chain's six puts name blobs "1".."6"; their files feed the
             // real lens, so stored and re-derived trees carry true lengths.
             for c in ["1", "2", "3", "4", "5", "6"] {
@@ -919,8 +919,8 @@ mod tests {
     /// the deadline, `read_file` returned the file's bytes.
     #[test]
     fn a_read_with_a_past_deadline_derives_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
         store.blobs().put(b"1").unwrap();
         // A changeset with no root tree row yet.
         let cs = store
@@ -947,8 +947,8 @@ mod tests {
     /// could lose a tree that the client was told about.
     #[test]
     fn get_root_tree_flushes_once_after_it_derives() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
         store.blobs().put(b"1").unwrap();
         // A changeset with no root tree row yet.
         let cs = store
@@ -974,8 +974,8 @@ mod tests {
 
     #[test]
     fn root_tree_derives_a_long_chain_and_caches_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
         let author = IdentityTime::new(b"a".to_vec(), b"a@x".to_vec(), 0, 0)
             .expect("identity fits the format");
         // Every put of the chain names its index as the blob; their files

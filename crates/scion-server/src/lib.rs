@@ -19,12 +19,10 @@
 //! The layers, bottom up. The private ones carry no links: they are not
 //! API, and their names here are orientation, not references.
 //!
-//! - `backend` and `meta`: one metadata trait over two backends: a data
-//!   directory on this machine (`store`: SQLite for metadata and trees),
-//!   and a Postgres database (`pg`) for the metadata instead. The blob
-//!   files stay on local disk in both: one blob folder per server. One
-//!   server runs per database: a second one is refused at open. What a
-//!   user touches is [`Backend`].
+//! - `backend` and `meta`: one metadata trait over the Postgres backend
+//!   (`pg`), with the blob files on local disk (one blob folder per
+//!   server). One server runs per database: a second one is refused at
+//!   open. What a user touches is [`Backend`].
 //! - `derived`: one mechanism for every kind of derived data, which
 //!   `backfill_root_tree` and its two sibling functions drive.
 //! - `tree`: apply changesets to trees and derive each changeset's root
@@ -64,7 +62,6 @@ pub(crate) mod backend;
 pub use backend::Backend;
 pub mod archive;
 pub(crate) mod blame;
-pub(crate) mod db;
 pub(crate) mod deadline;
 pub(crate) mod derived;
 pub(crate) mod error;
@@ -108,8 +105,27 @@ pub(crate) mod write;
 /// than the modules themselves: the modules are pub(crate), and a pub
 /// re-export of a pub(crate) module is refused (E0365), while a re-export
 /// of the items inside a public submodule is fine.
-#[cfg(feature = "test-hooks")]
+#[cfg(any(test, feature = "test-hooks"))]
 pub mod test_support {
+    /// A temp directory the run owns outright: mode 0700, whatever the
+    /// umask. The server refuses a data directory that group or others
+    /// can read, and a plain `tempfile::tempdir()` is 0777 less the
+    /// umask, so a test that opens a store in the temp directory
+    /// directly must hold a private one.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the temp directory cannot be made: a test wants to
+    /// stop at once anyway.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn private_tempdir() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir
+    }
+
     /// The caller behind an authenticated RPC, for tests that name one.
     pub mod auth {
         pub use crate::auth::Caller;
@@ -210,51 +226,21 @@ pub mod test_support {
     pub mod deadline {
         pub use crate::deadline::*;
     }
-    /// The opaque backend, for the tests that build one from a store
-    /// they prepared, or read the data directory's own store out of
-    /// one. The backend itself carries no test methods: the facade
-    /// type stays clean, and the seams live here.
+    /// The backend's schema version, so a test pins the migration story
+    /// without naming a literal that the next migration turns stale.
     pub mod backend {
-        /// Wraps a store the test prepared ([`Store::open`], or
-        /// `open_with_walks` for a capped walk) into a backend, as the
-        /// engine-agnostic constructors cannot: they open their own.
-        /// The engine the store holds is the test's choice, not part
-        /// of the API.
-        #[must_use]
-        pub fn from_store(store: crate::test_support::store::Store) -> crate::Backend {
-            crate::Backend::sqlite(store)
-        }
-
-        /// The test-only reads of a backend: the data directory's own
-        /// store, when the backend is one. [`None`] on Postgres, whose
-        /// rows a test reads through the [`MetaTx`] queries.
-        pub trait BackendExt {
-            /// The store of a data-directory backend, for the tests
-            /// that assert the storage's internals (its raw rows, its
-            /// page caps).
-            fn sqlite(&self) -> Option<&crate::test_support::store::Store>;
-        }
-
-        impl BackendExt for crate::Backend {
-            fn sqlite(&self) -> Option<&crate::test_support::store::Store> {
-                self.as_sqlite()
-            }
-        }
-
-        /// The schema versions this build migrates to, so a test pins
+        /// The schema version the Postgres schema ships, so a test pins
         /// the migration story without naming a literal that the next
         /// migration turns stale.
         pub mod schema_version {
-            /// The SQLite store's schema version ([`crate::store`]).
-            pub const SQLITE: u32 = crate::store::SCHEMA_VERSION;
-            /// The Postgres schema's version ([`crate::pg`]).
+            /// The Postgres schema's version, for the tests that pin it.
             pub const POSTGRES: u32 = crate::pg::PG_SCHEMA_VERSION;
         }
     }
     /// The error a changeset apply can end in, and the conversion the
     /// tests share with the crate, for the write tests.
     pub mod error {
-        pub use crate::error::{ApplyError, from_sqlite};
+        pub use crate::error::ApplyError;
     }
     /// The counters the import tests read between retries.
     pub mod import {
@@ -280,13 +266,9 @@ pub mod test_support {
     pub mod service {
         pub use crate::service::*;
     }
-    /// The on-disk store, so tests open and inspect one directly.
+    /// The blob folder, so tests read its limits directly.
     pub mod store {
         pub use crate::store::*;
-        /// The schema version this build ships, and the migration runner,
-        /// for a test that makes a store of an older version.
-        #[allow(unreachable_pub)]
-        pub use crate::store::{SCHEMA_VERSION, migrate};
     }
     /// The guide's own commands, so a Proof's test runs the block under
     /// its runbook's heading instead of retyping it.

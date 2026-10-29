@@ -12,9 +12,8 @@ use scion_proto::v1::scion_client::ScionClient;
 use scion_proto::v1::{ListDirRequest, ReadFileRequest};
 use scion_server::Access;
 use scion_server::Backend;
-use scion_server::test_support::backend::from_store;
 use scion_server::test_support::meta::MetaTx as _;
-use scion_server::test_support::{meta::Meta as _, service, store::Store};
+use scion_server::test_support::{meta::Meta as _, service};
 use tokio::net::TcpListener;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
@@ -66,8 +65,8 @@ fn author() -> IdentityTime {
 /// A store whose repo has one root changeset that puts `files` at the repo
 /// root. An empty `files` makes an empty directory.
 fn store(files: &[(Vec<u8>, &[u8])]) -> (tempfile::TempDir, Backend, ChangesetId) {
-    let dir = tempfile::tempdir().unwrap();
-    let store = from_store(Store::open(dir.path()).unwrap());
+    let dir = scion_server::test_support::private_tempdir();
+    let store = Backend::open_test(dir.path()).unwrap();
     let root = store
         .write(|c| {
             let repo = c.create_repo(REPO)?;

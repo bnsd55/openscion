@@ -393,7 +393,7 @@ async fn every_reply_survives_a_power_cut() {
     // 0.1%.
     let rounds = usize::try_from(env("SCION_POWER_ROUNDS", 10)).unwrap();
     let mut pending_kills = 0usize;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let log = dir.path().join("server.log");
     let mut cut_lands = 0;
     let mut total = 0;
@@ -425,7 +425,7 @@ async fn an_acknowledged_write_s_audit_lines_survive_a_power_cut() {
         return;
     }
     let lazyfs = lazyfs_dir().unwrap();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let log = dir.path().join("server.log");
     let lazy = Lazyfs::start(dir.path(), &lazyfs, 0);
     let data = lazy.mount.join("data");
@@ -745,19 +745,11 @@ async fn racing_puts_of_one_blob_survive_a_cut() {
     if !may_run() {
         return;
     }
-    if Backend::test_is_postgres() {
-        // The park that makes the race certain is a SQLite hook: it parks
-        // the store's writer, and the Postgres store has no park. The
-        // blob path of the race is the data directory's, and the cut rows
-        // above prove it; this row stays SQLite-proven.
-        eprintln!("skip on postgres: the write park is a SQLite hook");
-        return;
-    }
     let lazyfs = lazyfs_dir().unwrap();
     let seed = seed();
     let mut rng = Rng::new(seed);
     let rounds = usize::try_from(env("SCION_RACE_ROUNDS", 8)).unwrap();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     // The server's log goes where CI can upload it: next to the LazyFS
     // trace, when the run named that directory.
     let server_log = std::env::var_os("SCION_LAZYFS_TRACE_DIR").map_or_else(
@@ -918,7 +910,7 @@ async fn checker_writes_outlive_the_lazyfs_exit() {
     let seed = seed();
     let mut rng = Rng::new(seed);
     let rounds = usize::try_from(env("SCION_CHECKER_ROUNDS", 4)).unwrap();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let log = dir.path().join("checker.log");
     for round in 200..200 + rounds {
         let mut lazy = Lazyfs::start(dir.path(), &lazyfs, round);
@@ -1008,17 +1000,10 @@ async fn import_process_races_the_server_on_the_same_blob() {
     if !may_run() {
         return;
     }
-    if Backend::test_is_postgres() {
-        // The park that holds the server's writer between keep and rename
-        // is a SQLite hook, and the import beside it opens the data
-        // directory's own database. The row stays SQLite-proven.
-        eprintln!("skip on postgres: the write park is a SQLite hook");
-        return;
-    }
     let lazyfs = lazyfs_dir().unwrap();
     let seed = seed();
     let mut rng = Rng::new(seed);
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let log = dir.path().join("import-race-server.log");
     let mut lazy = Lazyfs::start(dir.path(), &lazyfs, 300);
     let data = lazy.mount.join("data");
@@ -1050,7 +1035,13 @@ async fn import_process_races_the_server_on_the_same_blob() {
     // Only now the import runs. Its write of the blob waits for the
     // writer's flock, the way any other process's write would.
     let import = common::spawn_guard::across_spawn(|| {
-        Command::new(env!("CARGO_BIN_EXE_scion-server"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_scion-server"));
+        // The import child takes the same URL rule every spawned server
+        // takes: the store's own schema, the one the server it races
+        // serves.
+        let url = common::postgres_url(&data);
+        command.arg("--postgres-url").arg(url);
+        command
             .args([
                 "--data",
                 data.to_str().unwrap(),

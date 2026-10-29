@@ -10,12 +10,8 @@ use scion_proto::runtime::listen::Limits;
 use scion_proto::v1::scion_client::ScionClient;
 use scion_proto::v1::{BlameChangeset, BlameRange, BlameRequest};
 use scion_server::Access;
-use scion_server::test_support::backend::from_store;
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
-use scion_server::{
-    Backend,
-    test_support::{service, store::Store},
-};
+use scion_server::{Backend, test_support::service};
 use tokio::net::TcpListener;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
@@ -82,8 +78,8 @@ fn commit(
 /// A store whose repo has one root changeset that puts `file.txt` with
 /// `root_body`, written by a 4-byte author.
 fn store(root_body: &[u8]) -> (tempfile::TempDir, Backend, ChangesetId) {
-    let dir = tempfile::tempdir().unwrap();
-    let store = from_store(Store::open(dir.path()).unwrap());
+    let dir = scion_server::test_support::private_tempdir();
+    let store = Backend::open_test(dir.path()).unwrap();
     let blob = store.blobs().put(root_body).unwrap();
     let root = store
         .write(|c| {

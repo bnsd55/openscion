@@ -33,7 +33,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 10001 --user-group --no-create-home --shell /usr/sbin/nologin scion \
     && mkdir -p /data /certs /work \
-    && chown scion:scion /data /certs /work
+    && chown scion:scion /data /certs /work \
+    && chmod 700 /data
 
 COPY --from=build /out/scion-server /out/scion-cache /out/scn /usr/local/bin/
 

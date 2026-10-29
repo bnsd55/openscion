@@ -64,7 +64,7 @@ only on Linux is marked **(Linux)**.
    ```
 
    Done when: a client can put and read an object (§1's `scion` client,
-   or the walkthrough in the README).
+   or the README's quick start).
 
    Notes: ___
 

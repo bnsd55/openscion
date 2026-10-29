@@ -58,7 +58,7 @@ next minor.
 | `scn` CLI, exit codes | 0 on success, 1 only for `is-ancestor`'s "no", 2 on any error. | `crates/scn/tests/exit_codes.rs`: one line per row of the table. |
 | `scion-server` exit codes | `fsck` exits 0 when it saw no damage, 1 when it did, 2 when it could not run. | `crates/scion-server/tests/fsck_exit.rs`: clean, damaged, and unopenable stores, one line per row. |
 | Production configuration | The flags, env vars and file formats the shipped binaries read change additively in 1.x: what a release ships stays, and 1.x only adds. The flags: docs_flags and docs_cli pin the names the docs carry. The env vars: `crates/scn/tests/env_surface.rs` reads the sources of both binaries, so a removed var fails and a new one enters the golden on purpose. The file formats carry no version field yet (the access file and the marker have none), so the 1.x promise is: keys add only, and a line a build does not know is refused at load, never silently read as a rule — the access file's parser refuses unknown keys, and `an_unknown_line_is_refused` in `crates/scion-server/tests/access.rs` pins it. A version field arrives with the first change that cannot stay additive. | Exists for flags; the env golden is new; the unknown-key refusal is pinned by `an_unknown_line_is_refused`. |
-| SQLite and Postgres schemas | The 0.x rule is the 1.x rule: a released migration never changes, open migrates forward one migration per released version, a database newer than the build is refused, and the N/N-1 window holds (a store from release N-1 opens on N; the pre-upgrade backup restores onto N-1). | Exists: the migration tests; the N-1 restore drill runs weekly (backup-n1.yml, Mondays 06:00, and on dispatch: a server of HEAD against a backup of the pinned N-1, the pre-upgrade backup restored onto N-1). |
+| SQLite and Postgres schemas | The 0.x rule is the 1.x rule: a released migration never changes, open migrates forward one migration per released version, a database newer than the build is refused, and the N/N-1 window holds (a store from release N-1 opens on N; the pre-upgrade backup restores onto N-1). | Exists: the migration tests; the weekly N-1 restore drill and the tagged-store ladder are removed for the Postgres-only build and come back after v0.1.0. |
 | Ticket bytes | The 0.x rule holds, and the window is pinned: v2 may be issued beside v1, both read until at least the next minor (compatibility.md). | Exists: the ticket prefix tests pin the version bytes. |
 | Snapshot files | The 0.x rule holds, and the window is pinned: a new magic is written beside the old one until at least the next minor. | Exists: the snapshot magic tests. |
 
@@ -66,11 +66,9 @@ What carries no machine check, and why: "served throughout 1.x" is a
 statement about every release, not a run — its machine form is the
 additive goldens above, which fail CI on the change that would break a
 client, before it ships. The version matrix is
-[compatibility.md](compatibility.md)'s surface; the tagged-store drill
-is store-upgrade.yml (pull requests that touch the migration surface,
-Mondays 05:30, with pinned stand-in commits until a release tag
-exists) and the N-1 restore drill is backup-n1.yml (Mondays 06:00):
-stability.md links to them instead of duplicating their checks.
+[compatibility.md](compatibility.md)'s surface; the tagged-store ladder
+and the N-1 restore drill are removed for the Postgres-only build and
+come back after v0.1.0.
 
 ## Where each promise is written down
 

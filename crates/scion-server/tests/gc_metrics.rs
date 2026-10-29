@@ -14,7 +14,7 @@ use scion_server::test_support::docs::runbook_block_with;
 
 fn run_gc(dir: &std::path::Path, metrics: &std::path::Path, dry: bool) -> Output {
     let data = dir.join("data");
-    fs::create_dir_all(&data).unwrap();
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
     // The collector's command is the routine's own line, with the
     // test's data directory and metrics file in place of the
     // documented ones. A dry run is the documented `--dry-run` flag.
@@ -42,6 +42,12 @@ fn run_gc(dir: &std::path::Path, metrics: &std::path::Path, dry: bool) -> Output
     Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(&collector_args)
         .env("NO_COLOR", "1")
+        // The documented line carries no URL: the operator's env gives
+        // it. The schema is the data directory's own.
+        .env(
+            "SCION_POSTGRES_URL",
+            scion_server::Backend::test_postgres_url(&data).unwrap(),
+        )
         .output()
         .unwrap()
 }
@@ -73,7 +79,7 @@ fn files_of(stdout: &str) -> u64 {
 
 #[test]
 fn a_real_run_writes_the_report_as_textfile_metrics() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let metrics = dir.path().join("gc.prom");
 
     let out = run_gc(dir.path(), &metrics, false);
@@ -139,7 +145,7 @@ fn a_real_run_writes_the_report_as_textfile_metrics() {
 
 #[test]
 fn a_dry_run_labels_itself_and_a_failed_run_touches_nothing() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let metrics = dir.path().join("gc.prom");
 
     // A real run first, then a dry run on the same --metrics-file: what

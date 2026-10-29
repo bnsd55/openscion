@@ -827,23 +827,24 @@ fn node(c: &mut dyn MetaTx, id: ChangesetId) -> Result<Node> {
 #[cfg(test)]
 mod tests {
     use crate::backend::Backend;
-    use crate::store::Store;
+    use proptest::prelude::{Strategy, any};
+    use proptest::sample::Index as Sample;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    use proptest::prelude::{Strategy, any};
-    use proptest::sample::Index as Sample;
     use scion_core::{BlobId, FileState, IdentityTime, RepoPath};
 
     use super::*;
-    use crate::db::testing;
     use crate::derived::steps;
+    use crate::meta::testing;
+    use crate::pg::damage;
 
     /// A cold commit graph and a past deadline: the query refuses instead of
     /// deriving the graph first. On main, where the derive ran without the
     /// deadline, this call returned a result.
     #[test]
     fn a_query_with_a_past_deadline_derives_nothing() {
+        let _slot = damage::slot();
         let parents = vec![vec![], vec![0], vec![0], vec![1, 2]];
         let (_dir, store, repo, ids) = store_graph(&parents);
         let past = Deadline::new(Instant::now());
@@ -869,15 +870,15 @@ mod tests {
     fn store_graph(
         parents: &[Vec<usize>],
     ) -> (tempfile::TempDir, Backend, RepoId, Vec<ChangesetId>) {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        // The same changesets `testing::insert_graph` builds, stored
+        // through the metadata trait, so the graph tests run on the test
+        // backend the environment names, Postgres included.
         let (repo, ids) = store
             .write(|c| {
                 let repo = c.create_repo("r")?;
-                Ok((
-                    repo,
-                    testing::insert_graph(c.sqlite().unwrap(), repo, parents)?,
-                ))
+                Ok((repo, testing::insert_graph(c, repo, parents)?))
             })
             .unwrap();
         (dir, store, repo, ids)
@@ -900,6 +901,41 @@ mod tests {
                     )?;
                 }
                 Ok(())
+            })
+            .unwrap();
+        (dir, store, repo, ids)
+    }
+
+    /// A new store with the file-less graph `parents` in repo `r`, its
+    /// derived rows seeded through
+    /// [`seed_file_less_ladder`](crate::seed::seed_file_less_ladder):
+    /// the same graphs the other helpers build, without a round trip
+    /// per changeset, so a test that measures a walk measures the walk.
+    fn store_graph_seeded(
+        parents: &[Vec<usize>],
+    ) -> (tempfile::TempDir, Backend, RepoId, Vec<ChangesetId>) {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let css: Vec<scion_core::Changeset> = parents
+            .iter()
+            .scan(Vec::new(), |ids, of| {
+                let cs = scion_core::Changeset::new(
+                    of.iter().map(|&p| ids[p]).collect(),
+                    scion_core::IdentityTime::new(b"a".to_vec(), b"a@x".to_vec(), 0, 0)
+                        .expect("identity fits the format"),
+                    None,
+                    format!("f{}", ids.len()).into_bytes(),
+                    std::collections::BTreeMap::default(),
+                )
+                .expect("changeset fits the format");
+                ids.push(cs.encode_with_id().1);
+                Some(cs)
+            })
+            .collect();
+        let (repo, ids) = store
+            .write(|c| {
+                let repo = c.create_repo("r")?;
+                Ok((repo, crate::seed::seed_file_less_ladder(c, repo, &css)?))
             })
             .unwrap();
         (dir, store, repo, ids)
@@ -975,7 +1011,8 @@ mod tests {
             parents in proptest::prop_oneof![testing::graphs(20), sparse_graphs(20)],
             pairs in proptest::collection::vec(any::<(Sample, Sample)>(), PAIRS),
         ) {
-            let (_dir, store, repo, ids) = store_graph(&parents);
+            let _slot = damage::slot();
+            let (_dir, store, repo, ids) = store_graph_seeded(&parents);
             let histories = histories(&parents);
             let ancestors = ancestors(&parents);
             let nodes: Vec<Node> = ids
@@ -1130,8 +1167,9 @@ mod tests {
         // second. The test counts reads, so its pass does not depend on how
         // busy the machine is.
         const N: usize = 4_096;
-        let dir = tempfile::tempdir().unwrap();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let _slot = damage::slot();
         let (repo, ids, side) = deep_chain(&store, N);
         let tip = ids[N - 1];
         // Myers bounds a walk down to a depth by about 3 log2 n moves.
@@ -1199,6 +1237,7 @@ mod tests {
 
     #[test]
     fn an_old_database_derives_the_graph_in_steps_on_first_query() {
+        let _slot = damage::slot();
         let parents: Vec<Vec<usize>> = vec![vec![], vec![0], vec![0], vec![1, 2], vec![3], vec![]];
         let (_dir, store, repo, ids) = store_graph(&parents);
         let commits = store.commits();
@@ -1241,6 +1280,7 @@ mod tests {
         // changeset that branched from the one before. `side` branched from
         // the 100th, and is not merged.
         const N: usize = 20_000;
+        let _slot = damage::slot();
         let mut parents: Vec<Vec<usize>> = vec![vec![]];
         let mut history = vec![0];
         for i in 1..N {
@@ -1253,7 +1293,7 @@ mod tests {
             history.push(parents.len() - 1);
         }
         parents.push(vec![history[100]]);
-        let (_dir, store, repo, ids) = store_graph_with_nodes(&parents);
+        let (_dir, store, repo, ids) = store_graph_seeded(&parents);
         let (side, tip) = (*ids.last().unwrap(), ids[history[N - 1]]);
         let (a, b) = (
             At::get_unbounded(&store, repo, side).unwrap(),
@@ -1335,8 +1375,9 @@ mod tests {
 
     #[test]
     fn a_walk_stops_at_its_deadline() {
+        let _slot = damage::slot();
         // The walks from the tip go through every merge down to `side`.
-        let (_dir, store, repo, ids) = store_graph(&ladder(100));
+        let (_dir, store, repo, ids) = store_graph_seeded(&ladder(100));
         let (side, tip) = (ids[1], *ids.last().unwrap());
         let passed = Deadline::new(Instant::now());
         let late = is_ancestor(&store, repo, side, tip, &passed);
@@ -1372,6 +1413,7 @@ mod tests {
 
     #[test]
     fn a_walk_blocks_no_write_and_no_read() {
+        let _slot = damage::slot();
         let (_dir, store, repo, ids) = store_graph_with_nodes(&ladder(20));
         let (side, tip) = (ids[1], *ids.last().unwrap());
         let mut paint = Paint::new(
@@ -1410,6 +1452,7 @@ mod tests {
 
     #[test]
     fn a_walk_waits_for_one_flush_for_all_its_steps() {
+        let _slot = damage::slot();
         let (_dir, store, repo, ids) = store_graph_with_nodes(&ladder(20));
         let (side, tip) = (ids[1], *ids.last().unwrap());
         let mut paint = Paint::new(
@@ -1438,8 +1481,14 @@ mod tests {
         assert_eq!(bases, [side]);
         assert!(cost.steps > 1, "{cost:?}");
         // None where the commit's own fsync flushes the drive cache.
+        //
+        // The count is 0: the commit's durability is Postgres's
+        // (synchronous_commit=on, checked at open), and a commit whose
+        // changeset names no new blob file full-flushes nothing. A
+        // commit that starts to full-flush blob groups fails here.
+        let expected = 0;
         let flushes = store.blobs().full_flushes() - before;
-        assert_eq!(flushes, u64::from(crate::store::FSYNC_LEAVES_DRIVE_CACHE));
+        assert_eq!(flushes, expected);
     }
 
     /// The parents batch changes no walk's read count: every changeset the
@@ -1450,6 +1499,7 @@ mod tests {
     /// statement: the merge's parents read became the merge's node read.
     #[test]
     fn the_parents_batch_counts_the_same_reads() {
+        let _slot = damage::slot();
         let (_dir, store, repo, ids) = store_graph(&ladder(100));
         let (side, tip) = (ids[1], *ids.last().unwrap());
         let floor = store.read(|c| c.generation(repo, side)).unwrap();

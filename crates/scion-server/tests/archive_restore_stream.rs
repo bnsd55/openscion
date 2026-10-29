@@ -15,6 +15,12 @@ use scion_core::{BlobId, Changeset, ChangesetId, FileState, IdentityTime, RepoPa
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use scion_server::{Backend, archive, fsck, test_support::tree};
 
+/// The URL a store on `dir` opens with: the test database, under the
+/// directory's own schema, created first.
+fn url_of(dir: &std::path::Path) -> String {
+    scion_server::Backend::test_postgres_url(dir).unwrap()
+}
+
 const CHAIN: usize = 400;
 const BUDGET: usize = 16 * 1024;
 
@@ -153,10 +159,12 @@ fn assert_restore_equals_source(source: &Backend, restored: &Backend) {
 
 #[test]
 fn a_restore_commits_bounded_transactions_and_answers_like_its_source() {
-    let data = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
     let store = stream_source(data.path());
 
-    let out = tempfile::tempdir().unwrap().path().join("archive");
+    let out = scion_server::test_support::private_tempdir()
+        .path()
+        .join("archive");
     let manifest = archive::export(&store, data.path(), None, true, &out)
         .unwrap_or_else(|e| panic!("export failed: {e:#}"));
     assert_eq!(manifest["kind"], "store");
@@ -167,9 +175,16 @@ fn a_restore_commits_bounded_transactions_and_answers_like_its_source() {
     // many transactions. The count comes from the counter, read before
     // and after, so the assertion is about work done, not work planned.
     let before = scion_server::test_support::archive::restore_tx_count();
-    let restored_dir = tempfile::tempdir().unwrap();
-    archive::restore_with_budget(&out, restored_dir.path(), None, None, BUDGET, Backend::open)
-        .unwrap_or_else(|e| panic!("restore failed: {e:#}"));
+    let restored_dir = scion_server::test_support::private_tempdir();
+    archive::restore_with_budget(
+        &out,
+        restored_dir.path(),
+        &url_of(restored_dir.path()),
+        None,
+        BUDGET,
+        Backend::open,
+    )
+    .unwrap_or_else(|e| panic!("restore failed: {e:#}"));
     let txs = scion_server::test_support::archive::restore_tx_count() - before;
     println!("the restore committed {txs} transactions");
     assert!(
@@ -178,7 +193,7 @@ fn a_restore_commits_bounded_transactions_and_answers_like_its_source() {
     );
 
     // Every read equals the source's, and both stores are clean.
-    let restored = Backend::open(restored_dir.path(), None, None).unwrap();
+    let restored = Backend::open(restored_dir.path(), &url_of(restored_dir.path()), None).unwrap();
     assert_restore_equals_source(&store, &restored);
     for store in [&store, &restored] {
         let problems = fsck::run(store, fsck::BATCH, &mut |_| {}).unwrap();
@@ -225,7 +240,7 @@ fn a_big_restore_stays_under_its_rss_ceiling() {
         return;
     }
 
-    let data = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
     let content = "small file\n".to_string();
     let blob = store.blobs().put(content.as_bytes()).unwrap();
@@ -250,7 +265,9 @@ fn a_big_restore_stays_under_its_rss_ceiling() {
         })
         .unwrap();
 
-    let out = tempfile::tempdir().unwrap().path().join("archive");
+    let out = scion_server::test_support::private_tempdir()
+        .path()
+        .join("archive");
     archive::export(&store, data.path(), None, true, &out)
         .unwrap_or_else(|e| panic!("export failed: {e:#}"));
     let bin_len = std::fs::metadata(out.join("repos").join("big").join("changesets.bin"))
@@ -282,10 +299,14 @@ fn a_big_restore_stays_under_its_rss_ceiling() {
 fn measure_ceiling(store: &Backend, out: &std::path::Path, tx_kb: u64, slack_kb: u64) {
     let baseline_kb = restore_sampled(
         &empty_archive(),
-        &tempfile::tempdir().unwrap().path().join("restored-empty"),
+        &scion_server::test_support::private_tempdir()
+            .path()
+            .join("restored-empty"),
         tx_kb * 1024,
     );
-    let target = tempfile::tempdir().unwrap().path().join("restored");
+    let target = scion_server::test_support::private_tempdir()
+        .path()
+        .join("restored");
     let peak_kb = restore_sampled(out, &target, tx_kb * 1024);
     println!(
         "the streamed restore's peak RSS was {peak_kb} kB; \
@@ -300,7 +321,7 @@ fn measure_ceiling(store: &Backend, out: &std::path::Path, tx_kb: u64, slack_kb:
     );
 
     // The restored store answers like the source.
-    let restored = Backend::open(&target, None, None).unwrap();
+    let restored = Backend::open(&target, &url_of(&target), None).unwrap();
     assert_restore_equals_source(store, &restored);
     let problems = fsck::run(&restored, fsck::BATCH, &mut |_| {}).unwrap();
     assert!(problems.problems.is_empty(), "{problems:?}");
@@ -312,17 +333,24 @@ fn measure_ceiling(store: &Backend, out: &std::path::Path, tx_kb: u64, slack_kb:
 /// failure path - and lands whole.
 #[test]
 fn a_killed_restore_leaves_the_next_one_clean() {
-    let data = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
     let store = stream_source(data.path());
-    let out = tempfile::tempdir().unwrap().path().join("archive");
+    let out = scion_server::test_support::private_tempdir()
+        .path()
+        .join("archive");
     archive::export(&store, data.path(), None, true, &out)
         .unwrap_or_else(|e| panic!("export failed: {e:#}"));
 
-    let target = tempfile::tempdir().unwrap().path().join("restored");
+    let target = scion_server::test_support::private_tempdir()
+        .path()
+        .join("restored");
     std::fs::create_dir_all(&target).unwrap();
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .arg("--data")
         .arg(&target)
+        // The restore reads its URL from the environment: the target's
+        // own schema, so the replay lands where the open below reads.
+        .env("SCION_POSTGRES_URL", url_of(&target))
         .env("SCION_TEST_RESTORE_TX_BYTES", "4096")
         .env("SCION_TEST_RESTORE_ECHO_BATCH", "1")
         .arg("restore")
@@ -340,12 +368,21 @@ fn a_killed_restore_leaves_the_next_one_clean() {
     let reader = std::thread::spawn(move || {
         use std::io::BufRead as _;
         let reader = std::io::BufReader::new(stderr);
+        let mut text = String::new();
+        let mut seen = false;
         for line in reader.lines() {
-            let line = line.unwrap();
+            let line = line.unwrap_or_default();
+            text.push_str(&line);
+            text.push('\n');
             if line.contains("batch 2 committed") {
+                seen = true;
                 break;
             }
         }
+        // The kill must hit real work: a restore that died at startup
+        // (a missing URL, a refused open) closes its stderr before any
+        // batch, and a test that killed it anyway would prove nothing.
+        assert!(seen, "the restore never reached its second batch: {text}");
     });
     let start = std::time::Instant::now();
     loop {
@@ -362,10 +399,10 @@ fn a_killed_restore_leaves_the_next_one_clean() {
     child.wait().unwrap();
 
     // The next restore starts over and lands whole.
-    let report = archive::restore(&out, &target, None, None)
+    let report = archive::restore(&out, &target, &url_of(&target), None)
         .unwrap_or_else(|e| panic!("the restore after the kill failed: {e:#}"));
     assert_eq!(report.repos.len(), 2);
-    let restored = Backend::open(&target, None, None).unwrap();
+    let restored = Backend::open(&target, &url_of(&target), None).unwrap();
     assert_restore_equals_source(&store, &restored);
     let problems = fsck::run(&restored, fsck::BATCH, &mut |_| {}).unwrap();
     assert!(problems.problems.is_empty(), "{problems:?}");
@@ -375,9 +412,9 @@ fn a_killed_restore_leaves_the_next_one_clean() {
 /// restores to measure the binary's own footprint.
 #[cfg(target_os = "linux")]
 fn empty_archive() -> std::path::PathBuf {
-    let data = tempfile::tempdir().unwrap();
+    let data = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
-    let parent = tempfile::tempdir().unwrap();
+    let parent = scion_server::test_support::private_tempdir();
     let out = parent.path().join("archive-empty");
     archive::export(&store, data.path(), None, true, &out).unwrap();
     drop(store);
@@ -403,6 +440,9 @@ fn restore_sampled(archive: &std::path::Path, target: &std::path::Path, tx_bytes
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .arg("--data")
         .arg(target)
+        // The restore reads its URL from the environment: the target's
+        // own schema, so the reset and the replay stay in one schema.
+        .env("SCION_POSTGRES_URL", url_of(target))
         .arg("restore")
         .arg("--archive")
         .arg(archive)
@@ -429,4 +469,98 @@ fn restore_sampled(archive: &std::path::Path, target: &std::path::Path, tx_bytes
     peak_text
         .parse()
         .unwrap_or_else(|e| panic!("the child's peak line does not parse: {peak_text:?}: {e}"))
+}
+
+/// The truncation lands LATE in the stream: the first batch is already
+/// committed when the reader walks into the cut. The design (archive.rs,
+/// `restore_impl`): every batch lands in a staging directory beside the
+/// target, and the target receives the store by ONE rename only after
+/// the whole replay. A late truncation must therefore fail the restore
+/// and leave the target with NO store a server would open - the answer
+/// the operator sees is a refused restore, not a half store.
+#[test]
+fn a_stream_cut_after_the_first_batch_fails_and_leaves_no_store() {
+    const CHAIN_BIG: usize = 64;
+    const MESSAGE_BYTES: usize = 200 * 1024;
+
+    let data = scion_server::test_support::private_tempdir();
+    let store = Backend::open_test(data.path()).unwrap();
+    let content = "small file\n".to_string();
+    let blob = store.blobs().put(content.as_bytes()).unwrap();
+    let mut lens = std::collections::HashMap::new();
+    lens.insert(blob, content.len() as u64);
+    store
+        .write(|c| {
+            let repo = c.create_repo("big")?;
+            let mut parent = None::<ChangesetId>;
+            for i in 0..CHAIN_BIG {
+                let cs = changeset_msg(
+                    parent.into_iter().collect(),
+                    vec![b'x'; MESSAGE_BYTES],
+                    &[(&format!("docs/f{i}"), Some(regular(&content)))],
+                );
+                let id = tree::store_changeset(c, repo, &cs, &mut tree::lens_from(&lens))?.0;
+                c.add_repo_blob(repo, blob)?;
+                parent = Some(id);
+            }
+            assert!(c.cas_ref(repo, "main", None, parent.expect("a chain"))?);
+            Ok(())
+        })
+        .unwrap();
+
+    let out = tempfile::tempdir().unwrap().path().join("archive");
+    archive::export(&store, data.path(), None, true, &out)
+        .unwrap_or_else(|e| panic!("export failed: {e:#}"));
+    let victim = out.join("repos").join("big").join("changesets.bin");
+    let full_len = std::fs::metadata(&victim).unwrap().len();
+    assert!(
+        full_len > 8 * BUDGET as u64,
+        "the stream ({full_len} B) must hold several batches (BUDGET {BUDGET} B), \
+         or the cut cannot land past the first batch"
+    );
+
+    // Cut at two budgets in: the first batch (and more) committed, the
+    // reader walks into a record the file no longer holds.
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&victim)
+        .unwrap();
+    f.set_len(2 * BUDGET as u64).unwrap();
+    drop(f);
+
+    let target = tempfile::tempdir().unwrap().path().join("target");
+    let error =
+        archive::restore_with_budget(&out, &target, &url_of(&target), None, BUDGET, Backend::open)
+            .expect_err("a cut stream must not restore");
+    assert!(
+        error.to_string().contains("ends inside a record"),
+        "the refusal must name the torn stream: {error}"
+    );
+
+    // The target holds no store a server would open: the marker, the
+    // database and the objects folder are all absent, and opening the
+    // directory as a store refuses.
+    for existing in ["scion.db", "backend", "objects"] {
+        assert!(
+            !target.join(existing).exists(),
+            "the target must not hold {existing} after a refused restore"
+        );
+    }
+    // (Backend::open on an empty directory CREATES a fresh store by
+    // design - it is not an oracle here.) The staging scratch went with
+    // the failure, and the target is empty for the operator's retry: a
+    // half store would name itself in the listing.
+    let staging = target.with_file_name(format!(
+        "{}.restoring",
+        target.file_name().unwrap().to_string_lossy()
+    ));
+    assert!(!staging.exists(), "the staging scratch must be gone");
+    // A target that was never made at all is the same answer: nothing
+    // of the restore became visible.
+    let left: Vec<_> = match std::fs::read_dir(&target) {
+        Ok(entries) => entries.collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("the target is unreadable: {error}"),
+    };
+    assert!(left.is_empty(), "the target must be empty: {left:?}");
 }

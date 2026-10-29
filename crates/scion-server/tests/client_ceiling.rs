@@ -21,7 +21,7 @@ impl Drop for Lift {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_call_to_a_stopped_server_ends_at_the_ceiling_with_a_name() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let server = common::Server::start(&dir.path().join("data"), &dir.path().join("log"));
     // A ceiling of the test's own choosing: 2 s, so the proof is quick.
     let ceiling = Duration::from_secs(2);

@@ -707,7 +707,7 @@ async fn the_model_holds_across_lands_retries_and_restarts() {
         now.as_secs() ^ u64::from(now.subsec_nanos()),
     );
     println!("seed {seed}; replay with SCION_LANDMODEL_SEED={seed}");
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let (data, log) = (dir.path().join("data"), dir.path().join("server.log"));
     create_repo(&data);
 

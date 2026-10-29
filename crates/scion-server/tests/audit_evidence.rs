@@ -77,7 +77,7 @@ fn history_rows(store: &Backend) -> Vec<(Vec<u8>, Vec<u8>)> {
 /// every row's stored bytes no longer hash to its ID. Distinct IDs always
 /// mean distinct bodies (the ID is the hash of the body), so a swap with
 /// a neighbour always mismatches.
-fn tamper_history(store: &Backend, data: &std::path::Path, rows: &[(Vec<u8>, Vec<u8>)]) {
+fn tamper_history(_store: &Backend, data: &std::path::Path, rows: &[(Vec<u8>, Vec<u8>)]) {
     assert!(rows.len() >= 2, "the fixture needs two history nodes");
     let mut swapped: Vec<(Vec<u8>, Vec<u8>)> = rows
         .iter()
@@ -90,33 +90,17 @@ fn tamper_history(store: &Backend, data: &std::path::Path, rows: &[(Vec<u8>, Vec
     // The last row copies the first's body, so at least one row (the
     // first) provably holds another node's bytes even in odd rotations.
     swapped.last_mut().unwrap().1.clone_from(&rows[0].1);
-    if Backend::test_is_postgres() {
-        let schema = Backend::test_schema(data).expect("postgres tests name a schema");
-        let url = std::env::var("SCION_TEST_POSTGRES_URL").expect("the test database's URL");
-        let mut client =
-            postgres::Client::connect(&url, postgres::NoTls).expect("the test database connects");
-        for (id, body) in &swapped {
-            client
-                .execute(
-                    &format!("UPDATE {schema}.history_nodes SET body = $1 WHERE id = $2"),
-                    &[&body, &id],
-                )
-                .expect("the tamper updates the row");
-        }
-    } else {
-        store
-            .write(|c| {
-                let conn = c.sqlite().expect("the sqlite seam gives the connection");
-                for (id, body) in &swapped {
-                    conn.execute(
-                        "UPDATE history_nodes SET body = ?1 WHERE id = ?2",
-                        rusqlite::params![body, id],
-                    )
-                    .expect("the tamper updates the row");
-                }
-                Ok(())
-            })
-            .unwrap();
+    let schema = Backend::test_schema(data);
+    let url = std::env::var("SCION_TEST_POSTGRES_URL").expect("the test database's URL");
+    let mut client =
+        postgres::Client::connect(&url, postgres::NoTls).expect("the test database connects");
+    for (id, body) in &swapped {
+        client
+            .execute(
+                &format!("UPDATE {schema}.history_nodes SET body = $1 WHERE id = $2"),
+                &[&body, &id],
+            )
+            .expect("the tamper updates the row");
     }
 }
 
@@ -124,7 +108,7 @@ fn tamper_history(store: &Backend, data: &std::path::Path, rows: &[(Vec<u8>, Vec
 /// history node's stored body no longer matches its ID.
 #[test]
 fn a_tampered_history_node_reads_as_corrupt() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     let ids = two_changesets(&store);
     let tip = *ids.last().unwrap();
@@ -148,7 +132,7 @@ fn a_tampered_history_node_reads_as_corrupt() {
 /// fsck reports a history node whose body does not match its ID.
 #[test]
 fn fsck_reports_a_tampered_history_node() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     let _ids = two_changesets(&store);
 

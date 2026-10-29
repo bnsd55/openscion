@@ -13,13 +13,21 @@ use scion_core::{BlobId, Changeset, ChangesetId, FileState, IdentityTime, RepoPa
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use std::os::unix::fs::PermissionsExt as _;
 
+/// The URL a store on `dir` opens with: the test database, under the
+/// directory's own schema, created first.
+fn url_of(dir: &std::path::Path) -> String {
+    scion_server::Backend::test_postgres_url(dir).unwrap()
+}
+
 /// Creates the data directory of `dir`, seeds it with repo `r` whose
 /// rows are all dead (no stored changeset puts them): one row names a
 /// stored blob file, one names a blob with no file at all. Returns the
 /// stored blob's ID.
 fn seed(data: &std::path::Path) -> BlobId {
-    fs::create_dir_all(data).unwrap();
-    let store = scion_server::Backend::open(data, None, None).unwrap();
+    // A store directory is private: the open refuses one group or
+    // others can read.
+    scion_proto::runtime::auth::create_private_dir_all(data).unwrap();
+    let store = scion_server::Backend::open(data, &url_of(data), None).unwrap();
     let blob = store.blobs().put(b"a prunable file\n").unwrap();
     let fake = BlobId::from_bytes([7u8; 32]);
     store
@@ -41,6 +49,9 @@ fn gc(data: &std::path::Path, args: &[&str]) -> Output {
         .args(["gc"])
         .args(args)
         .env("NO_COLOR", "1")
+        // The store's own schema: the gc opens it, and the test seeded
+        // it through the same schema.
+        .env("SCION_POSTGRES_URL", url_of(data))
         .output()
         .unwrap()
 }
@@ -65,7 +76,7 @@ fn hex(id: &BlobId) -> String {
 /// report's counts and `dry_run: false`.
 #[test]
 fn a_gc_run_writes_an_admin_intent_and_ok_line() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     seed(&data);
 
@@ -94,7 +105,7 @@ fn a_gc_run_writes_an_admin_intent_and_ok_line() {
 /// A dry run changes nothing, and its lines say so.
 #[test]
 fn a_dry_run_labels_itself_dry_run() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     seed(&data);
 
@@ -121,7 +132,7 @@ fn a_dry_run_labels_itself_dry_run() {
 /// anything: the prunable rows survive for the next run.
 #[test]
 fn a_gc_whose_audit_file_refuses_changes_nothing() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     seed(&data);
     // An audit file another hand left world-readable: the audit's open
@@ -170,7 +181,7 @@ fn no_blob_ids(value: &serde_json::Value) -> bool {
 /// counts, never content.
 #[test]
 fn a_gc_audit_names_no_blob() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let blob = seed(&data);
 
@@ -192,12 +203,15 @@ fn a_gc_audit_names_no_blob() {
 fn run(data: &std::path::Path, args: &[&str]) -> Output {
     // The binary refuses a missing data directory (#578); a test that
     // wants the create-behavior makes the directory itself.
-    fs::create_dir_all(data).unwrap();
+    scion_proto::runtime::auth::create_private_dir_all(data).unwrap();
     Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .arg("--data")
         .arg(data)
         .args(args)
         .env("NO_COLOR", "1")
+        // The commands that open the store read the URL from the env,
+        // quietly; the schema is the data directory's own.
+        .env("SCION_POSTGRES_URL", url_of(data))
         .output()
         .unwrap()
 }
@@ -290,9 +304,9 @@ fn one_changeset(parents: Vec<ChangesetId>, changes: &[(&str, Option<FileState>)
 /// server lock is released, so the CLI a test spawns next opens the
 /// directory at once.
 fn seed_exportable(data: &std::path::Path) {
-    fs::create_dir_all(data).unwrap();
+    scion_proto::runtime::auth::create_private_dir_all(data).unwrap();
     {
-        let store = scion_server::Backend::open(data, None, None).unwrap();
+        let store = scion_server::Backend::open(data, &url_of(data), None).unwrap();
         store.blobs().put(b"a\n").unwrap();
         store
             .write(|c| {
@@ -320,7 +334,7 @@ fn seed_exportable(data: &std::path::Path) {
 /// the import's counts.
 #[test]
 fn an_import_writes_an_admin_intent_and_ok_line() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let hist = dir.path().join("hist");
     a_git_repo(&hist);
@@ -355,7 +369,7 @@ fn an_import_writes_an_admin_intent_and_ok_line() {
 /// blob ID appears in the audit.
 #[test]
 fn an_import_audit_names_no_commit_or_blob() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let hist = dir.path().join("hist");
     a_git_repo(&hist);
@@ -375,7 +389,7 @@ fn an_import_audit_names_no_commit_or_blob() {
 /// audit imports the whole history.
 #[test]
 fn an_import_whose_audit_file_refuses_changes_nothing() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let hist = dir.path().join("hist");
     a_git_repo(&hist);
@@ -417,7 +431,7 @@ fn an_import_whose_audit_file_refuses_changes_nothing() {
 /// counts.
 #[test]
 fn a_restore_writes_an_admin_intent_and_ok_line() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let restored = dir.path().join("restored");
     let archive = dir.path().join("archive");
@@ -466,7 +480,7 @@ fn a_restore_writes_an_admin_intent_and_ok_line() {
 /// anything: the target directory holds no store.
 #[test]
 fn a_restore_whose_audit_file_refuses_changes_nothing() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let restored = dir.path().join("restored");
     seed_exportable(&data);
@@ -506,7 +520,7 @@ fn a_restore_whose_audit_file_refuses_changes_nothing() {
 /// good archive exits 0, a damaged one names its damage and does not.
 #[test]
 fn a_verify_subcommand_reports_a_good_archive_and_names_a_damaged_one() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let archive = dir.path().join("archive");
     seed_exportable(&data);
@@ -579,7 +593,7 @@ fn a_verify_subcommand_reports_a_good_archive_and_names_a_damaged_one() {
 /// exactly what a failed run must not delete.
 #[test]
 fn a_restore_that_fails_mid_replay_leaves_its_audit_record() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let restored = dir.path().join("restored");
     seed_exportable(&data);
@@ -634,7 +648,7 @@ fn a_restore_that_fails_mid_replay_leaves_its_audit_record() {
 /// and one ok after it, with the rows the run wrote and removed.
 #[test]
 fn a_derive_writes_an_admin_intent_and_ok_line() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     seed_exportable(&data);
 
@@ -666,7 +680,7 @@ fn a_derive_writes_an_admin_intent_and_ok_line() {
 /// complete, with the error's class and never its message.
 #[test]
 fn a_derive_that_fails_writes_its_failed_line() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     seed_exportable(&data);
 
@@ -690,7 +704,7 @@ fn a_derive_that_fails_writes_its_failed_line() {
 /// audit in any encoding.
 #[test]
 fn a_ticket_key_writes_its_pair_and_no_key_material() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let key_file = dir.path().join("tickets.key");
 
@@ -756,63 +770,4 @@ fn base64_of(bytes: &[u8]) -> String {
         });
     }
     out
-}
-
-/// An open that migrates an older store writes its line once: the
-/// migration ran inside the store's open, before the audit could open,
-/// so its record goes in before the command's own pair. A second open
-/// migrates nothing, and writes no line.
-#[test]
-fn an_open_that_migrates_writes_its_line_once() {
-    if scion_server::Backend::test_is_postgres() {
-        // The Postgres line rides the same code path this test pins (the
-        // open's migration reports its versions, and the record goes in
-        // before the command's pair); a test of it needs a schema at an
-        // older version, and the Postgres migrations are not idempotent,
-        // so no test seam makes one.
-        println!("skipping: the migrate line's path is pinned on SQLite");
-        return;
-    }
-    let dir = tempfile::tempdir().unwrap();
-    let data = dir.path().join("data");
-    fs::create_dir_all(&data).unwrap();
-    // The metadata at version 1, as the build's first migration makes it.
-    let db = rusqlite::Connection::open(data.join("scion.db")).unwrap();
-    scion_server::test_support::store::migrate(&db, 1).unwrap();
-    drop(db);
-
-    let out = gc(&data, &["--grace-secs", "0"]);
-    assert!(
-        out.status.success(),
-        "gc ran: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let lines = audit_lines(&data);
-    assert_eq!(lines.len(), 3, "migrate, then the gc's pair: {lines:?}");
-    assert_eq!(lines[0]["event"], "admin");
-    assert_eq!(lines[0]["outcome"], "ok");
-    assert_eq!(lines[0]["what"], "migrate");
-    assert_eq!(lines[0]["from"], 1);
-    assert!(
-        lines[0]["to"].as_u64().unwrap_or(0) > 1,
-        "the open moved the schema up: {lines:?}"
-    );
-    assert_eq!(lines[1]["what"], "gc");
-    assert_eq!(lines[1]["outcome"], "intent");
-    assert_eq!(lines[2]["outcome"], "ok");
-
-    // The second open finds the schema at this build's version, and
-    // writes no migration line.
-    let out = gc(&data, &["--grace-secs", "0"]);
-    assert!(out.status.success(), "the second gc ran");
-    let lines = audit_lines(&data);
-    assert_eq!(
-        lines.len(),
-        5,
-        "the second run adds its own pair: {lines:?}"
-    );
-    assert_eq!(lines[3]["what"], "gc");
-    assert_eq!(lines[3]["outcome"], "intent");
-    assert_eq!(lines[4]["outcome"], "ok");
 }

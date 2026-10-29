@@ -121,12 +121,8 @@ fn ladder_changesets(
 
 #[test]
 fn the_ladder_walks_stay_under_the_statement_budget() {
-    if !Backend::test_is_postgres() {
-        println!("skipping: Postgres only");
-        return;
-    }
     let merges = 10_000;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     let (css, main, sides, late, early) = ladder_changesets(merges);
     let (main, sides, late, early) = store

@@ -3,7 +3,7 @@
 //! power-loss suite (`power.rs`, dropped writes). The clients, the ledger of
 //! what was sent and replied, the server process, and the checks.
 // Every test binary compiles this file and uses its own subset of it.
-#![allow(dead_code)]
+#![allow(dead_code, unreachable_pub)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -25,12 +25,10 @@ use scion_proto::v1::{
     LandResponse, LandState, PutBlobRequest, ResolveRefRequest,
 };
 use scion_server::Backend;
-use scion_server::test_support::backend::BackendExt;
-use scion_server::test_support::backend::from_store;
 use scion_server::test_support::meta::Meta as _;
 use scion_server::test_support::meta::MetaTx as _;
 use scion_server::test_support::store::BlobStatus;
-use scion_server::test_support::{store::Store, tree};
+use scion_server::test_support::tree;
 use tonic::Status;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
@@ -131,11 +129,10 @@ fn exit_report(log: &Path, mark: usize, status: std::process::ExitStatus) -> Str
 
 impl Server {
     /// Starts a server on `data` and waits until it listens. It appends its
-    /// log to `log`. In Postgres mode (`SCION_TEST_BACKEND=postgres`) it
-    /// proves the backend it was asked for before it returns: the data
-    /// directory carries the Postgres marker and no SQLite database, so a
-    /// run whose spawn lost its `--postgres-url` fails here, not vacuously
-    /// as a second SQLite run.
+    /// log to `log`. It proves the backend before it returns: the data
+    /// directory carries the Postgres marker and no SQLite database, so
+    /// a run whose spawn lost its `--postgres-url` fails here, not as a
+    /// server on some other database.
     pub(crate) fn start(data: &Path, log: &Path) -> Self {
         let mut server = Self::spawn(data, log);
         // Only this start's lines are its business, and the CI log
@@ -152,7 +149,7 @@ impl Server {
             assert!(start.elapsed() < Duration::from_secs(60), "no listen");
             std::thread::sleep(Duration::from_millis(10));
         }
-        if Backend::test_is_postgres() {
+        {
             let marker = fs::read_to_string(data.join("backend")).unwrap_or_default();
             assert_eq!(
                 marker.lines().next(),
@@ -258,12 +255,8 @@ impl Server {
     }
 
     pub(crate) fn spawn_on(heading: &'static str, data: &Path, log: &Path) -> Self {
-        let postgres_url = if Backend::test_is_postgres() {
-            Some(postgres_url(data))
-        } else {
-            None
-        };
-        Self::spawn_with_url(heading, data, postgres_url.as_deref(), log)
+        let url = postgres_url(data);
+        Self::spawn_with_url(heading, data, Some(&url), log)
     }
 
     /// Starts a server on `data` whose Postgres metadata is the one the
@@ -287,7 +280,7 @@ impl Server {
         let (server, _) = spawn_until_lock_free(data, log, || {
             Self::spawn_reopened("One server", data, schema_source, log)
         });
-        if Backend::test_is_postgres() {
+        {
             let marker = fs::read_to_string(data.join("backend")).unwrap_or_default();
             assert_eq!(
                 marker.lines().next(),
@@ -312,19 +305,15 @@ impl Server {
         schema_source: &Path,
         log: &Path,
     ) -> Self {
-        let postgres_url = if Backend::test_is_postgres() {
-            Some(postgres_url(schema_source))
-        } else {
-            None
-        };
-        Self::spawn_with_url(heading, data, postgres_url.as_deref(), log)
+        let url = postgres_url(schema_source);
+        Self::spawn_with_url(heading, data, Some(&url), log)
     }
 
     /// The harness's data-directory make: private, whatever the umask.
     #[cfg(unix)]
     fn make_private_dir(data: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt as _;
-        fs::create_dir_all(data).unwrap();
+        scion_proto::runtime::auth::create_private_dir_all(data).unwrap();
         fs::set_permissions(data, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
@@ -341,7 +330,7 @@ impl Server {
             #[cfg(unix)]
             Self::make_private_dir(data);
             #[cfg(not(unix))]
-            fs::create_dir_all(data).unwrap();
+            scion_proto::runtime::auth::create_private_dir_all(data).unwrap();
         }
         let argv = Self::guide_argv(heading, data);
         let log_file = fs::OpenOptions::new()
@@ -430,7 +419,7 @@ pub(crate) fn postgres_url(data: &Path) -> String {
     std::thread::spawn(move || {
         let url = std::env::var("SCION_TEST_POSTGRES_URL")
             .expect("SCION_TEST_POSTGRES_URL must name the test database");
-        let schema = Backend::test_schema(&data).expect("postgres mode names a schema");
+        let schema = Backend::test_schema(&data);
         let mut client =
             postgres::Client::connect(&url, postgres::NoTls).expect("the test database connects");
         client
@@ -443,43 +432,27 @@ pub(crate) fn postgres_url(data: &Path) -> String {
     .unwrap()
 }
 
-/// The store of a data directory for a process beside the server: SQLite
-/// in the SQLite runs, and the Postgres test backend in the Postgres ones,
-/// which keeps the metadata in the database and no SQLite file in the
-/// directory.
+/// The test backend of a data directory: the metadata lives in the
+/// test database, under the directory's own schema.
 pub(crate) fn open_store(data: &Path) -> Backend {
-    if Backend::test_is_postgres() {
-        Backend::open_test(data).unwrap()
-    } else {
-        from_store(Store::open(data).unwrap())
-    }
+    Backend::open_test(data).unwrap()
 }
 
 /// [`open_store`], as a process that does not land: the checker and racer
-/// helpers that only verify blob files open this, and a Postgres open of
-/// it keeps the metadata in the database instead of making a stray
-/// SQLite file in a Postgres-backed directory.
+/// helpers that only verify blob files open this, and the metadata keeps
+/// out of the directory.
 pub(crate) fn open_store_shared(data: &Path) -> Backend {
-    if Backend::test_is_postgres() {
-        Backend::open_test_shared(data).unwrap()
-    } else {
-        from_store(Store::open_shared(data).unwrap())
-    }
+    Backend::open_test_shared(data).unwrap()
 }
 
 /// [`open_store_shared`], for a store the suite reopens from another
 /// path than the one its first open used: the power suite reopens from
 /// the backing directory, whose path would name a fresh, empty schema,
 /// while the metadata lives in the database the first open filled. The
-/// schema follows the store, not the path; SQLite ignores the source,
-/// because the metadata is the directory either way.
+/// schema follows the store, not the path.
 pub(crate) fn open_store_shared_reopened(data: &Path, schema_source: &Path) -> Backend {
-    if Backend::test_is_postgres() {
-        let schema = Backend::test_schema(schema_source).expect("postgres mode names a schema");
-        Backend::open_test_shared_in_schema(data, &schema).unwrap()
-    } else {
-        from_store(Store::open_shared(data).unwrap())
-    }
+    let schema = Backend::test_schema(schema_source);
+    Backend::open_test_shared_in_schema(data, &schema).unwrap()
 }
 
 /// The address of the newest `serving` line in the log, if there is one.
@@ -1064,36 +1037,51 @@ pub(crate) async fn diff(
     }
 }
 
-pub(crate) fn pending_lands(c: &rusqlite::Connection) -> i64 {
-    let pending = "SELECT count(*) FROM lands WHERE state = 'pending'";
-    c.query_row(pending, [], |row| row.get(0)).unwrap()
+/// A client of the test schema, for the raw-row reads the ledger's
+/// metadata cross-check makes: the tables carry the same names and
+/// columns on both engines, so the same SQL reads either.
+fn raw_with_schema(schema: &str) -> postgres::Client {
+    let url = std::env::var("SCION_TEST_POSTGRES_URL").expect("the test database's URL");
+    let mut db =
+        postgres::Client::connect(&url, postgres::NoTls).expect("the test database connects");
+    db.batch_execute(&format!("SET search_path TO {schema}"))
+        .expect("the schema's rows are readable");
+    db
 }
 
 /// A read of the lands table of a data directory whose server runs in
-/// another process: SQLite's file beside the server, or the server's own
-/// Postgres schema. The table is the server's backend's, so a test that
-/// waits for a pending land sees the same rows on both backends.
-pub(crate) enum LandsReader {
-    Sqlite(rusqlite::Connection),
-    Postgres(Option<postgres::Client>),
+/// another process: the server's own Postgres schema. A test that waits
+/// for a pending land sees the same rows the server serves.
+pub(crate) struct LandsReader {
+    client: Option<postgres::Client>,
 }
 
 impl LandsReader {
-    /// Opens the read. It must not run on a Postgres data directory's
-    /// SQLite path: opening `scion.db` beside a Postgres server would
-    /// create a file the restart refuses, so Postgres reads the schema.
+    /// Opens the read: the rows live in `schema_source`'s schema,
+    /// whatever path `dir` names, whose own name would be a fresh, empty
+    /// schema.
     pub(crate) fn open(data: &Path) -> Self {
-        if Backend::test_is_postgres() {
-            let url = postgres_url(data);
-            let client = std::thread::spawn(move || {
-                postgres::Client::connect(&url, postgres::NoTls)
-                    .expect("the server's schema connects")
-            })
-            .join()
-            .unwrap();
-            Self::Postgres(Some(client))
-        } else {
-            Self::Sqlite(rusqlite::Connection::open(data.join("scion.db")).unwrap())
+        Self::open_reopened(data, data)
+    }
+
+    /// Opens the read for a store the suite reopened under another
+    /// directory's schema (`start_reopened`).
+    pub(crate) fn open_reopened(_data: &Path, schema_source: &Path) -> Self {
+        let schema = Backend::test_schema(schema_source);
+        let url = std::env::var("SCION_TEST_POSTGRES_URL")
+            .expect("SCION_TEST_POSTGRES_URL must name the test database");
+        let client = std::thread::spawn(move || {
+            let mut client = postgres::Client::connect(&url, postgres::NoTls)
+                .expect("the server's schema connects");
+            client
+                .batch_execute(&format!("SET search_path TO {schema}"))
+                .expect("the store's schema is reachable");
+            client
+        })
+        .join()
+        .unwrap();
+        Self {
+            client: Some(client),
         }
     }
 
@@ -1102,27 +1090,19 @@ impl LandsReader {
     pub(crate) fn counts(&mut self) -> (i64, i64) {
         let total = "SELECT count(*) FROM lands";
         let pending = "SELECT count(*) FROM lands WHERE state = 'pending'";
-        match self {
-            Self::Sqlite(c) => {
-                let rows = c.query_row(total, [], |row| row.get(0)).unwrap();
-                (rows, pending_lands(c))
-            }
-            Self::Postgres(client) => {
-                let c = client.as_mut().expect("the reader's client is open");
-                // The sync client's queries block on the connection's own
-                // runtime, so they cannot run on a tokio worker: they run
-                // on a thread of their own, against the held client.
-                std::thread::scope(|s| {
-                    s.spawn(|| {
-                        let rows: i64 = c.query_one(total, &[]).unwrap().get(0);
-                        let pending: i64 = c.query_one(pending, &[]).unwrap().get(0);
-                        (rows, pending)
-                    })
-                    .join()
-                    .unwrap()
-                })
-            }
-        }
+        let c = self.client.as_mut().expect("the reader's client is open");
+        // The sync client's queries block on the connection's own
+        // runtime, so they cannot run on a tokio worker: they run
+        // on a thread of their own, against the held client.
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let rows: i64 = c.query_one(total, &[]).unwrap().get(0);
+                let pending: i64 = c.query_one(pending, &[]).unwrap().get(0);
+                (rows, pending)
+            })
+            .join()
+            .unwrap()
+        })
     }
 }
 
@@ -1131,60 +1111,62 @@ impl Drop for LandsReader {
         // The sync client's close blocks on the connection's own runtime,
         // so it cannot drop on a tokio worker: it drops on a thread of
         // its own.
-        if let Self::Postgres(client) = self
-            && let Some(client) = client.take()
-        {
+        if let Some(client) = self.client.take() {
             std::thread::spawn(move || drop(client)).join().unwrap();
         }
     }
 }
 
-/// The blobs that the changeset and tree rows of the database name, and the
-/// number of pending lands. Rows in `seen` are skipped, and new rows added:
-/// a row never changes.
-pub(crate) fn metadata(store: &Backend, seen: &mut HashSet<Vec<u8>>) -> (BTreeSet<BlobId>, i64) {
-    // The rows of the data directory's own database: this helper asserts the
-    // storage's internals, which only the SQLite backend holds.
-    let Some(raw) = store.sqlite() else {
-        // SHORTCUT: this ceiling is the empty walk; the Postgres rows are
-        // unread by this test, so the metadata-named cross-check has no
-        // Postgres run (the files on disk still verify, and the RPC-side
-        // ledger checks still run). Upgrade path: a MetaTx listing for
-        // changesets and trees, then drop the branch.
-        return (BTreeSet::new(), 0);
-    };
-    raw.read(|c| {
-        let mut named = BTreeSet::new();
-        for table in ["changesets", "trees"] {
-            let mut rows = c
-                .prepare(&format!("SELECT id, body FROM {table}"))
-                .map_err(scion_server::test_support::error::from_sqlite)?;
-            let rows = rows
-                .query_map([], |row| {
-                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })
-                .map_err(scion_server::test_support::error::from_sqlite)?;
-            for row in rows {
-                let (id, body) = row.map_err(scion_server::test_support::error::from_sqlite)?;
-                if !seen.insert(id) {
-                    continue;
-                }
-                let states: Vec<FileState> = if table == "changesets" {
-                    let changes = Changeset::decode(&body).unwrap().changes().clone();
-                    changes.into_values().flatten().collect()
-                } else {
-                    let entries = Tree::decode(&body).unwrap().entries().clone().into_values();
-                    let file = |entry| match entry {
-                        Entry::File(file) => Some(file.state()),
-                        Entry::Dir(_) => None,
-                    };
-                    entries.filter_map(file).collect()
-                };
-                named.extend(states.iter().filter_map(FileState::blob));
+/// The blobs that the changeset and tree rows of the metadata name, and
+/// the number of pending lands. Rows in `seen` are skipped, and new rows
+/// added: a row never changes. The rows come from the store's schema.
+fn metadata(
+    dir: &Path,
+    schema_source: &Path,
+    seen: &mut HashSet<Vec<u8>>,
+) -> (BTreeSet<BlobId>, i64) {
+    let schema = Backend::test_schema(schema_source);
+    let mut named = BTreeSet::new();
+    let schema = schema.clone();
+    for table in ["changesets", "trees"] {
+        let schema = &schema;
+        for (id, body) in raw_rows(schema, table) {
+            if !seen.insert(id) {
+                continue;
             }
+            let states: Vec<FileState> = if table == "changesets" {
+                let changes = Changeset::decode(&body).unwrap().changes().clone();
+                changes.into_values().flatten().collect()
+            } else {
+                let entries = Tree::decode(&body).unwrap().entries().clone().into_values();
+                let file = |entry| match entry {
+                    Entry::File(file) => Some(file.state()),
+                    Entry::Dir(_) => None,
+                };
+                entries.filter_map(file).collect()
+            };
+            named.extend(states.iter().filter_map(FileState::blob));
         }
-        Ok((named, pending_lands(c)))
+    }
+    let pending = LandsReader::open_reopened(dir, schema_source).counts().1;
+    (named, pending)
+}
+
+/// The (id, body) rows of one metadata table, from the store's schema.
+fn raw_rows(schema: &str, table: &str) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let (schema, table) = (schema.to_string(), table.to_string());
+    // The sync client's connect and queries block on the connection's
+    // own runtime, so they cannot run inside a tokio runtime: like
+    // the URL helper, they run on a thread of their own.
+    std::thread::spawn(move || {
+        let mut db = raw_with_schema(&schema);
+        db.query(&format!("SELECT id, body FROM {table} ORDER BY id"), &[])
+            .expect("the table reads")
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect::<Vec<(Vec<u8>, Vec<u8>)>>()
     })
+    .join()
     .unwrap()
 }
 
@@ -1384,14 +1366,11 @@ pub(crate) async fn check(
 
     // Every blob that the metadata names is intact, and so is every blob
     // file: a file reaches its name only whole. The store is the same
-    // backend the server serves: a SQLite open here would create the
-    // data directory's scion.db beside a Postgres server, and the
-    // restart after the cut would refuse the directory. The schema
-    // follows the store, not the path: a reopen from the backing
-    // directory walks another path, whose name would be a fresh, empty
-    // schema.
+    // backend the server serves. The schema follows the store, not the
+    // path: a reopen from the backing directory walks another path,
+    // whose name would be a fresh, empty schema.
     let store = open_store_shared_reopened(data, schema_source);
-    let (named, pending) = metadata(&store, &mut checked.rows);
+    let (named, pending) = metadata(data, schema_source, &mut checked.rows);
     assert_eq!(pending, 0, "every land sent was retried");
     let files = blob_files(data);
     for id in named.into_iter().chain(files) {
@@ -1571,4 +1550,132 @@ pub(crate) async fn ceiling<T>(step: &str, fut: impl std::future::Future<Output 
     tokio::time::timeout(std::time::Duration::from_secs(30), fut)
         .await
         .unwrap_or_else(|_| panic!("the step {step} never finished within 30 s"))
+}
+
+/// The test database's dump and psql: in the job's Postgres container
+/// when `SCION_TEST_PG_CONTAINER` names it (the container's tools are
+/// the server's own), otherwise the tools on the runner's path, the
+/// operator's real path, where the tool's major must match the
+/// server's - a dump by a client of another major may not load.
+pub mod pg {
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+
+    /// The Postgres major of the `tool` on the runner's path, from its
+    /// own version line (`pg_dump (PostgreSQL) 17.5 ...`).
+    fn tool_major(tool: &str) -> u32 {
+        let out = Command::new(tool)
+            .arg("--version")
+            .output()
+            .unwrap_or_else(|e| panic!("{tool} is not on the runner's path: {e}"));
+        let text = String::from_utf8_lossy(&out.stdout);
+        let major = text
+            .split(|c: char| !c.is_ascii_digit())
+            .find(|n| !n.is_empty())
+            .unwrap_or_else(|| panic!("{tool} --version does not name a version: {text}"));
+        major
+            .parse()
+            .unwrap_or_else(|_| panic!("{tool}'s major is not a number: {major}"))
+    }
+
+    /// The Postgres major of the test database, from the server itself.
+    fn server_major(url: &str) -> u32 {
+        let out = Command::new("psql")
+            .args([url, "-tAc", "SHOW server_version_num"])
+            .output()
+            .unwrap_or_else(|e| panic!("psql is not on the runner's path: {e}"));
+        assert!(
+            out.status.success(),
+            "the test database did not name its version: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        let num: u32 = text
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("server_version_num is not a number: {}", text.trim()));
+        num / 10000
+    }
+
+    /// A `pg_dump --no-owner` of `schema` of the test database. The
+    /// caller writes it out.
+    fn dump(url: &str, schema: &str) -> Command {
+        if let Ok(container) = std::env::var("SCION_TEST_PG_CONTAINER") {
+            let db = url.rsplit('/').next().unwrap().to_owned();
+            let mut c = Command::new("docker");
+            c.args([
+                "exec",
+                &container,
+                "pg_dump",
+                "-U",
+                "postgres",
+                "--no-owner",
+            ]);
+            c.arg(format!("--schema={schema}")).arg(db);
+            return c;
+        }
+        let major = tool_major("pg_dump");
+        let server = server_major(url);
+        assert_eq!(
+            major, server,
+            "pg_dump on the path is Postgres {major}, the test database is Postgres {server}: \
+             a dump by a client of another major may not load"
+        );
+        let mut c = Command::new("pg_dump");
+        c.arg("--no-owner");
+        c.arg(format!("--schema={schema}")).arg(url);
+        c
+    }
+
+    /// Dumps `schema` of the test database into `out`, as the runbook's
+    /// `pg_dump --no-owner` does, beside the server that keeps serving.
+    pub fn dump_schema(url: &str, schema: &str, out: &Path) {
+        let file = std::fs::File::create(out).unwrap();
+        let status = dump(url, schema)
+            .stdout(std::process::Stdio::from(file))
+            .status()
+            .expect("pg_dump runs");
+        assert!(status.success(), "pg_dump of {schema} failed");
+    }
+
+    /// A `psql -v ON_ERROR_STOP=1` against the test database. The
+    /// caller adds `-c <sql>` or the dump on stdin.
+    pub fn psql(url: &str) -> Command {
+        if let Ok(container) = std::env::var("SCION_TEST_PG_CONTAINER") {
+            let db = url.rsplit('/').next().unwrap().to_owned();
+            let mut c = Command::new("docker");
+            c.args(["exec", "-i", &container, "psql", "-U", "postgres"]);
+            c.args(["-v", "ON_ERROR_STOP=1", "-d", &db]);
+            return c;
+        }
+        let mut c = Command::new("psql");
+        c.args(["-v", "ON_ERROR_STOP=1"]).arg(url);
+        c
+    }
+
+    /// The name of the database container a test may stop, as
+    /// `SCION_TEST_PG_CONTAINER` names it. Stopping the database is a
+    /// test's premise (the takeover's), so without the name the test
+    /// fails, it does not skip.
+    pub fn container() -> String {
+        std::env::var("SCION_TEST_PG_CONTAINER").expect(
+            "SCION_TEST_PG_CONTAINER names the database container this test \
+             stops and starts again",
+        )
+    }
+
+    /// Loads a dump into the test database, as the runbook's restore
+    /// does, with the same tools the dump ran.
+    pub fn load_schema(url: &str, file: &Path) {
+        let dump = std::fs::File::open(file).unwrap();
+        let output = psql(url)
+            .stdin(Stdio::from(dump))
+            .output()
+            .expect("psql runs");
+        assert!(
+            output.status.success(),
+            "the dump failed to load: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

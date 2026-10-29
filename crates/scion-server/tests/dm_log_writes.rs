@@ -217,7 +217,7 @@ fn an_acknowledged_blob_survives_a_cut_at_the_last_barrier_before_its_reply() {
     }
     let replay =
         std::env::var("SCION_DMW_REPLAY").expect("the CI step builds replay-log and names it");
-    let work = tempfile::tempdir().unwrap();
+    let work = scion_server::test_support::private_tempdir();
     let recording = Recording::new(work.path());
     let mount = recording.mount.clone();
 

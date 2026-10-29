@@ -24,7 +24,7 @@ fn author() -> scion_core::IdentityTime {
 
 #[test]
 fn the_parents_batch_answers_a_merge_asked_twice() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
 
     let root = Changeset::new(vec![], author(), None, b"root".to_vec(), BTreeMap::new())

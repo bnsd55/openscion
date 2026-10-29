@@ -288,7 +288,7 @@ fn a_broken_link_is_reported() {
     // repository whose path is not in the repo, and to a heading that
     // `b.md` has. The checker must name the first three, each for its own
     // reason, and pass the fourth.
-    let root = tempfile::tempdir().expect("a temp tree");
+    let root = scion_server::test_support::private_tempdir();
     fs::write(
         root.path().join("a.md"),
         "[file](missing.md)\n[anchor](b.md#no)\n[repo](https://github.com/bnsd55/openscion/blob/main/docs/no-such-doc.md)\n[good](b.md#real)\n",

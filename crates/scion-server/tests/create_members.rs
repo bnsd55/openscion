@@ -39,7 +39,7 @@ fn regular(content: &str) -> FileState {
 /// the changeset, so the measured window is the member check's own
 /// statements.
 fn store_with_root(n_blobs: usize) -> (tempfile::TempDir, Backend, scion_core::ChangesetId) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     store.blobs().put(b"seed\n").unwrap();
     let root = store

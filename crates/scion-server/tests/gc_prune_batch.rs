@@ -48,14 +48,10 @@ fn age_file(store: &Backend, id: BlobId, age: Duration) {
 
 #[test]
 fn the_prune_of_a_thousand_rows_costs_twenty_statements() {
-    if !Backend::test_is_postgres() {
-        eprintln!("skip on sqlite: the statement count is a Postgres seam");
-        return;
-    }
     let old = Duration::from_secs(8 * 24 * 60 * 60);
     let mut counts = Vec::new();
     for n in [100, 1000] {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = scion_server::test_support::private_tempdir();
         let store = Backend::open_test_shared(dir.path()).unwrap();
         let repo = store.write(|c| c.create_repo("gc")).unwrap();
         for i in 0..n {

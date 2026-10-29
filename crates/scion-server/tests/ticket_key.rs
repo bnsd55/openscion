@@ -15,7 +15,7 @@ use std::process::{Command, Output};
 fn run(data: &Path, args: &[&std::ffi::OsStr]) -> Output {
     // The binary refuses a missing data directory (#578); a test that
     // wants the command to run makes the directory itself.
-    fs::create_dir_all(data).unwrap();
+    scion_proto::runtime::auth::create_private_dir_all(data).unwrap();
     Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .arg("--data")
         .arg(data)
@@ -32,7 +32,7 @@ fn mode_of(path: &Path) -> u32 {
 
 #[test]
 fn ticket_key_prints_one_line_of_64_hex() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let out = run(
         &data,
@@ -60,7 +60,7 @@ fn ticket_key_prints_one_line_of_64_hex() {
 
 #[test]
 fn a_ticket_key_file_is_private_and_made_once() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let key = dir.path().join("ticket.key");
 
@@ -90,7 +90,7 @@ fn a_ticket_key_file_is_private_and_made_once() {
 
 #[test]
 fn serve_refuses_a_seed_that_group_or_others_can_read() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     let key = dir.path().join("ticket.key");
     let out = run(
@@ -146,6 +146,11 @@ fn serve_refuses_a_seed_that_group_or_others_can_read() {
             "--ticket-key",
             key.to_str().unwrap(),
         ])
+        // The serve opens the store: the URL rides the env, quietly.
+        .env(
+            "SCION_POSTGRES_URL",
+            scion_server::Backend::test_postgres_url(&data2).unwrap(),
+        )
         .env("NO_COLOR", "1")
         // The info lines go to stderr, and the test waits for the one that
         // says the server listens.
@@ -235,7 +240,7 @@ fn serve_with_old(dir: &Path, seed: &Path, old: &Path) -> Output {
 
 #[test]
 fn an_old_public_key_is_readable_by_anyone_but_writable_by_its_owner_alone() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     // public_key_of makes dir/seed.key (0600) and prints its public half.
     let hex = public_key_of(dir.path());
     let seed = dir.path().join("seed.key");
@@ -258,6 +263,11 @@ fn an_old_public_key_is_readable_by_anyone_but_writable_by_its_owner_alone() {
             "--ticket-key-old",
             old.to_str().unwrap(),
         ])
+        // The serve opens the store: the URL rides the env, quietly.
+        .env(
+            "SCION_POSTGRES_URL",
+            scion_server::Backend::test_postgres_url(&dir.path().join("data")).unwrap(),
+        )
         .env("NO_COLOR", "1")
         // The info lines go to stderr, and the test waits for the one that
         // says the server listens.

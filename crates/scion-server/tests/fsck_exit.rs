@@ -10,14 +10,12 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
-use scion_server::test_support::store::Store;
-
 /// The `scion-server fsck` exit-code table.
 #[test]
 fn the_exit_codes_of_fsck() {
     // 0: a clean directory.
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let dir = scion_server::test_support::private_tempdir();
+    let store = scion_server::Backend::open_test(dir.path()).unwrap();
     let _blob = store.blobs().put(b"clean\n").unwrap();
     drop(store);
     assert_eq!(
@@ -46,23 +44,52 @@ fn the_exit_codes_of_fsck() {
         "a damaged store exits 1"
     );
 
-    // 2: cannot run. A database no store can open cannot be checked.
-    let broken = tempfile::tempdir().unwrap();
-    fs::write(broken.path().join("scion.db"), b"not a database at all\n").unwrap();
+    // 2: cannot run. The metadata store cannot be opened at all, so
+    // fsck cannot check anything. The URL names a port nothing listens
+    // on, so the run cannot begin, and the exit code is 2.
+    let broken = scion_server::test_support::private_tempdir();
+    let url = "postgres://postgres:scion@127.0.0.1:1/scion";
     assert_eq!(
-        fsck(broken.path()).status.code(),
+        fsck_with(broken.path(), &["--postgres-url".as_ref(), url.as_ref()])
+            .status
+            .code(),
         Some(2),
-        "a store that cannot open exits 2"
+        "a metadata store that cannot be reached exits 2"
+    );
+
+    // 2: cannot run, again: no Postgres URL at all. fsck cannot check
+    // anything when it does not know where the metadata lives, and its
+    // exit table says that is 2, not the generic open failure's 1.
+    let no_url = scion_server::test_support::private_tempdir();
+    assert_eq!(
+        fsck_with(no_url.path(), &[]).status.code(),
+        Some(2),
+        "fsck without a Postgres URL exits 2"
     );
 }
 
-/// Runs `scion-server --data <dir> fsck` and returns its status.
+/// Runs `scion-server --data <dir> fsck` and returns its status. The
+/// binary needs the URL rule every suite uses: the data directory's own
+/// schema.
 fn fsck(data: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_scion-server"))
-        .args(["--data"])
+    let url = common::postgres_url(data);
+    fsck_with(data, &["--postgres-url".as_ref(), url.as_ref()])
+}
+
+fn fsck_with(data: &Path, extra: &[&std::ffi::OsStr]) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scion-server"));
+    cmd.args(["--data"])
         .arg(data)
+        .args(extra)
         .arg("fsck")
+        // The run under test sees no URL but the one its arguments name:
+        // an env form meant for another suite must not save it.
+        .env_remove("SCION_POSTGRES_URL")
         .env("NO_COLOR", "1")
         .output()
         .unwrap()
 }
+
+// Every test binary compiles this file and uses its own subset of it.
+#[path = "common/mod.rs"]
+mod common;
