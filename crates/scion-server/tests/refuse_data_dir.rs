@@ -103,12 +103,17 @@ fn an_existing_data_directory_works_as_today_and_restore_still_creates() {
     let data = cwd.path().join("scion-data");
     scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
     let bin = env!("CARGO_BIN_EXE_scion-server");
+    // Every spawned child reads its URL from the environment (never
+    // `SCION_TEST_POSTGRES_URL`); the store under test is the test
+    // database's, at this data directory's own schema.
+    let url = scion_server::Backend::test_postgres_url(&data).unwrap();
     // With the directory present, every refused command works as today.
     let out = Command::new(bin)
         .args(["--data"])
         .arg(&data)
         .arg("fsck")
         .env("NO_COLOR", "1")
+        .env("SCION_POSTGRES_URL", &url)
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0), "fsck runs on the existing dir");
@@ -119,22 +124,32 @@ fn an_existing_data_directory_works_as_today_and_restore_still_creates() {
         .args(["ticket-key", "--out"])
         .arg(&key)
         .env("NO_COLOR", "1")
+        .env("SCION_POSTGRES_URL", &url)
         .output()
         .unwrap();
     assert!(out.status.success(), "ticket-key runs: {}", out.status);
     assert!(key.exists());
-    // `restore` is the one command that still creates its target.
+    // `restore` is the one command that still creates its target: its
+    // URL names the TARGET's schema (a restore publishes into the
+    // schema the URL names), not the data directory's.
     let archive = make_archive(cwd.path());
     let target = cwd.path().join("made-by-restore");
+    let target_url = scion_server::Backend::test_postgres_url(&target).unwrap();
     let out = Command::new(bin)
         .args(["--data"])
         .arg(&target)
         .args(["restore", "--archive"])
         .arg(&archive)
         .env("NO_COLOR", "1")
+        .env("SCION_POSTGRES_URL", &target_url)
         .output()
         .unwrap();
-    assert!(out.status.success(), "restore runs: {}", out.status);
+    assert!(
+        out.status.success(),
+        "restore runs: {} {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(target.is_dir(), "restore created its target");
 }
 
