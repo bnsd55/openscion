@@ -2726,22 +2726,32 @@ mod tests {
             (parents, edits) in testing::histories(40),
             room in proptest::option::of(0..4000_usize),
         ) {
-            // One schema (one data directory) for every case of this test
-            // fn, and one repo per case: on Postgres a schema per case
-            // would be 64 schemas of one writer and eight readers each.
-            static STAGE: std::sync::OnceLock<(tempfile::TempDir, Backend)> =
-                std::sync::OnceLock::new();
+            // SQLite takes a fresh store per case, so no query's cost
+            // grows with the case count. Postgres shares one schema for
+            // the whole test fn and makes one repo per case: a schema
+            // per case would be hundreds of schemas of one writer and
+            // eight readers each.
+            static STAGE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
             static CASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let _serial = damage::serial();
-            let (_dir, store) = STAGE.get_or_init(|| {
-                let dir = crate::test_support::private_tempdir();
-                let store = Backend::open_test(dir.path()).unwrap();
-                (dir, store)
-            });
-            let repo_name = format!(
-                "r{}",
-                CASE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            );
+            let shared = Backend::test_is_postgres();
+            // The directory outlives the case: a TempDir dropped early
+            // deletes the schema the store still serves.
+            let dir = if shared {
+                let d = STAGE.get_or_init(crate::test_support::private_tempdir);
+                d.path().to_owned()
+            } else {
+                crate::test_support::private_tempdir().path().to_path_buf()
+            };
+            let store = Backend::open_test(&dir).unwrap();
+            let repo_name = if shared {
+                format!(
+                    "r{}",
+                    CASE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                )
+            } else {
+                "r".to_owned()
+            };
             let (repo, ids) = store
                 .write(|c| {
                     let repo = c.create_repo(&repo_name)?;
