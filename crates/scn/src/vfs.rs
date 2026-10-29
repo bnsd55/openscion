@@ -268,6 +268,12 @@ impl Vfs {
     /// is the read ticket that minted for `root`; a ticket that does not
     /// parse is stored as expired, so the first read mints a fresh one.
     /// Changes go to `overlay`.
+    ///
+    /// # Errors
+    ///
+    /// The mount secret, when the system's source of random bytes is
+    /// unreadable.
+    //
     // The test seam re-exports the Vfs surface (test_support.vfs), and
     // unreachable_pub does not see through a re-export.
     #[allow(unreachable_pub)]
@@ -279,9 +285,9 @@ impl Vfs {
         root: TreeId,
         ticket: &[u8],
         overlay: PathBuf,
-    ) -> Self {
+    ) -> std::io::Result<Self> {
         let grant = Grant::of(ticket);
-        Self {
+        Ok(Self {
             objects,
             roots,
             repo,
@@ -306,14 +312,14 @@ impl Vfs {
                 deleted: HashSet::new(),
             }),
             blobs: tokio::sync::Mutex::new((LinkedHashMap::new(), 0)),
-            secret: secret_from_urandom(),
+            secret: secret_from_urandom()?,
             started: SystemTime::now(),
             uid: rustix::process::geteuid().as_raw(),
             gid: rustix::process::getegid().as_raw(),
             overlay,
             #[cfg(feature = "unstable-writable-mount")]
             writable: false,
-        }
+        })
     }
 
     /// Takes writes on this mount, or not: `scn mount --unstable-writable`
@@ -1624,13 +1630,13 @@ fn symlink_bytes(target: &[u8], file: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(target), file)
 }
 
-/// The mount secret, from the system's source of random bytes.
-fn secret_from_urandom() -> [u8; 16] {
+/// The mount secret, from the system's source of random bytes. A system
+/// without `/dev/urandom` is refused here, with the cause, not met with
+/// a panic.
+fn secret_from_urandom() -> std::io::Result<[u8; 16]> {
     let mut secret = [0u8; 16];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut secret))
-        .expect("cannot read /dev/urandom");
-    secret
+    std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut secret))?;
+    Ok(secret)
 }
 
 impl Vfs {
@@ -1899,7 +1905,8 @@ mod tests {
             root,
             &reply.ticket,
             overlay.path().to_path_buf(),
-        );
+        )
+        .expect("the vfs is made");
         // The unit tests of the VFS carry writes: a `--unstable-writable`
         // mount is what they exercise. A build without the feature has no
         // write path; its tests here are the read-side ones.
@@ -2524,7 +2531,8 @@ mod tests {
             root,
             &reply.ticket,
             overlay.path().to_path_buf(),
-        );
+        )
+        .expect("the vfs is made");
         // The first read: the ticket it was minted is refused, so the
         // mount mints again and reads with the fresh one.
         let id = vfs
