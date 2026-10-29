@@ -2750,7 +2750,7 @@ mod tests {
                 // them on a real server: after the first case and then
                 // every 16 cases, so the shared schema's plans follow
                 // its size.
-                if case > 0 && (case - 1) % 16 == 0 {
+                if case > 0 && (case - 1).is_multiple_of(16) {
                     damage::analyze(&store).unwrap();
                 }
                 format!("r{case}")
