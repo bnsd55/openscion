@@ -120,6 +120,19 @@ pub fn seed(store: &DiskStore, path: &Path) -> io::Result<Option<Seeded>> {
     if !store.is_empty() {
         return Ok(None);
     }
+    seed_cold(store, path).map(Some)
+}
+
+/// Seeds `store` from the snapshot at `path`, whatever it holds: [`seed`]
+/// without its check of an empty store, for a caller that checked once
+/// for several files. A daemon given more than one `--seed` judges the
+/// store cold before the first, and the first file's objects must not make
+/// it skip the rest.
+///
+/// # Errors
+///
+/// As [`seed`].
+pub fn seed_cold(store: &DiskStore, path: &Path) -> io::Result<Seeded> {
     let not_snapshot = |why: &str| {
         io::Error::new(
             ErrorKind::InvalidData,
@@ -187,7 +200,7 @@ pub fn seed(store: &DiskStore, path: &Path) -> io::Result<Option<Seeded>> {
             seeded.skipped += 1;
         }
     }
-    Ok(Some(seeded))
+    Ok(seeded)
 }
 
 /// Fills `buf` from `file`. `false` if the file ends first.

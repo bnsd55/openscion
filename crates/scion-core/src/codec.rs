@@ -351,7 +351,7 @@ impl Tree {
                 }
                 TAG_REGULAR => {
                     r.array::<32>()?;
-                    r.u8()?;
+                    r.flag()?;
                     r.array::<8>()?;
                 }
                 TAG_SYMLINK => {
@@ -553,6 +553,37 @@ mod tests {
             Err(EncodeError::FieldTooLong("field"))
         );
         assert_eq!(check_fit(0, 0, "field"), Ok(()));
+    }
+
+    /// `find_entry` refuses what the decoder refuses up to the point it
+    /// stops reading: a skipped entry's flag byte is checked as the
+    /// decoder checks it, not only read.
+    #[test]
+    fn find_entry_refuses_a_bad_flag_before_the_name_it_finds() {
+        let file = |executable| {
+            Entry::File(FileEntry::new(
+                FileState::Regular {
+                    content: BlobId::of(b"x"),
+                    executable,
+                },
+                1,
+            ))
+        };
+        let tree = Tree::new(BTreeMap::from([
+            (PathElem::new("a").unwrap(), file(false)),
+            (PathElem::new("b").unwrap(), file(false)),
+        ]))
+        .unwrap();
+        let mut body = tree.encode();
+        // version (1), count (4), then "a": name length (4), name (1),
+        // tag (1), blob (32), and its flag.
+        let flag = 1 + 4 + 4 + 1 + 1 + 32;
+        assert_eq!(body[flag], 0);
+        body[flag] = 2;
+        assert_eq!(Tree::decode(&body), Err(DecodeError::BadFlag(2)));
+        assert_eq!(Tree::find_entry(&body, b"b"), Err(DecodeError::BadFlag(2)));
+        // The entry it stops at is checked too, as before.
+        assert_eq!(Tree::find_entry(&body, b"a"), Err(DecodeError::BadFlag(2)));
     }
 
     #[test]
