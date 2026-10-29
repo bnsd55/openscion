@@ -1201,7 +1201,11 @@ fn serve_flags(args: &ServeArgs) -> anyhow::Result<ServeFlags> {
     let token = match (&args.token, &args.token_file) {
         (Some(_), Some(_)) => unreachable!("clap refuses --token with --token-file"),
         (Some(_), None) => {
-            warn_argv_secret("--token", "--token-file (or SCION_TOKEN)");
+            warn_argv_secret(
+                "--token",
+                "--token-file (or SCION_TOKEN)",
+                "the argv form is deprecated and goes away in a later release",
+            );
             args.token.clone()
         }
         (None, Some(file)) => Some(secret_file(file)?),
@@ -1342,20 +1346,20 @@ async fn serve(
 
 /// The stderr warning of a secret that arrived on the command line: ps
 /// and `/proc/$$/cmdline` show it to every local account, and it lands
-/// in shell history. The argv form stays for now (the owner's call: warn
-/// first, remove in a later minor); the replacement reads a file that
-/// the checked read of the access file protects.
-fn argv_secret_warning(flag: &str, replacement: &str) -> String {
+/// in shell history. The argv form goes away: `--postgres-url` in
+/// v0.2.0 (the owner's call), the rest in a later minor; the
+/// replacement reads a file that the checked read of the access file
+/// protects.
+fn argv_secret_warning(flag: &str, replacement: &str, removal: &str) -> String {
     format!(
         "warning: {flag} put a secret on the command line, which ps and \
          /proc/$$/cmdline show to every local account, and which lands in \
-         shell history; use {replacement} instead (the argv form is \
-         deprecated and goes away in a later release)"
+         shell history; use {replacement} instead ({removal})"
     )
 }
 
-fn warn_argv_secret(flag: &str, replacement: &str) {
-    eprintln!("{}", argv_secret_warning(flag, replacement));
+fn warn_argv_secret(flag: &str, replacement: &str, removal: &str) {
+    eprintln!("{}", argv_secret_warning(flag, replacement, removal));
 }
 
 /// A secret from a file the checked read protects, trimmed: the owner
@@ -1383,6 +1387,7 @@ fn postgres_url_of(url_file: Option<&PathBuf>, url_arg: Option<&String>) -> anyh
         warn_argv_secret(
             "--postgres-url",
             "--postgres-url-file (or SCION_POSTGRES_URL)",
+            "--postgres-url will be removed in v0.2.0",
         );
         url.clone()
     } else if let Some(url) = std::env::var("SCION_POSTGRES_URL")
@@ -1557,7 +1562,11 @@ fn hash_token() -> anyhow::Result<()> {
         (Some(_), Some(_)) => unreachable!("clap refuses --token with --token-file"),
         (None, Some(file)) => secret_file(file)?,
         (Some(_), None) => {
-            warn_argv_secret("--token", "--token-file, SCION_TOKEN or stdin");
+            warn_argv_secret(
+                "--token",
+                "--token-file, SCION_TOKEN or stdin",
+                "the argv form is deprecated and goes away in a later release",
+            );
             let token = token.expect("the argv form is given");
             let trimmed = token.trim();
             anyhow::ensure!(
