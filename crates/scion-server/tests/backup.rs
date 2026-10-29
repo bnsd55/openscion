@@ -782,27 +782,76 @@ fn test_schema(data: &std::path::Path) -> String {
     format!("scion_test_{:016x}", std::hash::Hasher::finish(&hasher))
 }
 
+/// The Postgres major of the `tool` on the runner's path, from its
+/// own version line (`pg_dump (PostgreSQL) 17.5 ...`).
+fn tool_major(tool: &str) -> u32 {
+    let out = std::process::Command::new(tool)
+        .arg("--version")
+        .output()
+        .unwrap_or_else(|e| panic!("{tool} is not on the runner's path: {e}"));
+    let text = String::from_utf8_lossy(&out.stdout);
+    let major = text
+        .split(|c: char| !c.is_ascii_digit())
+        .find(|n| !n.is_empty())
+        .unwrap_or_else(|| panic!("{tool} --version does not name a version: {text}"));
+    major
+        .parse()
+        .unwrap_or_else(|_| panic!("pg_dump's major is not a number: {major}"))
+}
+
+/// The Postgres major of the test database, from the server itself.
+fn server_major(url: &str) -> u32 {
+    let out = std::process::Command::new("psql")
+        .args([url, "-tAc", "SHOW server_version_num"])
+        .output()
+        .unwrap_or_else(|e| panic!("psql is not on the runner's path: {e}"));
+    assert!(
+        out.status.success(),
+        "the test database did not name its version: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    let num: u32 = text
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("server_version_num is not a number: {}", text.trim()));
+    num / 10000
+}
+
 /// Dumps `schema` with the runbook's `pg_dump --no-owner`, beside the
-/// server that keeps serving. The dump runs in the job's Postgres
-/// container, the only one on the runner: its tools match the server's
-/// version, where a client from the runner image may not.
+/// server that keeps serving. In the job's Postgres container the
+/// tools are the server's own. Without a container (a runner that
+/// serves Postgres from the host, the operator's real path) the tools
+/// come from the runner's path, and their major must match the
+/// server's: a dump by a client of another major may not load.
 fn dump_schema(schema: &str, out: &std::path::Path) {
-    let container = std::env::var("SCION_TEST_PG_CONTAINER")
-        .expect("SCION_TEST_PG_CONTAINER names the job's Postgres container");
-    let db = std::env::var("SCION_TEST_POSTGRES_URL")
-        .expect("SCION_TEST_POSTGRES_URL names the test database")
-        .rsplit('/')
-        .next()
-        .unwrap()
-        .to_owned();
-    let file = std::fs::File::create(out).unwrap();
-    let status = std::process::Command::new("docker")
-        .args(["exec", &container, "pg_dump", "-U", "postgres"])
-        .args(["--no-owner", &format!("--schema={schema}"), &db])
-        .stdout(std::process::Stdio::from(file))
-        .status()
-        .expect("docker runs");
-    assert!(status.success(), "pg_dump of {schema} failed");
+    let url = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL names the test database");
+    if let Ok(container) = std::env::var("SCION_TEST_PG_CONTAINER") {
+        let db = url.rsplit('/').next().unwrap().to_owned();
+        let file = std::fs::File::create(out).unwrap();
+        let status = std::process::Command::new("docker")
+            .args(["exec", &container, "pg_dump", "-U", "postgres"])
+            .args(["--no-owner", &format!("--schema={schema}"), &db])
+            .stdout(std::process::Stdio::from(file))
+            .status()
+            .expect("docker runs");
+        assert!(status.success(), "pg_dump of {schema} failed");
+    } else {
+        let major = tool_major("pg_dump");
+        let server = server_major(&url);
+        assert_eq!(
+            major, server,
+            "pg_dump on the path is Postgres {major}, the test database is Postgres {server}: a dump by a client of another major may not load"
+        );
+        let file = std::fs::File::create(out).unwrap();
+        let status = std::process::Command::new("pg_dump")
+            .args(["--no-owner", &format!("--schema={schema}"), &url])
+            .stdout(std::process::Stdio::from(file))
+            .status()
+            .expect("pg_dump runs");
+        assert!(status.success(), "pg_dump of {schema} failed");
+    }
     let dumped = std::fs::read_to_string(out).unwrap();
     assert!(
         dumped.contains(schema),
@@ -820,21 +869,24 @@ fn rename_in(file: &std::path::Path, from: &str, to: &str) {
 
 /// Loads a dump into the database, as the runbook's restore does.
 fn load_schema(file: &std::path::Path) {
-    let container = std::env::var("SCION_TEST_PG_CONTAINER")
-        .expect("SCION_TEST_PG_CONTAINER names the job's Postgres container");
-    let db = std::env::var("SCION_TEST_POSTGRES_URL")
-        .expect("SCION_TEST_POSTGRES_URL names the test database")
-        .rsplit('/')
-        .next()
-        .unwrap()
-        .to_owned();
+    let url = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL names the test database");
     let dump = std::fs::File::open(file).unwrap();
-    let output = std::process::Command::new("docker")
-        .args(["exec", "-i", &container, "psql", "-U", "postgres"])
-        .args(["-v", "ON_ERROR_STOP=1", "-d", &db])
-        .stdin(std::process::Stdio::from(dump))
-        .output()
-        .expect("docker runs");
+    let output = if let Ok(container) = std::env::var("SCION_TEST_PG_CONTAINER") {
+        let db = url.rsplit('/').next().unwrap().to_owned();
+        std::process::Command::new("docker")
+            .args(["exec", "-i", &container, "psql", "-U", "postgres"])
+            .args(["-v", "ON_ERROR_STOP=1", "-d", &db])
+            .stdin(std::process::Stdio::from(dump))
+            .output()
+            .expect("docker runs")
+    } else {
+        std::process::Command::new("psql")
+            .args(["-v", "ON_ERROR_STOP=1", &url])
+            .stdin(std::process::Stdio::from(dump))
+            .output()
+            .expect("psql runs")
+    };
     assert!(
         output.status.success(),
         "the dump failed to load: {}",

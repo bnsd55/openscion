@@ -395,6 +395,11 @@ jobs:
           PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '500' || '2000' }}
           SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+          # The backup test dumps the live metadata with the job's own
+          # Postgres, so its tools match the server: the container name
+          # points at the service container above, and the test never
+          # stops it.
+          SCION_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
       # The daemon startup rules (#592's data-dir gate) are exercised by
       # no per-PR job otherwise: the dispatch scripts (soak, bench,
       # capacity, version-matrix) start the daemon, the suite does not.
@@ -716,6 +721,10 @@ jobs:
           "$PG/initdb" --username=postgres --auth=trust "$RUNNER_TEMP/pgdata"
           "$PG/pg_ctl" -D "$RUNNER_TEMP/pgdata" -l "$RUNNER_TEMP/pg.log" start
           "$PG/createdb" -U postgres -h 127.0.0.1 scion
+          # The backup test's no-container arm runs pg_dump and psql
+          # from the path: keg-only, so the tools go on the path for the
+          # later steps, with the version check the test itself runs.
+          echo "$PG" >> "$GITHUB_PATH"
       # The Linux lint job never compiles macOS-only code (the ACL FFI
       # module among it), so clippy runs here, before the tests: same
       # warm cache, a couple of minutes on a job that already builds
@@ -803,6 +812,9 @@ jobs:
           PROPTEST_CASES: "2000"
           SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+          # The backup test dumps the live metadata with the job's own
+          # Postgres, so its tools match the server.
+          SCION_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
       - name: a real disk full (tmpfs)
         run: cargo test -p open-scion-server --test disk_full
         env:
@@ -864,6 +876,9 @@ jobs:
           PROPTEST_CASES: "64"
           SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+          # The backup test dumps the live metadata with the job's own
+          # Postgres, so its tools match the server.
+          SCION_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
       - name: the loop device goes away
         if: always()
         run: |
