@@ -56,9 +56,10 @@ fuzz_target!(|data: &[u8]| {
 
     // verify answers damages or refuses; it must never panic. A damaged
     // archive must refuse a restore: run it when the data dir stays empty.
+    // The URL never resolves: the check precedes the contact.
     if let Ok(damages) = archive::verify(&archive) {
         let target = scion_server::test_support::private_tempdir();
-        match archive::restore(&archive, target.path(), None, None) {
+        match archive::restore(&archive, target.path(), "postgres://127.0.0.1:5/scion", None) {
             Ok(_) => assert!(
                 damages.is_empty(),
                 "a restore ran on an archive verify names: {damages:?}"

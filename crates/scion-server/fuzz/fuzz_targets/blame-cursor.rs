@@ -13,7 +13,7 @@ use scion_core::{Changeset, ChangesetId, FileState, IdentityTime, RepoPath};
 use scion_server::test_support::blame::{self, Resume};
 use scion_server::test_support::memory::Bytes;
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
-use scion_server::{Backend, test_support::{store::Store, tree}};
+use scion_server::{Backend, test_support::tree};
 use std::sync::OnceLock;
 use tempfile::TempDir;
 
@@ -30,7 +30,7 @@ fn fixture() -> &'static (TempDir, Backend, ChangesetId) {
     static FIXTURE: OnceLock<(TempDir, Backend, ChangesetId)> = OnceLock::new();
     FIXTURE.get_or_init(|| {
         let dir = scion_server::test_support::private_tempdir();
-        let store = scion_server::test_support::backend::from_store(Store::open(dir.path()).expect("store"));
+        let store = Backend::open_test_shared(dir.path()).expect("store");
         let tip = store
             .write(|c| {
                 let repo = c.create_repo(REPO)?;

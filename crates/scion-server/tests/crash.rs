@@ -16,7 +16,6 @@ use std::time::{Duration, Instant};
 use common::*;
 
 use scion_server::Backend;
-use std::process::Command;
 
 /// The failed-migration runbook (docs/operations.md, "A failed
 /// migration"), step by step: an open of a database whose schema is
