@@ -390,9 +390,10 @@ jobs:
           cache-workspace-crates: true
       - run: cargo test --workspace
         env:
-          # The fast tier: a pull request runs 500 cases, main, the
-          # nightly and a dispatch the full 2000.
-          PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '500' || '2000' }}
+          # The fast tier: a pull request runs 64 cases, main, the
+          # nightly and a dispatch 256; the nightly's own job below
+          # still proves the full 2000 on Postgres.
+          PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '64' || '256' }}
           SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           # The backup test dumps the live metadata with the job's own
@@ -733,8 +734,9 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
         env:
-          # A pull request runs 500 cases, main and the nightly 2000.
-          PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '500' || '2000' }}
+          # A pull request runs 64 cases, main and the nightly 256;
+          # the nightly's own job proves the full 2000.
+          PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '64' || '256' }}
           SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
       - name: the work tree is still clean after the tests
@@ -809,7 +811,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo test --workspace
         env:
-          PROPTEST_CASES: "2000"
+          PROPTEST_CASES: "256"
           SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           # The backup test dumps the live metadata with the job's own
@@ -821,6 +823,58 @@ jobs:
           SCION_DISK_REQUIRE: "1"
           SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+
+  # The nightly's proof that the whole proptest budget (2000 cases)
+  # passes on Postgres: the per-job counts above keep the per-push jobs
+  # under their caps, and this job carries the full run once a night in
+  # its own longer window.
+  test-proptest-full:
+    name: test (proptest full)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    services:
+      # The suite's Postgres tests read this database: the backend they
+      # choose is Postgres, and the URL names the database this service
+      # runs.
+      postgres:
+        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        env:
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: scion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: protoc
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-workspace-crates: true
+      - run: cargo test --workspace
+        env:
+          PROPTEST_CASES: "2000"
+          SCION_TEST_BACKEND: postgres
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+          # The backup test dumps the live metadata with the job's own
+          # Postgres, so its tools match the server.
+          SCION_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
+      - name: the work tree is still clean after the tests
+        run: |
+          dirty=$(git status --porcelain --untracked-files=all)
+          if [ -n "$dirty" ]; then
+            git diff --exit-code || true
+            echo "::error::the test suite left the work tree dirty: $dirty"
+            exit 1
+          fi
 
   # The xfs cell of the support matrix (docs/support.md): every store
   # the server suite opens lands on a real xfs loop device, through
