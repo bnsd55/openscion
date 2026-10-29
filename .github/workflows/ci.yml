@@ -856,7 +856,12 @@ jobs:
           cargo test --workspace --no-run
         env:
           CARGO_TERM_COLOR: always
-      - run: |
+      # The runner dies ~48 minutes in under the whole-suite run, so
+      # the suites run in chunks, each chunk one step with its own
+      # artifact: the chunks before a death survive and the first
+      # missing one names where the run was.
+      - name: suites a-m
+        run: |
           free -m || true
           rm -f "$RUNNER_TEMP/arm64-test.log" "$RUNNER_TEMP/arm64-sampler.log" guard.trip measure.pgid measure.rc
           start_avail=$(df --output=avail -BG / 2> /dev/null | tail -1 | tr -dc '0-9') || true
@@ -896,7 +901,7 @@ jobs:
               fi
             done ) &
           watcher=$!
-          setsid bash -c 'echo $$ > measure.pgid; timeout -k 60 3300 cargo test --workspace --no-fail-fast > '"$RUNNER_TEMP"'/arm64-test.raw 2>&1; echo $? > measure.rc' || true
+          setsid bash -c 'echo $$ > measure.pgid; timeout -k 60 1200 cargo test -p open-scion-server --no-fail-fast --test access --test admin_audit --test alert_metrics --test archive --test archive_attacks --test archive_golden --test archive_restore_stream --test argv_secrets --test audit --test audit_evidence --test audit_golden --test backend_refusals --test backup --test batch_contract --test big_replies --test blame_edges --test capacity_harness --test changeset_batch --test changeset_batch_eq --test client_ceiling --test contract --test crash --test crash_pg --test create_members --test demo_ignore --test derived_batch --test disk_full --test dm_log_writes --test docs_alerts --test docs_capacity --test docs_changes --test docs_flags --test docs_links --test docs_ops --test e2e_write --test empty_token --test every_rpc_unauthenticated --test first_boot --test fsck_exit --test gc_metrics --test gc_prune_batch --test gc_prune_bytes --test git_import_batch --test global_flags --test health --test history --test history_batch > '"$RUNNER_TEMP"'/arm64-test.raw 2>&1; echo $? > measure.rc' || true
           code=$(cat measure.rc 2> /dev/null || echo 124)
           kill "$watcher" 2> /dev/null || true
           wait "$watcher" 2> /dev/null || true
@@ -909,13 +914,84 @@ jobs:
           PROPTEST_CASES: "2000"
           RUST_TEST_THREADS: "2"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
-      - name: the arm64 suite's log, even on a cancelled run
+      - name: the chunk's log, even on a cancelled run
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: arm64-test-log
+          name: arm64-test-log-a-m
           path: ${{ runner.temp }}/arm64-test.log
           if-no-files-found: ignore
+
+      - name: suites n-z
+        run: |
+          free -m || true
+          rm -f "$RUNNER_TEMP/arm64-test.log" "$RUNNER_TEMP/arm64-sampler.log" guard.trip measure.pgid measure.rc
+          start_avail=$(df --output=avail -BG / 2> /dev/null | tail -1 | tr -dc '0-9') || true
+          start_mem=$(free -m 2> /dev/null | awk 'NR==2 {print $7}') || true
+          start_procs=$(ps -e --no-headers 2> /dev/null | wc -l | tr -d ' ') || true
+          ( while sleep 10; do
+              { date -u +%T; df -h / | tail -1; free -m | awk 'NR==2'; } >> "$RUNNER_TEMP/arm64-sampler.log" 2> /dev/null || true
+              { ps -eo rss,comm,args --sort=-rss 2> /dev/null | head -6 >> "$RUNNER_TEMP/arm64-sampler.log"; } || true
+              procs=$(ps -e --no-headers 2> /dev/null | wc -l | tr -d ' ') || true
+              family=$(pgrep -c -f 'scion-(server|daemon|cache)' 2> /dev/null) || true
+              family=${family:-0}
+              mount 2> /dev/null | grep -Ei 'nfs|fuse' >> "$RUNNER_TEMP/arm64-sampler.log" || true
+              ps -eo pid,stat,etime,comm 2> /dev/null | awk '$2 ~ /D/' >> "$RUNNER_TEMP/arm64-sampler.log" || true
+              avail=$(df --output=avail -BG / 2> /dev/null | tail -1 | tr -dc '0-9') || true
+              mem=$(free -m 2> /dev/null | awk 'NR==2 {print $7}') || true
+              swap_used=$(free -m 2> /dev/null | awk 'NR==3 {print $3}') || true
+              echo "SAMPLE $(date -u +%H:%M:%S) procs=${procs:-?} store_family=$family mem_avail=${mem:-?}M swap_used=${swap_used:-?}M disk_avail=${avail:-?}G" >> "$RUNNER_TEMP/arm64-sampler.log" 2> /dev/null || true
+              avail_drop=0; mem_drop=0; proc_growth=0
+              if [ -n "${avail:-}" ] && [ -n "${start_avail:-}" ]; then avail_drop=$((start_avail - avail)); fi
+              if [ -n "${mem:-}" ] && [ -n "${start_mem:-}" ]; then mem_drop=$((start_mem - mem)); fi
+              if [ -n "${procs:-}" ] && [ -n "${start_procs:-}" ]; then proc_growth=$((procs - start_procs)); fi
+              if [ "${avail:-10}" -le 3 ] || [ "$avail_drop" -ge 20 ] || [ "${mem:-10000}" -le 1000 ] || [ "$proc_growth" -ge 500 ] || [ "$family" -ge 200 ]; then
+                {
+                  echo "the runner is starving: avail=${avail:-?}G free_mem=${mem:-?}M disk_drop=${avail_drop:-?}G mem_drop=${mem_drop:-?}M procs=$procs (start ${start_procs:-?}, growth $proc_growth) store_family=$family"
+                  df -h / || true
+                  free -m || true
+                  ps -eo pid,rss,pcpu,etime,comm,args --sort=-rss 2> /dev/null | head -12 || true
+                  { ps -eo ppid,comm | sort | uniq -c | sort -rn | head -10; } || true
+                } >> "$RUNNER_TEMP/arm64-sampler.log" 2> /dev/null || true
+                printf 'trip at %s: avail=%s mem=%s disk_drop=%s mem_drop=%s pgid=%s\n' "$(date -u +%T)" "${avail:-?}" "${mem:-?}" "${avail_drop:-?}" "${mem_drop:-?}" "$(cat measure.pgid 2> /dev/null || echo none)" > guard.trip 2> /dev/null || true
+                if [ -f measure.pgid ] && [ "$(ps -o pgid= -p "$(cat measure.pgid)" 2> /dev/null | tr -d ' ')" != "$(ps -o pgid= -p $$ 2> /dev/null | tr -d ' ')" ]; then
+                  kill -TERM -- "-$(cat measure.pgid)" || true
+                else
+                  echo "the guard stands down: no separate measure group (setsid failed?)" >> guard.trip 2> /dev/null || true
+                fi
+                exit 2
+              fi
+            done ) &
+          watcher=$!
+          setsid bash -c 'echo $$ > measure.pgid; timeout -k 60 1200 cargo test -p open-scion-server --no-fail-fast --test import --test import_attacks --test land_model --test land_model_proptest --test land_paths --test log_paging --test log_stream --test metrics --test migrate_log --test one_shot_temp --test parents_batch --test pg_graph_budget --test pg_parent_numbering --test pg_path_pages --test pg_restore_url --test pg_round_trips --test power --test private_dirs --test query --test quotas --test read_edges --test recovery_bench --test refuse_data_dir --test reply_budget_h2 --test reply_levers --test request_id --test restore_bench --test risky_pg --test schema_drift --test serve_flags --test served_metrics --test storage --test support_matrix --test ticket_key --test tickets --test tree_batch --test tree_batch_wide --test write > '"$RUNNER_TEMP"'/arm64-test.raw 2>&1; echo $? > measure.rc' || true
+          code="$(cat measure.rc 2> /dev/null || echo 124)"
+          kill "$watcher" 2> /dev/null || true
+          wait "$watcher" 2> /dev/null || true
+          while IFS= read -r l; do printf '%s %s\n' "$(date -u +%H:%M:%S)" "$l"; done \
+            < "$RUNNER_TEMP/arm64-test.raw" | tee "$RUNNER_TEMP/arm64-test.log"
+          cat "$RUNNER_TEMP/arm64-sampler.log" >> "$RUNNER_TEMP/arm64-test.log" 2> /dev/null || true
+          if [ -f guard.trip ]; then cat guard.trip >> "$RUNNER_TEMP/arm64-test.log"; fi
+          exit "$code"
+        env:
+          PROPTEST_CASES: "2000"
+          RUST_TEST_THREADS: "2"
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+      - name: the second chunk's log, even on a cancelled run
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: arm64-test-log-n-z
+          path: ${{ runner.temp }}/arm64-test.log
+          if-no-files-found: ignore
+
+      - name: the workspace's other crates and the server's unit tests
+        run: |
+          free -m || true
+          cargo test --workspace --no-fail-fast --lib --bins \
+            && cargo test -p scn --no-fail-fast \
+            && cargo test -p scion-core --no-fail-fast \
+            && cargo test -p scion-proto --no-fail-fast \
+            && cargo test -p scion-tier --no-fail-fast
       - name: a real disk full (tmpfs)
         run: cargo test -p open-scion-server --test disk_full
         env:
