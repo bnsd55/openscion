@@ -112,6 +112,7 @@ fn a_newer_schema_refuses_the_open_and_a_restore_serves() {
             String::from_utf8_lossy(&drop.stderr)
         );
         common::pg::load_schema(&url, &backup.join("schema.sql"));
+    }
     let server = Server::start(&data, &log);
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         let (_, mut objects) = connect(&server.url).await.unwrap();
