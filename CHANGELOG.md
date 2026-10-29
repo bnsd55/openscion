@@ -16,6 +16,123 @@ The first release: the server, its cache tiers, and the `scn` client.
 
 ### Added
 
+- # The admin lines cover every state-changing command
+  
+  The last admin actions join the audit. The `derive` subcommand records
+  one `admin`/`intent` line before its backfill and one `admin`/`ok` after
+  it, with the kind and the rows the run wrote and removed; a failed run
+  records `admin`/`failed` with the class. Making the counts real,
+  `backfill` returns a `DeriveReport` (the kind's name, the rows it wrote,
+  the rows of older versions it removed) instead of a bare name.
+  
+  An open that migrates a store's schema records one
+  `admin`/`ok` line `{what: migrate, from, to}` as soon as the audit can
+  open, before the command's own pair: the migration ran inside the
+  store's open, before the audit could exist, so no intent can precede
+  it. A fresh open creates the schema and reports no migration.
+  
+  The `ticket-key` subcommand records one intent before the key exists
+  and one ok after it is on the disk. The lines carry the what and
+  nothing else: never the seed, the key bytes, or the key file's path,
+  in any encoding the test searches for.
+  
+  The golden's `admin`/`intent` and `admin`/`ok` sections grow the new
+  fields; no new (event, outcome) kind appears. With this slice every
+  state-changing CLI command writes its admin lines, and #385's admin
+  item is complete: gc, import, restore, derive, the schema migration,
+  and ticket-key generation all record what they changed.
+- A backup and restore runbook for a server that keeps serving:
+  the metadata snapshot first (`pg_dump`), the
+  blob files second, the store's UUID marker with the metadata; what the
+  backup promises, why gc must stay out of it, and a test that restores
+  a backup taken while writes land.
+- The crash suite's Postgres rows. The real `scion-server` binary
+  serves a Postgres database, and the test kills it with SIGKILL - the
+  crash a cut without a FIN or RST leaves - at steps of a measured whole
+  run.
+  
+  Two rows:
+  
+  - A kill while a wide land runs leaves the ref at the head it had or
+    at a changeset the move put there - one whose first parent is that
+    head, and whole enough to read back. One restarted server answers
+    the replay of the same request key, and the ref must end exactly
+    where the reply says it did. The kills run until they have seen
+    both endings: a land the kill cut before the move, and one it cut
+    after.
+  - A kill while the schema upgrades leaves the database at one whole
+    version, and the next start finishes the upgrade and serves a
+    repo the client resolves.
+  
+  Their clients carry their own 5 s connect timeout and 30 s per-call
+  deadline until a shared builder lands. Each try runs well under
+  300 s.
+- # Wave 2: the durability point's backup proofs run the guide's commands
+  
+  The shared helper gains a block selector: `runbook_block_with` and
+  `run_guide_block_with` take a needle and pick the first block under the
+  heading that contains it, so a section with several blocks (a backup's
+  snapshot, its object copy) hands a test the step it performs.
+  
+  The backup and restore-bench proofs now take their snapshot and copy
+  the blob files with the runbook's own lines - `pg_dump` and
+  `cp -R ... objects` - with the test's directories in place of the
+  documented ones; restore-bench runs its full measurement through
+  them. The four physical-failure proofs (power cut, dm-log cut,
+  kill timing, injected fsync failure) carry `(behaviour, no command)`
+  markers: their subject is the failure's own timing, which no shell
+  command reproduces. Six rows leave NOT_YET_DRIVING; six remain.
+- One land on Postgres runs its work as serial client-to-database
+  statements inside the per-ref critical section, and every land queued
+  behind the one that holds the ref waits for all of them. The analysis
+  lives in the land performance issue.
+  
+  The store layer counts the statements a process runs against Postgres,
+  behind the test hooks, and a Postgres-only guard measures one land
+  through the server's Land RPC - the land already on the head, and one
+  that must rebase - and fails the run when either is above its count.
+  
+  A transaction now reads each changeset's generation once: a
+  generation is fixed at insert and never updated, so the derived walks
+  and the land that ask for the same few ids again get them from the
+  transaction's own cache, and a merge reads every parent's generation
+  in one statement instead of one per parent. The guard's limits fell
+  from 51 to 48 and from 56 to 55 with this change.
+  
+  The multi-row writes went the same way: the trees a change builds land
+  as one statement per table instead of one per row, and so do the blobs
+  a changeset puts and the rows of its parents - the work that scales
+  with the change's width. A third guard case pins that: a land of 50
+  files ran 106 statements before the batch and 56 after.
+  
+  A repeated parent now stores the way the per-row loop did (the batched
+  read had diverged), and a test holds the batch to the rows the loop
+  writes.
+  
+  The land's outcome check rides the plan's read transaction: one read
+  answers both whether a twin call settled the land and what the land
+  must do now, where the loop read them in two steps before. The counts
+  do not move (the loop's read ran without transaction boilerplate
+  already); what moves is that the plan can no longer run for a land
+  that a twin call has settled. The read runs in autocommit statements,
+  so two reads can see different states - a settle that lands between
+  them is stopped at `set_land_state`'s pending guard ("no longer
+  pending"), which is the backstop.
+- The fault matrix's disk, power and mount rows run on Postgres: the
+  `mount (NFS)`, `power-loss` and `test (postgres)` jobs each run their
+  suite, and `docs/faults.md` says which half of each fault a run proves
+  (the blob files in the data directory; the metadata in Postgres's own
+  WAL). The tier row is marked N/A: the tier keeps its own object cache
+  and takes no metadata backend.
+  
+  The busy row blocks through an open transaction of a second
+  connection, and answers busy inside the same four-to-twenty-second
+  window.
+  
+  On Postgres, a database that answers SQLSTATE `53100` (out of space)
+  maps to `Storage::disk_full` and the fixed `ResourceExhausted` reply, a
+  unit test of the mapping in `pg.rs` pins the SQLSTATE, the class and the
+  reply text; the stale comments that pointed at error.rs say the same.
 - The three contract formats now carry the goldens that enforce their
   additive rules: the store's byte pins and unknown-tag refusal
   (crates/scion-core/tests/golden.rs), the protocol's wire golden and
@@ -80,14 +197,6 @@ The first release: the server, its cache tiers, and the `scn` client.
   before the runner is registered and put back to
   `first_time_contributors` after, and the runner exists only for the
   rental.
-- A CI job opens a store written by each tagged release and upgrades it
-  directly: the tagged store opens under this build, the migration runs
-  forward, reads and writes then work, and a store of this build is refused
-  by the tagged binary with the version reason. The direct upgrade must be
-  the same store that upgrading stepwise through every tag gives -- a
-  migration that is order-dependent fails the job. The stores are built in
-  CI from the tags and read back under their own tag's binary first; with
-  no release tag the job says so and starts at v0.1.0.
 - The supply-chain job now runs cargo-deny in every fuzz
     sub-workspace, each of which holds its own Cargo.lock the root check
     never read — the gap that let RUSTSEC-2026-0382 sit in three fuzz
@@ -157,33 +266,6 @@ The first release: the server, its cache tiers, and the `scn` client.
   behind an `unreachable!` in the store-open match since the archive
   landed, so both subcommands panicked instead of running; they now run
   before the store opens.
-- # The admin lines cover every state-changing command
-  
-  The last admin actions join the audit. The `derive` subcommand records
-  one `admin`/`intent` line before its backfill and one `admin`/`ok` after
-  it, with the kind and the rows the run wrote and removed; a failed run
-  records `admin`/`failed` with the class. Making the counts real,
-  `backfill` returns a `DeriveReport` (the kind's name, the rows it wrote,
-  the rows of older versions it removed) instead of a bare name.
-  
-  An open that migrates a store's schema records one
-  `admin`/`ok` line `{what: migrate, from, to}` as soon as the audit can
-  open, before the command's own pair: the migration ran inside the
-  store's open, before the audit could exist, so no intent can precede
-  it. A fresh open creates the schema and reports no migration. Both
-  engines report their move: a Postgres open runs its own migrations at
-  open, and its runner reports the versions the same way SQLite's does.
-  
-  The `ticket-key` subcommand records one intent before the key exists
-  and one ok after it is on the disk. The lines carry the what and
-  nothing else: never the seed, the key bytes, or the key file's path,
-  in any encoding the test searches for.
-  
-  The golden's `admin`/`intent` and `admin`/`ok` sections grow the new
-  fields; no new (event, outcome) kind appears. With this slice every
-  state-changing CLI command writes its admin lines, and #385's admin
-  item is complete: gc, import, restore, derive, the schema migration,
-  and ticket-key generation all record what they changed.
 - The server records an audit log: an append-only JSON-lines file of
   authentication, writes, ref changes, lands and administrative
   changes, with no tokens and no contents.
@@ -252,157 +334,6 @@ The first release: the server, its cache tiers, and the `scn` client.
   test beside the render. A diff in the golden is a surface change: a
   removed name or a changed type is a break, never a re-pin; re-pin an
   added name on purpose with `SCION_UPDATE_METRICS_GOLDEN=1`.
-- The fault matrix runs its disk, power and mount rows on Postgres beside
-  SQLite: the `mount (NFS)`, `power-loss` and `test (postgres)` jobs each
-  run the Postgres arm of their suite, and `docs/faults.md` says which half
-  of each fault every run proves on Postgres (the blob files in the data
-  directory; the metadata in Postgres's own WAL). The tier row is marked
-  N/A: the tier keeps its own object cache and takes no metadata backend.
-  
-  The busy row now runs on both backends in one test: Postgres blocks
-  through an open transaction of a second connection, SQLite through
-  `BEGIN IMMEDIATE` on the same file, and both answer busy inside the
-  same four-to-twenty-second window.
-  
-  On Postgres, a database that answers SQLSTATE `53100` (out of space)
-  maps to `Storage::disk_full` and the fixed `ResourceExhausted` reply, a
-  unit test of the mapping in `pg.rs` pins the SQLSTATE, the class and the
-  reply text; the stale comments that pointed at error.rs say the same.
-- # gc writes the audit's first admin lines
-  
-  The collector subcommand records one `admin`/`intent` line before its
-  run and one result after it: `admin`/`ok` with the report's counts, or
-  `admin`/`failed` with the storage class of the error. `--audit-file`
-  puts the CLI's lines in the same file the server appends to, so one
-  audit log holds the whole history of a data directory. The golden pins
-  the new `admin`/`intent` kind and the `admin`/`ok` line's fields; a
-  source run that fails after its intent is declared undriven for now,
-  with its reason in the golden's census.
-- # import and restore write the audit's next admin lines
-  
-  The import subcommand records one `admin`/`intent` line before its run
-  and one `admin`/`ok` after it, with the import's counts: the commits it
-  saw, the ones it stored, the ones it verified, and whether it moved the
-  target ref. The restore subcommand records the same pair around its
-  replay, in the restored store's own `audit.log`, with the counts the
-  restore reports: repos, refs, and pending lands. Both take
-  `--audit-file`, with the same default as `gc`. The golden's
-  `admin`/`intent` and `admin`/`ok` sections grow the fields of the new
-  lines. The fix that made this possible: `verify` and `restore` sat
-  behind an `unreachable!` in the store-open match since the archive
-  landed, so both subcommands panicked instead of running; they now run
-  before the store opens.
-- # The admin lines cover every state-changing command
-  
-  The last admin actions join the audit. The `derive` subcommand records
-  one `admin`/`intent` line before its backfill and one `admin`/`ok` after
-  it, with the kind and the rows the run wrote and removed; a failed run
-  records `admin`/`failed` with the class. Making the counts real,
-  `backfill` returns a `DeriveReport` (the kind's name, the rows it wrote,
-  the rows of older versions it removed) instead of a bare name.
-  
-  An open that migrates a store's schema records one
-  `admin`/`ok` line `{what: migrate, from, to}` as soon as the audit can
-  open, before the command's own pair: the migration ran inside the
-  store's open, before the audit could exist, so no intent can precede
-  it. A fresh open creates the schema and reports no migration. Both
-  engines report their move: a Postgres open runs its own migrations at
-  open, and its runner reports the versions the same way SQLite's does.
-  
-  The `ticket-key` subcommand records one intent before the key exists
-  and one ok after it is on the disk. The lines carry the what and
-  nothing else: never the seed, the key bytes, or the key file's path,
-  in any encoding the test searches for.
-  
-  The golden's `admin`/`intent` and `admin`/`ok` sections grow the new
-  fields; no new (event, outcome) kind appears. With this slice every
-  state-changing CLI command writes its admin lines, and #385's admin
-  item is complete: gc, import, restore, derive, the schema migration,
-  and ticket-key generation all record what they changed.
-- The server records an audit log: an append-only JSON-lines file of
-  authentication, writes, ref changes, lands and administrative
-  changes, with no tokens and no contents.
-  
-  The file sits in the data directory (mode 0600, `--audit-file`
-  relocates it, no disable flag) and one writer thread owns it: callers
-  hand lines to a bounded channel, the writer drains the queue, writes
-  and fsyncs once per drain, and wakes each caller when its own lines
-  are durable. A state change records two lines: an `intent` line
-  fsynced before the change, and a `result` line after it, joined by
-  request ID; a read records one. Every intent gets its result: a call
-  that dies before its job starts is answered `cancelled` by the call's
-  drop, and a land the stale-land sweep rejects is answered `stale` by
-  the sweep. One case can leave a result missing: a job that dies after
-  it claimed the call but before it recorded anything — the server log
-  carries what the audit line cannot. If the audit append fails, the
-  change is refused and readiness reports not-ready. Refused
-  authentication is aggregated per peer per interval into one counted
-  line, capped.
-  
-  The write, land and ref events carry what an operator needs and no
-  contents: the RPC, the repo, the ref, the byte count of an upload,
-  the land's state and ID, and a ref move's old and new changeset IDs.
-  A changeset ID names content the caller already had; a blob or tree
-  digest would name contents, so none appears.
-  
-  On open, a file whose last line has no newline gets one, so a line
-  that a full drive cut in the middle stays a fragment of its own and
-  cannot swallow the lines that follow.
-  
-  A land's ref line names the head the move replaced, read where the
-  move happens, under the ref's lock, and is written only by the call
-  that made the move. A replayed land (the same request key after it
-  landed) moved nothing, so its land line names no old and no ref line
-  appears for it; an auditor finds the head the move replaced in the
-  land line of the call that made the move, under the same land_id.
-  The ref lines of a ref carry the ref's true history: each old is the
-  head its move's CAS replaced, so linking old to new rebuilds the
-  history. The lines of concurrent changes can appear in a different
-  order than the changes themselves (each job records its result after
-  its change), so the history is linked, not read in line order.
-  
-  Blob and tree digests are never logged (a digest is a dictionary key
-  to contents), and neither are token bytes or token hashes. Rotation
-  is by size, keeps a bounded number of old files, and names what it
-  dropped in an admin line.
-  
-  Not covered yet: the ref moves that happen outside the server.
-  Import moves a ref to each imported tip (import.rs), and archive
-  restore writes refs back (restore_ref); they run as their own
-  processes and cannot hand lines to the server's writer, so they must
-  append their own lines to the same audit file, intent before the
-  move. Until they do, a reader of the log must not take it as
-  complete: a ref can move without a line.
-- # The metric surface's golden
-  
-  The `/metrics` registry joins the machine-checked surfaces: a
-  checked-in golden (`crates/scion-proto/tests/metrics_v1.golden`) pins
-  every `scion_*` name the registry renders, its `# TYPE`, and its
-  labels and label values - names, types and labels are the surface,
-  the sample values are this run's counts and pin nothing. The test
-  exercises the registry end to end first (one request per RPC path,
-  one cancelled, one failed, every gauge and histogram), because
-  histograms render only once they counted. The stalled gauge hides
-  until a reply stalls, so its name, type and label set pin in a unit
-  test beside the render. A diff in the golden is a surface change: a
-  removed name or a changed type is a break, never a re-pin; re-pin an
-  added name on purpose with `SCION_UPDATE_METRICS_GOLDEN=1`.
-- The fault matrix runs its disk, power and mount rows on Postgres beside
-  SQLite: the `mount (NFS)`, `power-loss` and `test (postgres)` jobs each
-  run the Postgres arm of their suite, and `docs/faults.md` says which half
-  of each fault every run proves on Postgres (the blob files in the data
-  directory; the metadata in Postgres's own WAL). The tier row is marked
-  N/A: the tier keeps its own object cache and takes no metadata backend.
-  
-  The busy row now runs on both backends in one test: Postgres blocks
-  through an open transaction of a second connection, SQLite through
-  `BEGIN IMMEDIATE` on the same file, and both answer busy inside the
-  same four-to-twenty-second window.
-  
-  On Postgres, a database that answers SQLSTATE `53100` (out of space)
-  maps to `Storage::disk_full` and the fixed `ResourceExhausted` reply, a
-  unit test of the mapping in `pg.rs` pins the SQLSTATE, the class and the
-  reply text; the stale comments that pointed at error.rs say the same.
 - # The archive's golden
   
   The archive format joins the machine-checked surfaces: a checked-in
@@ -426,92 +357,6 @@ The first release: the server, its cache tiers, and the `scn` client.
   kind set the code writes, and the exercise must equal it exactly.
   Re-pin on purpose with `SCION_UPDATE_AUDIT_GOLDEN=1` and a changes
   fragment naming the added kind.
-- The server records an audit log: an append-only JSON-lines file of
-  authentication, writes, ref changes, lands and administrative
-  changes, with no tokens and no contents.
-  
-  The file sits in the data directory (mode 0600, `--audit-file`
-  relocates it, no disable flag) and one writer thread owns it: callers
-  hand lines to a bounded channel, the writer drains the queue, writes
-  and fsyncs once per drain, and wakes each caller when its own lines
-  are durable. A state change records two lines: an `intent` line
-  fsynced before the change, and a `result` line after it, joined by
-  request ID; a read records one. If the audit append fails, the change
-  is refused and readiness reports not-ready. Refused authentication is
-  aggregated per peer per interval into one counted line, capped.
-  
-  The write, land and ref events carry what an operator needs and no
-  contents: the RPC, the repo, the ref, the byte count of an upload,
-  the land's state and ID, and a ref move's old and new changeset IDs.
-  A changeset ID names content the caller already had; a blob or tree
-  digest would name contents, so none appears.
-  
-  On open, a file whose last line has no newline gets one, so a line
-  that a full drive cut in the middle stays a fragment of its own and
-  cannot swallow the lines that follow.
-  
-  A land's ref line names the head the move replaced, read where the
-  move happens, under the ref's lock, and is written only by the call
-  that made the move. A replayed land (the same request key after it
-  landed) moved nothing, so its land line names no old and no ref line
-  appears for it; an auditor finds the head the move replaced in the
-  land line of the call that made the move, under the same land_id.
-  The ref lines of a ref carry the ref's true history: each old is the
-  head its move's CAS replaced, so linking old to new rebuilds the
-  history. The lines of concurrent changes can appear in a different
-  order than the changes themselves (each job records its result after
-  its change), so the history is linked, not read in line order.
-  
-  Blob and tree digests are never logged (a digest is a dictionary key
-  to contents), and neither are token bytes or token hashes. Rotation
-  is by size, keeps a bounded number of old files, and names what it
-  dropped in an admin line.
-  
-  Not covered yet: the ref moves that happen outside the server.
-  Import moves a ref to each imported tip (import.rs), and archive
-  restore writes refs back (restore_ref); they run as their own
-  processes and cannot hand lines to the server's writer, so they must
-  append their own lines to the same audit file, intent before the
-  move. Until they do, a reader of the log must not take it as
-  complete: a ref can move without a line.
-- The crash suite's Postgres arm, as its own file so it never touches
-  crash.rs. The real `scion-server` binary serves a Postgres database,
-  and the test kills it with SIGKILL - the crash a cut without a FIN or
-  RST leaves - at steps of a measured whole run, the way the SQLite
-  suite places its kills.
-  
-  Two rows:
-  
-  - A kill while a wide land runs leaves the ref at the head it had or
-    at a changeset the move put there - one whose first parent is that
-    head, and whole enough to read back. One restarted server answers
-    the replay of the same request key, and the ref must end exactly
-    where the reply says it did. The kills run until they have seen
-    both endings: a land the kill cut before the move, and one it cut
-    after.
-  - A kill while the schema upgrades leaves the database at one whole
-    version, and the next start finishes the upgrade and serves a
-    repo the client resolves.
-  
-  The tests skip themselves unless `SCION_TEST_BACKEND` names
-  `postgres`. Their clients carry their own 5 s connect timeout and
-  30 s per-call deadline until a shared builder lands. Each try runs
-  well under 300 s.
-- # Wave 2: the durability point's backup proofs run the guide's commands
-  
-  The shared helper gains a block selector: `runbook_block_with` and
-  `run_guide_block_with` take a needle and pick the first block under the
-  heading that contains it, so a section with several blocks (a backup's
-  snapshot, its object copy) hands a test the step it performs.
-  
-  The backup and restore-bench proofs now take their snapshot and copy
-  the blob files with the runbook's own lines - `sqlite3 ... "VACUUM
-  INTO ..."` and `cp -R ... objects` - with the test's directories in
-  place of the documented ones; restore-bench runs its full measurement
-  through them. The four physical-failure proofs (power cut, dm-log cut,
-  kill timing, injected fsync failure) carry `(behaviour, no command)`
-  markers: their subject is the failure's own timing, which no shell
-  command reproduces. Six rows leave NOT_YET_DRIVING; six remain.
 - # Wave 1: the first boot and one-server proofs run the guide's command
   
   The harness gains `spawn_on`/`start_on`: the serve argv comes from the
@@ -552,43 +397,6 @@ The first release: the server, its cache tiers, and the `scn` client.
   line's "30 consecutive runs" as a fact anyone re-checks with `gh`. A
   small `nightly streak` job prints it on every run; it reads the run
   history only (`actions: read`).
-- One land on Postgres runs its work as serial client-to-database
-  statements inside the per-ref critical section, and every land queued
-  behind the one that holds the ref waits for all of them. The analysis
-  lives in the land performance issue.
-  
-  The store layer counts the statements a process runs against Postgres,
-  behind the test hooks, and a Postgres-only guard measures one land
-  through the server's Land RPC - the land already on the head, and one
-  that must rebase - and fails the run when either is above its count.
-  
-  A transaction now reads each changeset's generation once: a
-  generation is fixed at insert and never updated, so the derived walks
-  and the land that ask for the same few ids again get them from the
-  transaction's own cache, and a merge reads every parent's generation
-  in one statement instead of one per parent. The guard's limits fell
-  from 51 to 48 and from 56 to 55 with this change.
-  
-  The multi-row writes went the same way: the trees a change builds land
-  as one statement per table instead of one per row, and so do the blobs
-  a changeset puts and the rows of its parents - the work that scales
-  with the change's width. A third guard case pins that: a land of 50
-  files ran 106 statements before the batch and 56 after.
-  
-  A repeated parent now stores the same way on both backends (the
-  batched read had diverged from the per-row loop on Postgres), and a
-  test holds the two backends to the same answer.
-  
-  The land's outcome check rides the plan's read transaction: one read
-  answers both whether a twin call settled the land and what the land
-  must do now, where the loop read them in two steps before. The counts
-  do not move (the loop's read ran without transaction boilerplate
-  already); what moves is that the plan can no longer run for a land
-  that a twin call has settled. On SQLite that read is one snapshot; on
-  Postgres it runs in autocommit statements, so the two reads can see
-  different states - a settle that lands between them is stopped at
-  `set_land_state`'s pending guard ("no longer pending"), which is the
-  backstop there.
 - The production-trial record exists as a form:
   [docs/production-trial.md](docs/production-trial.md) (#395, the v0.9.0
   gate). Its fields hold what the roadmap names: the commit and the
@@ -723,7 +531,7 @@ The first release: the server, its cache tiers, and the `scn` client.
   takeover test, which stops the job's database, sees the busy answers and
   the fence stay down, brings the database back, and recovers the store
   with no process restart.
-- - A packet for a hired reviewer: [docs/security-review.md](docs/
+- A packet for a hired reviewer: [docs/security-review.md](docs/
     security-review.md) states the review's scope and its out-of-scope
     boundaries, links the trust model instead of copying it, and lists
     the internal attack passes by surface — what each tried, what it
@@ -753,7 +561,7 @@ The first release: the server, its cache tiers, and the `scn` client.
   line and the missing name. Eight references in docs/threat-model.md
   named helpers, not tests; they now name the covering test or keep the
   helper in prose, so no claim reads as proven when its test is gone.
-- - A release page for users: [docs/verify.md](docs/verify.md) walks the
+- A release page for users: [docs/verify.md](docs/verify.md) walks the
     four checks a download needs before it runs — the SSH-signed tag
     (`git tag -v` with the owner's allowed-signers line), the checksums,
     the GitHub build attestation (`gh attestation verify --repo
@@ -774,7 +582,7 @@ The first release: the server, its cache tiers, and the `scn` client.
 - Two documents that say what the project stands behind:
   [docs/stability.md](docs/stability.md), one row per surface (the
   crates' APIs, the CLI and its `--json` output, protocol v1, object
-  format v1, the SQLite and Postgres schemas, snapshot files, ticket
+  format v1, the Postgres schema, snapshot files, ticket
   bytes, and the `test-hooks` feature) saying what 0.x promises, what a
   patch or a minor release may change, and how to upgrade; and a
   "Supported platforms" section in the README naming the runner images
@@ -832,11 +640,6 @@ The first release: the server, its cache tiers, and the `scn` client.
   upload and a land: an answered call is durable after the restart, a cut
   land stays pending and a retry with the same request key resumes it, and
   fsck is clean.
-- A backup and restore runbook for a server that keeps serving:
-  the metadata snapshot first (VACUUM INTO, or pg_dump on Postgres), the
-  blob files second, the store's UUID marker with the metadata; what the
-  backup promises, why gc must stay out of it, and a test that restores
-  a backup taken while writes land.
 - The checkout benchmark runs in a workflow_dispatch-only workflow on a shared
   ubuntu-24.04 runner, and docs/benchmarks.md states the runner, the dataset
   and the commands, with the noise in the min and max.
@@ -918,14 +721,6 @@ The first release: the server, its cache tiers, and the `scn` client.
   number of times the reps input gives (100 by default), stopping at
   the first failure and uploading that run's log. This is the repeated
   evidence that the fork gate (#309) fixed the macOS mount flake.
-- A store of the previous schema version opens on a new build: the open
-  migrates it forward and serves what it held. A test builds a version-1
-  store of each backend in place (the SQLite schema of migration 0001, a
-  Postgres schema of migrations/postgres/0001, each with a repo, a root
-  changeset, its ref and two blob files this build wrote), opens it the
-  normal way, and checks the migration level after the open, the ref,
-  the changeset, both blobs byte for byte, a file read through the tree
-  the upgrade rebuilt, and a clean fsck (#318).
 - The toolchain floor is on the record: docs/stability.md states when it
   may rise (only in a minor release, named in the release notes, never
   above the stable toolchain of six months ago, and checked by CI);
@@ -1016,10 +811,10 @@ The first release: the server, its cache tiers, and the `scn` client.
   service answers `NOT_SERVING`, and the process exits after a short
   grace, so a supervisor restart either takes the lock back or refuses.
 - `scion-server`, the server: changesets, trees and blobs in a data
-  directory (SQLite metadata, one zstd file per blob), one-way git import
-  checked against git, `fsck`, `gc`, `derive` and `hash-token` commands.
-  The metadata may live in Postgres instead (`--postgres-url`); the blob
-  files stay on disk in both backends (`#178`).
+  directory (one zstd file per blob), their metadata in Postgres
+  (`--postgres-url`), one-way git import checked against git, `fsck`,
+  `gc`, `derive` and `hash-token` commands. The blob files stay on disk
+  (`#178`).
 - Server-side writes: `PutBlob`, `CreateChangeset` (at most 100,000
   changes, one parent, no committer) and `Land`, which rebases onto a ref
   and moves it by compare-and-swap. Conflicts are path-level; there is no
@@ -1156,6 +951,74 @@ The first release: the server, its cache tiers, and the `scn` client.
 
 ### Changed
 
+- The server's Backend is an opaque struct with one private engine
+  behind it, opened by the engine-agnostic constructors. A caller
+  matches behavior through the methods, never the engine, so a new
+  engine (or a major bump of one) is a private change of the server
+  crate, not a break of its API. The tests that build a backend from a
+  store they prepared, or read the data directory's own store out of
+  one, find both in test_support::backend (from_store), where the test
+  seams live since the facade became the API.
+- CI stops re-saving a rust-cache for every pull-request branch, which
+  had grown to 66 caches and 10.6 GB - past GitHub's 10 GB ceiling, so
+  caches were evicting each other and hits were shrinking. Caches save
+  from main only now; a pull request restores main's. The cargo test
+  jobs also cache the workspace crates' own artifacts
+  (cache-workspace-crates), so the fault jobs stop rebuilding the bins
+  the test job just built: about five minutes off the job that finishes
+  last in 13 of 20 runs. The fuzz smoke runs its ten targets
+  four at a time (20 s each) instead of serially (15 s each), which cuts
+  the job from ~11 minutes to ~7 on the runs where it sets the tail.
+- The docker demo's database password and clients' token were committed
+  in `docker/compose.yml` (`postgres:dev`, token `dev`), though the
+  header said secrets are never committed. `docker/demo.sh` now makes
+  both with openssl at every run and exports them next to the ticket
+  public key; compose reads them with required interpolation and refuses
+  to start without the script. A second run of the demo carries
+  different secrets than the first, and the repository carries none.
+- `scn diff --json` printed `"size": 0` for the old and new side of
+  every file and symlink, whatever the file's length: the diff reply
+  carries kind, ID and the executable flag, not a length, and the JSON
+  printed a default. The field is gone from entries whose side carries
+  no size, so a script that read it no longer reads a number the server
+  never sent.
+- The runbook states what an acknowledged write has survived - the
+  durability point: a blob put is answered after the file fsync, the
+  rename, the directory fsyncs and the drive-cache flush; a land is
+  answered after its blobs synced and its metadata commit was made
+  durable (`synchronous_commit = on`, which the server checks at every
+  open).
+  
+  Section 3 also states the recovery point of a backup (its metadata
+  snapshot; a backup every N minutes loses about N minutes of
+  acknowledged writes) and the restore time, measured: the new
+  `restore time` CI job runs `restore_bench.rs` - a store of 20 repos,
+  1000 changesets, about 32 MiB of raw blob content, restored and fscked
+  - on a fixed `ubuntu-24.04` runner and prints the seconds, past a
+  600 s bound.
+  
+  Section 1 says plainly that one active server has no automatic
+  failover: a second server is refused (the lock is the anti-split-brain
+  guard, not a failover), the operator restarts the server, and nothing
+  takes over by itself.
+- `scion-server restore` resolved the Postgres URL from the command
+  line alone: a URL given by `--postgres-url-file` or
+  `SCION_POSTGRES_URL` was ignored, and the restore silently built a
+  SQLite store beside the Postgres one the operator meant. Restore now
+  resolves the URL the way serve does, from every source, and
+  `--postgres-ca` without a URL from any source is refused with the
+  three sources named, instead of a clap "requires" error that cannot
+  fire for the file and environment forms.
+- The metadata store is Postgres only: the SQLite store, its schema
+  migrations and the rusqlite dependency are gone from the server crate
+  and from `scn` (the tier keeps its own SQLite object cache). A store's
+  metadata was never carried across engines, and this build carries none
+  forward: a data directory whose metadata a SQLite store holds stays
+  with the build that made it - there is no migration from SQLite. The
+  `--postgres-url` flag is the store's own URL now; passing it warns that
+  the flag is removed in v0.2.0. The store-upgrade and backup-n1 drills,
+  and the CI jobs that ran them, are removed; they come back after
+  v0.1.0, against the Postgres-only open.
 - The daemon refuses a data directory that does not exist.
   
   scion-daemon's `--data` defaults to a working-directory-relative name
@@ -1217,24 +1080,16 @@ The first release: the server, its cache tiers, and the `scn` client.
   tokio about 5% slower: 88.1 ms against 83.3 ms, with 777 clock reads in
   the server against 149. A call that expires or goes still stops within
   16 entries.
-- - The graph queries read their merges' parents and their side branches
+- The graph queries read their merges' parents and their side branches
     from caches that a chain page fills: one `parents_many` statement for
     the page's parents and one node batch for those parents, instead of
     one parents statement per merge. The walk order is unchanged.
-- a pull request runs only the fast tier: fmt + clippy, the SQLite
-  tests with 500 proptest cases and the docs tests. A pull request
+- a pull request runs only the fast tier: fmt + clippy, the Postgres
+  tests with 64 proptest cases and the docs tests. A pull request
   that touched only docs, markdown or changelog fragments runs the
   docs tests alone; a draft pull request skips every job. Main, the
-  nightly and a dispatch run the full suite as before.
-- - The graph queries read their merges' parents and their side branches
-    from caches that a chain page fills: one `parents_many` statement for
-    the page's parents and one node batch for those parents, instead of
-    one parents statement per merge. The walk order is unchanged.
-- a pull request runs only the fast tier: fmt + clippy, the SQLite
-  tests with 500 proptest cases and the docs tests. A pull request
-  that touched only docs, markdown or changelog fragments runs the
-  docs tests alone; a draft pull request skips every job. Main, the
-  nightly and a dispatch run the full suite as before.
+  nightly and a dispatch run the suite with 128, and the nightly's own
+  full run proves the 2000 on Postgres.
 - # The fuzz campaign: a wider target, a dispatchable budget
   
   ## The archive section readers gain their own target
@@ -1271,7 +1126,7 @@ The first release: the server, its cache tiers, and the `scn` client.
   target parses the framing independently and asserts the report covers
   exactly the records the file holds. The 12-byte empty snapshot joins
   the target's seeds as the regression case.
-- - A path lookup read each level's whole tree node: decode it into the
+- A path lookup read each level's whole tree node: decode it into the
     entry map, clone the map, remove the one name. Now the level's
     stored `TreeV1` bytes are scanned for the one name — linear with an
     early exit, because variable-length entries give no random access
@@ -1298,16 +1153,6 @@ The first release: the server, its cache tiers, and the `scn` client.
   as unstable and not the published contract. Constants and helpers with
   no user outside the crate drop to `pub(crate)`, so the crates.io
   publish of #21 carries only what the wire needs.
-- The server's Backend no longer says which database it holds: the
-  public Sqlite and Postgres variants are gone, and the backend is an
-  opaque struct with one private engine behind it, opened by the same
-  engine-agnostic constructors as before. A caller matches behavior
-  through the methods, never the engine, so a new engine (or a major
-  bump of one) is a private change of the server crate, not a break of
-  its API. The tests that build a backend from a store they prepared,
-  or read the data directory's own store out of one, find both in
-  test_support::backend (from_store, and BackendExt::sqlite), where the
-  test seams live since the facade became the API.
 - The checkout benchmark publishes its first results: one bench.yml run
   on main, the medians with min and max for the five states, and the
   ratios between the tools. A cold checkout through the daemon is 9.3 to
@@ -1328,16 +1173,6 @@ The first release: the server, its cache tiers, and the `scn` client.
   that holds the published table to the envelope's shape - the grid's
   every cell present in order, numbers that parse, no half-filled row,
   a footer that names the run's commit, and the edge in the caption.
-- CI stops re-saving a rust-cache for every pull-request branch, which
-  had grown to 66 caches and 10.6 GB - past GitHub's 10 GB ceiling, so
-  caches were evicting each other and hits were shrinking. Caches save
-  from main only now; a pull request restores main's. The three cargo
-  test jobs also cache the workspace crates' own artifacts
-  (cache-workspace-crates), so the postgres job stops rebuilding the
-  bins the SQLite job just built: about five minutes off the job that
-  finishes last in 13 of 20 runs. The fuzz smoke runs its ten targets
-  four at a time (20 s each) instead of serially (15 s each), which cuts
-  the job from ~11 minutes to ~7 on the runs where it sets the tail.
 - CONTRIBUTING.md states the test policy the silver level asks for:
   major new functionality lands with tests in the automated suite, and a
   pull request that cannot test its change says why not in the
@@ -1378,25 +1213,6 @@ The first release: the server, its cache tiers, and the `scn` client.
   major bump of an embedded engine is then a private change, and callers
   match classes, not engine internals. The gRPC codes and reply texts of
   every class are unchanged.
-- The runbook states what an acknowledged write has survived - the
-  durability point: a blob put is answered after the file fsync, the
-  rename, the directory fsyncs and the drive-cache flush; a land is
-  answered after its blobs synced and its metadata commit was made
-  durable (SQLite's `synchronous = FULL` WAL commit, Postgres's
-  `synchronous_commit = on`, which the server checks at every open).
-  
-  Section 3 also states the recovery point of a backup (its metadata
-  snapshot; a backup every N minutes loses about N minutes of
-  acknowledged writes) and the restore time, measured: the new
-  `restore time` CI job runs `restore_bench.rs` - a store of 20 repos,
-  1000 changesets, about 32 MiB of raw blob content, restored and fscked
-  - on a fixed `ubuntu-24.04` runner and prints the seconds, past a
-  600 s bound.
-  
-  Section 1 says plainly that one active server has no automatic
-  failover: a second server is refused (the lock is the anti-split-brain
-  guard, not a failover), the operator restarts the server, and nothing
-  takes over by itself.
 - The project is now openscion, at github.com/bnsd55/openscion; the old
   URL redirects. The package names stay open-scion-*.
 - The roadmap carries the whole line to v1.0: the production boundary at
@@ -1527,6 +1343,119 @@ The first release: the server, its cache tiers, and the `scn` client.
 
 ### Fixed
 
+- # Archive: a section's reads hold one snapshot
+  
+  An export's metadata sections claim one read snapshot, and each
+  section reads inside one explicit read transaction
+  (`Backend::read_snapshot`): REPEATABLE READ for its statements, so a
+  land that commits between a section's changesets query and its refs
+  query leaves the archive holding exactly the ref the snapshot named.
+  The cost is the one the section's snapshot always names: the log
+  cannot restart while the section reads.
+- `scion-cache` names its own flag, `--ticket-public-key`, when it refuses
+  a key at start (more than two keys, a key that is not 64 hex
+  characters, or bytes that are not a public key). The refusals named
+  `--ticket-key`, which is the server's flag and which the cache does
+  not take.
+- `scion-cache` refused three kinds of bad ticket key at start with
+  messages that named `--ticket-key`, the flag of `scion-server serve`.
+  The cache takes `--ticket-public-key`, and its refusals now say so
+  ("give at most two --ticket-public-key", "must be 64 hex characters",
+  "bad --ticket-public-key: ..."), so the error points at the flag the
+  operator can actually fix.
+- `scn diff --json` no longer prints `"size": 0` for the old and new side
+  of every entry. A diff's file states name a blob, not a length, so the
+  reply carries no size and the zero was never true; the field is gone,
+  as it went from `scn show --json` in #194. A script that read it gets
+  no field instead of a wrong zero (docs/stability.md: a 0.x minor may
+  remove a `--json` field).
+- The status-code table of docs/protocol-v1.md no longer says that only
+  `GetObjects` answers `RESOURCE_EXHAUSTED`: the row now names every kind
+  of server limit that answers it (a per-principal quota, a memory
+  budget, the unary-reply budget, a reply's size cap, a full disk), as
+  the rest of the document already did. The README's partial-reader
+  section says that `GetObjects` without a ticket answers
+  `PERMISSION_DENIED`, as for every caller, not `UNIMPLEMENTED`.
+- A new `--out` directory of `scion-server export` was made 0777 less
+  the umask (0755 under Ubuntu's 002, 0755 again under 022), and the
+  section files inside at 0644, so an archive that holds every blob,
+  changeset and ref of the store was group- or world-readable wherever
+  the operator pointed the flag. The archive root is now 0700 and the
+  section files 0600, whatever the umask, the way the data directory is.
+- `scion-server import` refuses a git commit whose time zone is shorter
+  than `+hhmm` (`+1`, or a bare `+`) instead of panicking: such a zone is
+  a date git cannot write, and the import now reports it like any other
+  identity it cannot keep.
+- `scion-server import` aborted with an index panic on a git commit
+  whose author or committer time zone is shorter than `+hhmm` (`+1`, or
+  a bare `+`): the zone splitter assumed two digits after the sign. gix
+  accepts such a zone (the offset becomes zero), so a repo git itself
+  wrote could refuse the import with a raw `end byte index 2 is out of
+  bounds`. The import now refuses a malformed zone with the zone named,
+  and imports the rest as before.
+- On Postgres, a graph walk over a merge-heavy history could answer a
+  false `commit graph: no node for X` on a healthy store, and a repeated
+  subtree read could answer as missing: two of the backend's batch reads
+  emptied their reply map as they answered it, so when one batch named
+  the same ID twice (two merges sharing a side parent, or one tree under
+  two paths), the second ask found nothing. Both reads now answer one
+  entry per asked ID, in the order asked, as the metadata contract says.
+  No rows were lost; the reads lost them.
+- Postgres numbered a changeset's parents from one (WITH ORDINALITY
+  starts at one) where the reads ask for zero, so every first-parent
+  read (`n = 0`) matched nothing on real data: a chain fetch walked one
+  changeset and stopped, and the savings the first-parent chain fetch
+  promises never happened. The insert now shifts the ordinality down, so
+  the first parent sits at n = 0, and a migration renumbers the
+  one-based rows of an existing store (only the rows of a changeset
+  whose smallest n is 1 move, in two steps that never hold a duplicate
+  of the primary key, and the migration changes nothing on a store that
+  is already zero-based). The guard tests pin the numbering, chain a
+  300-deep ladder through the ordinary path, migrate a one-based store,
+  and hold the bulk seed to the rows the ordinary path writes.
+  
+  Proof: crates/scion-server/tests/pg_parent_numbering.rs
+- `scn` answered three broken or absurd inputs with a panic, and now
+  answers each with an error that says what to fix:
+  
+  - `scn commit` and `scn bench` built the changeset's author identity
+    and the changeset itself with an unchecked assert whose only failure
+    is a field longer than the encoder can write (over 4 GiB); the
+    results are now errors that name the field.
+  - `scn mount` registered its stop-signal handlers with an unchecked
+    result; a system that refuses them now hears why at startup.
+  - The mount's secret came from `/dev/urandom` with an unchecked open,
+    so a system without the device panicked mid-mount; the mount now
+    reports the error with its cause.
+- The nightly soak failed its own RSS bound on 2026-10-19 (run
+  39219458903, the schedule event on 2bc9099): 34892 KB -> 54140 KB, over
+  the 150 percent ceiling. At that commit the schedule branch of the
+  workflow still fell back to the 10-minute default, so the nightly ran
+  its planned 10 minutes and failed the check at the end, against a
+  baseline taken after 60 seconds; the 120-minute schedule came later on
+  main. There was no early abort: the only RSS check in the script runs
+  after the sampling loop, and the fixed script's only RSS check needs
+  the warm baseline, which exists only after SOAK_WARM_SECONDS. A 35-minute local run of the same load saw RSS climb for about
+  30 minutes (32288 -> 59184 KB) and then hold flat for the last 16
+  minutes (the last 20 samples: max 59184, average 58137, no trend), and
+  the failed CI curve itself rose, stepped once at about 4 minutes, and
+  then oscillated 49-57 KB for its last 5 minutes with no climb. That is
+  warm-up - allocator arenas, the database connections' client-side
+  buffers, prepared statements - not a leak: a leak does not plateau on
+  two runs.
+  
+  The bound's baseline is now the first sample after SOAK_WARM_SECONDS
+  (1800 s, named in soak.yml): the nightly still checks 90 minutes of RSS
+  after the warm-up. A run shorter than the window checks no RSS bound -
+  it cannot tell warm-up from a leak (a 10-minute run, as the nightly of
+  that commit was, sees only the climb). The other bounds are
+  untouched.
+  
+  The samples now include the store's size on disk: every 10 s the loop
+  appends epoch and `du -sk` of the server data directory to a
+  metrics-store.csv, next to metrics.csv in the artifacts, so a run can
+  be read for disk growth and for Ben's 72-hour soak decision, not only
+  for the RSS it shares a cause with.
 - The production audit's evidence now holds as tests: a tampered history
   node reads as corrupt through the server path (`get_history_node`
   answers "does not match its ID"), and fsck reports the row
@@ -1539,12 +1468,6 @@ The first release: the server, its cache tiers, and the `scn` client.
   doc landed and failed main's first run. A docs-tests job now runs the
   docs_*.rs integration tests on every pull request (and the same
   events), and fails when a docs_*.rs file exists that it does not name.
-- The backup-N-1 and store-upgrade drills kill every server they
-  backgrounded on any exit path, TERM then KILL, via the pid files the
-  starter wrote. Before, a drill that died between starting and stopping
-  a server left it running unparented. A drill run without a caller-named
-  run directory now writes under `.scn-drills/` in the repository, not in
-  the shared temp directory.
 - An access file that named the digest of an empty token authenticated
   every client that sent an empty bearer, and `hash-token --token ''`
   printed that digest, so an operator could mint it by accident. The
@@ -1574,10 +1497,10 @@ The first release: the server, its cache tiers, and the `scn` client.
   bytes (`scion\0ticket\0v1\0`) are pinned by a unit test (the version
   byte was, the prefix string was not - a rewrite would have passed
   every test while every held ticket stopped verifying), and the
-  schema rows name the drills that run today instead of the issues
-  that promised them: the tagged-store ladder is store-upgrade.yml
-  (pinned stand-in commits until a tag exists) and the N-1 restore
-  drill is backup-n1.yml.
+  schema rows name the drills that run instead of the issues that
+  promised them: the weekly N-1 restore drill and the tagged-store
+  ladder are removed for the Postgres-only build and come back after
+  v0.1.0.
 - The import's history nodes are written in batches: the nodes a
   transaction inserted answer its own reads, and the flush writes one
   statement per 1,000 rows after the derived rows and before the git
@@ -1601,7 +1524,7 @@ The first release: the server, its cache tiers, and the `scn` client.
   moves with it, and every table writes at the transaction's end in the
   order the foreign keys read: changesets, changeset_parents,
   repo_changesets, derived, history, git_import.
-- - The `CreateChangeset` write stops its blob checks at the call's
+- The `CreateChangeset` write stops its blob checks at the call's
     deadline: the check re-hashes every distinct blob the changeset puts,
     so a big changeset would otherwise keep hashing after the client gave
     up. Nothing is written when the call is gone or its deadline passed,
@@ -1654,32 +1577,17 @@ The first release: the server, its cache tiers, and the `scn` client.
   names a schema can now serve beside another server of the same
   database; that is a production behavior change, and the reason the
   tests of one database can hold one server each.
-- - A data directory whose marker names a store refuses a database
+- A data directory whose marker names a store refuses a database
     schema that holds no store, so a `--postgres-url` whose search_path
     names the wrong or a new schema fails at the start, naming the
     directory's store, instead of adopting its identity into an empty
     store that every later call reads as "repo not found". A schema that
     holds a store's rows but no store UUID row - a dump taken before the
     UUID existed - is still adopted.
-- - The fault scripts hand `--postgres-url` to the server root command
+- The fault scripts hand `--postgres-url` to the server root command
     before the subcommand again: `serve`, `import`, `gc` and `fsck` take
     no such flag of their own, so the NFS mount job's Postgres run failed
     to start since the fault-matrix change.
-- Postgres numbered a changeset's parents from one (WITH ORDINALITY
-  starts at one) where SQLite numbers them from zero, so every
-  first-parent read (`n = 0`) matched nothing on real Postgres data: a
-  chain fetch walked one changeset and stopped, and the savings the
-  first-parent chain fetch promises never happened on Postgres. The
-  insert now shifts the ordinality down, so both backends put the first
-  parent at n = 0, and a migration renumbers the one-based rows of an
-  existing store (only the rows of a changeset whose smallest n is 1
-  move, in two steps that never hold a duplicate of the primary key, and
-  the migration changes nothing on a store that is already zero-based).
-  The guard tests pin the numbering on both backends, chain a 300-deep
-  ladder through the ordinary path, migrate a one-based store, and hold
-  the bulk seed to the rows the ordinary path writes.
-  
-  Proof: crates/scion-server/tests/pg_parent_numbering.rs
 - The tier job that decides what a pull request runs now starts the
   Postgres tests for any change under the server's `src/`, not only for
   the Postgres, metadata, backend and db files: the server's correctness
@@ -1697,17 +1605,6 @@ The first release: the server, its cache tiers, and the `scn` client.
   ("an ACL whose walk failed").
   
   macOS only; every other target keeps refusing group-writable paths.
-- # Archive: a section's reads hold one snapshot
-  
-  An export's metadata sections claim one read snapshot, and on SQLite
-  the claim was false: `Store::read` runs each statement autocommit, so
-  a land that commits between a section's changesets query and its refs
-  query left a ref in the archive whose target the archive does not
-  hold, and the export failed its own verify. A section now reads inside
-  one explicit read transaction on the reader connection
-  (`Backend::read_snapshot`); Postgres already gave its reads one
-  REPEATABLE READ transaction. The cost is the one the section's
-  snapshot always named: the log cannot restart while the section reads.
 - # A client's connection notices a dead peer
   
   ## The product clients run the server's keepalive, on their side
@@ -2004,35 +1901,6 @@ The first release: the server, its cache tiers, and the `scn` client.
   end inside a kill window fails the run: the reader quit while the
   server was still serving. The old reader makes that check red, which
   is the proof it works.
-- The nightly soak failed its own RSS bound on 2026-10-19 (run
-  39219458903, the schedule event on 2bc9099): 34892 KB -> 54140 KB, over
-  the 150 percent ceiling. At that commit the schedule branch of the
-  workflow still fell back to the 10-minute default, so the nightly ran
-  its planned 10 minutes and failed the check at the end, against a
-  baseline taken after 60 seconds; the 120-minute schedule came later on
-  main. There was no early abort: the only RSS check in the script runs
-  after the sampling loop, and the fixed script's only RSS check needs
-  the warm baseline, which exists only after SOAK_WARM_SECONDS. A 35-minute local run of the same load saw RSS climb for about
-  30 minutes (32288 -> 59184 KB) and then hold flat for the last 16
-  minutes (the last 20 samples: max 59184, average 58137, no trend), and
-  the failed CI curve itself rose, stepped once at about 4 minutes, and
-  then oscillated 49-57 KB for its last 5 minutes with no climb. That is
-  warm-up - sqlite page caches of the 8 read connections and the write
-  connection, allocator arenas, prepared statements - not a leak: a leak
-  does not plateau on two runs.
-  
-  The bound's baseline is now the first sample after SOAK_WARM_SECONDS
-  (1800 s, named in soak.yml): the nightly still checks 90 minutes of RSS
-  after the warm-up. A run shorter than the window checks no RSS bound -
-  it cannot tell warm-up from a leak (a 10-minute run, as the nightly of
-  that commit was, sees only the climb). The other bounds are
-  untouched.
-  
-  The samples now include the store's size on disk: every 10 s the loop
-  appends epoch and `du -sk` of the server data directory to a
-  metrics-store.csv, next to metrics.csv in the artifacts, so a run can
-  be read for disk growth and for Ben's 72-hour soak decision, not only
-  for the RSS it shares a cause with.
 - A streamed reply that stalled on a client that stopped reading now gives
   its byte estimate back when its stream ends, instead of holding it until
   the connection closes. A connection that serves many stalled replies no
@@ -2251,6 +2119,19 @@ The first release: the server, its cache tiers, and the `scn` client.
 
 ### Security
 
+- The server refuses a data directory that group or others can read, as the
+  daemon refuses a socket directory: readable is reachable, and whoever can
+  read the directory has every blob and every row. A directory that only
+  group or others can write was already refused; the refusal now demands
+  mode 0700 and the error says so (`chmod 700 <dir>`), and a restore makes
+  its target 0700 whatever the umask. An operator whose data directory was
+  mode 0755 must run `chmod 700 <dir>` before the server starts again.
+- RUSTSEC-2026-0414: `pulldown-cmark` 0.13.4 allows exponential event
+  growth with `ENABLE_WIKILINKS`; fixed in 0.13.5, and all four
+  lockfiles moved to it. Build-time only: the crate enters as a build
+  dependency of the protobuf codegen, its input is the checked-in
+  `.proto` comments, and nothing ships the parser. The deps job's
+  advisory gate now passes at the root and in every fuzz workspace.
 - The server's fuzz lockfile no longer pins the vulnerable gix
   (RUSTSEC-2026-0382): `cargo update -p gix` moved the gix family in
   `crates/scion-server/fuzz/Cargo.lock` to 0.90.0 (#587 moved only the
