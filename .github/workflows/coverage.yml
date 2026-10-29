@@ -310,8 +310,9 @@ jobs:
           if-no-files-found: error
       - name: upload the measure's profiles
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+
         with:
-          name: coverage
+          name: coverage-postgres
           path: target/coverage/*.profraw
           if-no-files-found: error
       - name: the measure's log, even on failure
