@@ -313,7 +313,7 @@ fn the_footer_names_a_commit_that_exists() {
     // measure main's code. The bench's full checkout carries
     // origin/main, so the claim is checkable where the table is made.
     let ok = Command::new("git")
-        .args(["merge-base", "--is-ancestor", &hex, "origin/main"])
+        .args(["merge-base", "--is-ancestor", hex, "origin/main"])
         .current_dir(repo_dir())
         .status()
         .expect("git runs")
