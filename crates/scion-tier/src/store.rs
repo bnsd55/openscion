@@ -1860,7 +1860,7 @@ mod tests {
     /// which reports the store was dropped under its feet.
     #[test]
     fn a_dropped_store_leaves_no_walk_thread_behind() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::private_tempdir();
         let data = dir.path().join("data");
         let (a, frame) = blob(b"aaaa");
         // The walk must be owed: a clean stop leaves none, so the first
@@ -2031,7 +2031,7 @@ mod tests {
 
     #[test]
     fn the_disk_store_stays_under_its_limit_across_restarts() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::private_tempdir();
         let data = dir.path().join("data");
         let (a, b, c) = (blob(b"aaaa"), blob(b"bbbb"), blob(b"cccc"));
         let n = a.1.len();
@@ -2070,7 +2070,7 @@ mod tests {
 
     #[test]
     fn the_disk_store_drops_bad_copies() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::private_tempdir();
         let data = dir.path().join("data");
         let store = DiskStore::open(&data, 1 << 20).unwrap();
 
@@ -2145,7 +2145,7 @@ mod tests {
 
     #[test]
     fn a_row_that_names_more_than_an_object_holds_is_refused_not_sized() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::private_tempdir();
         let data = dir.path().join("data");
         let (key, frame) = blob(b"aaaa");
         let store = DiskStore::open(&data, 1 << 20).unwrap();
@@ -2180,7 +2180,7 @@ mod tests {
 
     #[test]
     fn a_put_of_an_object_that_was_just_dropped_keeps_its_new_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::private_tempdir();
         let (a, b) = (blob(b"aaaa"), blob(b"bbbb"));
         let n = a.1.len();
         // Room for one object.
@@ -2209,7 +2209,7 @@ mod tests {
         if rustix::process::geteuid().as_raw() == 0 {
             return;
         }
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::private_tempdir();
         let data = dir.path().join("data");
         let (a, b) = (blob(b"aaaa"), blob(b"bbbb"));
         let n = a.1.len();
@@ -2309,7 +2309,7 @@ mod tests {
 
     #[test]
     fn a_start_after_a_clean_stop_trusts_the_index_and_a_crash_walks() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::private_tempdir();
         let data = dir.path().join("data");
         let (a, stray) = (blob(b"aaaa"), blob(b"not in the index"));
         let stray_path = {
@@ -2357,7 +2357,7 @@ mod tests {
 
     #[test]
     fn the_order_of_use_survives_a_restart() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::private_tempdir();
         let data = dir.path().join("data");
         let (a, b, c, d) = (blob(b"aaaa"), blob(b"bbbb"), blob(b"cccc"), blob(b"dddd"));
         let len = a.1.len();
@@ -2386,7 +2386,7 @@ mod tests {
 
     #[test]
     fn a_crash_keeps_what_was_committed_and_loses_only_its_last_uses() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::private_tempdir();
         let data = dir.path().join("data");
         let (a, b, c) = (blob(b"aaaa"), blob(b"bbbb"), blob(b"cccc"));
         let n = a.1.len();
@@ -2431,7 +2431,7 @@ mod tests {
 
     #[test]
     fn the_index_file_of_the_previous_format_is_imported_in_order() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::private_tempdir();
         let data = dir.path().join("data");
         let (a, b, c) = (blob(b"aaaa"), blob(b"bbbb"), blob(b"cccc"));
         {
@@ -2458,7 +2458,7 @@ mod tests {
 
     #[test]
     fn a_dirty_file_of_the_previous_format_gives_its_order_before_the_scan() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::private_tempdir();
         let data = dir.path().join("data");
         let (a, b, c) = (blob(b"aaaa"), blob(b"bbbb"), blob(b"cccc"));
         {
@@ -2485,7 +2485,7 @@ mod tests {
 
     #[test]
     fn a_damaged_file_of_the_previous_format_is_not_trusted() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::private_tempdir();
         let data = dir.path().join("data");
         let (a, b, stray) = (blob(b"aaaa"), blob(b"bbbb"), blob(b"not in the index"));
         let stray_path = {
@@ -2525,7 +2525,7 @@ mod tests {
 
     #[test]
     fn a_damaged_index_db_is_set_aside_and_the_files_are_scanned() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::private_tempdir();
         let data = dir.path().join("data");
         let (a, stray) = (blob(b"aaaa"), blob(b"not in the index"));
         let stray_path = {
@@ -2553,7 +2553,7 @@ mod tests {
         if rustix::process::geteuid().as_raw() == 0 {
             return;
         }
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::private_tempdir();
         let data = dir.path().join("data");
         let a = blob(b"aaaa");
         DiskStore::open(&data, 1 << 20)
@@ -2570,7 +2570,7 @@ mod tests {
 
     #[test]
     fn the_memory_of_the_index_stays_bounded_as_objects_grow() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::private_tempdir();
         let data = dir.path().join("data");
         let store = DiskStore::open(&data, 1 << 30).unwrap();
         // The rows of the db grow with the objects; the batch that waits in
@@ -2605,7 +2605,7 @@ mod tests {
 
     #[test]
     fn an_eviction_reads_only_what_it_drops() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::private_tempdir();
         let data = dir.path().join("data");
         let (a, b) = (blob(b"aaaa"), blob(b"bbbb"));
         let n = a.1.len();
@@ -2639,7 +2639,7 @@ mod tests {
     #[test]
     #[allow(clippy::many_single_char_names)]
     fn a_walk_adopts_the_files_that_a_crash_left_and_the_limit_counts_them() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::private_tempdir();
         let data = dir.path().join("data");
         let (a, b, c, d, e) = (
             blob(b"aaaa"),
@@ -2704,7 +2704,7 @@ mod tests {
     #[test]
     #[allow(clippy::many_single_char_names)]
     fn a_commit_that_fails_keeps_the_rows_the_truth() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::private_tempdir();
         let data = dir.path().join("data");
         let (a, b, c) = (blob(b"aaaa"), blob(b"bbbb"), blob(b"cccc"));
         let n = a.1.len();
@@ -2760,7 +2760,7 @@ mod tests {
 
     #[test]
     fn a_torn_file_found_at_start_is_dropped_when_read() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::private_tempdir();
         let data = dir.path().join("data");
         let (key, bytes) = blob(b"a whole object\n");
         let path = {
@@ -2790,7 +2790,7 @@ mod tests {
     fn a_data_directory_that_others_can_reach_is_refused() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::private_tempdir();
         let open = dir.path().join("open");
         fs::create_dir(&open).unwrap();
         fs::set_permissions(&open, fs::Permissions::from_mode(0o777)).unwrap();

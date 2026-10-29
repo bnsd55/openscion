@@ -111,7 +111,7 @@ async fn run_agent(
                 now_unix_secs()?,
                 0,
             )
-            .expect("identity fits the format"),
+            .context("the bench identity does not fit a changeset field")?,
             None,
             format!("bench: agent {agent} change {i}\n").into_bytes(),
             BTreeMap::from([(
@@ -122,7 +122,7 @@ async fn run_agent(
                 }),
             )]),
         )
-        .expect("changeset fits the format");
+        .context("the changeset fields do not fit the format")?;
         let id = ctx.create_changeset(&changeset).await?;
         let landing = Instant::now();
         let reply = ctx

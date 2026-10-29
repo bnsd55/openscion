@@ -76,6 +76,7 @@ fn a_daemon_serves_a_data_directory_that_exists() {
     // refusal is for the missing directory only. The socket's birth is
     // the proof it got past the store.
     let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let data = dir.path().join("daemon");
     std::fs::create_dir_all(&data).unwrap();
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();

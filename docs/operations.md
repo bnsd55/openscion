@@ -1372,22 +1372,22 @@ checking out through a cache and a daemon beside it.
 
 | | |
 |---|---|
-| Commit | 07198dd728c754ad7a79ba526cb2227e620490b0 the main commit the run measured (the run's own HEAD, `62fb2183`, fixes the throughput column's sum only), at [run 40212691905](https://github.com/bnsd55/openscion/actions/runs/40212691905) |
-| Runner | GitHub-hosted `ubuntu-24.04`: 4 vCPU, 16 GiB RAM, ext4 on a ~144 GiB SSD, runner image `ubuntu24 20261023.334.3`, kernel `6.17.0-1022-azure` (the run's `machine.txt` artifact) |
+| Commit | f4d62b595f94f86903225629a936f8ac221942cb the main commit the run measured (the run's own HEAD), at [run 40864498937](https://github.com/bnsd55/openscion/actions/runs/40864498937) |
+| Runner | GitHub-hosted `ubuntu-24.04`: 4 vCPU, 16 GiB RAM, ext4 on a ~144 GiB SSD, runner image `ubuntu24 20261026.354.1`, kernel `7.0.0-1017-azure` (the run's `machine.txt` artifact) |
 | Filesystem | the filesystem the run measured, from the run's `machine.txt` artifact (`df -T` on the work directory); the `ubuntu-24.04` class's root disk is ext4 ([support.md](support.md)) |
 | Repetitions | 2 per cell; the table reports the cell's whole run, and the run's raw samples are the workflow run's `capacity.csv` artifact |
 
 | backend | writers | readers | land p99 ms | checkout p50 ms | checkout p99 ms | timeouts | errors | server RSS MiB | landed | lands per second | blob store KiB per 1k lands | database KiB per 1k lands |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| postgres | 2 | 0 | 59.9 | - | - | 0 | 0 | 20 | 2000 | 21.1 | 5666 | 85454 |
-| postgres | 2 | 5 | 126 | 248 | 290 | 0 | 0 | 23 | 2000 | 11.2 | 5670 | 85078 |
-| postgres | 2 | 20 | 256 | 844 | 1033 | 0 | 0 | 25 | 2000 | 8.0 | 5674 | 87506 |
-| postgres | 50 | 0 | 2233 | - | - | 0 | 0 | 32 | 2000 | 22.4 | 5668 | 34520 |
-| postgres | 50 | 5 | 4478 | 253 | 296 | 0 | 0 | 37 | 2000 | 12.2 | 5668 | 34458 |
-| postgres | 50 | 20 | 7857 | 870 | 1083 | 0 | 0 | 39 | 2000 | 8.3 | 5668 | 34578 |
-| postgres | 200 | 0 | 9249 | - | - | 0 | 0 | 44 | 2000 | 21.8 | 5664 | 62298 |
-| postgres | 200 | 5 | 17017 | 253 | 299 | 0 | 0 | 63 | 2000 | 12.1 | 5668 | 62318 |
-| postgres | 200 | 20 | 29960 | 874 | 1085 | 0 | 0 | 64 | 2000 | 8.3 | 5670 | 62270 |
+| postgres | 2 | 0 | 57.8 | - | - | 0 | 0 | 20 | 2000 | 23.2 | 5668 | 85012 |
+| postgres | 2 | 5 | 123.4 | 248 | 291 | 0 | 0 | 24 | 2000 | 11.4 | 5668 | 87506 |
+| postgres | 2 | 20 | 245.3 | 861 | 1038 | 0 | 0 | 27 | 2000 | 8.2 | 5668 | 87298 |
+| postgres | 50 | 0 | 2034.1 | - | - | 0 | 0 | 34 | 2000 | 25.5 | 5672 | 34494 |
+| postgres | 50 | 5 | 4232.0 | 246 | 288 | 0 | 0 | 38 | 2000 | 12.7 | 5674 | 34510 |
+| postgres | 50 | 20 | 7708.9 | 867 | 1063 | 0 | 0 | 40 | 2000 | 8.4 | 5670 | 34534 |
+| postgres | 200 | 0 | 8081.3 | - | - | 0 | 0 | 45 | 2000 | 24.9 | 5670 | 62376 |
+| postgres | 200 | 5 | 16945.7 | 248 | 292 | 0 | 0 | 64 | 2000 | 12.5 | 5668 | 62234 |
+| postgres | 200 | 20 | 29120.7 | 873 | 1061 | 0 | 0 | 66 | 2000 | 8.3 | 5668 | 62340 |
 
 Every cell runs on a store the cell's own import made: on SQLite a data directory
 the cell created, on Postgres a database the cell dropped and

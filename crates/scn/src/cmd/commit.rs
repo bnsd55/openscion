@@ -138,8 +138,8 @@ pub async fn commit(ctx: &mut Ctx, args: CommitArgs) -> Result<()> {
     }
     // SHORTCUT: always UTC, since std cannot read the local time zone.
     // Upgrade: a time zone crate.
-    let author =
-        IdentityTime::new(name, email, now_unix_secs()?, 0).expect("identity fits the format");
+    let author = IdentityTime::new(name, email, now_unix_secs()?, 0)
+        .context("the author identity does not fit a changeset field")?;
     let changeset = Changeset::new(
         vec![parent],
         author,
@@ -147,7 +147,7 @@ pub async fn commit(ctx: &mut Ctx, args: CommitArgs) -> Result<()> {
         args.message.into_bytes(),
         changes,
     )
-    .expect("changeset fields fit the format");
+    .context("the changeset fields do not fit the format")?;
     let id = ctx.create_changeset(&changeset).await?;
     if ctx.json {
         outln!("{}", serde_json::json!({ "changeset": id.to_string() }));

@@ -1482,7 +1482,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_tls_client_is_served() {
         let certs = test_certs();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, None);
         let (addr, _) = serve_tls(Limits::default(), TIMERS, &server_tls, HANDSHAKE_TIMEOUT).await;
         let mut client = client(addr, &certs.authority.cert(), None).await.unwrap();
@@ -1493,7 +1493,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_mtls_server_refuses_a_client_without_a_certificate() {
         let certs = test_certs();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
         let (addr, _) = serve_tls(Limits::default(), TIMERS, &server_tls, HANDSHAKE_TIMEOUT).await;
         // The connect of a client can end before the server has checked its
@@ -1517,7 +1517,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_mtls_server_serves_a_client_with_a_certificate() {
         let certs = test_certs();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
         let (addr, _) = serve_tls(Limits::default(), TIMERS, &server_tls, HANDSHAKE_TIMEOUT).await;
         let mut client = client(addr, &certs.authority.cert(), Some(&certs.client))
@@ -1531,7 +1531,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_client_with_the_wrong_ca_is_refused() {
         let certs = test_certs();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, None);
         let (addr, _) = serve_tls(Limits::default(), TIMERS, &server_tls, HANDSHAKE_TIMEOUT).await;
         assert!(client(addr, &certs.stranger.cert(), None).await.is_err());
@@ -1541,7 +1541,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_mtls_server_refuses_a_client_of_another_ca() {
         let certs = test_certs();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
         let (addr, _) = serve_tls(Limits::default(), TIMERS, &server_tls, HANDSHAKE_TIMEOUT).await;
         // As above: the refusal may show in the connect or in the call.
@@ -1563,7 +1563,7 @@ mod tests {
     #[tokio::test]
     async fn a_peer_without_the_tls_handshake_is_dropped() {
         let certs = test_certs();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, None);
         let (addr, _) = serve_tls(
             Limits::default(),
@@ -1580,7 +1580,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_peer_silent_after_the_tls_handshake_is_closed() {
         let certs = test_certs();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, None);
         // All timers are short (timers("age")), so the peer is closed soon
         // after it goes silent: the TLS handshake timeout can no longer
@@ -1608,7 +1608,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_silent_tls_peer_is_closed_within_one_deadline() {
         let certs = test_certs();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, None);
         let deadline = Duration::from_secs(1);
         let (addr, _) = serve_tls(Limits::default(), TIMERS, &server_tls, deadline).await;
@@ -1655,7 +1655,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_silent_tls_handshake_does_not_block_other_clients() {
         let certs = test_certs();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, None);
         // The silent peer's handshake timeout: far beyond the next test
         // step, so only the blocking of a sequential handshake can end it.

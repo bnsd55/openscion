@@ -7,6 +7,19 @@ use std::time::Duration;
 
 use scion_proto::runtime::auth::read_secret_file;
 
+/// A temp directory the run owns outright: mode 0700, whatever the
+/// umask. Under a group-writable one, the read is refused for its
+/// directory before the check each test means to prove runs at all.
+fn private_tempdir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("the temp dir opens");
+    std::fs::set_permissions(
+        dir.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .expect("the mode is set");
+    dir
+}
+
 /// Runs `f` on a thread and waits `limit` for it to finish: the answer
 /// is `Some` when the call came back, `None` when it hung.
 fn within<T: Send + 'static>(limit: Duration, f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
@@ -30,7 +43,7 @@ fn within<T: Send + 'static>(limit: Duration, f: impl FnOnce() -> T + Send + 'st
 /// not block.
 #[test]
 fn a_fifo_as_the_file_is_refused_not_blocked() {
-    let dir = tempfile::tempdir().expect("the temp dir opens");
+    let dir = private_tempdir();
     let fifo = dir.path().join("token");
     // The system mkfifo: std has none, and rustix's mkfifoat is not
     // on macOS. The mode is set to 0600 below, so the tool's umask
@@ -62,7 +75,7 @@ fn a_fifo_as_the_file_is_refused_not_blocked() {
 /// this user, mode 0600: every check but a size cap passes.
 #[test]
 fn a_file_past_any_sane_cap_is_refused() {
-    let dir = tempfile::tempdir().expect("the temp dir opens");
+    let dir = private_tempdir();
     let big = dir.path().join("token");
     let file = std::fs::File::create(&big).expect("the file is made");
     file.set_len(512 * 1024 * 1024).expect("the size is set");
@@ -86,7 +99,7 @@ fn a_file_past_any_sane_cap_is_refused() {
 /// owner is not this process.
 #[test]
 fn a_file_owned_by_another_user_is_refused_on_the_descriptor() {
-    let dir = tempfile::tempdir().expect("the temp dir opens");
+    let dir = private_tempdir();
     let file = dir.path().join("token");
     std::fs::write(&file, b"secret").expect("the file is written");
     std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o600))
