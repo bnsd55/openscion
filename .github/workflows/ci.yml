@@ -842,33 +842,59 @@ jobs:
       # outlives cargo cannot hold the step open past its timeout. The
       # stamping runs after cargo is done, so the step always returns
       # and the upload below always runs.
+      # The watcher doubles as a guard, the coverage measure's design:
+      # the suite runs in its own process group (setsid), the guard
+      # samples every 20 s, and a trip (disk under 3 G or 6 G dropped,
+      # memory under 600 M or down 4 G, a process storm) kills the
+      # suite's group by its pgid and ends the step while the runner
+      # can still upload. Without it the starved runner dies with
+      # every log it kept.
       - run: |
-          set -o pipefail
-          # A background sampler every 20 s: the runner has died of
-          # resource starvation before, so the last sample before
-          # death names the hog (memory, disk, the biggest processes).
-          sampler() {
-            while :; do
-              {
-                printf 'SAMPLE %s\n' "$(date -u +%H:%M:%S)"
-                free -m | head -2
-                df -h / | tail -1
-                ps -eo rss,comm,args --sort=-rss | head -6
-                printf 'scion procs: %s\n' "$(pgrep -fc scion || true)"
-                printf 'pg conns: %s\n' "$(psql postgres://postgres:scion@localhost:5432/scion -Atc 'select count(*) from pg_stat_activity' 2>/dev/null || echo n/a)"
-              } >> "$RUNNER_TEMP/arm64-sampler.log"
-              sleep 20
-            done
-          }
-          sampler & SAMPLER=$!
-          timeout -k 60 2100 cargo test --workspace --no-fail-fast \
-            > "$RUNNER_TEMP/arm64-test.raw" 2>&1
-          code=$?
-          kill $SAMPLER 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/arm64-test.log" "$RUNNER_TEMP/arm64-sampler.log" guard.trip measure.pgid measure.rc
+          start_avail=$(df --output=avail -BG / 2> /dev/null | tail -1 | tr -dc '0-9') || true
+          start_mem=$(free -m 2> /dev/null | awk 'NR==2 {print $7}') || true
+          start_procs=$(ps -e --no-headers 2> /dev/null | wc -l | tr -d ' ') || true
+          ( while sleep 10; do
+              { date -u +%T; df -h / | tail -1; free -m | awk 'NR==2'; } >> "$RUNNER_TEMP/arm64-sampler.log" 2> /dev/null || true
+              { ps -eo rss,comm,args --sort=-rss 2> /dev/null | head -6 >> "$RUNNER_TEMP/arm64-sampler.log"; } || true
+              procs=$(ps -e --no-headers 2> /dev/null | wc -l | tr -d ' ') || true
+              family=$(pgrep -c -f 'scion-(server|daemon|cache)' 2> /dev/null) || true
+              family=${family:-0}
+              avail=$(df --output=avail -BG / 2> /dev/null | tail -1 | tr -dc '0-9') || true
+              mem=$(free -m 2> /dev/null | awk 'NR==2 {print $7}') || true
+              swap_used=$(free -m 2> /dev/null | awk 'NR==3 {print $3}') || true
+              echo "SAMPLE $(date -u +%H:%M:%S) procs=${procs:-?} store_family=$family mem_avail=${mem:-?}M swap_used=${swap_used:-?}M disk_avail=${avail:-?}G" >> "$RUNNER_TEMP/arm64-sampler.log" 2> /dev/null || true
+              avail_drop=0; mem_drop=0; proc_growth=0
+              if [ -n "${avail:-}" ] && [ -n "${start_avail:-}" ]; then avail_drop=$((start_avail - avail)); fi
+              if [ -n "${mem:-}" ] && [ -n "${start_mem:-}" ]; then mem_drop=$((start_mem - mem)); fi
+              if [ -n "${procs:-}" ] && [ -n "${start_procs:-}" ]; then proc_growth=$((procs - start_procs)); fi
+              if [ "${avail:-10}" -le 3 ] || [ "${mem:-10000}" -le 600 ] || [ "$avail_drop" -ge 6 ] || [ "$mem_drop" -ge 4000 ] || [ "$proc_growth" -ge 500 ] || [ "$family" -ge 200 ]; then
+                {
+                  echo "the runner is starving: avail=${avail:-?}G free_mem=${mem:-?}M disk_drop=${avail_drop:-?}G mem_drop=${mem_drop:-?}M procs=$procs (start ${start_procs:-?}, growth $proc_growth) store_family=$family"
+                  df -h / || true
+                  free -m || true
+                  ps -eo pid,rss,pcpu,etime,comm,args --sort=-rss 2> /dev/null | head -12 || true
+                  { ps -eo ppid,comm | sort | uniq -c | sort -rn | head -10; } || true
+                } >> "$RUNNER_TEMP/arm64-sampler.log" 2> /dev/null || true
+                printf 'trip at %s: avail=%s mem=%s disk_drop=%s mem_drop=%s pgid=%s\n' "$(date -u +%T)" "${avail:-?}" "${mem:-?}" "${avail_drop:-?}" "${mem_drop:-?}" "$(cat measure.pgid 2> /dev/null || echo none)" > guard.trip 2> /dev/null || true
+                if [ -f measure.pgid ] && [ "$(ps -o pgid= -p "$(cat measure.pgid)" 2> /dev/null | tr -d ' ')" != "$(ps -o pgid= -p $$ 2> /dev/null | tr -d ' ')" ]; then
+                  kill -TERM -- "-$(cat measure.pgid)" || true
+                else
+                  echo "the guard stands down: no separate measure group (setsid failed?)" >> guard.trip 2> /dev/null || true
+                fi
+                exit 2
+              fi
+            done ) &
+          watcher=$!
+          setsid bash -c 'echo $$ > measure.pgid; timeout -k 60 2100 cargo test --workspace --no-fail-fast > '"$RUNNER_TEMP"'/arm64-test.raw 2>&1; echo $? > measure.rc' || true
+          code=$(cat measure.rc 2> /dev/null || echo 124)
+          kill "$watcher" 2> /dev/null || true
+          wait "$watcher" 2> /dev/null || true
           while IFS= read -r l; do printf '%s %s\n' "$(date -u +%H:%M:%S)" "$l"; done \
             < "$RUNNER_TEMP/arm64-test.raw" | tee "$RUNNER_TEMP/arm64-test.log"
-          cat "$RUNNER_TEMP/arm64-sampler.log" >> "$RUNNER_TEMP/arm64-test.log"
-          exit $code
+          cat "$RUNNER_TEMP/arm64-sampler.log" >> "$RUNNER_TEMP/arm64-test.log" 2> /dev/null || true
+          if [ -f guard.trip ]; then cat guard.trip >> "$RUNNER_TEMP/arm64-test.log"; fi
+          exit "$code"
         env:
           PROPTEST_CASES: "2000"
           RUST_TEST_THREADS: "2"
