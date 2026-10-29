@@ -166,7 +166,8 @@ pub async fn mount(ctx: &mut Ctx, args: MountArgs) -> Result<()> {
         root,
         &reply.ticket,
         overlay.join(CHANGES),
-    );
+    )
+    .context("cannot make the mount: the system gave no random bytes")?;
     #[cfg(feature = "unstable-writable-mount")]
     let vfs = vfs.writable(args.unstable_writable);
     let secret = vfs.secret_name();
@@ -220,7 +221,7 @@ pub async fn mount(ctx: &mut Ctx, args: MountArgs) -> Result<()> {
         try_mount(port, &secret, &dir)?;
     }
 
-    wait_stopped().await;
+    wait_stopped().await?;
     drop(server);
     // Unmount before the overlay goes, so no file disappears mid-read.
     unmount_dir(&dir);
@@ -600,15 +601,17 @@ fn stop_serving_with(record: &MountRecord, dir: &Path, kill: impl Fn(u32, &str) 
     false
 }
 
-/// Waits for a stop signal.
-async fn wait_stopped() {
+/// Waits for a stop signal. A system that refuses the handlers is
+/// refused here, with the cause, not met with a panic.
+async fn wait_stopped() -> Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
-    let mut stop = signal(SignalKind::interrupt()).expect("cannot listen for SIGINT");
-    let mut term = signal(SignalKind::terminate()).expect("cannot listen for SIGTERM");
+    let mut stop = signal(SignalKind::interrupt()).context("cannot listen for SIGINT")?;
+    let mut term = signal(SignalKind::terminate()).context("cannot listen for SIGTERM")?;
     tokio::select! {
         _ = stop.recv() => {}
         _ = term.recv() => {}
     }
+    Ok(())
 }
 
 /// The recorded mount of `dir`.
