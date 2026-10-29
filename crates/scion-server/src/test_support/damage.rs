@@ -51,8 +51,7 @@ static GATE: std::sync::Mutex<GateState> = std::sync::Mutex::new(GateState {
 static GATE_CV: std::sync::Condvar = std::sync::Condvar::new();
 
 /// One permit of the gate: the default for a test whose fixture opens
-/// a store. SQLite has no shared database, so the permit skips itself
-/// there.
+/// a store.
 pub(crate) struct SlotGuard;
 
 impl Drop for SlotGuard {
@@ -66,10 +65,7 @@ impl Drop for SlotGuard {
 }
 
 /// One permit of the gate, one of 4.
-pub(crate) fn slot() -> Option<SlotGuard> {
-    if !Backend::test_is_postgres() {
-        return None;
-    }
+pub(crate) fn slot() -> SlotGuard {
     let mut state = GATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -79,7 +75,7 @@ pub(crate) fn slot() -> Option<SlotGuard> {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
     }
     state.permits_out += 1;
-    Some(SlotGuard)
+    SlotGuard
 }
 
 /// The full stop: no permit is out, and no new one goes out, until the
@@ -99,10 +95,7 @@ impl Drop for ExclusiveGuard {
 }
 
 /// Takes the full stop, one of none.
-pub(crate) fn exclusive() -> Option<ExclusiveGuard> {
-    if !Backend::test_is_postgres() {
-        return None;
-    }
+pub(crate) fn exclusive() -> ExclusiveGuard {
     let mut state = GATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -114,7 +107,7 @@ pub(crate) fn exclusive() -> Option<ExclusiveGuard> {
     }
     state.waiting_exclusive -= 1;
     state.exclusive_out = true;
-    Some(ExclusiveGuard)
+    ExclusiveGuard
 }
 
 /// Updates the schema's planner statistics, the way autovacuum does on a
@@ -122,11 +115,7 @@ pub(crate) fn exclusive() -> Option<ExclusiveGuard> {
 /// un-analyzed planner keeps the small-table plans it picked on the
 /// first case.
 pub(crate) fn analyze(backend: &Backend) -> Result<()> {
-    if Backend::test_is_postgres() {
-        exec(data_dir(backend), "ANALYZE")
-    } else {
-        Ok(())
-    }
+    exec(data_dir(backend), "ANALYZE")
 }
 
 /// The kind of a derived row.
@@ -417,140 +406,81 @@ pub(crate) fn view_tree_rows(backend: &Backend) -> Result<usize> {
 /// The count of the lands whose state is `landed`.
 pub(crate) fn landed_rows(backend: &Backend) -> Result<i64> {
     let data = data_dir(backend);
-    if Backend::test_is_postgres() {
-        pg_with(data, |client| {
-            let row = client
-                .query_one("SELECT count(*) FROM lands WHERE state = 'landed'", &[])
-                .map_err(map_pg_error)?;
-            Ok(row.get::<_, i64>(0))
-        })
-    } else {
-        raw_sqlite(data, false, |c| {
-            c.query_row(
-                "SELECT count(*) FROM lands WHERE state = 'landed'",
-                [],
-                |row| row.get(0),
-            )
-        })
-    }
+    pg_with(data, |client| {
+        let row = client
+            .query_one("SELECT count(*) FROM lands WHERE state = 'landed'", &[])
+            .map_err(map_pg_error)?;
+        Ok(row.get::<_, i64>(0))
+    })
 }
 
 /// The state of the land row of `request_key`.
 pub(crate) fn land_state_by_key(backend: &Backend, key: &str) -> Result<String> {
     let data = data_dir(backend);
-    if Backend::test_is_postgres() {
-        pg_with(data, |client| {
-            let row = client
-                .query_opt("SELECT state FROM lands WHERE request_key = $1", &[&key])
-                .map_err(map_pg_error)?;
-            Ok(row
-                .map(|r| r.get::<_, String>(0))
-                .expect("the land row exists"))
-        })
-    } else {
-        raw_sqlite(data, false, |c| {
-            c.query_row(
-                "SELECT state FROM lands WHERE request_key = ?1",
-                [key],
-                |row| row.get(0),
-            )
-        })
-    }
+    pg_with(data, |client| {
+        let row = client
+            .query_opt("SELECT state FROM lands WHERE request_key = $1", &[&key])
+            .map_err(map_pg_error)?;
+        Ok(row
+            .map(|r| r.get::<_, String>(0))
+            .expect("the land row exists"))
+    })
 }
 
 /// The state and detail of the land row of `request_key`.
 pub(crate) fn land_state_detail_by_key(backend: &Backend, key: &str) -> Result<(String, String)> {
     let data = data_dir(backend);
-    if Backend::test_is_postgres() {
-        pg_with(data, |client| {
-            let row = client
-                .query_opt(
-                    "SELECT state, detail FROM lands WHERE request_key = $1",
-                    &[&key],
-                )
-                .map_err(map_pg_error)?;
-            Ok(row
-                .map(|r| (r.get::<_, String>(0), r.get::<_, String>(1)))
-                .expect("the land row exists"))
-        })
-    } else {
-        raw_sqlite(data, false, |c| {
-            c.query_row(
-                "SELECT state, detail FROM lands WHERE request_key = ?1",
-                [key],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+    pg_with(data, |client| {
+        let row = client
+            .query_opt(
+                "SELECT state, detail FROM lands WHERE request_key = $1",
+                &[&key],
             )
-        })
-    }
+            .map_err(map_pg_error)?;
+        Ok(row
+            .map(|r| (r.get::<_, String>(0), r.get::<_, String>(1)))
+            .expect("the land row exists"))
+    })
 }
 
 /// The count of the land rows of one caller and request key.
 pub(crate) fn land_rows_by_caller_key(backend: &Backend, caller: &str, key: &str) -> Result<i64> {
     let data = data_dir(backend);
-    if Backend::test_is_postgres() {
-        pg_with(data, |client| {
-            let row = client
-                .query_one(
-                    "SELECT count(*) FROM lands WHERE caller = $1 AND request_key = $2",
-                    &[&caller, &key],
-                )
-                .map_err(map_pg_error)?;
-            Ok(row.get::<_, i64>(0))
-        })
-    } else {
-        raw_sqlite(data, false, |c| {
-            c.query_row(
-                "SELECT count(*) FROM lands WHERE caller = ?1 AND request_key = ?2",
-                [caller, key],
-                |row| row.get(0),
+    pg_with(data, |client| {
+        let row = client
+            .query_one(
+                "SELECT count(*) FROM lands WHERE caller = $1 AND request_key = $2",
+                &[&caller, &key],
             )
-        })
-    }
+            .map_err(map_pg_error)?;
+        Ok(row.get::<_, i64>(0))
+    })
 }
 
 /// Moves the time one land finished `secs` into the past.
 pub(crate) fn age_land(backend: &Backend, land_id: i64, secs: i64) -> Result<usize> {
     let data = data_dir(backend);
-    if Backend::test_is_postgres() {
-        pg_with(data, |client| {
-            client
-                .execute(
-                    "UPDATE lands SET finished_at = finished_at - $2 WHERE land_id = $1",
-                    &[&land_id, &secs],
-                )
-                .map_err(map_pg_error)
-                .map(|n| usize::try_from(n).expect("a row count fits"))
-        })
-    } else {
-        raw_sqlite(data, false, |c| {
-            c.execute(
-                "UPDATE lands SET finished_at = finished_at - ?2 WHERE land_id = ?1",
-                rusqlite::params![land_id, secs],
+    pg_with(data, |client| {
+        client
+            .execute(
+                "UPDATE lands SET finished_at = finished_at - $2 WHERE land_id = $1",
+                &[&land_id, &secs],
             )
-        })
-    }
+            .map_err(map_pg_error)
+            .map(|n| usize::try_from(n).expect("a row count fits"))
+    })
 }
 
 /// Moves the time every pending land was created `secs` into the past.
 pub(crate) fn age_pending_lands(backend: &Backend, secs: i64) -> Result<()> {
     let data = data_dir(backend);
-    if Backend::test_is_postgres() {
-        pg_with(data, |client| {
-            client
-                .execute(
-                    "UPDATE lands SET created_at = created_at - $1 WHERE state = 'pending'",
-                    &[&secs],
-                )
-                .map_err(map_pg_error)?;
-            Ok(())
-        })
-    } else {
-        raw_sqlite(data, false, |c| {
-            c.execute(
-                "UPDATE lands SET created_at = unixepoch() - ?1 WHERE state = 'pending'",
-                rusqlite::params![secs],
+    pg_with(data, |client| {
+        client
+            .execute(
+                "UPDATE lands SET created_at = created_at - $1 WHERE state = 'pending'",
+                &[&secs],
             )
-        })
-        .map(|_| ())
-    }
+            .map_err(map_pg_error)?;
+        Ok(())
+    })
 }

@@ -226,6 +226,10 @@ impl Backend {
         data: &Path,
         open: impl FnOnce(&str, Option<&Path>, usize, &Path, Marker) -> Result<Pg>,
     ) -> Result<Self> {
+        // The directory's own checks run before anything reads it: a
+        // symlink or a shared mode is refused by kind, before the marker
+        // read could follow a link.
+        crate::store::refuse_bad_dir(data)?;
         refuse_damaged_marker(data)?;
         let marker = Marker::read(data);
         refuse_sqlite_dir(data)?;

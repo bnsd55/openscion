@@ -1,11 +1,8 @@
-//! Durable state: `SQLite` for metadata and trees, a folder of zstd files for
-//! blobs.
+//! Durable state: metadata in Postgres, a folder of zstd files for blobs.
 //!
 //! ```text
-//! <data>/lock                      shared by every process that uses <data>
+//! <data>/backend                   names the backend and its store UUID
 //! <data>/open.lock                 held while a process opens <data>
-//! <data>/server.lock               held by the one process that may land
-//! <data>/scion.db                  metadata and trees (see migrations/)
 //! <data>/objects/blob/ab/cd..      one zstd file per blob, named by ID
 //! <data>/tmp/                      staging for atomic blob writes and uploads,
 //!                                  one folder per process, held with a lock
@@ -13,17 +10,16 @@
 //!
 //! Every directory that a store makes, `<data>` and the ones above it
 //! included, gets mode 0700 whatever the umask
-//! ([`create_private_dir_all`]): the data is this user's alone, and the
-//! check of `<data>` below refuses a directory the group can write, as
-//! a plain mkdir under Ubuntu's umask 002 makes it.
+//! ([`create_private_dir_all`]): the data is this user's alone, and
+//! [`refuse_bad_dir`] refuses a directory the group can write, as a
+//! plain mkdir under Ubuntu's umask 002 makes it.
 //!
 //! The locks are `flock`s on open files. A forked child shares its parent's
 //! file descriptions, and with them the locks, until it execs, so a child
-//! spawned while a store is dropped can hold the dropped store's lock for
-//! that window. This server never forks, and a store drops only when its
-//! last user is done with it, so a server cannot hit the window. A library
-//! user that forks while it drops a `Store` can: its tests that assert a
-//! released lock must keep child spawns out of that window, as
+//! spawned while a blob store opens can hold its lock for that window.
+//! This server never forks, so a server cannot hit the window. A library
+//! user that forks while it opens a data directory can: its tests that
+//! assert a released lock must keep child spawns out of that window, as
 //! `spawn_guard` does in this crate's tests.
 
 // Every pub item of this module is re-exported by the test seam
@@ -89,10 +85,8 @@ pub enum BlobStatus {
     Corrupt,
 }
 
-/// Opens (or makes) `dir`'s file `name`, for a `flock`. Only the tests
-/// of a released lock hold one now: the server's locks live on the
-/// database and in [`Blobs`]' own `.lock` files.
-#[cfg(test)]
+/// Opens (or makes) `dir`'s file `name`, for a `flock`. `open.lock`, the
+/// one open at a time, and the staging folders' `.lock` files ride on it.
 fn lock_file(dir: &Path, name: &str) -> io::Result<fs::File> {
     fs::OpenOptions::new()
         .create(true)
@@ -111,6 +105,45 @@ fn flock(file: &fs::File, op: FlockOperation) -> io::Result<bool> {
         Err(Errno::WOULDBLOCK) => Ok(false),
         Err(e) => Err(e.into()),
     }
+}
+
+/// Refuses a data directory that a symlink or a group/others-writable
+/// mode would make unsafe, before anything opens inside it. The refusal
+/// is by kind, not by the link's mode: on macOS lchmod can give a
+/// symlink any mode, so a mode check alone does not catch one, and a
+/// link's target can change behind the checks.
+pub(crate) fn refuse_bad_dir(dir: &Path) -> Result<()> {
+    let meta = fs::symlink_metadata(dir)?;
+    if meta.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is a symlink (the data directory must be a real directory: a symlink's target and mode can change behind the checks)",
+                dir.display()
+            ),
+        )
+        .into());
+    }
+    // Readable is reachable: the daemon refuses a socket directory open
+    // to other users, and the store's data directory answers the same
+    // rule - group or others get no bits at all.
+    if meta.mode() & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} can be read or written by group or others (fix: chmod 700 {})",
+                dir.display(),
+                dir.display()
+            ),
+        )
+        .into());
+    }
+    // The mode check covers the directory itself; the ancestors' check is
+    // the swappable parent: a group- or others-writable directory above
+    // the data lets another user replace the data directory whole.
+    let me = rustix::process::geteuid().as_raw();
+    scion_proto::runtime::auth::check_ancestors(dir, me)?;
+    Ok(())
 }
 
 /// The held fan-out directory flock of a blob: the handle's close
@@ -201,6 +234,13 @@ impl Blobs {
     pub(crate) fn open(dir: &Path) -> Result<Self> {
         // Folders of `tmp/` made in this process, so each `Blobs` gets its own.
         static FOLDERS: AtomicU64 = AtomicU64::new(0);
+        // Opens take turns: the open.lock is held for the folder creation
+        // and the sweep, so no other process creates a staging folder or
+        // sweeps while this one does. A folder whose `.lock` is not yet
+        // flocked would look dead to a concurrent sweep; the open lock
+        // closes that window.
+        let opening = lock_file(dir, "open.lock")?;
+        flock(&opening, FlockOperation::LockExclusive)?;
         let objects = dir.join("objects");
         let root = objects.join("blob");
         let tmp = dir.join("tmp");
@@ -239,6 +279,11 @@ impl Blobs {
         for path in [&root, &objects, &tmp, dir] {
             fsync_dir(path)?;
         }
+        // The sweep runs under the open lock: no other open creates a
+        // folder or sweeps while this one does.
+        sweep_tmp_dir(&tmp, &mine)?;
+        drop(opening);
+        drop(opening);
         Ok(Self {
             // The park files live under the data dir, not under
             // `objects/blob`: the test writes them next to the data root.
@@ -304,17 +349,18 @@ impl Blobs {
         Ok(DirFlock { _file: file })
     }
 
-    /// Removes what crashes left in `tmp/`: the folders of processes that no
-    /// longer hold them, with the blob writes that were never renamed, and,
-    /// when this open is alone, files of a build older than the folders. No
-    /// blob name points at any of them. The folders of live processes are
-    /// held, and this process's own folder is held too.
-    pub(crate) fn sweep_tmp(&self, alone: bool) -> io::Result<()> {
+    /// Removes what crashes left in `tmp/`: the folders of processes that
+    /// no longer hold them, with the blob writes that were never renamed.
+    /// No blob name points at any of them. The folders of live processes
+    /// are held, and this process's own folder is held too. Runs under the
+    /// open lock, from [`Blobs::open`], so no other open creates a folder
+    /// or sweeps while this one does.
+    fn sweep_tmp_dir(tmp: &Path, mine: &Path) -> io::Result<()> {
         let mut removed = 0;
-        for entry in fs::read_dir(&self.tmp)? {
+        for entry in fs::read_dir(tmp)? {
             let path = entry?.path();
             if path.is_dir() {
-                if path == self.mine {
+                if path == mine {
                     continue;
                 }
                 // A lock file that cannot be opened was never flocked: its
@@ -327,9 +373,6 @@ impl Blobs {
                     fs::remove_dir_all(&path)?;
                     removed += 1;
                 }
-            } else if alone {
-                fs::remove_file(&path)?;
-                removed += 1;
             }
         }
         if removed > 0 {
@@ -1300,24 +1343,24 @@ pub(crate) mod spawn_guard {
         f()
     }
 
-    /// Waits until the server lock of `dir` is free. Call it on the
+    /// Waits until the open lock of `dir` is free. Call it on the
     /// write side (inside [`Self::across_release`]), after dropping the
     /// stores and before the reopen that must see the lock released.
     ///
     /// The poll takes the real condition — the lock is free — instead of
-    /// a timing guess: it opens `<dir>/server.lock` and takes a
+    /// a timing guess: it opens `<dir>/open.lock` and takes a
     /// non-blocking exclusive flock every 1 ms, up to 2 s, then fails
     /// with the holder message, so a real leak still fails. The delay it
     /// absorbs is the operating system's: macOS tears a reaped child's
     /// inherited `flock` down one tick after `waitpid`, and about 7% of
     /// immediate reopens after a Rust spawn and its wait fail with
     /// `EWOULDBLOCK` there, sub-ms; Linux shows 0 of 2,000 rounds (a
-    /// standalone probe). The server never spawns a child, so
-    /// `Store::open` itself needs none of this.
+    /// standalone probe). The server never spawns a child, so an open
+    /// itself needs none of this.
     pub fn wait_for_lock_release(dir: &Path) {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            let file = lock_file(dir, "server.lock")
+            let file = lock_file(dir, "open.lock")
                 .unwrap_or_else(|e| panic!("cannot open the lock of {dir:?}: {e}"));
             let free = flock(&file, FlockOperation::NonBlockingLockExclusive).unwrap_or(false);
             drop(file);

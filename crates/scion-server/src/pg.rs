@@ -897,7 +897,6 @@ impl Pg {
         // [`store_identity`].
         let store_uuid = store_identity(&mut writer, marker)?;
         let blobs = Blobs::open(data)?;
-        blobs.sweep_tmp(false)?;
         let inner = Arc::new(PgInner {
             writer: Mutex::new(writer),
             fence,
