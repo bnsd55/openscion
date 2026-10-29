@@ -514,6 +514,9 @@ jobs:
         env:
           SCION_TEST_RESTORE_BIG: "1"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+          # The spawned restore reads its URL from the env; the server
+          # derives each target's schema itself.
+          SCION_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
       - name: the whole-file read would not (the guard is not vacuous)
         # The mutated run must fail for THE CEILING's reason, not any
         # reason: a compile error or a missing /proc would "fail" the
