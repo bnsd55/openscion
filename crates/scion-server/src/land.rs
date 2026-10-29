@@ -2727,21 +2727,26 @@ mod tests {
             room in proptest::option::of(0..4000_usize),
         ) {
             // The per-case cost must not grow with the case count:
-            // SQLite takes a fresh store per case, Postgres empties the
-            // one schema the whole test fn shares and makes one repo
-            // per case (a schema per case would be hundreds of schemas
-            // of one writer and eight readers each).
+            // SQLite takes a fresh store per case; Postgres shares one
+            // schema for the whole test fn, makes one repo per case,
+            // and keeps the schema's planner statistics current (a
+            // schema per case would be hundreds of schemas of one
+            // writer and eight readers each).
             static STAGE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
             static CASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let _serial = damage::serial();
             let shared = Backend::test_is_postgres();
             // The directory outlives the case: a TempDir dropped early
             // deletes the schema the store still serves.
+            let case_dir;
             let dir = if shared {
-                let d = STAGE.get_or_init(crate::test_support::private_tempdir);
-                d.path().to_owned()
+                STAGE
+                    .get_or_init(crate::test_support::private_tempdir)
+                    .path()
+                    .to_owned()
             } else {
-                crate::test_support::private_tempdir().path().to_path_buf()
+                case_dir = crate::test_support::private_tempdir();
+                case_dir.path().to_owned()
             };
             let store = Backend::open_test(&dir).unwrap();
             let case = CASE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
