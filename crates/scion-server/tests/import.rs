@@ -902,7 +902,6 @@ fn server_process(data: &Path, args: &[&str]) -> Command {
     command
 }
 
-
 /// `scion-server import` that opens the test's Postgres schema: the test
 /// URL plus a `search_path` startup option, since the binary names no
 /// schema and the tests of one data directory share one. The data

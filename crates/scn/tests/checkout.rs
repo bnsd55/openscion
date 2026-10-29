@@ -1194,4 +1194,3 @@ fn an_expired_ticket_is_minted_again_once() {
     // One mint for the checkout, one for the refresh: no more.
     assert_eq!(mints.load(Ordering::SeqCst), 2);
 }
-

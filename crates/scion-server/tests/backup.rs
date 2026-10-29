@@ -35,12 +35,6 @@ fn a_backup_taken_while_serving_restores_whole() {
     backup_postgres();
 }
 
-
-
-
-
-
-
 /// Copies every file of `from`, in its subdirectories, into `to`.
 fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
     for entry in walkdir(from) {

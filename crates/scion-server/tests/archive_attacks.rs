@@ -415,14 +415,20 @@ fn a_changeset_naming_an_unlisted_blob_is_named_and_refused() {
 fn a_mid_replay_failure_leaves_the_target_empty() {
     let (_keep, out, _main, _second) = sound_archive();
     let empty = scion_server::test_support::private_tempdir();
-    let restored = archive::restore_with(&out, empty.path(), &url_of(empty.path()), None, |path, url, ca| {
-        let store = scion_server::Backend::open(path, url, ca)?;
-        // The seam: the store's next commit — the whole metadata
-        // transaction, every repo — fails as busy, the way a disk or a
-        // lock would make it.
-        store.fail_next_commits(1);
-        Ok(store)
-    });
+    let restored = archive::restore_with(
+        &out,
+        empty.path(),
+        &url_of(empty.path()),
+        None,
+        |path, url, ca| {
+            let store = scion_server::Backend::open(path, url, ca)?;
+            // The seam: the store's next commit — the whole metadata
+            // transaction, every repo — fails as busy, the way a disk or a
+            // lock would make it.
+            store.fail_next_commits(1);
+            Ok(store)
+        },
+    );
     assert!(
         restored.is_err(),
         "a replay whose store refuses its commit must not report success"

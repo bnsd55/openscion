@@ -192,7 +192,6 @@ fn a_full_disk_answers_out_of_space_and_needs_no_repair() {
     assert!(report.is_clean(), "{:?}", report.problems);
 }
 
-
 #[test]
 fn a_disk_out_of_inodes_answers_out_of_space_and_needs_no_repair() {
     if !required() {
@@ -254,8 +253,7 @@ fn gc_args(data: &std::path::Path, dry: bool) -> String {
         // The URL is a flag of the root command, so it goes before the
         // subcommand; its options carry this directory's schema.
         let schema = Backend::test_schema(data);
-        let url = std::env::var("SCION_TEST_POSTGRES_URL")
-            .expect("SCION_TEST_POSTGRES_URL");
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").expect("SCION_TEST_POSTGRES_URL");
         args.push("--postgres-url".to_owned());
         args.push(format!(
             "{url}{}options=--search_path%3D{schema}",

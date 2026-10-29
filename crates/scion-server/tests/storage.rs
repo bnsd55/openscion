@@ -98,9 +98,6 @@ fn a_batch_that_loses_a_file_keeps_its_earlier_files() {
     store.blobs().put(b"after\n").unwrap();
 }
 
-
-
-
 #[test]
 fn the_blob_hook_refuses_exactly_one_write_per_count() {
     let (dir, store) = store();
@@ -277,6 +274,3 @@ fn a_fsync_hook_refuses_exactly_one_fsync_per_count() {
     store.blobs().put(b"c\n").unwrap();
     assert_eq!(store.blobs().get(one).unwrap(), b"a\n");
 }
-
-
-

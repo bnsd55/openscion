@@ -184,7 +184,7 @@ fn a_restore_commits_bounded_transactions_and_answers_like_its_source() {
         BUDGET,
         Backend::open,
     )
-        .unwrap_or_else(|e| panic!("restore failed: {e:#}"));
+    .unwrap_or_else(|e| panic!("restore failed: {e:#}"));
     let txs = scion_server::test_support::archive::restore_tx_count() - before;
     println!("the restore committed {txs} transactions");
     assert!(
@@ -514,8 +514,9 @@ fn a_stream_cut_after_the_first_batch_fails_and_leaves_no_store() {
     drop(f);
 
     let target = tempfile::tempdir().unwrap().path().join("target");
-    let error = archive::restore_with_budget(&out, &target, &url_of(&target), None, BUDGET, Backend::open)
-        .expect_err("a cut stream must not restore");
+    let error =
+        archive::restore_with_budget(&out, &target, &url_of(&target), None, BUDGET, Backend::open)
+            .expect_err("a cut stream must not restore");
     assert!(
         error.to_string().contains("ends inside a record"),
         "the refusal must name the torn stream: {error}"

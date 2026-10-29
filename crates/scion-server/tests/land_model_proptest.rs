@@ -815,11 +815,10 @@ async fn run_script(script: &[Op]) -> RunSummary {
                     // between two polls of the rows. A missed row is
                     // logged, and the kill still runs - it is the plain
                     // kill then, which the checks already hold.
-                    let saw =
-                        wait_until_or_timeout("a land pending in the database", || {
-                            common::LandsReader::open(&data).counts().1 > 0
-                        })
-                        .await;
+                    let saw = wait_until_or_timeout("a land pending in the database", || {
+                        common::LandsReader::open(&data).counts().1 > 0
+                    })
+                    .await;
                     if !saw {
                         println!(
                             "seed {}: kill-pending saw no pending row; \
