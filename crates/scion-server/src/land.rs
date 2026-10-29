@@ -2726,11 +2726,11 @@ mod tests {
             (parents, edits) in testing::histories(40),
             room in proptest::option::of(0..4000_usize),
         ) {
-            // SQLite takes a fresh store per case, so no query's cost
-            // grows with the case count. Postgres shares one schema for
-            // the whole test fn and makes one repo per case: a schema
-            // per case would be hundreds of schemas of one writer and
-            // eight readers each.
+            // The per-case cost must not grow with the case count:
+            // SQLite takes a fresh store per case, Postgres empties the
+            // one schema the whole test fn shares and makes one repo
+            // per case (a schema per case would be hundreds of schemas
+            // of one writer and eight readers each).
             static STAGE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
             static CASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let _serial = damage::serial();
