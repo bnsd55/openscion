@@ -849,13 +849,15 @@ jobs:
       # suite's group by its pgid and ends the step while the runner
       # can still upload. Without it the starved runner dies with
       # every log it kept.
+      - name: build the workspace's tests
+        run: |
+          df -h / || true
+          free -m || true
+          cargo test --workspace --no-run
+        env:
+          CARGO_TERM_COLOR: always
       - run: |
-          # The coverage measure's own trick: no debug info in the test
-          # build. The full workspace's test binaries with line tables
-          # grew the disk past its floor mid-link (the guard tripped at
-          # 100 MB free with two linkers at 95% CPU); without them the
-          # build is also far faster.
-          printf '[profile.dev]\ndebug = false\nstrip = true\n\n[profile.test]\ndebug = false\nstrip = true\n' > .cargo/config.toml
+          free -m || true
           rm -f "$RUNNER_TEMP/arm64-test.log" "$RUNNER_TEMP/arm64-sampler.log" guard.trip measure.pgid measure.rc
           start_avail=$(df --output=avail -BG / 2> /dev/null | tail -1 | tr -dc '0-9') || true
           start_mem=$(free -m 2> /dev/null | awk 'NR==2 {print $7}') || true
@@ -876,7 +878,7 @@ jobs:
               if [ -n "${avail:-}" ] && [ -n "${start_avail:-}" ]; then avail_drop=$((start_avail - avail)); fi
               if [ -n "${mem:-}" ] && [ -n "${start_mem:-}" ]; then mem_drop=$((start_mem - mem)); fi
               if [ -n "${procs:-}" ] && [ -n "${start_procs:-}" ]; then proc_growth=$((procs - start_procs)); fi
-              if [ "${avail:-10}" -le 3 ] || [ "${mem:-10000}" -le 600 ] || [ "$avail_drop" -ge 6 ] || [ "$mem_drop" -ge 4000 ] || [ "$proc_growth" -ge 500 ] || [ "$family" -ge 200 ]; then
+              if [ "${avail:-10}" -le 3 ] || [ "$avail_drop" -ge 20 ] || [ "${mem:-10000}" -le 1000 ] || [ "$proc_growth" -ge 500 ] || [ "$family" -ge 200 ]; then
                 {
                   echo "the runner is starving: avail=${avail:-?}G free_mem=${mem:-?}M disk_drop=${avail_drop:-?}G mem_drop=${mem_drop:-?}M procs=$procs (start ${start_procs:-?}, growth $proc_growth) store_family=$family"
                   df -h / || true
