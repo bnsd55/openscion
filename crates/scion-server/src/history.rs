@@ -811,9 +811,9 @@ mod tests {
 
     use super::*;
     use crate::backend::Backend;
-    use crate::meta::testing;
     use crate::meta::Meta as _;
     use crate::meta::RepoId;
+    use crate::meta::testing;
     use crate::read;
     use crate::store::Store;
     use crate::write;

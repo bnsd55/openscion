@@ -37,7 +37,12 @@ impl Backend {
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn open_test_shared(data: &Path) -> Result<Self> {
-        Self::open_test_in_schema_with(data, &test_schema(data), PG_TEST_READERS, Pg::open_test_shared)
+        Self::open_test_in_schema_with(
+            data,
+            &test_schema(data),
+            PG_TEST_READERS,
+            Pg::open_test_shared,
+        )
     }
     /// [`Backend::open_test_shared`], for a store the suite reopens from
     /// another path than the one its first open used: the power suite

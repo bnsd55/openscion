@@ -20,7 +20,6 @@ fn url_of(dir: &std::path::Path) -> String {
     scion_server::Backend::test_postgres_url(dir).unwrap()
 }
 
-
 static LOG: std::sync::LazyLock<Captured> = std::sync::LazyLock::new(Captured::default);
 
 #[derive(Clone, Default)]

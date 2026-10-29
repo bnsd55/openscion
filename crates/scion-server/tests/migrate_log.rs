@@ -1,8 +1,8 @@
 //! A fresh database's first open logs one honest line: it says it
 //! created the schema, and nothing about migrating.
 
-use scion_server::test_support::backend::schema_version;
 use scion_server::Backend;
+use scion_server::test_support::backend::schema_version;
 use std::sync::{Arc, Mutex};
 
 /// The version this build's Postgres schema climbs to.

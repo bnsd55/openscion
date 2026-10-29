@@ -15,9 +15,9 @@ use std::collections::BTreeSet;
 use scion_core::{BlobId, Changeset, ChangesetId, RepoPath};
 
 use crate::backend::Backend;
-use crate::meta as db;
 use crate::deadline::Deadline;
 use crate::error::{Error, Result};
+use crate::meta as db;
 use crate::meta::Meta as _;
 use crate::meta::{MetaTx, RepoId};
 use crate::store::{BlobStatus, Upload};

@@ -20,7 +20,6 @@ fn url_of(dir: &std::path::Path) -> String {
     scion_server::Backend::test_postgres_url(dir).unwrap()
 }
 
-
 /// `scion-server` with `args`, run by a shell that first sets umask `umask`,
 /// as a login shell or a service manager does. The process's own umask
 /// cannot be changed for one test: it is the whole test process's.

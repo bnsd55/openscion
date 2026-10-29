@@ -17,12 +17,12 @@ use scion_core::{
 };
 
 use crate::backend::Backend;
-use crate::meta as db;
 use crate::deadline::Deadline;
 use crate::derived::{self, Kind};
 use crate::error::{ApplyError, Error, Result};
 use crate::graph::CommitGraph;
 use crate::history::PathHistory;
+use crate::meta as db;
 use crate::meta::{MetaTx, RepoId};
 
 /// The byte length of a blob, as the tree entries carry it. The store reads

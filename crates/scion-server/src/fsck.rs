@@ -26,10 +26,10 @@ use std::str::FromStr as _;
 use scion_core::{BlobId, Changeset, ChangesetId, Tree, TreeId};
 
 use crate::backend::Backend;
-use crate::meta as db;
 use crate::derived::Kind as _;
 use crate::graph::CommitGraph;
 use crate::history::{self, NodeId, PathHistory};
+use crate::meta as db;
 use crate::meta::{FsckDerivedRow, Meta as _, MetaTx as _, RepoId};
 use crate::store::BlobStatus;
 use crate::tree::RootTree;

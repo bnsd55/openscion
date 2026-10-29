@@ -1645,5 +1645,4 @@ mod tests {
         assert!(importer.txes() > 2, "the batch was one transaction");
         assert_eq!(report.imported, 160);
     }
-
 }

@@ -1491,8 +1491,6 @@ impl<'a> PgTx<'a> {
         Ok(tx)
     }
 
-
-
     /// Reads back the land another writer recorded for this request key
     /// first: its land wins, and its input must match this one's.
     fn read_back_land(&mut self, repo: RepoId, caller: &Caller, req: &LandRequest) -> Result<i64> {

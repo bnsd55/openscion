@@ -882,16 +882,18 @@ async fn main() -> anyhow::Result<()> {
         }
         // `fsck` cannot run when the store cannot open, and its table
         // says that is 2, not the generic open failure's 1.
-        Command::Fsck => match Backend::open_shared(&cli.data, &postgres_url, cli.postgres_ca.as_deref()) {
-            Ok(store) => Ok(store),
-            Err(e) => {
-                eprintln!("scion-server fsck: {e}");
-                // `exit` skips destructors: safe on this path, because
-                // nothing was opened yet — the store refused to open,
-                // so there is no lock to release and nothing buffered.
-                std::process::exit(2);
+        Command::Fsck => {
+            match Backend::open_shared(&cli.data, &postgres_url, cli.postgres_ca.as_deref()) {
+                Ok(store) => Ok(store),
+                Err(e) => {
+                    eprintln!("scion-server fsck: {e}");
+                    // `exit` skips destructors: safe on this path, because
+                    // nothing was opened yet — the store refused to open,
+                    // so there is no lock to release and nothing buffered.
+                    std::process::exit(2);
+                }
             }
-        },
+        }
         // `verify` and `restore` ended the function above: verify exits,
         // and restore returns.
         Command::Verify { .. } | Command::Restore { .. } => {

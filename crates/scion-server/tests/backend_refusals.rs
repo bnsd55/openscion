@@ -9,7 +9,6 @@ use std::process::Command;
 use scion_server::Backend;
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 
-
 /// The blob files under the data directory.
 fn blob_files(data: &Path) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
@@ -458,10 +457,18 @@ fn two_urls_that_ride_different_schemas_open_side_by_side() {
         .batch_execute("CREATE SCHEMA scion_test_lock_one; CREATE SCHEMA scion_test_lock_two;")
         .unwrap();
     let dir_a = scion_server::test_support::private_tempdir();
-    let a = Backend::open(dir_a.path(), &db.url_riding(Some("scion_test_lock_one")), None)
+    let a = Backend::open(
+        dir_a.path(),
+        &db.url_riding(Some("scion_test_lock_one")),
+        None,
+    )
     .expect("the first schema opens");
     let dir_b = scion_server::test_support::private_tempdir();
-    let b = Backend::open(dir_b.path(), &db.url_riding(Some("scion_test_lock_two")), None)
+    let b = Backend::open(
+        dir_b.path(),
+        &db.url_riding(Some("scion_test_lock_two")),
+        None,
+    )
     .expect("the second schema opens beside it");
     // Each store keeps its rows in its own schema: one repo apiece, and
     // the other schema's table stays empty.
@@ -507,8 +514,8 @@ fn a_directory_that_names_a_store_refuses_an_empty_schema() {
     let dir = scion_server::test_support::private_tempdir();
     // Schema `a` serves once: it mints the store, the directory's marker
     // takes its UUID, and the schema holds the store's data.
-    let served = Backend::open(dir.path(), &db.url_riding(Some("a")), None)
-        .expect("the first schema opens");
+    let served =
+        Backend::open(dir.path(), &db.url_riding(Some("a")), None).expect("the first schema opens");
     served.write(|c| c.create_repo("r").map(|_| ())).unwrap();
     drop(served);
     let marker = std::fs::read_to_string(dir.path().join("backend")).unwrap();
@@ -545,8 +552,8 @@ fn a_schema_that_holds_a_store_but_no_uuid_row_still_adopts() {
     let mut admin = postgres::Client::connect(&db.url, postgres::NoTls).unwrap();
     admin.batch_execute("CREATE SCHEMA a;").unwrap();
     let dir = scion_server::test_support::private_tempdir();
-    let served = Backend::open(dir.path(), &db.url_riding(Some("a")), None)
-        .expect("the first open mints");
+    let served =
+        Backend::open(dir.path(), &db.url_riding(Some("a")), None).expect("the first open mints");
     served.write(|c| c.create_repo("r").map(|_| ())).unwrap();
     drop(served);
     let marker = std::fs::read_to_string(dir.path().join("backend")).unwrap();
@@ -585,8 +592,8 @@ fn a_first_open_cut_before_its_marker_opens_again() {
     let dir = scion_server::test_support::private_tempdir();
     // The first open mints the store's row; the cut takes the marker the
     // open writes at its end.
-    let first = Backend::open(dir.path(), &db.url_riding(Some("a")), None)
-        .expect("the first open mints");
+    let first =
+        Backend::open(dir.path(), &db.url_riding(Some("a")), None).expect("the first open mints");
     drop(first);
     std::fs::remove_file(dir.path().join("backend")).unwrap();
     // The kill's shape: the row stands, the marker is gone, the schema
@@ -622,8 +629,8 @@ fn a_served_store_without_its_marker_refuses_a_fresh_directory() {
     let mut admin = postgres::Client::connect(&db.url, postgres::NoTls).unwrap();
     admin.batch_execute("CREATE SCHEMA a;").unwrap();
     let dir = scion_server::test_support::private_tempdir();
-    let served = Backend::open(dir.path(), &db.url_riding(Some("a")), None)
-        .expect("the first open mints");
+    let served =
+        Backend::open(dir.path(), &db.url_riding(Some("a")), None).expect("the first open mints");
     served.write(|c| c.create_repo("r").map(|_| ())).unwrap();
     drop(served);
     std::fs::remove_file(dir.path().join("backend")).unwrap();
@@ -644,8 +651,8 @@ fn a_lost_marker_written_back_as_the_runbook_says_reopens_the_store() {
     let mut admin = postgres::Client::connect(&db.url, postgres::NoTls).unwrap();
     admin.batch_execute("CREATE SCHEMA a;").unwrap();
     let dir = scion_server::test_support::private_tempdir();
-    let served = Backend::open(dir.path(), &db.url_riding(Some("a")), None)
-        .expect("the first open mints");
+    let served =
+        Backend::open(dir.path(), &db.url_riding(Some("a")), None).expect("the first open mints");
     served.write(|c| c.create_repo("r").map(|_| ())).unwrap();
     drop(served);
     std::fs::remove_file(dir.path().join("backend")).unwrap();

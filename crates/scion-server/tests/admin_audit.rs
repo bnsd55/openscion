@@ -19,7 +19,6 @@ fn url_of(dir: &std::path::Path) -> String {
     scion_server::Backend::test_postgres_url(dir).unwrap()
 }
 
-
 /// Creates the data directory of `dir`, seeds it with repo `r` whose
 /// rows are all dead (no stored changeset puts them): one row names a
 /// stored blob file, one names a blob with no file at all. Returns the
@@ -766,4 +765,3 @@ fn base64_of(bytes: &[u8]) -> String {
     }
     out
 }
-

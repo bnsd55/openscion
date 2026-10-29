@@ -104,11 +104,14 @@ fn pg_parent_rows(db: &mut postgres::Client, cs: ChangesetId) -> Vec<(i64, Vec<u
 fn all_parent_rows(dir: &std::path::Path) -> Vec<(i64, Vec<u8>)> {
     let schema = Backend::test_schema(dir);
     let mut db = raw_with_schema(&schema);
-    db.query("SELECT n, parent FROM changeset_parents ORDER BY cs, n", &[])
-        .expect("the parent rows read")
-        .iter()
-        .map(|row| (row.get(0), row.get(1)))
-        .collect()
+    db.query(
+        "SELECT n, parent FROM changeset_parents ORDER BY cs, n",
+        &[],
+    )
+    .expect("the parent rows read")
+    .iter()
+    .map(|row| (row.get(0), row.get(1)))
+    .collect()
 }
 
 /// A ladder of 300 changesets goes in through the ordinary path; the

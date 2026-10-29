@@ -21,7 +21,6 @@ fn url_of(dir: &std::path::Path) -> String {
     scion_server::Backend::test_postgres_url(dir).unwrap()
 }
 
-
 const CHAIN: usize = 400;
 const BUDGET: usize = 16 * 1024;
 

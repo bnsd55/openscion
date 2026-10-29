@@ -624,8 +624,7 @@ start a server on it, or restore into a new schema",
             // On Postgres the replay committed whole batches before it
             // failed: drop the schema they sit in, best effort, so the
             // operator's retry against the same database starts empty.
-            if let Err(why) = crate::pg::reset_own_staging(postgres_url, postgres_ca)
-            {
+            if let Err(why) = crate::pg::reset_own_staging(postgres_url, postgres_ca) {
                 tracing::warn!(error = %why, "cannot drop the restored database's schema");
             }
             Err(error)

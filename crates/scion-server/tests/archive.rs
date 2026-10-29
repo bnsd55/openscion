@@ -16,7 +16,6 @@ fn url_of(dir: &std::path::Path) -> String {
     scion_server::Backend::test_postgres_url(dir).unwrap()
 }
 
-
 const REPO: &str = "main";
 
 fn path(p: &str) -> RepoPath {
@@ -132,7 +131,13 @@ fn a_section_holds_one_snapshot_when_a_writer_lands_between_its_statements() {
 
     // And a restore replays it into an empty store with a clean fsck.
     let restored_dir = scion_server::test_support::private_tempdir();
-    let report = archive::restore(&out, restored_dir.path(), &url_of(restored_dir.path()), None).unwrap();
+    let report = archive::restore(
+        &out,
+        restored_dir.path(),
+        &url_of(restored_dir.path()),
+        None,
+    )
+    .unwrap();
     assert_eq!(report.repos, vec![REPO]);
     let restored = Backend::open(restored_dir.path(), &url_of(restored_dir.path()), None).unwrap();
     let problems = fsck::run(&restored, fsck::BATCH, &mut |_| {}).unwrap();
@@ -192,7 +197,13 @@ fn an_export_beside_a_writer_verifies_and_restores_resolving_main() {
     // generations, a clean fsck, and a main that resolves to what the
     // snapshot read.
     let restored_dir = scion_server::test_support::private_tempdir();
-    let report = archive::restore(&out, restored_dir.path(), &url_of(restored_dir.path()), None).unwrap();
+    let report = archive::restore(
+        &out,
+        restored_dir.path(),
+        &url_of(restored_dir.path()),
+        None,
+    )
+    .unwrap();
     assert_eq!(report.repos, vec![REPO]);
     let restored = Backend::open(restored_dir.path(), &url_of(restored_dir.path()), None).unwrap();
     let problems = fsck::run(&restored, fsck::BATCH, &mut |_| {}).unwrap();

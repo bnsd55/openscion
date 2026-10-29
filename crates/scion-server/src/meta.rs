@@ -657,8 +657,6 @@ pub struct RefState {
     pub version: i64,
 }
 
-
-
 /// The error of a repo that does not exist. A caller that may not read a
 /// repo gets it too (`access::Access::check_read`).
 pub(crate) fn no_repo(name: &str) -> Error {

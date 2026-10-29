@@ -1288,9 +1288,9 @@ pub(crate) mod spawn_guard {
     use rustix::fs::FlockOperation;
     use rustix::io::Errno;
     use std::path::Path;
-    use std::time::{Duration, Instant};
     use std::sync::RwLock;
-    
+    use std::time::{Duration, Instant};
+
     static SPAWNS: RwLock<()> = RwLock::new(());
 
     /// Holds the read side while `f` spawns its child: any number of tests
@@ -1356,7 +1356,7 @@ pub(crate) mod spawn_guard {
 #[cfg(test)]
 mod tests {
     use crate::backend::old_store;
-        use crate::meta::MetaTx as _;
+    use crate::meta::MetaTx as _;
     use std::cell::{Cell, RefCell};
     use std::panic;
     use std::rc::Rc;

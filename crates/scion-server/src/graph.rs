@@ -833,8 +833,8 @@ mod tests {
     use scion_core::{BlobId, FileState, IdentityTime, RepoPath};
 
     use super::*;
-    use crate::meta::testing;
     use crate::derived::steps;
+    use crate::meta::testing;
 
     /// A cold commit graph and a past deadline: the query refuses instead of
     /// deriving the graph first. On main, where the derive ran without the
@@ -917,9 +917,6 @@ mod tests {
         }
         jumps[usize::try_from(depth).unwrap()]
     }
-
-
-
 
     /// A first-parent chain of `n` changesets, each node stored as it is
     /// written, and `side`, whose parent is changeset `n / 2`. Returns the

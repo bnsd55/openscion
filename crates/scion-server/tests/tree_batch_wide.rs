@@ -22,7 +22,6 @@ fn url_of(dir: &std::path::Path) -> String {
     scion_server::Backend::test_postgres_url(dir).unwrap()
 }
 
-
 const REPO: &str = "tree";
 
 fn changeset(files: &[String]) -> Changeset {

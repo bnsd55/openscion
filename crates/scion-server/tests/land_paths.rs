@@ -98,4 +98,3 @@ fn setup() -> Fixture {
         root: root_id,
     }
 }
-
