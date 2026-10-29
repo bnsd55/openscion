@@ -856,21 +856,22 @@ jobs:
                 ps -eo rss,comm,args --sort=-rss | head -6
                 printf 'scion procs: %s\n' "$(pgrep -fc scion || true)"
                 printf 'pg conns: %s\n' "$(psql postgres://postgres:scion@localhost:5432/scion -Atc 'select count(*) from pg_stat_activity' 2>/dev/null || echo n/a)"
-              } >> "$RUNNER_TEMP/arm64-test.log"
+              } >> "$RUNNER_TEMP/arm64-sampler.log"
               sleep 20
             done
           }
           sampler & SAMPLER=$!
           timeout -k 60 2100 cargo test --workspace --no-fail-fast \
-            --test-threads=2 \
             > "$RUNNER_TEMP/arm64-test.raw" 2>&1
           code=$?
           kill $SAMPLER 2>/dev/null || true
           while IFS= read -r l; do printf '%s %s\n' "$(date -u +%H:%M:%S)" "$l"; done \
             < "$RUNNER_TEMP/arm64-test.raw" | tee "$RUNNER_TEMP/arm64-test.log"
+          cat "$RUNNER_TEMP/arm64-sampler.log" >> "$RUNNER_TEMP/arm64-test.log"
           exit $code
         env:
           PROPTEST_CASES: "2000"
+          RUST_TEST_THREADS: "2"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
       - name: the arm64 suite's log, even on a cancelled run
         if: always()
