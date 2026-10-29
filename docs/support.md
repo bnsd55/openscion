@@ -27,7 +27,7 @@ marked supported here.
 |---|---|---|---|---|---|---|---|
 | scion-server | Linux | x64 | ext4 | — | supported | `test` (ci.yml) | The default runner disk; the whole workspace suite runs on it |
 | scion-server | Linux | x64 | ext4 | 16 | supported | `test-postgres` (ci.yml) | The metadata store; the suite runs on it. Runs nightly and on release candidates |
-| scion-server | Linux | x64 | ext4 | 17 | supported | `test-postgres` (ci.yml) | The metadata store; the suite runs on it. The one major that also runs per push, on data-path changes |
+| scion-server | Linux | x64 | ext4 | 17 | supported | `test-postgres` (ci.yml) | The metadata store; the suite runs on it. The one major that also runs per push |
 | scion-server | Linux | x64 | ext4 | 18 | supported | `test-postgres` (ci.yml) | The metadata store; the suite runs on it. Runs nightly and on release candidates |
 | scion-server | Linux | x64 | ext4 | 15 | unsupported | — | Upstream supports 15 until November 2027, but the project does not claim it yet; one matrix line adds it when an operator asks |
 | scion-server | Linux | x64 | tmpfs | — | supported | `test` (ci.yml) | The `disk_full` step fills a real tmpfs (`SCION_DISK_REQUIRE=1`) |
@@ -64,9 +64,10 @@ when that job runs the cell per push.
 Postgres majors are promised per cell, not as a family. Postgres is
 the supported metadata store: the server keeps its metadata in
 Postgres 16, 17 or 18, and a SQLite data directory is not opened.
-The `test-postgres` job runs Postgres 17 per push (on data-path
-changes), and all three supported-upstream majors (16, 17, 18) nightly
-and on release candidates; adding a major is one service line plus its
+The `test-postgres` job runs Postgres 17 on every push, and all three
+supported-upstream majors (16, 17, 18) nightly and on release
+candidates; adding a major is one service line plus its suite minutes —
+the cell row is added when the job runs it. adding a major is one service line plus its
 suite minutes — the cell row is added when the job runs it.
 
 ## Severity levels

@@ -6,7 +6,7 @@ four things hold: (a) the contract test passes on Postgres 17, (b) the
 real Postgres fault rows pass, (c) backup and restore pass on Postgres
 17, and (d) the release-candidate trial runs on Postgres 17. Postgres
 is the metadata store the project supports today (`docs/support.md`):
-17 runs per push on data-path changes, 16 and 18 nightly and on
+17 runs on every push, 16 and 18 nightly and on
 release candidates.
 
 This document is the gap list: one row per requirement and per fault

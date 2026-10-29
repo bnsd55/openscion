@@ -710,52 +710,38 @@ restore, whatever was happening in the meantime.
 
 Proof: crates/scion-server/tests/backup.rs::a_backup_taken_while_serving_restores_whole (behaviour, no command: the section states the durability rules in prose, and no shell command reproduces an acknowledged write; the test holds the recovery point the section promises)
 
-A data directory is `scion.db` plus `objects/`; the lock files and `tmp/`
-are process state, not data. A copy of the directory is a backup:
+A data directory is the blob files in `objects/` plus the `backend`
+marker; the lock files and `tmp/` are process state, not data, and the
+metadata itself lives in the database, not in the directory. A backup is
+the metadata's dump plus the blob files plus the marker.
 
-```sh
-cp -R /srv/scion /backups/scion-$(date +%F)
-chmod 700 /backups/scion-$(date +%F)
-```
+With the server stopped, `pg_dump` the database and copy the directory:
+the copy is exact. While the server runs, take the backup in an order
+that keeps it whole: the metadata first, the blob files second. A blob
+file is written once and is durable before the row that names it
+commits, so a metadata snapshot never names a blob that a later copy of
+`objects/` misses; a backup that takes the blobs first can miss a blob
+that a row of its own metadata names.
 
-With the server stopped, the copy is exact. While the server runs, take
-the backup in an order that keeps it whole: the metadata first, the blob
-files second. A blob file is written once and is durable before the row
-that names it commits, so a metadata snapshot never names a blob that a
-later copy of `objects/` misses; a backup that takes the blobs first can
-miss a blob that a row of its own metadata names.
-
-On SQLite, the snapshot is `VACUUM INTO`, which reads a consistent
-committed state and does not stop the server:
-
-```sh
-sqlite3 /srv/scion/scion.db "VACUUM INTO '/backups/scion.db'"
-```
-
-On Postgres, the metadata lives in the database, so the snapshot is a
-dump:
+The metadata snapshot is a dump, which reads a consistent committed
+state and does not stop the server:
 
 ```sh
 pg_dump --no-owner --file /backups/metadata.sql <the metadata database>
 ```
 
-Then copy the blob files into the backup:
+Then copy the blob files and the marker into the backup:
 
 ```sh
 cp -R /srv/scion/objects /backups/scion-$(date +%F)/objects
 chmod 700 /backups/scion-$(date +%F)/objects
+cp /srv/scion/backend /backups/scion-$(date +%F)/backend
 ```
 
 The `backend` marker is part of the metadata: it holds the store's UUID,
 which the metadata holds too, and together they bind the database to its
 data directory. An open refuses a database whose UUID differs from the
-marker's, so the marker and the metadata always travel together. Copy
-the marker when the directory has one (a Postgres deployment writes it;
-a SQLite directory keeps its UUID in `scion.db` itself):
-
-```sh
-cp /srv/scion/backend /backups/scion-$(date +%F)/backend
-```
+marker's, so the marker and the metadata always travel together.
 
 A copy taken this way never tears a file that a commit is writing, and
 `fsck` tells you what state a backup holds. `fsck` changes nothing and
@@ -831,9 +817,8 @@ Proof: crates/scion-server/tests/archive_attacks.rs::a_restored_store_does_not_c
 
 The schema version lives in the database. On open, a server migrates an
 older schema forward, one migration per released version, each in one
-transaction, with its progress in the log (a migration can take a while:
-schema 4 walks every repo's changesets; schema 5 renumbers
-the changeset parents from one to zero). Two rules:
+transaction (the released Postgres migrations are table creations and
+a parent numbering; none rewrites data, so none takes long). Two rules:
 
 - A database with a **newer** schema than the binary refuses to open:
   `corrupt data: database schema version 7 is newer than this build (6)`.

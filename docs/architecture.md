@@ -142,8 +142,8 @@ and the decoder rules.
 ## 3. Storage
 
 The metadata lives in a Postgres database, at the schema the server's
-URL names (same tables, one server per database; the schema is checked
-against these tables by a test), and its rules are in the operations
+URL names (same tables, one server per database), and its rules are in
+the operations
 guide ([`operations.md`](operations.md), "The metadata in Postgres").
 The blob files stay in the data directory:
 
@@ -187,34 +187,24 @@ steps of the kind remove them (section 4).
 
 Trees live in the database, not in the blob folder, so a derivation that
 writes many trees commits them in one transaction. When a database opens,
-each migration in `migrations/` that is newer than its version runs, in
-order, in its own transaction. A released migration never changes. A build
-refuses a database with a newer version. Version 3 lets a derived value have any length; the
-upgrade copies every row. Version 4 adds `repo_blobs`. SQL cannot read the
-blob IDs inside changeset bytes, so the upgrade runs a step in Rust
-(`db::fill_repo_blobs`) in the same transaction: it reads each changeset of
-each repo once and adds the blobs that its changes put. A changeset lists
-every path that differs from its first parent, so these are every blob that
-the repo's trees name. It logs its progress every 10,000 changesets. It is
-one transaction, not resumable: a crash rolls it back, and the next open runs
-it again from its start. A blob uploaded before the upgrade and named by no
-changeset must be uploaded again. Version 5 adds `history_nodes`.
+each migration in `migrations/postgres/` that is newer than its version
+runs, in order, in its own transaction. A released migration never
+changes. A build refuses a database with a newer version. The released
+schema is 0001 (the metadata's tables, `repo_blobs` among them), then
+0002 adds the derived roots' own table, 0003 the derived trees, 0004 the
+store's UUID, 0005 the first-parent numbering. There is no data-carrying
+upgrade step: `repo_blobs` is created with its rows' table, and a
+database a build cannot migrate to is refused, not rewritten.
 
-**Connections.** Each process has one write connection behind a mutex, and
-8 read-only connections (`store::READERS`). Write transactions use
-`BEGIN IMMEDIATE`. The migrations run on the write connection before the
-read connections open. In WAL mode a read connection reads beside a write, so a
-read never waits for a write, and a long read never makes a write wait.
-`Store::read` takes an idle read connection, or waits for one. It runs
-outside any explicit transaction, so each statement sees its own snapshot:
-every commit that it can see when it starts. A caller that needs one
-consistent view reads it in one statement. (A snapshot held across the
-statements of back-to-back reads would keep the auto-checkpoint from ever
-copying the whole log, so the log would never restart and its file would
-grow.) `Store::read_unflushed` runs
-on the write connection. Writes use it to read what they are about to
-change, under the same lock. The read connections close first, so the write
-connection closes last and moves the log into `scion.db`.
+**Connections.** Each process holds one write connection behind a mutex
+and a pool of read-only clients (at most `store::READERS` at once). The
+migrations run on the write connection before the readers open. A read
+takes an idle read connection, or waits for one; each statement sees its
+own snapshot of the database, and a caller that needs one consistent
+view reads it in one statement. Writes that must read what they are
+about to change run on the write connection, under the same lock. The
+database is fenced: the first open takes the one-server lock, and a
+process that loses it stops answering (section 3's fence row).
 
 **Blob folder.** One zstd file per blob, at most 100 MiB uncompressed. A write
 goes to a temp file in `tmp/`, is flushed, and is renamed into place. The zstd
