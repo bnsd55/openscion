@@ -764,18 +764,24 @@ fn a_kill_during_a_schema_upgrade_leaves_one_whole_version() {
     build_pre_uuid_store(&schema, &data, 0);
     let started = Instant::now();
     let mut probe = PgServer::spawn(&data, &schema, &log);
-    let step = started.elapsed() / 8;
+    let mut step = started.elapsed() / 8;
     probe.kill_and_wait();
 
     // Kill 1, 2, 3 steps into the next start's own work, each from a
     // fresh empty schema. The spawn does not wait: the sleep starts
     // when the process starts, so the kill can fall inside the upgrade.
     // A kill whose log already says `serving` came after the upgrade
-    // committed; that rep ends the loop, the way the last migration
-    // already stands.
+    // committed; once one has landed during the upgrade, a rep like
+    // that ends the loop, the way the last migration already stands.
+    // A first rep whose kill lands after serving says the step
+    // overshot a faster upgrade (a warm runner's next upgrade runs
+    // quicker than the probe's): the kills march back by halving the
+    // step, because the assert below needs at least one kill inside
+    // the upgrade to prove anything.
     let mut during = 0usize;
     let mut total = 0usize;
-    for k in 1..64 {
+    let mut k = 1usize;
+    while total < 64 {
         drop_schema(&schema);
         create_schema(&schema);
         // Each rep restores the shape the store-UUID open adopts: a
@@ -828,6 +834,15 @@ fn a_kill_during_a_schema_upgrade_leaves_one_whole_version() {
         verify.kill_and_wait();
         if served {
             break;
+        }
+        // No kill has landed during the upgrade yet, and this one came
+        // after serving: the step overshot, the next rep starts at half
+        // of it.
+        if during == 0 {
+            step /= 2;
+            k = 1;
+        } else {
+            k += 1;
         }
     }
     assert!(
