@@ -23,14 +23,23 @@ fn url_of(dir: &std::path::Path) -> String {
 /// `scion-server` with `args`, run by a shell that first sets umask `umask`,
 /// as a login shell or a service manager does. The process's own umask
 /// cannot be changed for one test: it is the whole test process's.
+/// The spawned child reads its URL from the environment (never
+/// `SCION_TEST_POSTGRES_URL`), so the helper hands it the store's own
+/// URL, taken from the `--data` argument's schema.
 fn server(umask: &str, args: &[&OsStr]) -> Command {
+    let data = args
+        .windows(2)
+        .find(|pair| pair[0] == "--data")
+        .map(|pair| std::path::PathBuf::from(&*pair[1]))
+        .expect("the spawned scion-server names its --data");
     let mut command = Command::new("/bin/sh");
     command
         .arg("-c")
         .arg(format!("umask {umask} && exec \"$0\" \"$@\""))
         .arg(env!("CARGO_BIN_EXE_scion-server"))
         .args(args)
-        .env("NO_COLOR", "1");
+        .env("NO_COLOR", "1")
+        .env("SCION_POSTGRES_URL", url_of(&data));
     command
 }
 
