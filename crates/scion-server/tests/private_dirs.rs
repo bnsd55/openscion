@@ -30,7 +30,7 @@ fn server(umask: &str, args: &[&OsStr]) -> Command {
     let data = args
         .windows(2)
         .find(|pair| pair[0] == "--data")
-        .map(|pair| std::path::PathBuf::from(&*pair[1]))
+        .map(|pair| std::path::PathBuf::from(pair[1]))
         .expect("the spawned scion-server names its --data");
     let mut command = Command::new("/bin/sh");
     command
