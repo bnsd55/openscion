@@ -161,6 +161,8 @@ jobs:
           fi
           swapon --show || true
           df -h / | tail -1; free -m | awk 'NR==2'
+      # The measure proves which lines run, not how many random cases
+      # pass: 16 cases each, where the test jobs run the case counts.
       - name: stale profiles go
         run: rm -f target/coverage/*.profraw target/coverage/*.profdata target/coverage/*-profraw-list
       - name: measure
@@ -261,7 +263,7 @@ jobs:
             tail -40 build-postgres.log
             exit 1
           fi
-          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --profile coverage --workspace --no-fail-fast -E "not test(graph_queries_across_many_merges_answer)"; echo $? > measure.rc' \
+          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 env PROPTEST_CASES=16 cargo nextest run --profile coverage --workspace --no-fail-fast -E "not test(graph_queries_across_many_merges_answer)"; echo $? > measure.rc' \
             | tee measure.log
           # The same end-of-step rules the measure always had.
           # One wait only: a second wait on the reaped job re-fires
