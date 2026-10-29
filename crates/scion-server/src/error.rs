@@ -272,8 +272,7 @@ impl Error {
             // The pool of read connections is drained: a retry after it
             // refills may succeed.
             Error::Unavailable(_) => Status::unavailable(self.to_string()),
-            // The engine's class decides, wherever the metadata lives:
-            // on SQLite or on Postgres, the caller reads the same code
+            // The engine's class decides: the caller reads the same code
             // for the same shortage.
             Error::Storage(storage) => match storage.class() {
                 // The engine's write lock stayed busy, or the connection

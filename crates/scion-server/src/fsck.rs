@@ -1,7 +1,7 @@
-//! `scion-server fsck <data>`: checks a SQLite data directory and reports
+//! `scion-server fsck <data>`: checks a data directory and reports
 //! what it finds. It changes nothing: it reads, and leaves every repair to
-//! you. It belongs to the SQLite backend: its SQL lives in `db.rs`, and
-//! another backend brings its own check.
+//! you. It reads the store's own tables and the blob folder, so it works
+//! on the Postgres metadata with the same checks.
 //!
 //! It reads in short batches, so it runs beside a live server. Each check
 //! looks at the state at the moment it looks: a row's blob file is checked

@@ -318,8 +318,7 @@ fn prune_rows(
             }
             Ok(dead)
         })?;
-        // The collector's key (Postgres) and the one write connection
-        // (SQLite) already order the collector's delete transactions
+        // The collector's key orders the collector's delete transactions
         // against every changeset transaction: a writer that began first
         // commits before a delete chunk begins, and a writer that begins
         // after the chunk waits for it.
@@ -501,13 +500,11 @@ fn sweep_files(
     // The listing is done; a test writes between it and the sweep.
     between(Stage::BlobFiles);
     // The sweep's row check and unlink run inside a write transaction, so
-    // no writer can add a row between the two: on the data directory the
-    // one write connection orders the sweep against the changeset, and on
-    // a shared database every write transaction holds the collector's key
-    // from its begin (`Pg::commit`), the way the SQLite one-write-
-    // connection store serializes. The mtime re-stat stays as a second
-    // guard. An unlink is not rolled back by the transaction, and a crash
-    // after it and before the commit is fine: the file had no row.
+    // no writer can add a row between the two: every write transaction
+    // holds the collector's key from its begin (`Pg::commit`). The mtime
+    // re-stat stays as a second guard. An unlink is not rolled back by
+    // the transaction, and a crash after it and before the commit is
+    // fine: the file had no row.
     candidates.sort_by(|a, b| a.2.as_bytes().cmp(b.2.as_bytes()));
     for batch in candidates.chunks(SWEEP_BATCH) {
         let started = std::time::Instant::now();

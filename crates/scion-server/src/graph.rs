@@ -1447,13 +1447,10 @@ mod tests {
         assert!(cost.steps > 1, "{cost:?}");
         // None where the commit's own fsync flushes the drive cache.
         //
-        // On Postgres the count is 0: the commit's durability is
-        // Postgres's (synchronous_commit=on, checked at open), and a
-        // commit whose changeset names no new blob file full-flushes
-        // nothing - unlike SQLite, whose own database file sits on the
-        // same drive, so its commit fsyncs the blob group too. A
-        // Postgres commit that starts to full-flush blob groups fails
-        // here.
+        // The count is 0: the commit's durability is Postgres's
+        // (synchronous_commit=on, checked at open), and a commit whose
+        // changeset names no new blob file full-flushes nothing. A
+        // commit that starts to full-flush blob groups fails here.
         let expected = 0;
         let flushes = store.blobs().full_flushes() - before;
         assert_eq!(flushes, expected);

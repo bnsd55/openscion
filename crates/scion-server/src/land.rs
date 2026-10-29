@@ -705,11 +705,10 @@ fn finish(
     loop {
         // The outcome check rides the plan's read transaction: one read
         // answers both "already settled by a twin call" and "what the
-        // land must do now". On SQLite that read is one snapshot; on
-        // Postgres `read_unflushed` runs its statements in autocommit,
-        // so the outcome row and the plan's reads can see different
-        // states. A twin call that settles between them is still
-        // stopped at `set_land_state`'s pending guard, which answers
+        // land must do now". `read_unflushed` runs its statements in
+        // autocommit, so the outcome row and the plan's reads can see
+        // different states. A twin call that settles between them is
+        // still stopped at `set_land_state`'s pending guard, which answers
         // "no longer pending" instead of moving the ref twice - the
         // guard is the backstop there, not the shared read.
         let planned = store.read_unflushed(|c| {
@@ -1508,8 +1507,8 @@ mod tests {
         fixture_on(store, dir)
     }
 
-    /// The same repo, on the test backend the environment names: the
-    /// verdict race runs on SQLite and on the test database alike.
+    /// The same repo, on the test database: the verdict race runs on the
+    /// shared test schema.
     fn fixture_shared() -> Fixture {
         let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test_shared(dir.path()).unwrap();
@@ -2721,12 +2720,11 @@ mod tests {
             (parents, edits) in testing::histories(40),
             room in proptest::option::of(0..4000_usize),
         ) {
-            // The per-case cost must not grow with the case count:
-            // SQLite takes a fresh store per case; Postgres shares one
-            // schema for the whole test fn, makes one repo per case,
-            // and keeps the schema's planner statistics current (a
-            // schema per case would be hundreds of schemas of one
-            // writer and eight readers each).
+            // The per-case cost must not grow with the case count: the
+            // suite shares one schema for the whole test fn, makes one
+            // repo per case, and keeps the schema's planner statistics
+            // current (a schema per case would be hundreds of schemas of
+            // one writer and eight readers each).
             static STAGE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
             static CASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let _slot = damage::slot();

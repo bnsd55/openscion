@@ -1262,10 +1262,7 @@ mod tests {
         (dir, store, repo, ids)
     }
 
-    /// The body of [`n_cold_reads_derive_once`], on the store given: the
-    /// Postgres variant runs it against the database, the SQLite one
-    /// against the data directory, and both read the same in-memory
-    /// flights.
+    /// The body of [`n_cold_reads_derive_once`], on the store given.
     fn n_cold_reads_derive_once_on(store: &Backend, repo: RepoId, tip: ChangesetId) {
         let at_the_gate = std::sync::Barrier::new(8);
         std::thread::scope(|scope| {
@@ -1358,9 +1355,8 @@ mod tests {
     }
 
     /// The commits one run made, as steps: `steps(n)` when the count
-    /// means anything. SQLite only: `commits()` is always 0 on Postgres,
-    /// whose one write connection batches, so the commit-count claims
-    /// are SQLite claims (the Postgres write path has its own tests).
+    /// means anything. The Postgres write path's commit counter batches,
+    /// so a claim on it names what the batching counts.
     fn commits_delta(store: &Backend, before: u64, steps: u64, what: &str) {
         assert_eq!(store.commits() - before, steps, "{what}");
     }
