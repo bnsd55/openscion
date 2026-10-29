@@ -448,3 +448,24 @@ fn a_gitlink_never_follows_its_commit() {
     }
     assert!(fs::read_dir(git.path()).is_ok());
 }
+
+/// A zone shorter than `+hhmm` (`+1`, or a bare `+`) is a date git
+/// cannot write: the import refuses it instead of panicking.
+#[test]
+fn a_short_zone_is_refused_not_a_panic() {
+    for offset in ["+1", "+"] {
+        let git = Git::init();
+        let tree = plain_tree(&git);
+        let head = commit(
+            &tree,
+            &[
+                author_line(offset),
+                "committer Ada <ada@example.com> 1700000000 +0000".to_owned(),
+            ],
+            "short zone\n",
+        );
+        let head = git.object("commit", &head);
+        git.force_main(&head);
+        refusal(&git, &format!("zone {offset:?} is refused"));
+    }
+}

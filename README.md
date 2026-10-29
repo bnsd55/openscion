@@ -270,8 +270,10 @@ derives for it. `ResolveRef` and `GetRootTree` answer the real changeset
 ID and the view root; `ReadFile` and `ListDir` read through the view, and
 a path outside the prefixes is answered exactly like a missing one. The
 history RPCs (`GetChangeset`, `Log`, `Blame`, `MergeBase`, `IsAncestor`,
-`Diff`), every write, and `GetObjects` without a view-root ticket answer
-`UNIMPLEMENTED` with the same text for every such principal. A file that
+`Diff`) and every write answer `UNIMPLEMENTED` with the same text for every
+such principal. `GetObjects` serves only what the view root's ticket
+reaches, and without a ticket answers `PERMISSION_DENIED`, as it does for
+every caller. A file that
 gives a partial reader a write rule is refused at load. The file holds at
 most 32 distinct read rule sets per repo, and a set at most 256 prefixes.
 

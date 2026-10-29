@@ -1195,8 +1195,9 @@ fn identity(
 
 /// The raw git date `<seconds> <sign><hhmm>`, as the pair gix parses it
 /// to, or `None` when the bytes are not that grammar. A zone with a
-/// seconds field (`+053030`) or a zone too long to read as two two-digit
-/// fields is refused here, where gix would coerce its offset to zero.
+/// seconds field (`+053030`), a zone too long to read as two two-digit
+/// fields, or one too short to hold them (`+1`, a bare `+`) is refused
+/// here, where gix would coerce its offset to zero.
 fn zone(raw: &str) -> Option<(i64, i32)> {
     let (seconds, offset) = raw.split_once(' ')?;
     let seconds = seconds.parse().ok()?;
@@ -1206,7 +1207,7 @@ fn zone(raw: &str) -> Option<(i64, i32)> {
         _ => return None,
     };
     let digits = offset.get(1..)?;
-    let (hours, minutes) = digits.split_at(2);
+    let (hours, minutes) = digits.split_at_checked(2)?;
     if minutes.len() != 2
         || !hours
             .bytes()
