@@ -1654,7 +1654,7 @@ mod tests {
     /// growth, never more.
     #[test]
     fn a_derive_walk_over_its_byte_budget_stops_busy_and_a_retry_resumes() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         // The walk of a chain of 12 takes six steps (STEP is 2 in tests);
         // the store's budget holds seven steps' worth, and this test holds
         // two of them, as the walks of other callers would.
@@ -1711,7 +1711,7 @@ mod tests {
     /// bytes: a history the budget cannot hold still derives.
     #[test]
     fn an_unbounded_derive_walk_takes_no_bytes() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let budget = walk_step_bytes();
         let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test_with_walks(

@@ -625,7 +625,7 @@ mod tests {
     /// goes through it.
     #[test]
     fn body_chunks_hold_at_most_the_budget_of_bodies() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let id = |n: u8| vec![n; 8];
         // 4 bodies of 600 bytes against a 1,000-byte budget: 2 chunks of
         // 2, 3, ... the exact split the running sum makes.
@@ -766,7 +766,7 @@ mod tests {
 
     #[test]
     fn gc_removes_what_nothing_names() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store) = store();
         let x = uploaded(&store, b"orphan\n");
         age_file(&store, x, OLD);
@@ -782,7 +782,7 @@ mod tests {
 
     #[test]
     fn gc_keeps_what_a_changeset_puts() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store) = store();
         let x = store.blobs().put(b"kept\n").unwrap();
         land(&store, &cs(None, &[("a.txt", file_of(&store, b"kept\n"))]));
@@ -795,7 +795,7 @@ mod tests {
 
     #[test]
     fn gc_keeps_a_fresh_upload() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store) = store();
         let x = uploaded(&store, b"fresh\n");
         let report = collect(&store, Duration::from_secs(DEFAULT_GRACE_SECS), &mut |_| {});
@@ -806,7 +806,7 @@ mod tests {
 
     #[test]
     fn a_blob_one_repo_names_survives_another_repos_dead_row() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store) = store();
         let x = uploaded(&store, b"shared\n");
         // A second repo uploads the same content and never names it in a
@@ -830,7 +830,7 @@ mod tests {
 
     #[test]
     fn a_changeset_after_the_snapshot_pins_its_blobs() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store) = store();
         let x = uploaded(&store, b"pinned\n");
         age_file(&store, x, OLD);
@@ -861,7 +861,7 @@ mod tests {
 
     #[test]
     fn a_put_that_keeps_the_copy_restarts_the_grace() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store) = store();
         let text = b"again\n";
         let x = uploaded(&store, text);
@@ -881,7 +881,7 @@ mod tests {
 
     #[test]
     fn a_pending_lands_changesets_are_live() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store) = store();
         let root = land(&store, &cs(None, &[("a.txt", file_of(&store, b"one\n"))]));
         let tip = land(
@@ -908,7 +908,7 @@ mod tests {
 
     #[test]
     fn rows_go_before_files_so_a_crash_leaves_no_missing_file() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store) = store();
         let x = uploaded(&store, b"crash\n");
         age_file(&store, x, OLD);
@@ -939,7 +939,7 @@ mod tests {
 
     #[test]
     fn a_fresh_orphan_file_survives_one_gc() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store) = store();
         let x = store.blobs().put(b"later\n").unwrap();
         let report = collect(&store, Duration::from_secs(DEFAULT_GRACE_SECS), &mut |_| {});
@@ -958,7 +958,7 @@ mod tests {
     /// A build without the flock unlinks the aged orphan right away.
     #[test]
     fn a_sweep_of_a_file_another_process_writes_waits_for_its_flock() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (dir, store) = store();
         // A second process beside the collector, the way a serving server
         // and `scion-server gc` run.
@@ -1016,7 +1016,7 @@ mod tests {
 
     #[test]
     fn a_row_added_between_the_listing_and_the_sweep_keeps_its_file() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store) = store();
         let x = store.blobs().put(b"listed\n").unwrap();
         age_file(&store, x, OLD);
@@ -1054,7 +1054,7 @@ mod tests {
 
     #[test]
     fn a_dry_run_reports_what_the_real_run_would_remove() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store) = store();
         let x = uploaded(&store, b"dry\n");
         age_file(&store, x, OLD);
@@ -1092,7 +1092,7 @@ mod tests {
     /// `any` where the code says `all`) must not pass here.
     #[test]
     fn a_blob_live_in_another_repo_survives_a_dry_run() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store) = store();
         let b = uploaded(&store, b"shared\n");
         store
@@ -1150,7 +1150,7 @@ mod tests {
     /// would hide the rows and files the grace still holds.
     #[test]
     fn the_report_counts_what_the_grace_kept() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store) = store();
         let young = uploaded(&store, b"young row\n");
         let old = uploaded(&store, b"old row\n");
@@ -1174,7 +1174,7 @@ mod tests {
     /// forever on a page that never comes.
     #[test]
     fn a_walk_whose_pages_end_exactly_on_the_batch_still_ends() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store) = store();
         store
             .write(|c| {
@@ -1208,7 +1208,7 @@ mod tests {
     /// collector reads it as empty instead of failing.
     #[test]
     fn a_missing_blob_root_collects_nothing() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store) = store();
         let root = store.blobs().root().to_path_buf();
         std::fs::remove_dir_all(&root).unwrap();
@@ -1221,7 +1221,7 @@ mod tests {
     /// that fsck reports.
     #[test]
     fn a_stray_file_in_the_blob_root_is_left_alone() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store) = store();
         let root = store.blobs().root().to_path_buf();
         let stray = root.join("stray.txt");
@@ -1239,7 +1239,7 @@ mod tests {
     /// nothing, so the prune takes the row and the run does not fail.
     #[test]
     fn a_row_whose_file_is_gone_is_dead_at_any_age() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store) = store();
         let b = uploaded(&store, b"vanished\n");
         let (_, path) = store.blobs().location(b);
@@ -1254,7 +1254,7 @@ mod tests {
     /// is corrupt, not just that something is.
     #[test]
     fn a_corrupt_changeset_names_its_id() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store) = store();
         let b = uploaded(&store, b"corrupt\n");
         store
@@ -1295,7 +1295,7 @@ mod tests {
     fn an_unreadable_blob_root_fails_the_run() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store) = store();
         let root = store.blobs().root().to_path_buf();
         let mode = std::fs::metadata(&root).unwrap().permissions();
@@ -1312,7 +1312,7 @@ mod tests {
 
     #[test]
     fn a_store_that_never_holds_blobs_collects_nothing() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store) = store();
         let report = collect(&store, Duration::from_secs(DEFAULT_GRACE_SECS), &mut |_| {});
         assert_eq!(report.repos, 1, "{report:?}");
@@ -1341,7 +1341,7 @@ mod tests {
     /// the blob's row and file survive.
     #[test]
     fn a_changeset_that_commits_while_gc_runs_keeps_its_blob() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test_shared(dir.path()).unwrap();
         let repo = store.write(|c| c.create_repo(REPO)).unwrap();
@@ -1377,7 +1377,11 @@ mod tests {
     /// re-read then sees the changeset, and the file survives.
     #[test]
     fn the_collector_waits_for_a_changeset_that_holds_the_blob_lock() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
+        if !Backend::test_is_postgres() {
+            eprintln!("skip on sqlite: the lock is the write lock itself");
+            return;
+        }
         // The collector side opens the way the `gc` CLI does - shared,
         // with no one-server lock - and the writer the way a server
         // does, with the per-schema lock. One data directory, as they
@@ -1446,7 +1450,7 @@ mod tests {
     /// deletes at most `PRUNE_BATCH` rows.
     #[test]
     fn a_prune_bigger_than_a_chunk_yields_the_key_between_chunks() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test_shared(dir.path()).unwrap();
         let repo = store.write(|c| c.create_repo(REPO)).unwrap();
@@ -1498,7 +1502,7 @@ mod tests {
     /// unlinked loses the file's bytes for every reader of the path.
     #[test]
     fn a_create_over_a_collected_blob_does_not_name_its_lost_file() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test_shared(dir.path()).unwrap();
         let repo = store.write(|c| c.create_repo(REPO)).unwrap();
@@ -1570,7 +1574,7 @@ mod tests {
     /// for the repo, and the next changeset may name it.
     #[test]
     fn a_put_blob_that_answers_ok_names_the_blob_over_a_concurrent_gc() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test_shared(dir.path()).unwrap();
         let repo = store.write(|c| c.create_repo(REPO)).unwrap();
