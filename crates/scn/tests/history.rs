@@ -154,16 +154,13 @@ fn changeset_of(store: &Backend, commit: &str) -> String {
         .collect();
     store
         .read(|c| {
-            let cs: Vec<u8> = c
-                .sqlite()
-                .unwrap()
-                .query_row(
-                    "SELECT cs FROM git_import WHERE git_oid = ?1",
-                    [oid],
-                    |row| row.get(0),
-                )
-                .map_err(scion_server::test_support::error::from_sqlite)?;
-            Ok(ChangesetId::try_from(cs.as_slice()).unwrap().to_string())
+            let repo = c.repo_id(REPO)?;
+            let imported = c.imported_commits(repo)?;
+            let cs = imported
+                .iter()
+                .find(|(k, _)| k.as_bytes() == oid.as_slice())
+                .map(|(_, cs)| cs.to_string());
+            Ok(cs.unwrap())
         })
         .unwrap()
 }
@@ -295,16 +292,6 @@ fn blame_fixture(dir: &Path) {
 
 #[test]
 fn blame_matches_git_blame_first_parent() {
-    if Backend::test_is_postgres() {
-        // SHORTCUT: this ceiling is the skip itself; Postgres import
-        // provenance (the git_import rows) is unread by these tests, so the
-        // git side of the comparison has no Postgres run. Upgrade path: a
-        // backend-agnostic git_import read on MetaTx, then drop the skip.
-        // The scion blame lines the other rows of this file check are
-        // backend-agnostic.
-        eprintln!("skip on postgres: the test reads the data directory's git_import rows");
-        return;
-    }
     blame_matches_git_blame_first_parent_inner();
 }
 
