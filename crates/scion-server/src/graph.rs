@@ -835,12 +835,14 @@ mod tests {
     use super::*;
     use crate::derived::steps;
     use crate::meta::testing;
+    use crate::pg::damage;
 
     /// A cold commit graph and a past deadline: the query refuses instead of
     /// deriving the graph first. On main, where the derive ran without the
     /// deadline, this call returned a result.
     #[test]
     fn a_query_with_a_past_deadline_derives_nothing() {
+        let _slot = damage::slot();
         let parents = vec![vec![], vec![0], vec![0], vec![1, 2]];
         let (_dir, store, repo, ids) = store_graph(&parents);
         let past = Deadline::new(Instant::now());
@@ -918,6 +920,170 @@ mod tests {
         jumps[usize::try_from(depth).unwrap()]
     }
 
+    /// The first-parent history of each changeset of `parents`, newest
+    /// first.
+    fn histories(parents: &[Vec<usize>]) -> Vec<Vec<usize>> {
+        let mut out: Vec<Vec<usize>> = Vec::new();
+        for (i, of) in parents.iter().enumerate() {
+            let mut history = vec![i];
+            if let Some(&first) = of.first() {
+                history.extend(&out[first]);
+            }
+            out.push(history);
+        }
+        out
+    }
+
+    /// The ancestors of each changeset of `parents`, itself included.
+    fn ancestors(parents: &[Vec<usize>]) -> Vec<HashSet<usize>> {
+        let mut out: Vec<HashSet<usize>> = Vec::new();
+        for (i, of) in parents.iter().enumerate() {
+            let mut all: HashSet<usize> = of.iter().flat_map(|&p| out[p].clone()).collect();
+            all.insert(i);
+            out.push(all);
+        }
+        out
+    }
+
+    /// Graphs of [`testing::graphs`] with most merges taken out, so that
+    /// first-parent runs are long and the merge-base walk jumps over them.
+    fn sparse_graphs(max: usize) -> impl Strategy<Value = Vec<Vec<usize>>> {
+        let merges = proptest::collection::vec(proptest::bool::weighted(0.15), max);
+        (testing::graphs(max), merges).prop_map(|(mut parents, merges)| {
+            for (of, merge) in parents.iter_mut().zip(merges) {
+                if !merge {
+                    of.truncate(1);
+                }
+            }
+            parents
+        })
+    }
+
+    /// Pairs of changesets that each case of [`queries_match_the_graph`]
+    /// checks, of the up to 400 of a graph. CI runs 2,000 cases.
+    const PAIRS: usize = 40;
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        /// On any graph, each node holds what a walk of the graph finds, and
+        /// the queries give the answers that the sets of ancestors define.
+        /// A step here takes a few reads, so the walks go on across steps.
+        #[test]
+        fn queries_match_the_graph(
+            parents in proptest::prop_oneof![testing::graphs(20), sparse_graphs(20)],
+            pairs in proptest::collection::vec(any::<(Sample, Sample)>(), PAIRS),
+        ) {
+            let _slot = damage::slot();
+            let (_dir, store, repo, ids) = store_graph(&parents);
+            let histories = histories(&parents);
+            let ancestors = ancestors(&parents);
+            let nodes: Vec<Node> = ids
+                .iter()
+                .map(|&id| derived::get_unbounded::<CommitGraph>(&store, repo, id).unwrap())
+                .collect();
+            let index_of = |id: ChangesetId| ids.iter().position(|&i| i == id).unwrap();
+            for (i, node) in nodes.iter().enumerate() {
+                let history = &histories[i];
+                let generation = store.read(|c| c.generation(repo, ids[i])).unwrap();
+                proptest::prop_assert_eq!(node.generation, generation);
+                proptest::prop_assert_eq!(usize::try_from(node.depth).unwrap(), history.len() - 1);
+                proptest::prop_assert_eq!(index_of(node.parent.id), history[1.min(history.len() - 1)]);
+                let jump = jump_depth(node.depth);
+                proptest::prop_assert_eq!(node.jump.depth, jump);
+                let back = usize::try_from(node.depth - jump).unwrap();
+                proptest::prop_assert_eq!(index_of(node.jump.id), history[back]);
+                let merge = history.iter().find(|&&h| parents[h].len() > 1);
+                proptest::prop_assert_eq!(node.merge.map(|m| index_of(m.id)), merge.copied());
+            }
+            // Ancestry for every pair, in one read: some histories reach the
+            // ancestor only through an older merge, and few pairs show it.
+            let searched = store
+                .read(|c| {
+                    let deadline = later();
+                    let mut walked = Vec::new();
+                    for (x, y) in (0..ids.len()).flat_map(|x| (0..ids.len()).map(move |y| (x, y))) {
+                        let (a, b) = (ids[x], ids[y]);
+                        walked.push(c.is_ancestor(repo, a, b, usize::MAX)?);
+                    }
+                    let mut cache = HashMap::new();
+                    let mut parents = HashMap::new();
+                    let mut index = Index::new(&mut *c, &deadline, &mut cache, &mut parents);
+                    let mut out = Vec::new();
+                    for (x, y) in (0..ids.len()).flat_map(|x| (0..ids.len()).map(move |y| (x, y))) {
+                        let (a, b) = (ids[x], ids[y]);
+                        let mut search = Search::new(At { id: b, node: nodes[y] }, a, nodes[x].generation);
+                        let found = loop {
+                            if let Some(found) = search.next(&mut index)? {
+                                break found;
+                            }
+                        };
+                        out.push((x, y, walked[x * ids.len() + y], found));
+                    }
+                    Ok(out)
+                })
+                .unwrap();
+            for (x, y, walked, found) in searched {
+                let ancestry = ancestors[y].contains(&x);
+                proptest::prop_assert_eq!(walked, ancestry, "{} {}", x, y);
+                proptest::prop_assert_eq!(found, ancestry, "{} {}", x, y);
+            }
+            // The rest for a sample of the pairs. The walks here go on
+            // across steps.
+            for (x, y) in pairs.iter().map(|(x, y)| (x.index(ids.len()), y.index(ids.len()))) {
+                let (a, b) = (ids[x], ids[y]);
+                // The best common ancestors, by their definition.
+                let common: Vec<usize> = (0..ids.len())
+                    .filter(|c| ancestors[x].contains(c) && ancestors[y].contains(c))
+                    .collect();
+                let mut best: Vec<usize> = common
+                    .iter()
+                    .copied()
+                    .filter(|&c| !common.iter().any(|&d| d != c && ancestors[d].contains(&c)))
+                    .collect();
+                best.sort_by_key(|&c| (Reverse(nodes[c].generation), ids[c]));
+                let best: Vec<ChangesetId> = best.into_iter().map(|c| ids[c]).collect();
+                let ancestry = ancestors[y].contains(&x);
+                let mut search = Search::new(At { id: b, node: nodes[y] }, a, nodes[x].generation);
+                let (found, _) =
+                    in_steps(&store, &later(), SMALL, &mut HashMap::new(), &mut HashMap::new(), |index| search.next(index)).unwrap();
+                proptest::prop_assert_eq!(found, ancestry, "{} {}", x, y);
+                // `merge_bases` answers from where the first-parent
+                // histories meet, or else from the walk. Each that
+                // answers is right, and the walk always answers.
+                let (from, other) = (At { id: b, node: nodes[y] }, At { id: a, node: nodes[x] });
+                let mut paint = Paint::new(other, from);
+                let (painted, _) =
+                    in_steps(&store, &later(), SMALL, &mut HashMap::new(), &mut HashMap::new(), |index| paint.next(index)).unwrap();
+                proptest::prop_assert_eq!(&painted, &best, "{} {}", x, y);
+                let (bases, down, met) = store
+                    .read(|c| {
+                        let deadline = later();
+                        let mut cache = HashMap::new();
+                        let mut parents = HashMap::new();
+                        let mut index = Index::new(c, &deadline, &mut cache, &mut parents);
+                        let bases = meeting(&mut index, other, from)?;
+                        // The walks down first-parent histories.
+                        let down = index.descend(from, nodes[x].generation, |l| l.generation)?;
+                        Ok((bases, down.id, index.meet(from, other)?.map(|at| at.id)))
+                    })
+                    .unwrap();
+                if let Some(bases) = bases {
+                    proptest::prop_assert_eq!(&bases, &best, "{} {}", x, y);
+                }
+                let oldest = histories[y]
+                    .iter()
+                    .take_while(|&&h| nodes[h].generation >= nodes[x].generation)
+                    .last()
+                    .copied()
+                    .unwrap_or(y);
+                proptest::prop_assert_eq!(index_of(down), oldest);
+                let shared = histories[y].iter().find(|h| histories[x].contains(h));
+                proptest::prop_assert_eq!(met.map(index_of), shared.copied());
+            }
+        }
+    }
+
     /// A first-parent chain of `n` changesets, each node stored as it is
     /// written, and `side`, whose parent is changeset `n / 2`. Returns the
     /// chain and `side`.
@@ -966,6 +1132,7 @@ mod tests {
         const N: usize = 4_096;
         let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test(dir.path()).unwrap();
+        let _slot = damage::slot();
         let (repo, ids, side) = deep_chain(&store, N);
         let tip = ids[N - 1];
         // Myers bounds a walk down to a depth by about 3 log2 n moves.
@@ -1033,6 +1200,7 @@ mod tests {
 
     #[test]
     fn an_old_database_derives_the_graph_in_steps_on_first_query() {
+        let _slot = damage::slot();
         let parents: Vec<Vec<usize>> = vec![vec![], vec![0], vec![0], vec![1, 2], vec![3], vec![]];
         let (_dir, store, repo, ids) = store_graph(&parents);
         let commits = store.commits();
@@ -1075,6 +1243,7 @@ mod tests {
         // changeset that branched from the one before. `side` branched from
         // the 100th, and is not merged.
         const N: usize = 20_000;
+        let _slot = damage::slot();
         let mut parents: Vec<Vec<usize>> = vec![vec![]];
         let mut history = vec![0];
         for i in 1..N {
@@ -1169,6 +1338,7 @@ mod tests {
 
     #[test]
     fn a_walk_stops_at_its_deadline() {
+        let _slot = damage::slot();
         // The walks from the tip go through every merge down to `side`.
         let (_dir, store, repo, ids) = store_graph(&ladder(100));
         let (side, tip) = (ids[1], *ids.last().unwrap());
@@ -1206,6 +1376,7 @@ mod tests {
 
     #[test]
     fn a_walk_blocks_no_write_and_no_read() {
+        let _slot = damage::slot();
         let (_dir, store, repo, ids) = store_graph_with_nodes(&ladder(20));
         let (side, tip) = (ids[1], *ids.last().unwrap());
         let mut paint = Paint::new(
@@ -1242,6 +1413,54 @@ mod tests {
         assert_eq!(bases, [side]);
     }
 
+    #[test]
+    fn a_walk_waits_for_one_flush_for_all_its_steps() {
+        let _slot = damage::slot();
+        let (_dir, store, repo, ids) = store_graph_with_nodes(&ladder(20));
+        let (side, tip) = (ids[1], *ids.last().unwrap());
+        let mut paint = Paint::new(
+            At::get_unbounded(&store, repo, side).unwrap(),
+            At::get_unbounded(&store, repo, tip).unwrap(),
+        );
+        let before = store.blobs().full_flushes();
+        let mut commits = 0;
+        let (bases, cost) = in_steps(
+            &store,
+            &later(),
+            SMALL,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            |index| {
+                // Each step sees a commit that no flush covers yet.
+                if index.reads == 0 {
+                    commits += 1;
+                    let name = format!("other {commits}");
+                    store.commit(|c| c.create_repo(&name).map(drop))?;
+                }
+                paint.next(index)
+            },
+        )
+        .unwrap();
+        assert_eq!(bases, [side]);
+        assert!(cost.steps > 1, "{cost:?}");
+        // None where the commit's own fsync flushes the drive cache.
+        //
+        // On Postgres the count is 0: the commit's durability is
+        // Postgres's (synchronous_commit=on, checked at open), and a
+        // commit whose changeset names no new blob file full-flushes
+        // nothing - unlike SQLite, whose own database file sits on the
+        // same drive, so its commit fsyncs the blob group too. A
+        // Postgres commit that starts to full-flush blob groups fails
+        // here.
+        let expected = if Backend::test_is_postgres() {
+            0
+        } else {
+            u64::from(crate::store::FSYNC_LEAVES_DRIVE_CACHE)
+        };
+        let flushes = store.blobs().full_flushes() - before;
+        assert_eq!(flushes, expected);
+    }
+
     /// The parents batch changes no walk's read count: every changeset the
     /// walk reaches counts one read, as when every merge asked for its
     /// parents alone. The step budget and the deadline ride on these
@@ -1250,6 +1469,7 @@ mod tests {
     /// statement: the merge's parents read became the merge's node read.
     #[test]
     fn the_parents_batch_counts_the_same_reads() {
+        let _slot = damage::slot();
         let (_dir, store, repo, ids) = store_graph(&ladder(100));
         let (side, tip) = (ids[1], *ids.last().unwrap());
         let floor = store.read(|c| c.generation(repo, side)).unwrap();
