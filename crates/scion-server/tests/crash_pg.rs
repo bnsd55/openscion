@@ -748,17 +748,24 @@ fn a_kill_during_a_schema_upgrade_leaves_one_whole_version() {
     drop_schema(&schema);
     create_schema(&schema);
 
-    // A whole start from empty, measured from the PROCESS to the serving
-    // line: its eighth sets the step of the kills, so their placement
-    // does not depend on the speed of the machine.
-    // eighth sets the step of the kills, so their placement does not
-    // depend on the speed of the machine.
-    let started = Instant::now();
+    // A whole start from empty, then a whole UPGRADE start, measured
+    // from the PROCESS to the serving line: the kills land on an
+    // upgrade start (a pre-UUID schema upgraded 3 -> last), which is a
+    // different and much cheaper run than a start from empty, so the
+    // step comes from the upgrade's own measurement. Their eighth sets
+    // the step of the kills, so their placement does not depend on the
+    // speed of the machine.
     let mut first = PgServer::spawn(&data, &schema, &log);
-    let step = started.elapsed() / 8;
     let last = schema_version(&schema);
     first.kill_and_wait();
     assert!(last >= 1, "the first start left no schema");
+    drop_schema(&schema);
+    create_schema(&schema);
+    build_pre_uuid_store(&schema, &data, 0);
+    let started = Instant::now();
+    let mut probe = PgServer::spawn(&data, &schema, &log);
+    let step = started.elapsed() / 8;
+    probe.kill_and_wait();
 
     // Kill 1, 2, 3 steps into the next start's own work, each from a
     // fresh empty schema. The spawn does not wait: the sleep starts
