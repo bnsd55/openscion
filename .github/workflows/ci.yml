@@ -800,10 +800,16 @@ jobs:
   # power-loss job stay on x64: their loop-device and FUSE harnesses
   # are proven there, and one platform carries that evidence.
   test-arm64:
-    name: test (linux arm64)
+    name: test (linux arm64, trial ${{ matrix.trial }})
     # The arm64 cells are best effort until v0.8: the nightly and a
     # release candidate's dispatch prove them, a push does not.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # PROBE BRANCH ONLY: the death hunt wants three independent whole-
+    # suite runs at once; main keeps the single unnamed job.
+    strategy:
+      fail-fast: false
+      matrix:
+        trial: [1, 2, 3]
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 40
     services:
