@@ -862,6 +862,7 @@ jobs:
           }
           sampler & SAMPLER=$!
           timeout -k 60 2100 cargo test --workspace --no-fail-fast \
+            --test-threads=2 \
             > "$RUNNER_TEMP/arm64-test.raw" 2>&1
           code=$?
           kill $SAMPLER 2>/dev/null || true
