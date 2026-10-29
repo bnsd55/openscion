@@ -212,3 +212,69 @@ for bad in '--dry-run' 'v1' ''; do
     fi
 done
 echo "merge-changelog arguments: fixture ok"
+
+# A fragment whose row the section already holds is skipped, not
+# folded a second time: a merge that brings a folded fragment back
+# must not double the row (2026-10-29: the release branch folded the
+# admin-lines fragments twice, and the v0.1.0 refresh carried the
+# doubles). The skip is said on stderr, the fragment is deleted, and
+# a different fragment in the same fold still merges.
+dup=$(mktemp -d)
+trap 'rm -rf "$work" "$check" "$args" "$dup"' EXIT
+mkdir "$dup/changes"
+cat >"$dup/CHANGELOG.md" <<'EOF'
+# Changelog
+
+## [v0.1.0] - unreleased
+
+The first release.
+
+### Added
+
+- A thing the changelog already holds, from a fragment that a
+  merge brought back after an earlier fold.
+EOF
+printf 'A thing the changelog already holds, from a fragment that a\nmerge brought back after an earlier fold.\n' >"$dup/changes/1.added.md"
+printf 'A different thing that must still merge beside the skipped\nfragment, so the skip is not a refusal of the whole fold.\n' >"$dup/changes/2.added.md"
+
+(cd "$dup" && "$here/merge-changelog.sh" v0.1.0) >"$dup/out.txt" 2>"$dup/err.txt"
+grep -q "skipped.*changes/1.added.md" "$dup/err.txt" || {
+    echo "the fold does not say on stderr that it skipped the duplicate; it said:" >&2
+    cat "$dup/err.txt" >&2
+    exit 1
+}
+[ "$(grep -c '^- A thing the changelog already holds' "$dup/CHANGELOG.md")" -eq 1 ] || {
+    echo "the duplicate fragment was folded a second time; the changelog holds:" >&2
+    grep -n 'A thing the changelog' "$dup/CHANGELOG.md" >&2
+    exit 1
+}
+[ "$(grep -c '^- A different thing' "$dup/CHANGELOG.md")" -eq 1 ] || {
+    echo "the distinct fragment did not merge beside the skipped one" >&2
+    exit 1
+}
+if [ -d "$dup/changes" ] && [ -n "$(ls -A "$dup/changes")" ]; then
+    echo "the fold left fragments behind after the skip:" >&2
+    ls "$dup/changes" >&2
+    exit 1
+fi
+echo "merge-changelog skip: fixture ok"
+
+# Exact text, after the merge's own normalisation, is the rule: a
+# fragment whose first line matches an existing row but whose body
+# differs is a new row, not a duplicate.
+rm -rf "$dup/changes"
+mkdir "$dup/changes"
+cp "$dup/CHANGELOG.md" "$dup/CHANGELOG.kept"
+printf 'A thing the changelog already holds, from a fragment that a\nmerge brought back with a different body than the row holds.\n' >"$dup/changes/3.added.md"
+(cd "$dup" && "$here/merge-changelog.sh" v0.1.0) >"$dup/out.txt" 2>"$dup/err.txt"
+if grep -q 'skipped' "$dup/err.txt"; then
+    echo "a fragment whose body differs was skipped as a duplicate; stderr said:" >&2
+    cat "$dup/err.txt" >&2
+    exit 1
+fi
+[ "$(grep -c '^- A thing the changelog already holds' "$dup/CHANGELOG.md")" -eq 2 ] || {
+    echo "the fragment with a different body did not fold; the changelog holds:" >&2
+    grep -n 'A thing the changelog already holds' "$dup/CHANGELOG.md" >&2
+    exit 1
+}
+echo "merge-changelog exact-text rule: fixture ok"
