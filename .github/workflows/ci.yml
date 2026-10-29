@@ -805,7 +805,10 @@ jobs:
     # release candidate's dispatch prove them, a push does not.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 40
+    # A cold cache puts a whole-workspace build in front of the suite;
+    # 40 minutes cancelled runs that had everything to do (the nightly
+    # warms the cache, a fresh key starts cold).
+    timeout-minutes: 60
     services:
       # The suite's Postgres tests read this database; the backend the
       # tests choose is unchanged for now (SCION_TEST_BACKEND stays
