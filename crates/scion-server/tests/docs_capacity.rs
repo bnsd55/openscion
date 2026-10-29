@@ -293,7 +293,9 @@ fn the_footer_names_a_commit_that_exists() {
         panic!("the capacity table has numbers but the footer names no commit");
     };
     // A shallow checkout (a PR's) may not carry the object; the
-    // capacity run's clone is full, and there the commit must resolve.
+    // capacity run's clone is full, and the docs-tests job checks out
+    // with a full history too, so the check below runs there instead
+    // of skipping on a shallow clone.
     let shallow = match Command::new("git")
         .args(["rev-parse", "--is-shallow-repository"])
         .current_dir(repo_dir())
@@ -305,11 +307,19 @@ fn the_footer_names_a_commit_that_exists() {
     if shallow != "false" {
         return;
     }
+    // The commit must exist AND be reachable from origin/main: a
+    // commit of a side branch exists in a full clone (refs/pull keeps
+    // it) but is not a commit of main, and the table claims to
+    // measure main's code. The bench's full checkout carries
+    // origin/main, so the claim is checkable where the table is made.
     let ok = Command::new("git")
-        .args(["cat-file", "-e", &format!("{hex}^{{commit}}")])
+        .args(["merge-base", "--is-ancestor", &hex, "origin/main"])
         .current_dir(repo_dir())
         .status()
         .expect("git runs")
         .success();
-    assert!(ok, "the commit the capacity table names does not exist");
+    assert!(
+        ok,
+        "the commit the capacity table names is not an ancestor of origin/main"
+    );
 }
