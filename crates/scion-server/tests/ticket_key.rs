@@ -146,6 +146,11 @@ fn serve_refuses_a_seed_that_group_or_others_can_read() {
             "--ticket-key",
             key.to_str().unwrap(),
         ])
+        // The serve opens the store: the URL rides the env, quietly.
+        .env(
+            "SCION_POSTGRES_URL",
+            scion_server::Backend::test_postgres_url(&data2).unwrap(),
+        )
         .env("NO_COLOR", "1")
         // The info lines go to stderr, and the test waits for the one that
         // says the server listens.
@@ -258,6 +263,11 @@ fn an_old_public_key_is_readable_by_anyone_but_writable_by_its_owner_alone() {
             "--ticket-key-old",
             old.to_str().unwrap(),
         ])
+        // The serve opens the store: the URL rides the env, quietly.
+        .env(
+            "SCION_POSTGRES_URL",
+            scion_server::Backend::test_postgres_url(&dir.path().join("data")).unwrap(),
+        )
         .env("NO_COLOR", "1")
         // The info lines go to stderr, and the test waits for the one that
         // says the server listens.

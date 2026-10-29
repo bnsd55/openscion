@@ -348,6 +348,9 @@ fn a_killed_restore_leaves_the_next_one_clean() {
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .arg("--data")
         .arg(&target)
+        // The restore reads its URL from the environment: the target's
+        // own schema, so the replay lands where the open below reads.
+        .env("SCION_POSTGRES_URL", url_of(&target))
         .env("SCION_TEST_RESTORE_TX_BYTES", "4096")
         .env("SCION_TEST_RESTORE_ECHO_BATCH", "1")
         .arg("restore")
@@ -365,12 +368,21 @@ fn a_killed_restore_leaves_the_next_one_clean() {
     let reader = std::thread::spawn(move || {
         use std::io::BufRead as _;
         let reader = std::io::BufReader::new(stderr);
+        let mut text = String::new();
+        let mut seen = false;
         for line in reader.lines() {
-            let line = line.unwrap();
+            let line = line.unwrap_or_default();
+            text.push_str(&line);
+            text.push('\n');
             if line.contains("batch 2 committed") {
+                seen = true;
                 break;
             }
         }
+        // The kill must hit real work: a restore that died at startup
+        // (a missing URL, a refused open) closes its stderr before any
+        // batch, and a test that killed it anyway would prove nothing.
+        assert!(seen, "the restore never reached its second batch: {text}");
     });
     let start = std::time::Instant::now();
     loop {
@@ -428,6 +440,9 @@ fn restore_sampled(archive: &std::path::Path, target: &std::path::Path, tx_bytes
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .arg("--data")
         .arg(target)
+        // The restore reads its URL from the environment: the target's
+        // own schema, so the reset and the replay stay in one schema.
+        .env("SCION_POSTGRES_URL", url_of(target))
         .arg("restore")
         .arg("--archive")
         .arg(archive)
