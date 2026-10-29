@@ -1417,11 +1417,6 @@ mod tests {
 
     #[test]
     fn a_walk_waits_for_one_flush_for_all_its_steps() {
-        // A Postgres commit is durable when it returns: no flush to count.
-        if Backend::test_is_postgres() {
-            eprintln!("skip on postgres: the flush steps are the SQLite store's");
-            return;
-        }
         let _slot = damage::slot();
         let (_dir, store, repo, ids) = store_graph_with_nodes(&ladder(20));
         let (side, tip) = (ids[1], *ids.last().unwrap());
@@ -1456,11 +1451,16 @@ mod tests {
         // Postgres's (synchronous_commit=on, checked at open), and a
         // commit whose changeset names no new blob file full-flushes
         // nothing - unlike SQLite, whose own database file sits on the
-        // same drive, so its commit fsyncs the blob group too.
-        if !Backend::test_is_postgres() {
-            let flushes = store.blobs().full_flushes() - before;
-            assert_eq!(flushes, u64::from(crate::store::FSYNC_LEAVES_DRIVE_CACHE));
-        }
+        // same drive, so its commit fsyncs the blob group too. A
+        // Postgres commit that starts to full-flush blob groups fails
+        // here.
+        let expected = if Backend::test_is_postgres() {
+            0
+        } else {
+            u64::from(crate::store::FSYNC_LEAVES_DRIVE_CACHE)
+        };
+        let flushes = store.blobs().full_flushes() - before;
+        assert_eq!(flushes, expected);
     }
 
     /// The parents batch changes no walk's read count: every changeset the
