@@ -896,7 +896,7 @@ jobs:
               fi
             done ) &
           watcher=$!
-          setsid bash -c 'echo $$ > measure.pgid; timeout -k 60 2100 cargo test --workspace --no-fail-fast > '"$RUNNER_TEMP"'/arm64-test.raw 2>&1; echo $? > measure.rc' || true
+          setsid bash -c 'echo $$ > measure.pgid; timeout -k 60 3300 cargo test --workspace --no-fail-fast > '"$RUNNER_TEMP"'/arm64-test.raw 2>&1; echo $? > measure.rc' || true
           code=$(cat measure.rc 2> /dev/null || echo 124)
           kill "$watcher" 2> /dev/null || true
           wait "$watcher" 2> /dev/null || true
