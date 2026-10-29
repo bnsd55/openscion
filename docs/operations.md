@@ -701,7 +701,7 @@ What an acknowledged write has survived, before you need a backup:
 
 Proof: crates/scion-server/tests/power.rs::every_reply_survives_a_power_cut (behaviour, no command: the proof is the power cut the LazyFS device delivers at the disk boundary, which no shell command reproduces)
 Proof: crates/scion-server/tests/dm_log_writes.rs::an_acknowledged_blob_survives_a_cut_at_the_last_barrier_before_its_reply (behaviour, no command: the proof is a cut at the device's last barrier before the reply, delivered by the dm-log device, which no shell command reproduces)
-Proof: crates/scion-server/tests/crash_pg.rs::a_kill_during_a_land_leaves_the_ref_old_or_new (behaviour, no command: the proof is the kill's own timing - a reply answered and the process killed mid-flight - which no guide command reproduces) (behaviour, no command: the proof is the kill's own timing - a reply answered and the process killed mid-flight - which no guide command reproduces)
+Proof: crates/scion-server/tests/crash_pg.rs::a_kill_during_a_land_leaves_the_ref_old_or_new (behaviour, no command: the proof is the kill's own timing - a reply answered and the process killed mid-flight - which no guide command reproduces)
 Proof: crates/scion-server/tests/storage.rs::a_retry_after_a_failed_dir_fsync_makes_the_kept_file_durable (behaviour, no command: the proof injects the fsync failure at the directory boundary, which a shell cannot order; the retry it forces is the runbook's promise)
 
 The Postgres metadata half of the first two rules is Postgres's own
@@ -717,9 +717,7 @@ acknowledged writes, plus the write in flight while the snapshot ran.
 Writes acknowledged **before** the snapshot read back whole after a
 restore, whatever was happening in the meantime.
 
-Proof: crates/scion-server/tests/backup.rs::a_backup_taken_while_serving_restores_whole
-Proof (open, #411): the live-backup test of that PR pins what a backup taken while
-the server keeps writing may and may not hold
+Proof: crates/scion-server/tests/backup.rs::a_backup_taken_while_serving_restores_whole (behaviour, no command: the section states the durability rules in prose, and no shell command reproduces an acknowledged write; the test holds the recovery point the section promises)
 
 A data directory is `scion.db` plus `objects/`; the lock files and `tmp/`
 are process state, not data. A copy of the directory is a backup:
@@ -814,9 +812,9 @@ current numbers live in the workflow's run log on `main`, and a run
 that drifts far from them is a regression to look at, not a promise
 to restate here.
 
-Proof: crates/scion-server/tests/restore_bench.rs::a_restore_of_a_stated_store_takes_a_stated_time
+Proof: crates/scion-server/tests/restore_bench.rs::a_restore_of_a_stated_store_takes_a_stated_time (measured, no command: the number is the workflow's own run, not a shell command the guide names)
 
-Proof: crates/scion-server/tests/backup.rs::a_backup_taken_while_serving_restores_whole
+Proof: crates/scion-server/tests/backup.rs::a_backup_taken_while_serving_restores_whole (behaviour, no command: the section's sample numbers are measured by the workflow, not reproducible as one command; the test holds the backup-while-serving behaviour the section names)
 
 On Postgres, a restore's staging schema carries a `restore_staging`
 mark from its first transaction until publication, so a restore drops
