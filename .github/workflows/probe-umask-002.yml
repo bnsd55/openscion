@@ -6,6 +6,11 @@
 
 on:
   workflow_dispatch:
+  # A workflow_dispatch needs the file registered on the default
+  # branch, which a probe never touches: a push to this probe branch
+  # is what runs it (the way probe-chain ran).
+  push:
+    branches: [probe/umask-002]
 
 permissions:
   contents: read
