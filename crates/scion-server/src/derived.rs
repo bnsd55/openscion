@@ -1895,8 +1895,7 @@ mod tests {
                 let i = start.index(ids.len());
                 let missing = model[i].iter().filter(|id| !derived.contains_key(id)).count();
                 DERIVES.set(0);
-                let commits = store.commits();
-                proptest::prop_assert_eq!(&get_unbounded::<Ancestry>(&store, repo, ids[i]).unwrap(), &model[i]);
+                proptest::prop_assert_eq!(&get_unbounded::<Ancestry>(&store, repo, ids[i]).unwrap(), &model[i]);(&get_unbounded::<Ancestry>(&store, repo, ids[i]).unwrap(), &model[i]);
                 proptest::prop_assert_eq!(DERIVES.get(), missing);
                 derived.extend(model[i].iter().map(|&id| (id, i)));
             }

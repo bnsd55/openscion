@@ -1445,15 +1445,11 @@ pub(crate) fn decode_paths(bytes: &[u8]) -> Option<Vec<RepoPath>> {
 
 #[cfg(test)]
 mod tests {
-    use crate::backend::Backend;
-    use crate::db::{self, SqliteTx};
-    use crate::store::Store;
-    use rusqlite::{Connection, params};
     use std::time::Instant;
 
     use super::*;
     use crate::meta::testing;
-    use crate::pg::damage;
+    use crate::pg::{CHANGESET_READS, damage};
     use crate::store::FSYNC_LEAVES_DRIVE_CACHE;
     use scion_core::{BlobId, Entry, FileEntry, IdentityTime};
 
@@ -1854,18 +1850,15 @@ mod tests {
                 if d.contains("the land stays pending, retry with the same request key")),
             "{err}"
         );
-        // The row's commit is durable when the reply is built: a flush
-        // covered every commit made before the reply, the pending row's
-        // included. `flushed_upto` is the store's own durability mark, the
-        // one a flush updates on every platform. The check runs before any
-        // read of this test: a read of an unflushed commit flushes on its
-        // own, which would hide the bug.
-        assert!(
-            f.store.flushed_upto() > commits_before,
-            "the error reply went out before the pending row was durable: \
-             flushed to {}, commits reach {}",
-            f.store.flushed_upto(),
+        // The row's commit is durable when the reply is built: on
+        // Postgres, `COMMIT` returns only after the row is durable
+        // (`synchronous_commit` is on), so the reply cannot go out first.
+        // The check runs before any read of this test: a read of an
+        // unflushed commit flushes on its own, which would hide the bug.
+        assert_eq!(
+            f.store.commits(),
             commits_before + 1,
+            "the error reply went out before the pending row was durable"
         );
         // The row is still pending: it answers `pending_lands`, the
         // metadata trait both backends serve.
@@ -1893,13 +1886,12 @@ mod tests {
         let cs = f.commit(head, &[put("d", "new")]);
         let commits = f.store.commits();
         assert_eq!(f.land(cs, "k").state, LandState::Landed);
-        // Record the land, five root trees in steps, then the land itself.
-        // Until #682's Postgres counters land, commits() is always 0 on
-        // Postgres, so the count is a SQLite claim.
-        let steps = crate::derived::steps(5);
-        if !Backend::test_is_postgres() {
-            assert_eq!(f.store.commits() - commits, 1 + steps + 1);
-        }
+        // The land's own commits and its steps all count, as the
+        // Postgres backend's commit counter reports them.
+        assert_eq!(
+            f.store.commits() - commits,
+            1 + u64::from(crate::derived::steps(5)) + 1
+        );
     }
 
     #[test]
@@ -2668,10 +2660,10 @@ mod tests {
             assert_eq!(out.state, LandState::Conflict);
             let changes = [put("c2", "mine"), put("d/e/g", "mine"), put("c1/z", "mine")];
             let cs = f.commit(history[1], &changes);
-            db::CHANGESET_READS.set(0);
+            CHANGESET_READS.set(0);
             history::NODE_READS.set(0);
             let out = f.land(cs, "measured");
-            let reads = (db::CHANGESET_READS.get(), history::NODE_READS.get());
+            let reads = (CHANGESET_READS.get(), history::NODE_READS.get());
             assert_eq!(out.state, LandState::Conflict);
             assert_eq!(out.conflict_paths, [RepoPath::new("c2").unwrap()]);
             reads
@@ -2738,33 +2730,22 @@ mod tests {
             static STAGE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
             static CASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let _slot = damage::slot();
-            let shared = Backend::test_is_postgres();
             // The directory outlives the case: a TempDir dropped early
             // deletes the schema the store still serves.
-            let case_dir;
-            let dir = if shared {
-                STAGE
-                    .get_or_init(crate::test_support::private_tempdir)
-                    .path()
-                    .to_owned()
-            } else {
-                case_dir = crate::test_support::private_tempdir();
-                case_dir.path().to_owned()
-            };
+            let dir = STAGE
+                .get_or_init(crate::test_support::private_tempdir)
+                .path()
+                .to_owned();
             let store = Backend::open_test(&dir).unwrap();
             let case = CASE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let repo_name = if shared {
-                // The planner statistics, the way autovacuum would keep
-                // them on a real server: after the first case and then
-                // every 16 cases, so the shared schema's plans follow
-                // its size.
-                if case > 0 && (case - 1).is_multiple_of(16) {
-                    damage::analyze(&store).unwrap();
-                }
-                format!("r{case}")
-            } else {
-                "r".to_owned()
-            };
+            // The planner statistics, the way autovacuum would keep them
+            // on a real server: after the first case and then every 16
+            // cases, so the shared schema's plans follow its size.
+            let case_index = case;
+            if case_index > 0 && (case_index - 1).is_multiple_of(16) {
+                damage::analyze(&store).unwrap();
+            }
+            let repo_name = format!("r{case}");
             let (repo, ids) = store
                 .write(|c| {
                     let repo = c.create_repo(&repo_name)?;
@@ -3437,103 +3418,6 @@ mod tests {
         assert_eq!(retry.state, LandState::Conflict);
         assert_eq!(retry.conflict_paths, [RepoPath::new("a/x").unwrap()]);
         assert_eq!(f.main(), main_before);
-    }
-
-    #[test]
-    fn a_version_1_database_upgrades_and_keeps_its_lands() {
-        // The old shape is a SQLite file of schema version 1, made
-        // through its migration script: there is no Postgres form of an
-        // older build's store, and the schema-drift tests cover the
-        // Postgres migrations. This test leaves with the engine.
-        if Backend::test_is_postgres() {
-            return;
-        }
-        let dir = crate::test_support::private_tempdir();
-        let (child, pending_cs) = {
-            let c = Connection::open(dir.path().join("scion.db")).unwrap();
-            let v1 = include_str!("../migrations/0001_init.sql");
-            c.execute_batch(&format!("BEGIN; {v1} PRAGMA user_version = 1; COMMIT;"))
-                .unwrap();
-            let mut tx = SqliteTx(&c);
-            let repo = tx.create_repo("r").unwrap();
-            let insert =
-                |tx: &mut SqliteTx<'_>, cs: &Changeset| tx.insert_changeset(repo, cs).unwrap();
-            let root = insert(&mut tx, &changeset(vec![], &[put("a/x", "1")]));
-            let child = insert(&mut tx, &changeset(vec![root], &[put("a/x", "2")]));
-            let pending_cs = insert(&mut tx, &changeset(vec![root], &[put("b", "3")]));
-            assert!(tx.cas_ref(repo, "main", None, child).unwrap());
-            c.execute(
-                "INSERT INTO lands
-                     (repo_id, caller, request_key, target_ref, input_cs, state, result_cs,
-                      detail, conflict_paths)
-                 VALUES (?1, 't', 'landed', 'main', ?2, 'landed', ?2, '', x''),
-                        (?1, 't', 'conflict', 'main', ?3, 'conflict', NULL, 'clash', ?4),
-                        (?1, 't', 'pending', 'main', ?3, 'pending', NULL, '', x'')",
-                params![
-                    repo.0,
-                    child.as_bytes(),
-                    pending_cs.as_bytes(),
-                    b"a/x".as_slice()
-                ],
-            )
-            .unwrap();
-            (child, pending_cs)
-        };
-
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
-        // The fixture wrote no blob files; the pending land's tree build
-        // reads their lengths, so store them now.
-        store_blobs(&store);
-        let version: u32 = store
-            .read(|c| {
-                c.sqlite()
-                    .unwrap()
-                    .pragma_query_value(None, "user_version", |row| row.get(0))
-                    .map_err(crate::error::from_sqlite)
-            })
-            .unwrap();
-        assert_eq!(version, crate::store::SCHEMA_VERSION);
-        // Finished lands start their retention at the upgrade; the pending
-        // one has no finish time.
-        let rows: Vec<(String, Option<bool>)> = store
-            .read(|c| {
-                let sql = "SELECT state, abs(finished_at - unixepoch()) < 60 FROM lands
-                           ORDER BY land_id";
-                let mut stmt = c
-                    .sqlite()
-                    .unwrap()
-                    .prepare(sql)
-                    .map_err(crate::error::from_sqlite)?;
-                let rows = stmt
-                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                    .map_err(crate::error::from_sqlite)?;
-                rows.collect::<rusqlite::Result<_>>()
-                    .map_err(crate::error::from_sqlite)
-            })
-            .unwrap();
-        let want = [
-            ("landed", Some(true)),
-            ("conflict", Some(true)),
-            ("pending", None),
-        ];
-        assert_eq!(rows, want.map(|(state, now)| (state.to_owned(), now)));
-
-        // The lands are 1, 2 and 3, in insert order.
-        let get = |id| get_land(&store, &caller(), "r", id).unwrap();
-        let landed = get(1);
-        let pair = (landed.state, landed.result);
-        assert_eq!(pair, (LandState::Landed, Some(child)));
-        let conflict = get(2);
-        assert_eq!(conflict.state, LandState::Conflict);
-        assert_eq!(conflict.conflict_paths, [RepoPath::new("a/x").unwrap()]);
-        assert_eq!(conflict.detail, "clash");
-
-        // The pending land finishes, and the old finished ones stay.
-        let out = Lands::default()
-            .land(&store, &caller(), &req(pending_cs, "pending"))
-            .unwrap();
-        assert_eq!((out.land_id, out.state), (3, LandState::Landed));
-        assert_eq!((get(1), get(2)), (landed, conflict));
     }
 
     #[test]

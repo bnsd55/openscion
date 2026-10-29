@@ -84,9 +84,8 @@ const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// The advisory lock of the one server process of a database.
 const SERVER_LOCK: i64 = 0x5343_494F_4E53_5256;
 
-/// Changesets that [`PgTx::get_changeset`] reads on this thread: the
-/// tests bound a walk's cost by it, and the full-stop gate keeps another
-/// test's statements out of its delta.
+// The tests bound a walk's changeset-read cost by this counter, and the
+// full-stop gate keeps another test's statements out of its delta.
 #[cfg(any(test, feature = "test-hooks"))]
 thread_local! {
     pub(crate) static CHANGESET_READS: std::cell::Cell<usize> =
@@ -4392,7 +4391,7 @@ impl Meta for Pg {
 
 #[cfg(test)]
 mod tests {
-    use super::{Client, NoTls, P, merged_options};
+    use super::{Client, NoTls, merged_options};
     use crate::pg::Pg;
     use std::sync::Arc;
 
