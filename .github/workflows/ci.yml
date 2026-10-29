@@ -878,6 +878,7 @@ jobs:
               swap_used=$(free -m 2> /dev/null | awk 'NR==3 {print $3}') || true
               mount 2> /dev/null | grep -Ei 'nfs|fuse' >> "$RUNNER_TEMP/arm64-sampler.log" || true
               ps -eo pid,stat,etime,comm 2> /dev/null | awk '$2 ~ /D/' >> "$RUNNER_TEMP/arm64-sampler.log" || true
+              ps -eo pid,ppid,etime,rss,comm --sort=-etime 2> /dev/null | head -15 >> "$RUNNER_TEMP/arm64-sampler.log" || true
               echo "SAMPLE $(date -u +%H:%M:%S) procs=${procs:-?} store_family=$family mem_avail=${mem:-?}M swap_used=${swap_used:-?}M disk_avail=${avail:-?}G" >> "$RUNNER_TEMP/arm64-sampler.log" 2> /dev/null || true
               avail_drop=0; mem_drop=0; proc_growth=0
               if [ -n "${avail:-}" ] && [ -n "${start_avail:-}" ]; then avail_drop=$((start_avail - avail)); fi
@@ -937,6 +938,7 @@ jobs:
               family=${family:-0}
               mount 2> /dev/null | grep -Ei 'nfs|fuse' >> "$RUNNER_TEMP/arm64-sampler.log" || true
               ps -eo pid,stat,etime,comm 2> /dev/null | awk '$2 ~ /D/' >> "$RUNNER_TEMP/arm64-sampler.log" || true
+              ps -eo pid,ppid,etime,rss,comm --sort=-etime 2> /dev/null | head -15 >> "$RUNNER_TEMP/arm64-sampler.log" || true
               avail=$(df --output=avail -BG / 2> /dev/null | tail -1 | tr -dc '0-9') || true
               mem=$(free -m 2> /dev/null | awk 'NR==2 {print $7}') || true
               swap_used=$(free -m 2> /dev/null | awk 'NR==3 {print $3}') || true
@@ -1047,6 +1049,47 @@ jobs:
         with:
           name: kill-probe-log
           path: ${{ runner.temp }}/probe.log
+          if-no-files-found: ignore
+
+  alive-control:
+    name: control (arm64, no tests)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 70
+    services:
+      postgres:
+        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        env:
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: scion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: protoc
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: alive, with nothing running
+        run: |
+          for i in $(seq 1 55); do
+            echo "alive $i"
+            free -m | sed -n 2p || true
+            ps -eo pid,ppid,etime,rss,comm --sort=-etime 2> /dev/null | head -10 || true
+            sleep 60
+          done
+      - name: the control's log, even on a cancelled run
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: alive-control-log
+          path: ${{ runner.temp }}/*
           if-no-files-found: ignore
 
   # The xfs cell of the support matrix (docs/support.md): every store
