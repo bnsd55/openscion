@@ -3326,6 +3326,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    // The guard is the suite's gate: it must span the whole test, awaits
+    // included, or two backends run at once and the database runs out
+    // of connections (E53300).
+    #[allow(clippy::await_holding_lock)]
     async fn at_most_max_graph_queries_run_at_once() {
         // root ─ a, and root ─ b. The pool is the server's size: the test
         // holds every read connection, so the cap's wait is visible. The

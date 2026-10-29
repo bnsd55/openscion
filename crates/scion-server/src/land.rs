@@ -1889,7 +1889,7 @@ mod tests {
         // Postgres backend's commit counter reports them.
         assert_eq!(
             f.store.commits() - commits,
-            1 + u64::from(crate::derived::steps(5)) + 1
+            1 + crate::derived::steps(5) + 1
         );
     }
 

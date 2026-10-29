@@ -672,7 +672,7 @@ fn verification_catches_a_tree_that_differs_from_git() {
         }),
     )]);
     let bad = store
-        .read(|c| tree::apply(c, Some(root), &extra, &mut |_| Ok(0)).map_err(Error::from))
+        .read(|c| tree::apply(c, Some(root), &extra, &mut |_| Ok(0)))
         .unwrap();
     let schema = Backend::test_schema(dir.path());
     let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();

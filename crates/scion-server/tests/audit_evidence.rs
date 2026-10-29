@@ -77,7 +77,7 @@ fn history_rows(store: &Backend) -> Vec<(Vec<u8>, Vec<u8>)> {
 /// every row's stored bytes no longer hash to its ID. Distinct IDs always
 /// mean distinct bodies (the ID is the hash of the body), so a swap with
 /// a neighbour always mismatches.
-fn tamper_history(store: &Backend, data: &std::path::Path, rows: &[(Vec<u8>, Vec<u8>)]) {
+fn tamper_history(_store: &Backend, data: &std::path::Path, rows: &[(Vec<u8>, Vec<u8>)]) {
     assert!(rows.len() >= 2, "the fixture needs two history nodes");
     let mut swapped: Vec<(Vec<u8>, Vec<u8>)> = rows
         .iter()

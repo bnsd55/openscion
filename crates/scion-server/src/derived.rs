@@ -1342,8 +1342,6 @@ mod tests {
         Ok((repo, ids))
     }
 
-    /// Every `derived` row, as (kind, version, changeset, value).
-
     /// The rows of kind `name` at `version`, as (changeset, value).
     fn rows_of(store: &Backend, name: &str, version: u32) -> Vec<(Vec<u8>, Vec<u8>)> {
         damage::derived_rows(store)
@@ -1891,7 +1889,7 @@ mod tests {
                 let i = start.index(ids.len());
                 let missing = model[i].iter().filter(|id| !derived.contains_key(id)).count();
                 DERIVES.set(0);
-                proptest::prop_assert_eq!(&get_unbounded::<Ancestry>(&store, repo, ids[i]).unwrap(), &model[i]);(&get_unbounded::<Ancestry>(&store, repo, ids[i]).unwrap(), &model[i]);
+                proptest::prop_assert_eq!(&get_unbounded::<Ancestry>(&store, repo, ids[i]).unwrap(), &model[i]);
                 proptest::prop_assert_eq!(DERIVES.get(), missing);
                 derived.extend(model[i].iter().map(|&id| (id, i)));
             }

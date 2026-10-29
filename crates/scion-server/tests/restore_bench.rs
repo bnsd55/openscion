@@ -209,7 +209,7 @@ fn rename_schema(file: &Path, to: &str) {
                 .map(|name| name.trim_end().to_owned())
         })
         .expect("the dump carries its schema's name");
-    std::fs::write(file, text.replace(&from.to_owned(), to)).unwrap();
+    std::fs::write(file, text.replace(&from.clone(), to)).unwrap();
 }
 
 /// Loads a dump into the test database, as the runbook's restore does:
