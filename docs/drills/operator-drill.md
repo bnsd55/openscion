@@ -79,8 +79,8 @@ Source: §1 "One server", §2 "Ticket keys", §6 "Health".
 Source: §3 "Backup and restore".
 
 0. Give the backup something to hold: import a git repository and put
-   one changeset on it (any small repo works — the README's Try-it
-   block does this in nine commands). Without this, T4's done-when has
+   one changeset on it (any small repo works — the README's quick
+   start does this). Without this, T4's done-when has
    nothing to read.
 
 1. Take the metadata snapshot first, then the blobs — never the other

@@ -23,8 +23,7 @@ otherwise.
 ## Scope
 
 Known limits of the current design are documented in the code as `SHORTCUT:`
-comments, in the README, and in
-[`docs/operations.md`](docs/operations.md). For example: an access file maps
+comments and in [`docs/operations.md`](docs/operations.md). For example: an access file maps
 one token to one principal with per-path rules, and the network is closed by
 default — the server refuses a non-loopback address unless it serves TLS
 (`--tls-cert` and `--tls-key`) or gets `--insecure-listen`. A report about a

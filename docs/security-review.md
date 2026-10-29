@@ -93,7 +93,7 @@ git clone --depth 1 https://github.com/tokio-rs/tokio /tmp/tokio
 ```
 
 Attack it: `scn` is the client (`./target/release/scn ls main:src` and
-the rest of the README's [Try it](../README.md#try-it) steps run as
+the rest of the README's [quick start](../README.md#quick-start) steps run as
 written); the gRPC surface is behind `SCION_TOKEN=dev` on port 7878;
 the data directory `/tmp/scion` is SQLite plus blobs. The file-mode
 rules refuse a directory other accounts can write — make one and watch
