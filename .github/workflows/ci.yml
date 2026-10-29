@@ -1188,7 +1188,10 @@ jobs:
     # The slow tier: main, the nightly and a dispatch only.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # A cap covers a cold build: after every Cargo.lock change the
+    # rust-cache misses and every fuzz target builds again (a warm run
+    # is 3.5 min, main's cold run went past the old 15).
+    timeout-minutes: 25
     services:
       # The suite's Postgres tests read this database: the backend they
       # choose is Postgres, and the URL names the database this service
