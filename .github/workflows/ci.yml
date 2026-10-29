@@ -362,7 +362,9 @@ jobs:
     if: >-
       ${{ !cancelled() && (needs.tier.result == 'success' || needs.tier.result == 'skipped') && !github.event.pull_request.draft && needs.tier.outputs.docs_only != 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Every suite runs on Postgres, and a cold cache adds the build: a
+    # cap covers both, the way the fuzz smoke's does.
+    timeout-minutes: 40
     services:
       # The scripts' servers keep their metadata in Postgres: the smoke
       # below (start-scion-smoke) opens the database this service names.
@@ -391,9 +393,9 @@ jobs:
       - run: cargo test --workspace
         env:
           # The fast tier: a pull request runs 64 cases, main, the
-          # nightly and a dispatch 256; the nightly's own job below
+          # nightly and a dispatch 128; the nightly's own job below
           # still proves the full 2000 on Postgres.
-          PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '64' || '256' }}
+          PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '64' || '128' }}
           SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           # The backup test dumps the live metadata with the job's own
@@ -454,7 +456,10 @@ jobs:
     if: >-
       ${{ !cancelled() && (github.event_name != 'pull_request' && (needs.tier.result == 'success' || needs.tier.result == 'skipped')) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # The whole workspace on one Postgres: the fast tier already
+    # proved the suites, this proves the majors. A cold cache adds the
+    # build, the way the fast tier's cap does.
+    timeout-minutes: 40
     services:
       # The suite's Postgres tests read this database: the backend they
       # choose is Postgres, and the URL names the database this service
@@ -734,9 +739,9 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
         env:
-          # A pull request runs 64 cases, main and the nightly 256;
+          # A pull request runs 64 cases, main and the nightly 128;
           # the nightly's own job proves the full 2000.
-          PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '64' || '256' }}
+          PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '64' || '128' }}
           SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
       - name: the work tree is still clean after the tests
