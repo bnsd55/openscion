@@ -1,0 +1,60 @@
+# A probe, not a gate (#699's follow-up): the whole workspace suite on
+# Postgres under umask 002. The nightly's umask 002 cell the #699 plan
+# promised: this workflow answers what breaks before the contributor
+# fixes land. Dispatch only; it runs nowhere on its own. Remove it when
+# the cell it probes is a real job.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One probe at a time: the job holds the test database's shape.
+  group: probe-umask-002
+  cancel-in-progress: false
+
+jobs:
+  test-umask-002:
+    name: test (umask 002)
+    runs-on: ubuntu-24.04
+    # The same budget class as the test job's, plus a cold build: the
+    # probe shares no cache with the CI jobs' key.
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        env:
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: scion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: protoc
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # A probe reads the cache the CI jobs wrote and writes none.
+          save-if: "false"
+          cache-workspace-crates: true
+      - name: the workspace suite under umask 002
+        run: |
+          umask 002
+          echo "umask $(umask)"
+          cargo test --workspace
+        env:
+          # The same env the test job runs: 128 proptest cases on a
+          # dispatch, the job's own Postgres, and the container id the
+          # backup test's pg_dump needs.
+          PROPTEST_CASES: "128"
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+          SCION_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
