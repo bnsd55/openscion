@@ -685,7 +685,7 @@ mod tests {
     /// operator sees the damage, and `fsck` still answers at all.
     #[test]
     fn a_missing_blob_root_still_reports_the_rows_that_name_blobs() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, id) = store();
         let blob = first_put(&store, id);
         std::fs::remove_dir_all(store.blobs().root()).unwrap();
@@ -711,7 +711,7 @@ mod tests {
             }
         }
 
-        let _serial = damage::serial();
+        let _slot = damage::slot();
 
         if rustix::process::geteuid().as_raw() == 0 {
             eprintln!("skipped: root reads through any mode, the check would mean nothing");
@@ -736,7 +736,7 @@ mod tests {
     /// file of that entry would lie, so the check names the tree.
     #[test]
     fn a_tree_whose_entry_size_lies_is_tree_size() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, id) = store();
         let blob = first_put(&store, id);
         let entry = scion_core::Entry::File(scion_core::FileEntry::new(
@@ -767,7 +767,7 @@ mod tests {
     /// hides the damage of the second.
     #[test]
     fn a_changeset_past_a_full_page_is_still_checked() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, _) = store();
         // A second changeset, independent of the first: two rows, two
         // pages at a batch of one.
@@ -802,7 +802,7 @@ mod tests {
     /// first page never hides the damage of the second.
     #[test]
     fn a_tree_past_a_full_page_is_still_checked() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, _) = store();
         let _second = land(
             &store,
@@ -830,7 +830,7 @@ mod tests {
     /// A history node past a full page of the walk is still checked.
     #[test]
     fn a_history_node_past_a_full_page_is_still_checked() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, _) = store();
         let _second = land(
             &store,
@@ -864,7 +864,7 @@ mod tests {
     /// the blob its row names is gone, and the check must say so.
     #[test]
     fn a_repo_blob_past_a_full_page_is_still_checked() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, id) = store();
         let real = first_put(&store, id);
         let fake = [0xff_u8; 32];
@@ -891,7 +891,7 @@ mod tests {
     /// operator hears about the hole instead of reading a clean report.
     #[test]
     fn a_land_whose_changeset_is_gone_is_missing() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, _) = store();
         let repo = store.read(|c| c.repo_id(REPO)).unwrap();
         damage::insert_land_row(&store, repo, "k1", "main", &[7_u8; 32]).unwrap();
@@ -908,7 +908,7 @@ mod tests {
     /// the version matches.
     #[test]
     fn a_derived_row_of_an_unknown_kind_is_old_not_damage() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, id) = store();
         damage::insert_derived_row(&store, "made_up_kind", 1, id.as_bytes(), id.as_bytes())
             .unwrap();
@@ -919,7 +919,7 @@ mod tests {
 
     #[test]
     fn a_clean_store_reports_nothing() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, _) = store();
         let report = run(&store, 1, &mut |_| {}).unwrap();
         assert!(report.is_clean(), "{:?}", kinds(&report));
@@ -931,7 +931,7 @@ mod tests {
     /// and owns the files no row names.
     #[test]
     fn a_missing_file_no_row_names_is_the_collectors_orphan_not_damage() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, _) = store();
         let id = store.blobs().put(b"orphan\n").unwrap();
         let (_, path) = store.blobs().location(id);
@@ -941,7 +941,7 @@ mod tests {
 
     #[test]
     fn a_missing_file_a_row_names_is_damage() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, _) = store();
         let id = store.blobs().put(b"kept\n").unwrap();
         store
@@ -959,7 +959,7 @@ mod tests {
     /// rewritten by a racing put: not damage.
     #[test]
     fn a_file_back_between_the_two_looks_is_not_damage() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, _) = store();
         let id = store.blobs().put(b"again\n").unwrap();
         assert!(!missing_is_damage(&store, id));
@@ -977,7 +977,7 @@ mod tests {
 
     #[test]
     fn a_truncated_blob_file_is_corrupt() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, id) = store();
         let blob = first_put(&store, id);
         let path = store.blobs().location(blob).1;
@@ -993,7 +993,7 @@ mod tests {
 
     #[test]
     fn a_missing_blob_file_that_a_row_names_is_missing() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, id) = store();
         let blob = first_put(&store, id);
         std::fs::remove_file(store.blobs().location(blob).1).unwrap();
@@ -1008,7 +1008,7 @@ mod tests {
 
     #[test]
     fn a_broken_changeset_body_is_bad() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, id) = store();
         damage::corrupt_changeset_body(&store, &id).unwrap();
         let report = run(&store, 1, &mut |_| {}).unwrap();
@@ -1021,7 +1021,7 @@ mod tests {
 
     #[test]
     fn a_broken_tree_body_is_bad() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, id) = store();
         let repo = store.write(|c| c.repo_id(REPO)).unwrap();
         let tree =
@@ -1040,7 +1040,7 @@ mod tests {
 
     #[test]
     fn a_ref_to_a_changeset_no_repo_may_read_dangles() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, id) = store();
         // The damage: the schema forbids it with its keys on, so the
         // raw helper makes it, as an older build may have.
@@ -1051,7 +1051,7 @@ mod tests {
 
     #[test]
     fn a_broken_history_node_body_is_bad() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, _) = store();
         let id = damage::first_history_node_id(&store)
             .unwrap()
@@ -1067,7 +1067,7 @@ mod tests {
 
     #[test]
     fn a_derived_row_for_a_missing_changeset_is_missing() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, _) = store();
         let missing = [7_u8; 32];
         // The damage: the schema forbids it with its keys on, so the
@@ -1083,7 +1083,7 @@ mod tests {
 
     #[test]
     fn a_derived_value_that_does_not_decode_is_bad() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, _) = store();
         damage::set_derived_value(&store, "commit_graph", &[0_u8; 32]).unwrap();
         let report = run(&store, 1, &mut |_| {}).unwrap();
@@ -1096,7 +1096,7 @@ mod tests {
 
     #[test]
     fn a_derived_row_of_an_unknown_version_is_old_not_damage() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, id) = store();
         damage::insert_derived_row(&store, "root_tree", 9, id.as_bytes(), id.as_bytes()).unwrap();
         let report = run(&store, 1, &mut |_| {}).unwrap();
@@ -1106,7 +1106,7 @@ mod tests {
 
     #[test]
     fn fsck_beside_a_live_server_sees_no_damage() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test(dir.path()).unwrap();
         let mut id = land(

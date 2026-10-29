@@ -14,7 +14,7 @@ use scion_server::Backend;
 use scion_server::test_support::meta::Meta as _;
 use scion_server::test_support::meta::MetaTx as _;
 use scion_server::test_support::read::MAX_DIFF_ENTRIES;
-use scion_server::test_support::{service, store::Store, tree};
+use scion_server::test_support::{service, tree};
 use scion_server::{ImportOptions, import_git};
 use serde_json::Value;
 use std::sync::Arc;
@@ -381,7 +381,7 @@ fn two_changesets_lens(
 #[test]
 fn ls_shows_the_size_of_every_entry_that_carries_one() {
     let data = scion_server::test_support::private_tempdir();
-    let store = scion_server::test_support::backend::from_store(Store::open(data.path()).unwrap());
+    let store = Backend::open_test(data.path()).unwrap();
     let read = b"one two three"; // 13 bytes
     let link = b"a.md"; // 4 bytes
     let empty = b"";

@@ -2839,6 +2839,8 @@ impl MetaTx for PgTx<'_> {
     /// [`Error::NotFound`] if `repo` does not have it, [`Error::Corrupt`]
     /// if it does not decode or match.
     fn get_changeset(&mut self, repo: RepoId, id: ChangesetId) -> Result<Changeset> {
+        #[cfg(test)]
+        crate::db::CHANGESET_READS.set(crate::db::CHANGESET_READS.get() + 1);
         let body: Vec<u8> = self
             .c
             .query_opt(
