@@ -67,8 +67,7 @@ Postgres 16, 17 or 18, and a SQLite data directory is not opened.
 The `test-postgres` job runs Postgres 17 on every push, and all three
 supported-upstream majors (16, 17, 18) nightly and on release
 candidates; adding a major is one service line plus its suite minutes —
-the cell row is added when the job runs it. adding a major is one service line plus its
-suite minutes — the cell row is added when the job runs it.
+the cell row is added when the job runs it.
 
 ## Severity levels
 

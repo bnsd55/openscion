@@ -1753,12 +1753,10 @@ The first release: the server, its cache tiers, and the `scn` client.
   new name; the old file goes cold once and can be deleted.
 - The version matrix always has an N-1, from the first nightly: `PREV_REF`
   beats the release tags, the newest tag that is an ancestor of HEAD and
-  not HEAD itself wins next, and with neither, the newest of the stand-in
-  ladder - the two pinned commits that
-  [version-matrix.sh](scripts/version-matrix.sh) holds, chosen where
-  the store schema changed - stands in until the first release tag
-  replaces them. A run that tests no pair fails with the reason; the
-  matrix never passes as a skip. Two windows of the N and N-1 pair are
+  not HEAD itself wins next, and with neither, the stand-in commit - the
+  one pinned commit on main chosen where the store schema changed -
+  stands in until the first release tag replaces it. A run that tests no
+  pair fails with the reason; the matrix never passes as a skip. Two windows of the N and N-1 pair are
   proved, both
   directions: the ticket one version's server signs verifies on the other
   version's tier, and a ticket of another key is refused with the ticket
