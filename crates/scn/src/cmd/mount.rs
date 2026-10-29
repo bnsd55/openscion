@@ -62,6 +62,7 @@ pub struct UnmountArgs {
 /// `test_support::cmd::mount`.
 pub(crate) mod record {
     use std::io::Write as _;
+    use std::os::unix::ffi::OsStrExt as _;
     use std::path::{Path, PathBuf};
 
     use anyhow::Result;
@@ -96,13 +97,18 @@ pub(crate) mod record {
         let records: Vec<serde_json::Value> = sessions
             .iter()
             .map(|record| {
-                serde_json::json!({
-                    "dir": record.dir.display().to_string(),
-                    "overlay": record.overlay.display().to_string(),
+                let mut value = serde_json::json!({
                     "rev": record.rev,
                     "pid": record.pid,
                     "writable": record.writable,
-                })
+                });
+                // A path is bytes: one that is not UTF-8 keeps them in a
+                // `_b64` sibling, as scn's JSON output does, so the record
+                // still names its own directory when it is read back.
+                for (field, path) in [("dir", &record.dir), ("overlay", &record.overlay)] {
+                    crate::client::put_json_bytes(&mut value, field, path.as_os_str().as_bytes());
+                }
+                value
             })
             .collect();
         let temp = file.with_extension(format!("json.{}.tmp", std::process::id()));
@@ -482,6 +488,25 @@ fn read_sessions(file: &Path) -> Result<Vec<MountRecord>> {
     parse_sessions(&json).with_context(|| format!("{} does not hold mount records", file.display()))
 }
 
+/// The path a record holds in `field`: the exact bytes of its `_b64`
+/// sibling when the path is not UTF-8, else the field's text.
+fn path_field(record: &serde_json::Value, field: &str) -> Result<PathBuf> {
+    use base64::Engine as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    if let Some(b64) = record.get(format!("{field}_b64")) {
+        let bytes = b64
+            .as_str()
+            .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
+            .ok_or_else(|| anyhow!("its {field}_b64 is not base64"))?;
+        return Ok(PathBuf::from(std::ffi::OsStr::from_bytes(&bytes)));
+    }
+    record
+        .get(field)
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("it has no {field}"))
+}
+
 /// The records of a session file's JSON.
 fn parse_sessions(json: &serde_json::Value) -> Result<Vec<MountRecord>> {
     let records = json
@@ -492,18 +517,8 @@ fn parse_sessions(json: &serde_json::Value) -> Result<Vec<MountRecord>> {
         .enumerate()
         .map(|(n, record)| {
             Ok(MountRecord {
-                dir: PathBuf::from(
-                    record
-                        .get("dir")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| anyhow!("record {n} has no dir"))?,
-                ),
-                overlay: PathBuf::from(
-                    record
-                        .get("overlay")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| anyhow!("record {n} has no overlay"))?,
-                ),
+                dir: path_field(record, "dir").with_context(|| format!("record {n}"))?,
+                overlay: path_field(record, "overlay").with_context(|| format!("record {n}"))?,
                 rev: record
                     .get("rev")
                     .and_then(|v| v.as_str())
@@ -909,6 +924,47 @@ mod silent_failures {
             pid,
             writable: false,
         }
+    }
+
+    /// A path is bytes: a directory and an overlay whose names are not
+    /// UTF-8 come back exactly from the session file, so `scn unmount`
+    /// finds the record. A UTF-8 path is written as before, with no
+    /// `_b64` sibling, and a record without one still reads.
+    #[test]
+    fn a_path_that_is_not_utf8_round_trips_through_the_session_file() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let base = tempfile::tempdir().unwrap();
+        let file = base.path().join("mounts.json");
+        let odd = MountRecord {
+            dir: base.path().join(std::ffi::OsStr::from_bytes(b"m\xff")),
+            overlay: base.path().join(std::ffi::OsStr::from_bytes(b"o\xfe")),
+            rev: "main".to_owned(),
+            pid: 1,
+            writable: false,
+        };
+        add_session(&file, &odd).unwrap();
+        assert_eq!(read_sessions(&file).unwrap(), vec![odd.clone()]);
+        assert!(
+            drop_session(&file, &odd.dir).unwrap().is_some(),
+            "scn unmount finds no mount"
+        );
+
+        let plain = record("/mnt/view", 7);
+        add_session(&file, &plain).unwrap();
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(
+            !text.contains("_b64"),
+            "a UTF-8 path grew a sibling: {text}"
+        );
+        fs::write(
+            &file,
+            r#"[{"dir":"/mnt/view","overlay":"/tmp/o","rev":"main","pid":7,"writable":false}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_sessions(&file).unwrap()[0].dir,
+            PathBuf::from("/mnt/view")
+        );
     }
 
     /// A kill that cannot signal a live process keeps the record, so a
