@@ -341,13 +341,13 @@ async fn snapshots(
 /// The keys that a ticket of a call must verify against: at most two, the
 /// second one from a rotation.
 fn ticket_keys(hex: &[String]) -> anyhow::Result<Vec<ed25519_dalek::VerifyingKey>> {
-    anyhow::ensure!(hex.len() <= 2, "give at most two --ticket-key");
+    anyhow::ensure!(hex.len() <= 2, "give at most two --ticket-public-key");
     hex.iter()
         .map(|key| {
             let bytes = scion_tier::key_from_hex(key)
-                .ok_or_else(|| anyhow::anyhow!("--ticket-key must be 64 hex characters"))?;
+                .ok_or_else(|| anyhow::anyhow!("--ticket-public-key must be 64 hex characters"))?;
             ed25519_dalek::VerifyingKey::from_bytes(&bytes)
-                .map_err(|why| anyhow::anyhow!("bad --ticket-key: {why}"))
+                .map_err(|why| anyhow::anyhow!("bad --ticket-public-key: {why}"))
         })
         .collect()
 }

@@ -16,7 +16,7 @@ immutable GitHub release, nothing published anywhere else.
 
 Make the project safe to install anywhere it claims to work.
 
-- A clean install and the [quick start](../README.md#try-it) pass on
+- A clean install and the [quick start](../README.md#quick-start) pass on
   every supported platform (Linux and macOS), under umask 002 and umask
   022: done, [#317](https://github.com/bnsd55/openscion/issues/317)
   landed the release smoke, and its CI job runs on every push, in a

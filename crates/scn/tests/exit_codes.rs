@@ -9,8 +9,9 @@ use std::process::{Command, Output};
 
 use scion_core::{Changeset, FileState, IdentityTime, RepoPath};
 use scion_proto::runtime::listen::Limits;
+use scion_server::Backend;
 use scion_server::Quotas;
-use scion_server::test_support::backend::from_store;
+use scion_server::test_support::meta::Meta as _;
 use scion_server::test_support::meta::MetaTx as _;
 use scion_server::test_support::service;
 use std::sync::Arc;
@@ -65,7 +66,7 @@ fn scn(args: &[&str]) -> Output {
 /// the URL, the two IDs in hex, and the keep-alive runtime.
 fn server_with_two_changesets() -> (String, String, String, tokio::runtime::Runtime) {
     let dir = scion_server::test_support::private_tempdir();
-    let store = scion_server::test_support::store::Store::open(dir.path()).unwrap();
+    let store = Backend::open_test(dir.path()).unwrap();
     let blob = store.blobs().put(b"exit codes\n").unwrap();
     let root = Changeset::new(
         vec![],
@@ -107,7 +108,7 @@ fn server_with_two_changesets() -> (String, String, String, tokio::runtime::Runt
     let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     runtime.spawn(service::serve(
-        from_store(store),
+        store,
         listener,
         TOKEN,
         service::ServeOptions {

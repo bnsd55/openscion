@@ -1,14 +1,14 @@
 //! `merge-base`, `is-ancestor`, `diff`.
 
 use anyhow::{Context, Result, bail};
-use scion_core::{ChangesetId, Entry, FileEntry, FileState, GitOid, RepoPath};
+use scion_core::{ChangesetId, FileState, GitOid, RepoPath};
 use scion_proto::v1::{self, DiffRequest, FileKind, IsAncestorRequest, MergeBaseRequest};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::BufWriter;
 
 use crate::client::{Ctx, id_from, lossy, put_json_bytes};
-use crate::cmd::read::entry_json;
+use crate::cmd::read::state_json;
 use crate::out::{flush, write};
 use crate::outln;
 
@@ -100,9 +100,7 @@ pub async fn diff(ctx: &mut Ctx, old: &str, new: &str, path: Option<&RepoPath>) 
         let mut out = BufWriter::new(std::io::stdout().lock());
         for entry in reply.entries {
             let (old, new) = (file_state(entry.old)?, file_state(entry.new)?);
-            let side = |state: Option<FileState>| {
-                state.map(|s| entry_json(&Entry::File(FileEntry::new(s, 0))))
-            };
+            let side = |state: Option<FileState>| state.map(|s| state_json(&s));
             // The deleted half of a rename prints with the added half.
             if !entry.rename_to.is_empty() {
                 deletes.insert(entry.path, (entry.rename_to, side(old)));
