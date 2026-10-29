@@ -161,6 +161,8 @@ fn a_serve_token_file_starts_the_server() {
         .arg("--data")
         .arg(data.path())
         .args([
+            "--postgres-url",
+            &common::postgres_url(data.path()),
             "serve",
             "--token-file",
             file.to_str().unwrap(),
@@ -473,8 +475,10 @@ fn assert_no_leak(form: UrlForm, run: &Serve, url: &str, canary: &str, password:
         }
     }
     let warning = matches!(form, UrlForm::Argv);
+    // The warning names the flag and the exposure, and says the form
+    // goes away; the env form says nothing.
     assert_eq!(
-        run.stderr.contains("deprecated"),
+        run.stderr.contains("warning: --postgres-url"),
         warning,
         "the argv warning must print for the argv form alone"
     );
