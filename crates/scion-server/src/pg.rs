@@ -83,6 +83,15 @@ const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The advisory lock of the one server process of a database.
 const SERVER_LOCK: i64 = 0x5343_494F_4E53_5256;
+
+/// Changesets that [`PgTx::get_changeset`] reads on this thread: the
+/// tests bound a walk's cost by it, and the full-stop gate keeps another
+/// test's statements out of its delta.
+#[cfg(any(test, feature = "test-hooks"))]
+thread_local! {
+    pub(crate) static CHANGESET_READS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
 /// The advisory lock of one migration run of a database.
 const SCHEMA_LOCK: i64 = 0x5343_494F_4E53_4348;
 
@@ -2820,7 +2829,7 @@ impl MetaTx for PgTx<'_> {
     /// if it does not decode or match.
     fn get_changeset(&mut self, repo: RepoId, id: ChangesetId) -> Result<Changeset> {
         #[cfg(test)]
-        crate::db::CHANGESET_READS.set(crate::db::CHANGESET_READS.get() + 1);
+        CHANGESET_READS.set(CHANGESET_READS.get() + 1);
         let body: Vec<u8> = self
             .c
             .query_opt(
@@ -4384,7 +4393,6 @@ impl Meta for Pg {
 #[cfg(test)]
 mod tests {
     use super::{Client, NoTls, P, merged_options};
-    use crate::backend::old_store;
     use crate::pg::Pg;
     use std::sync::Arc;
 

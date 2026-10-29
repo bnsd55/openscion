@@ -827,6 +827,8 @@ fn node(c: &mut dyn MetaTx, id: ChangesetId) -> Result<Node> {
 #[cfg(test)]
 mod tests {
     use crate::backend::Backend;
+    use proptest::prelude::{Strategy, any};
+    use proptest::sample::Index as Sample;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
@@ -1452,11 +1454,7 @@ mod tests {
         // same drive, so its commit fsyncs the blob group too. A
         // Postgres commit that starts to full-flush blob groups fails
         // here.
-        let expected = if Backend::test_is_postgres() {
-            0
-        } else {
-            u64::from(crate::store::FSYNC_LEAVES_DRIVE_CACHE)
-        };
+        let expected = 0;
         let flushes = store.blobs().full_flushes() - before;
         assert_eq!(flushes, expected);
     }

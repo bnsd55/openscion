@@ -2276,7 +2276,7 @@ fn file_state(state: FileState) -> v1::FileState {
 #[cfg(test)]
 mod tests {
     use crate::backend::Backend;
-    use crate::db;
+    use crate::meta::testing;
     use std::time::Instant;
 
     use scion_core::{Changeset, FileState, IdentityTime};
@@ -3334,7 +3334,7 @@ mod tests {
         let ids = store
             .write(|c| {
                 let repo = c.create_repo("r")?;
-                db::testing::insert_graph(c, repo, &[vec![], vec![0], vec![0]])
+                testing::insert_graph(c, repo, &[vec![], vec![0], vec![0]])
             })
             .unwrap();
         let bytes = |i: usize| ids[i].as_bytes().to_vec();

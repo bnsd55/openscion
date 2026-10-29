@@ -917,7 +917,7 @@ mod tests {
         store
             .write(|c| {
                 let repo = c.repo_id(REPO)?;
-                c.delete_repo_blob(repo, x.as_bytes())
+                c.delete_repo_blobs(repo, &[x.as_bytes().to_vec()])
             })
             .unwrap();
         assert!(!named(&store, x));
@@ -1378,10 +1378,6 @@ mod tests {
     #[test]
     fn the_collector_waits_for_a_changeset_that_holds_the_blob_lock() {
         let _slot = damage::slot();
-        if !Backend::test_is_postgres() {
-            eprintln!("skip on sqlite: the lock is the write lock itself");
-            return;
-        }
         // The collector side opens the way the `gc` CLI does - shared,
         // with no one-server lock - and the writer the way a server
         // does, with the per-schema lock. One data directory, as they

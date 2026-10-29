@@ -360,8 +360,8 @@ mod tests {
     /// source, by design.
     #[test]
     fn every_error_that_wraps_another_returns_it_through_source() {
-        // The storage: the chain is Error → Storage → the engine's error.
-        let e = db(ffi::SQLITE_CORRUPT);
+        // The storage: the chain is Error → Storage → the database's error.
+        let e = Error::Storage(Storage::busy(std::io::Error::other("the database is gone")));
         let source = std::error::Error::source(&e).expect("the storage is the source");
         assert!(source.source().is_some(), "the engine error is the source");
         // The apply error: the changeset apply error is the source.

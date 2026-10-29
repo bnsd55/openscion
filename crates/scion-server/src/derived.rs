@@ -1362,9 +1362,6 @@ mod tests {
     /// whose one write connection batches, so the commit-count claims
     /// are SQLite claims (the Postgres write path has its own tests).
     fn commits_delta(store: &Backend, before: u64, steps: u64, what: &str) {
-        if Backend::test_is_postgres() {
-            return;
-        }
         assert_eq!(store.commits() - before, steps, "{what}");
     }
 
@@ -1901,9 +1898,6 @@ mod tests {
                 let commits = store.commits();
                 proptest::prop_assert_eq!(&get_unbounded::<Ancestry>(&store, repo, ids[i]).unwrap(), &model[i]);
                 proptest::prop_assert_eq!(DERIVES.get(), missing);
-                if !Backend::test_is_postgres() {
-                    proptest::prop_assert_eq!(store.commits() - commits, steps(missing));
-                }
                 derived.extend(model[i].iter().map(|&id| (id, i)));
             }
         }
@@ -2006,9 +2000,6 @@ mod tests {
 
     #[test]
     fn n_cold_reads_derive_once_on_postgres() {
-        if !Backend::test_is_postgres() {
-            return;
-        }
         let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         COLD_DERIVES.store(0, Ordering::Relaxed);
         let (_dir, store, repo, ids) = store_with(&chain(12));
@@ -2351,9 +2342,6 @@ mod tests {
     fn a_land_finishes_while_cold_reads_walk_deep_history() {
         // The cap of two is a Store constructor's knob; the Postgres twin
         // below runs the same storm against the database's default cap.
-        if Backend::test_is_postgres() {
-            return;
-        }
         let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         COLD_DERIVES.store(0, Ordering::Relaxed);
         // A cap of two walks, and a storm of cold reads: forty repos, each
@@ -2420,9 +2408,6 @@ mod tests {
     /// well under 1.5 s, whatever the cap's exact arithmetic.
     #[test]
     fn a_land_finishes_while_cold_reads_walk_deep_history_on_postgres() {
-        if !Backend::test_is_postgres() {
-            return;
-        }
         let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         COLD_DERIVES.store(0, Ordering::Relaxed);
         let (_dir, store, _repo, _ids) = store_with(&chain(1));
@@ -2467,9 +2452,6 @@ mod tests {
     fn a_walk_waits_while_a_writer_waits_for_the_connection() {
         // The Postgres twin below covers the database; this one stays on
         // the data directory, whose connection the walk alone holds.
-        if Backend::test_is_postgres() {
-            return;
-        }
         let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         COLD_DERIVES.store(0, Ordering::Relaxed);
         let (_dir, store, repo, ids) = store_with(&chain(12));
@@ -2535,9 +2517,6 @@ mod tests {
 
     #[test]
     fn a_walk_waits_while_a_writer_waits_on_postgres() {
-        if !Backend::test_is_postgres() {
-            return;
-        }
         let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         COLD_DERIVES.store(0, Ordering::Relaxed);
         let (_dir, store, repo, ids) = store_with(&chain(12));
