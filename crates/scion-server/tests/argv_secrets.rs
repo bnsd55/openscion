@@ -8,6 +8,7 @@ use std::io::{BufRead as _, Write as _};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::str::FromStr as _;
 use std::time::{Duration, Instant};
 
 mod common;
@@ -237,14 +238,14 @@ fn leak_url(data: &Path) -> (String, String, Option<String>) {
         text
     });
     let url = format!("{url}&application_name=leak-{canary}");
-    // The credentials the URL carries: everything between the scheme and
-    // the host. A URL without a password has none to leak.
-    let rest = url.split("://").nth(1).expect("the URL has a scheme");
-    let userinfo = rest.split('/').next().expect("the URL names a database");
-    let userinfo = userinfo.rsplit('@').next().expect("a non-empty URL");
-    let password = userinfo
-        .split_once(':')
-        .map(|(_, secret)| secret.to_owned());
+    // The credentials the URL carries, parsed the way the server parses
+    // it: through the same library, not a hand-split that a port or an
+    // escaped character would fool. A URL without a password has none to
+    // leak.
+    let password = postgres::Config::from_str(&url)
+        .expect("the URL parses as a database URL")
+        .get_password()
+        .map(|secret| String::from_utf8_lossy(secret).into_owned());
     (url, canary, password)
 }
 
@@ -449,10 +450,13 @@ fn scrape(url: &str) -> String {
     body.to_owned()
 }
 
-/// The shared check of the two serve forms: the URL, the password it
-/// carries, and the run's canary reach none of the surfaces. The argv
-/// form alone must carry the deprecation warning, and must print it
-/// without the URL.
+/// The shared check of the two serve forms: the URL and the run's
+/// canary reach none of the surfaces, and so does the credential form
+/// `:<password>@`, the only shape a leak can print a password in
+/// without a URL around it. The bare word is checked only when it is
+/// distinctive (12 characters or more): a short one, such as the test
+/// database's, is a word the log and the metrics body carry anyway, and
+/// the canary covers the URL-shaped leaks either way.
 fn assert_no_leak(form: UrlForm, run: &Serve, url: &str, canary: &str, password: Option<&str>) {
     let surfaces = [
         ("stdout", &run.stdout),
@@ -464,8 +468,15 @@ fn assert_no_leak(form: UrlForm, run: &Serve, url: &str, canary: &str, password:
         assert!(!text.contains(url), "the database URL leaked to {name}");
     }
     if let Some(password) = password {
+        let form = format!(":{password}@");
         for (name, text) in surfaces {
-            assert!(!text.contains(password), "the password leaked to {name}");
+            assert!(
+                !text.contains(&form),
+                "the credential form of the password leaked to {name}"
+            );
+            if password.len() >= 12 {
+                assert!(!text.contains(password), "the password leaked to {name}");
+            }
         }
     }
     let warning = matches!(form, UrlForm::Argv);
