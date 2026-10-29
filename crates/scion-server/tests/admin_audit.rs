@@ -49,6 +49,9 @@ fn gc(data: &std::path::Path, args: &[&str]) -> Output {
         .args(["gc"])
         .args(args)
         .env("NO_COLOR", "1")
+        // The store's own schema: the gc opens it, and the test seeded
+        // it through the same schema.
+        .env("SCION_POSTGRES_URL", url_of(data))
         .output()
         .unwrap()
 }
@@ -206,6 +209,9 @@ fn run(data: &std::path::Path, args: &[&str]) -> Output {
         .arg(data)
         .args(args)
         .env("NO_COLOR", "1")
+        // The commands that open the store read the URL from the env,
+        // quietly; the schema is the data directory's own.
+        .env("SCION_POSTGRES_URL", url_of(data))
         .output()
         .unwrap()
 }

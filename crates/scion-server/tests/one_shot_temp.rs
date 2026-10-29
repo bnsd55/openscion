@@ -21,6 +21,12 @@ fn fsck(data: &std::path::Path) -> (bool, String) {
         .arg(data)
         .arg("fsck")
         .env("NO_COLOR", "1")
+        // fsck opens the store: the URL rides the env, quietly, and the
+        // schema is the data directory's own.
+        .env(
+            "SCION_POSTGRES_URL",
+            scion_server::Backend::test_postgres_url(data).unwrap(),
+        )
         .output()
         .expect("the fsck runs");
     (
