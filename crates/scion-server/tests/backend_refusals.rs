@@ -3,6 +3,8 @@
 //! lock. Each fails if the path breaks: a refusal that no longer fires
 //! is the bug the test catches.
 
+mod common;
+
 use std::path::Path;
 use std::process::Command;
 
@@ -284,20 +286,15 @@ fn a_reconnect_ends_the_dead_transaction_and_a_new_begin_passes() {
 
 /// An unreachable database is not a takeover: writes answer what a
 /// client retries against, the fence stays down, and the store recovers
-/// when the database comes back. Needs a database this test may stop and
-/// start again: name its Docker container in `SCION_TEST_PG_CONTAINER`.
+/// when the database comes back. It stops the database, its premise:
+/// `SCION_TEST_PG_CONTAINER` must name the database container, and
+/// without the name the test fails, it does not skip.
 // It stops the database every test of this binary shares, so it runs
 // alone: `cargo test --test backend_refusals -- --ignored`.
 #[test]
 #[ignore = "stops the test database every test of this binary shares"]
 fn an_unreachable_database_is_not_a_takeover() {
-    let Ok(container) = std::env::var("SCION_TEST_PG_CONTAINER") else {
-        eprintln!(
-            "skip: stopping the database needs SCION_TEST_PG_CONTAINER, \
-             the name of a Docker container this test may stop"
-        );
-        return;
-    };
+    let container = common::pg::container();
     let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     store

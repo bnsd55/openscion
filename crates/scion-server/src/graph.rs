@@ -906,6 +906,41 @@ mod tests {
         (dir, store, repo, ids)
     }
 
+    /// A new store with the file-less graph `parents` in repo `r`, its
+    /// derived rows seeded through
+    /// [`seed_file_less_ladder`](crate::seed::seed_file_less_ladder):
+    /// the same graphs the other helpers build, without a round trip
+    /// per changeset, so a test that measures a walk measures the walk.
+    fn store_graph_seeded(
+        parents: &[Vec<usize>],
+    ) -> (tempfile::TempDir, Backend, RepoId, Vec<ChangesetId>) {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let css: Vec<scion_core::Changeset> = parents
+            .iter()
+            .scan(Vec::new(), |ids, of| {
+                let cs = scion_core::Changeset::new(
+                    of.iter().map(|&p| ids[p]).collect(),
+                    scion_core::IdentityTime::new(b"a".to_vec(), b"a@x".to_vec(), 0, 0)
+                        .expect("identity fits the format"),
+                    None,
+                    format!("f{}", ids.len()).into_bytes(),
+                    std::collections::BTreeMap::default(),
+                )
+                .expect("changeset fits the format");
+                ids.push(cs.encode_with_id().1);
+                Some(cs)
+            })
+            .collect();
+        let (repo, ids) = store
+            .write(|c| {
+                let repo = c.create_repo("r")?;
+                Ok((repo, crate::seed::seed_file_less_ladder(c, repo, &css)?))
+            })
+            .unwrap();
+        (dir, store, repo, ids)
+    }
+
     /// The depth that a jump from `depth` lands on, by Myers' rule, from the
     /// depths alone.
     fn jump_depth(depth: i64) -> i64 {
@@ -977,7 +1012,7 @@ mod tests {
             pairs in proptest::collection::vec(any::<(Sample, Sample)>(), PAIRS),
         ) {
             let _slot = damage::slot();
-            let (_dir, store, repo, ids) = store_graph(&parents);
+            let (_dir, store, repo, ids) = store_graph_seeded(&parents);
             let histories = histories(&parents);
             let ancestors = ancestors(&parents);
             let nodes: Vec<Node> = ids
@@ -1258,7 +1293,7 @@ mod tests {
             history.push(parents.len() - 1);
         }
         parents.push(vec![history[100]]);
-        let (_dir, store, repo, ids) = store_graph_with_nodes(&parents);
+        let (_dir, store, repo, ids) = store_graph_seeded(&parents);
         let (side, tip) = (*ids.last().unwrap(), ids[history[N - 1]]);
         let (a, b) = (
             At::get_unbounded(&store, repo, side).unwrap(),
@@ -1342,7 +1377,7 @@ mod tests {
     fn a_walk_stops_at_its_deadline() {
         let _slot = damage::slot();
         // The walks from the tip go through every merge down to `side`.
-        let (_dir, store, repo, ids) = store_graph(&ladder(100));
+        let (_dir, store, repo, ids) = store_graph_seeded(&ladder(100));
         let (side, tip) = (ids[1], *ids.last().unwrap());
         let passed = Deadline::new(Instant::now());
         let late = is_ancestor(&store, repo, side, tip, &passed);

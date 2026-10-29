@@ -202,18 +202,18 @@ fn check_row(row: &[String]) {
 }
 
 /// The row shapes the rule must accept and refuse, as fixture rows in
-/// the table's own shape: a filled no-reader row, a dead bench's row,
-/// and the half-filled row that must never publish.
+/// the table's own shape: a filled row, a no-reader row, a dead bench's
+/// row, and the half-filled row that must never publish.
 #[test]
 fn a_no_reader_row_names_the_land_and_dashes_the_reads() {
-    let shapes: [(&[&str], bool); 6] = [
+    let shapes: [(&[&str], bool); 5] = [
         // (cells after the cell name, does the rule accept it?)
         (
             &[
-                "63.1", "70", "115", "0", "0", "30376", "2000", "155.4", "1106", "-",
+                "63.1", "70", "115", "0", "0", "30376", "2000", "11.4", "1402",
             ],
             true,
-        ), // a live sqlite cell
+        ), // a live cell: both growth columns
         (
             &[
                 "63.1", "-", "-", "0", "0", "30376", "2000", "155.4", "1106", "-",
@@ -232,19 +232,13 @@ fn a_no_reader_row_names_the_land_and_dashes_the_reads() {
         ), // half-filled: never
         (
             &[
-                "63.1", "70", "115", "0", "0", "30376", "2000", "11.4", "1402",
-            ],
-            true,
-        ), // a live postgres cell: both growth columns
-        (
-            &[
                 "63.1", "70", "115", "0", "0", "30376", "2000", "11.4", "nonsense", "-",
             ],
             false,
         ), // a growth column that is neither number nor "-": never
     ];
     for (cells, accepts) in shapes {
-        let mut row: Vec<String> = vec!["sqlite".into(), "2".into(), "0".into()];
+        let mut row: Vec<String> = vec!["postgres".into(), "2".into(), "0".into()];
         row.extend(cells.iter().map(ToString::to_string));
         let checked = std::panic::catch_unwind(|| check_row(&row));
         assert_eq!(checked.is_ok(), accepts, "the rule disagrees about {row:?}");
