@@ -572,11 +572,17 @@ impl Vfs {
         let data = Arc::new(raw);
         let mut blobs = self.blobs.lock().await;
         blobs.1 += data.len();
-        blobs.0.insert(id, Arc::clone(&data));
+        // A racing call may have inserted the same blob while this one
+        // fetched: the insert replaces that copy, so its bytes leave the
+        // count, or the count drifts above what the map holds.
+        if let Some(old) = blobs.0.insert(id, Arc::clone(&data)) {
+            blobs.1 -= old.len();
+        }
         while blobs.1 > BLOB_CACHE_BYTES {
-            let bytes = blobs.0.front().map_or(0, |(_, data)| data.len());
-            blobs.0.pop_front();
-            blobs.1 = blobs.1.saturating_sub(bytes);
+            let Some((_, gone)) = blobs.0.pop_front() else {
+                break;
+            };
+            blobs.1 -= gone.len();
         }
         Ok(data)
     }
@@ -2494,6 +2500,52 @@ mod tests {
                 .collect::<Vec<Result<ObjectPart, Status>>>();
             Ok(Response::new(Box::pin(tokio_stream::iter(parts))))
         }
+    }
+
+    /// Two reads that miss the cache for one blob both fetch it and both
+    /// insert it; the cache must count its bytes once. Counted twice, the
+    /// count drifts above what the map holds, and once the drift passes
+    /// `BLOB_CACHE_BYTES` the eviction loop spins on an empty map forever.
+    #[tokio::test]
+    async fn a_blob_fetched_twice_at_once_is_counted_once() {
+        let fake = Expiring::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(
+            Server::builder()
+                .add_service(ObjectsServer::new(fake))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        let objects = crate::client::test_objects(&url, TOKEN).await;
+        let roots = crate::client::test_objects(&url, TOKEN).await;
+        let reply = objects
+            .clone()
+            .get_root_tree(Ask {
+                repo: REPO.to_owned(),
+                changeset_id: [7u8; 32].to_vec(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        let root = id_from(&reply.tree_id).unwrap();
+        let overlay = tempfile::tempdir().unwrap();
+        let vfs = Vfs::new(
+            objects,
+            roots,
+            REPO.to_owned(),
+            ChangesetId::from_bytes([7u8; 32]),
+            root,
+            &reply.ticket,
+            overlay.path().to_path_buf(),
+        )
+        .unwrap();
+        let blob = BlobId::of(b"x\n");
+        let (a, b) = tokio::join!(vfs.fetch_blob(blob, None, 2), vfs.fetch_blob(blob, None, 2));
+        assert_eq!(*a.unwrap(), b"x\n");
+        assert_eq!(*b.unwrap(), b"x\n");
+        let blobs = vfs.blobs.lock().await;
+        assert_eq!(blobs.0.len(), 1);
+        assert_eq!(blobs.1, 2, "the cache counts bytes it does not hold");
     }
 
     /// A mount that lives past the life of its first ticket keeps reading:
