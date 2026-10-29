@@ -11,9 +11,9 @@ the warm baseline, which exists only after SOAK_WARM_SECONDS. A 35-minute local 
 minutes (the last 20 samples: max 59184, average 58137, no trend), and
 the failed CI curve itself rose, stepped once at about 4 minutes, and
 then oscillated 49-57 KB for its last 5 minutes with no climb. That is
-warm-up - sqlite page caches of the 8 read connections and the write
-connection, allocator arenas, prepared statements - not a leak: a leak
-does not plateau on two runs.
+warm-up - allocator arenas, the database connections' client-side
+buffers, prepared statements - not a leak: a leak does not plateau on
+two runs.
 
 The bound's baseline is now the first sample after SOAK_WARM_SECONDS
 (1800 s, named in soak.yml): the nightly still checks 90 minutes of RSS
