@@ -811,7 +811,10 @@ jobs:
       matrix:
         trial: [1, 2, 3]
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 40
+    # The probe branch's cache is cold for merged main, so a trial
+    # builds ~30 min before it tests: 40 minutes cancelled all three
+    # trials of the last dispatch at 45:00 sharp.
+    timeout-minutes: 60
     services:
       # The suite's Postgres tests read this database; the backend the
       # tests choose is unchanged for now (SCION_TEST_BACKEND stays
