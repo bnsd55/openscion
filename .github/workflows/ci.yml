@@ -292,9 +292,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     services:
-      # The suite's Postgres tests read this database; the backend the
-      # tests choose is unchanged for now (SCION_TEST_BACKEND stays
-      # unset), and the URL is in place for the switch.
+      # The docs tests' server targets read this database.
       postgres:
         image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
         env:
