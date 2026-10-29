@@ -1494,6 +1494,17 @@ impl<S: Store> Objects for Tier<S> {
     }
 }
 
+/// A temp directory the ancestor check accepts whatever the umask of the
+/// run: this run's own, mode 0700. A store's or a snapshot's parent that
+/// group or others can write is refused, as it must be.
+#[cfg(test)]
+fn private_tempdir() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    dir
+}
+
 #[cfg(test)]
 mod tests {
 

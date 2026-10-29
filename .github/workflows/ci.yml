@@ -308,7 +308,12 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
+      # Full history: the capacity footer names a commit of main, and
+      # docs_capacity.rs checks it is an ancestor of origin/main - a
+      # shallow clone would skip that check.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
@@ -800,7 +805,10 @@ jobs:
     # release candidate's dispatch prove them, a push does not.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 40
+    # A cold cache puts a whole-workspace build in front of the suite;
+    # 40 minutes cancelled runs that had everything to do (the nightly
+    # warms the cache, a fresh key starts cold).
+    timeout-minutes: 60
     services:
       # The suite's Postgres tests read this database; the backend the
       # tests choose is unchanged for now (SCION_TEST_BACKEND stays

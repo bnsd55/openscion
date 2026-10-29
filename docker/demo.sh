@@ -27,6 +27,15 @@ if ! command -v openssl >/dev/null 2>&1; then
     exit 1
 fi
 
+# --- the demo's secrets, made fresh each run ---------------------------
+# One token for the clients, one password for the demo database. Both are
+# exported for compose to interpolate: nothing about them is committed or
+# baked into the image, and a second run of the demo carries different
+# secrets than the first.
+SCION_DEMO_TOKEN="$(openssl rand -hex 24)"
+SCION_DEMO_DB_PASSWORD="$(openssl rand -hex 16)"
+export SCION_DEMO_TOKEN SCION_DEMO_DB_PASSWORD
+
 # --- certificates: one CA, one certificate per service -----------------
 rm -rf certs work
 mkdir -p certs work
@@ -82,8 +91,9 @@ compose run --rm certs-init '
 compose run --rm pg-certs-init
 
 # The server flags that name the database. The Postgres host is the
-# network's `postgres`, which is not local, so the CA rides along.
-PG_ARGS="--postgres-url postgres://scion:dev@postgres:5432/scion?sslmode=require --postgres-ca /certs/ca.pem"
+# network's `postgres`, which is not local, so the CA rides along, and
+# the password is the demo run's own.
+PG_ARGS="--postgres-url postgres://scion:${SCION_DEMO_DB_PASSWORD}@postgres:5432/scion?sslmode=require --postgres-ca /certs/ca.pem"
 compose up -d postgres
 for _ in $(seq 1 30); do
     if compose run --rm --entrypoint pg_isready postgres -h postgres -U scion >/dev/null 2>&1; then

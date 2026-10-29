@@ -135,7 +135,8 @@ fn mount_as(tiers: &common::Tiers, base: &ChangesetId, writable: bool) -> Mount 
         root,
         &reply.ticket,
         overlay.join("tree"),
-    );
+    )
+    .expect("the vfs is made");
     // A build without the feature has no write path: only its read-only
     // tests run, and the record still says so.
     #[cfg(feature = "unstable-writable-mount")]

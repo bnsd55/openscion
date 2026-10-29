@@ -3,12 +3,12 @@
 # each service picks its own entrypoint. The server keeps its metadata in a
 # Postgres database this file also runs.
 #
-# Secrets are made by docker/demo.sh and are never committed
-# or baked into the image. See docker/README.md.
-#
-# The server's ticket public key arrives as an environment variable that
-# docker/demo.sh exports before it starts the services; without it the
-# cache refuses to serve.
+# Every secret is made by docker/demo.sh and reaches the services as an
+# environment variable, never committed and never baked into the image:
+# SCION_DEMO_TOKEN (the clients' token), SCION_DEMO_DB_PASSWORD (the demo
+# database's), and SCION_TICKET_PUB (the ticket public key, which is not a
+# secret but is made the same way). compose refuses to start without
+# them. See docker/README.md.
 
 name: scion-demo
 
@@ -30,14 +30,14 @@ services:
       - --data
       - /data
       - --postgres-url
-      - postgres://scion:dev@postgres:5432/scion?sslmode=require
+      - postgres://scion:${SCION_DEMO_DB_PASSWORD:?set by docker/demo.sh}@postgres:5432/scion?sslmode=require
       - --postgres-ca
       - /certs/ca.pem
       - serve
       - --listen
       - 0.0.0.0:7878
       - --token
-      - dev
+      - ${SCION_DEMO_TOKEN:?set by docker/demo.sh}
       - --tls-cert
       - /certs/server.crt
       - --tls-key
@@ -60,7 +60,7 @@ services:
     image: postgres:17
     environment:
       POSTGRES_USER: scion
-      POSTGRES_PASSWORD: dev
+      POSTGRES_PASSWORD: ${SCION_DEMO_DB_PASSWORD:?set by docker/demo.sh}
       POSTGRES_DB: scion
     command:
       - -c
@@ -102,7 +102,7 @@ services:
       - --listen
       - 0.0.0.0:7879
       - --token
-      - dev
+      - ${SCION_DEMO_TOKEN:?set by docker/demo.sh}
       - --tls-cert
       - /certs/cache.crt
       - --tls-key
@@ -110,7 +110,7 @@ services:
       - --upstream
       - https://server:7878
       - --upstream-token
-      - dev
+      - ${SCION_DEMO_TOKEN:?set by docker/demo.sh}
       - --tls-ca
       - /certs/ca.pem
       - --ticket-public-key
@@ -133,7 +133,7 @@ services:
       SCION_SERVER: https://server:7878
       SCION_OBJECTS: https://cache:7879
       SCION_TLS_CA: /certs/ca.pem
-      SCION_TOKEN: dev
+      SCION_TOKEN: ${SCION_DEMO_TOKEN:?set by docker/demo.sh}
       SCION_REPO: demo
     volumes:
       - demo-certs:/certs:ro
