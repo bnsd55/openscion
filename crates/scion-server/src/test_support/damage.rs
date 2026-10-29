@@ -40,6 +40,18 @@ pub(crate) fn serial() -> Option<std::sync::MutexGuard<'static, ()>> {
     }
 }
 
+/// Updates the schema's planner statistics, the way autovacuum does on a
+/// real server: a shared test schema grows across cases, and an
+/// un-analyzed planner keeps the small-table plans it picked on the
+/// first case.
+pub(crate) fn analyze(backend: &Backend) -> Result<()> {
+    if Backend::test_is_postgres() {
+        exec(data_dir(backend), "ANALYZE")
+    } else {
+        Ok(())
+    }
+}
+
 /// The kind of a derived row.
 pub(crate) type DerivedRow = (String, i64, Vec<u8>, Vec<u8>);
 

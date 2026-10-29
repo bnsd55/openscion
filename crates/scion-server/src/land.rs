@@ -2744,11 +2744,16 @@ mod tests {
                 crate::test_support::private_tempdir().path().to_path_buf()
             };
             let store = Backend::open_test(&dir).unwrap();
+            let case = CASE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let repo_name = if shared {
-                format!(
-                    "r{}",
-                    CASE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                )
+                // The planner statistics, the way autovacuum would keep
+                // them on a real server: after the first case and then
+                // every 16 cases, so the shared schema's plans follow
+                // its size.
+                if case > 0 && (case - 1) % 16 == 0 {
+                    damage::analyze(&store).unwrap();
+                }
+                format!("r{case}")
             } else {
                 "r".to_owned()
             };
