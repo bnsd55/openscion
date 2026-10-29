@@ -863,6 +863,8 @@ jobs:
               avail=$(df --output=avail -BG / 2> /dev/null | tail -1 | tr -dc '0-9') || true
               mem=$(free -m 2> /dev/null | awk 'NR==2 {print $7}') || true
               swap_used=$(free -m 2> /dev/null | awk 'NR==3 {print $3}') || true
+              mount 2> /dev/null | grep -Ei 'nfs|fuse' >> "$RUNNER_TEMP/arm64-sampler.log" || true
+              ps -eo pid,stat,etime,comm 2> /dev/null | awk '$2 ~ /D/' >> "$RUNNER_TEMP/arm64-sampler.log" || true
               echo "SAMPLE $(date -u +%H:%M:%S) procs=${procs:-?} store_family=$family mem_avail=${mem:-?}M swap_used=${swap_used:-?}M disk_avail=${avail:-?}G" >> "$RUNNER_TEMP/arm64-sampler.log" 2> /dev/null || true
               avail_drop=0; mem_drop=0; proc_growth=0
               if [ -n "${avail:-}" ] && [ -n "${start_avail:-}" ]; then avail_drop=$((start_avail - avail)); fi
