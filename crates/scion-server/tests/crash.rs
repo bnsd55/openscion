@@ -39,7 +39,6 @@ async fn root_tree(objects: &mut Objects, changeset: ChangesetId) -> TreeId {
 
 use scion_core::{Changeset, ChangesetId, Tree, TreeId};
 use scion_server::Backend;
-use std::process::Command;
 
 fn seed() -> u64 {
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH);
@@ -418,46 +417,20 @@ fn a_newer_schema_refuses_the_open_and_a_restore_serves() {
     // the schema, dropping what the forge had left.
     if Backend::test_is_postgres() {
         // The forge's rows drop with the schema, and the dump loads in
-        // their place, in the job's Postgres container: its tools match
-        // the server's version, where a client from the runner image
-        // may not.
+        // their place, with the same tools the dump ran.
         let schema_name = Backend::test_schema(&data).expect("the test names a schema");
-        let container = std::env::var("SCION_TEST_PG_CONTAINER").expect("SCION_TEST_PG_CONTAINER");
-        let db = std::env::var("SCION_TEST_POSTGRES_URL")
-            .expect("SCION_TEST_POSTGRES_URL")
-            .rsplit('/')
-            .next()
-            .unwrap()
-            .to_owned();
-        let drop = Command::new("docker")
-            .args(["exec", &container, "psql", "-U", "postgres"])
-            .args([
-                "-v",
-                "ON_ERROR_STOP=1",
-                "-d",
-                &db,
-                "-c",
-                &format!("DROP SCHEMA {schema_name} CASCADE"),
-            ])
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").expect("SCION_TEST_POSTGRES_URL");
+        let drop = common::pg::psql(&url)
+            .arg("-c")
+            .arg(format!("DROP SCHEMA {schema_name} CASCADE"))
             .output()
-            .expect("docker runs");
+            .expect("psql runs");
         assert!(
             drop.status.success(),
             "the schema drops: {}",
             String::from_utf8_lossy(&drop.stderr)
         );
-        let dump = fs::File::open(backup.join("schema.sql")).unwrap();
-        let restore = Command::new("docker")
-            .args(["exec", "-i", &container, "psql", "-U", "postgres"])
-            .args(["-v", "ON_ERROR_STOP=1", "-d", &db])
-            .stdin(std::process::Stdio::from(dump))
-            .output()
-            .expect("docker runs");
-        assert!(
-            restore.status.success(),
-            "the restore lands: {}",
-            String::from_utf8_lossy(&restore.stderr)
-        );
+        common::pg::load_schema(&url, &backup.join("schema.sql"));
     } else {
         fs::remove_file(data.join("scion.db-wal")).ok();
         fs::remove_file(data.join("scion.db-shm")).ok();
@@ -475,26 +448,14 @@ fn a_newer_schema_refuses_the_open_and_a_restore_serves() {
 fn backup_dir(data: &Path, backup: &Path) {
     fs::create_dir_all(backup).unwrap();
     if Backend::test_is_postgres() {
-        // The dump runs in the job's Postgres container: its tools
-        // match the server's version, where a client from the runner
-        // image may not.
+        // The dump runs with the job's Postgres container's own tools,
+        // or, when no container is named, with the runner's path tools
+        // whose major the helper checks against the server's.
         let schema = Backend::test_schema(data).expect("the test names a schema");
-        let container = std::env::var("SCION_TEST_PG_CONTAINER").expect("SCION_TEST_PG_CONTAINER");
-        let db = std::env::var("SCION_TEST_POSTGRES_URL")
-            .expect("SCION_TEST_POSTGRES_URL")
-            .rsplit('/')
-            .next()
-            .unwrap()
-            .to_owned();
-        let file = fs::File::create(backup.join("schema.sql")).unwrap();
-        let dump = Command::new("docker")
-            .args(["exec", &container, "pg_dump", "-U", "postgres"])
-            .args(["--no-owner", &format!("--schema={schema}"), &db])
-            .stdout(std::process::Stdio::from(file))
-            .status()
-            .expect("docker runs");
-        assert!(dump.success(), "pg_dump of {schema} failed");
-        let text = fs::read_to_string(backup.join("schema.sql")).unwrap();
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").expect("SCION_TEST_POSTGRES_URL");
+        let file = backup.join("schema.sql");
+        common::pg::dump_schema(&url, &schema, &file);
+        let text = fs::read_to_string(&file).unwrap();
         eprintln!("dump has repos row: {}", text.contains("repos"));
         eprintln!("dump has the repo r: {}", text.contains("'r'"));
     }

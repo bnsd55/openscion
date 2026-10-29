@@ -3,7 +3,7 @@
 //! power-loss suite (`power.rs`, dropped writes). The clients, the ledger of
 //! what was sent and replied, the server process, and the checks.
 // Every test binary compiles this file and uses its own subset of it.
-#![allow(dead_code)]
+#![allow(dead_code, unreachable_pub)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -1629,4 +1629,121 @@ pub(crate) async fn ceiling<T>(step: &str, fut: impl std::future::Future<Output 
     tokio::time::timeout(std::time::Duration::from_secs(30), fut)
         .await
         .unwrap_or_else(|_| panic!("the step {step} never finished within 30 s"))
+}
+
+/// The test database's dump and psql: in the job's Postgres container
+/// when `SCION_TEST_PG_CONTAINER` names it (the container's tools are
+/// the server's own), otherwise the tools on the runner's path, the
+/// operator's real path, where the tool's major must match the
+/// server's - a dump by a client of another major may not load.
+pub mod pg {
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+
+    /// The Postgres major of the `tool` on the runner's path, from its
+    /// own version line (`pg_dump (PostgreSQL) 17.5 ...`).
+    fn tool_major(tool: &str) -> u32 {
+        let out = Command::new(tool)
+            .arg("--version")
+            .output()
+            .unwrap_or_else(|e| panic!("{tool} is not on the runner's path: {e}"));
+        let text = String::from_utf8_lossy(&out.stdout);
+        let major = text
+            .split(|c: char| !c.is_ascii_digit())
+            .find(|n| !n.is_empty())
+            .unwrap_or_else(|| panic!("{tool} --version does not name a version: {text}"));
+        major
+            .parse()
+            .unwrap_or_else(|_| panic!("{tool}'s major is not a number: {major}"))
+    }
+
+    /// The Postgres major of the test database, from the server itself.
+    fn server_major(url: &str) -> u32 {
+        let out = Command::new("psql")
+            .args([url, "-tAc", "SHOW server_version_num"])
+            .output()
+            .unwrap_or_else(|e| panic!("psql is not on the runner's path: {e}"));
+        assert!(
+            out.status.success(),
+            "the test database did not name its version: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        let num: u32 = text
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("server_version_num is not a number: {}", text.trim()));
+        num / 10000
+    }
+
+    /// A `pg_dump --no-owner` of `schema` of the test database. The
+    /// caller writes it out.
+    fn dump(url: &str, schema: &str) -> Command {
+        if let Ok(container) = std::env::var("SCION_TEST_PG_CONTAINER") {
+            let db = url.rsplit('/').next().unwrap().to_owned();
+            let mut c = Command::new("docker");
+            c.args([
+                "exec",
+                &container,
+                "pg_dump",
+                "-U",
+                "postgres",
+                "--no-owner",
+            ]);
+            c.arg(format!("--schema={schema}")).arg(db);
+            return c;
+        }
+        let major = tool_major("pg_dump");
+        let server = server_major(url);
+        assert_eq!(
+            major, server,
+            "pg_dump on the path is Postgres {major}, the test database is Postgres {server}: \
+             a dump by a client of another major may not load"
+        );
+        let mut c = Command::new("pg_dump");
+        c.arg("--no-owner");
+        c.arg(format!("--schema={schema}")).arg(url);
+        c
+    }
+
+    /// Dumps `schema` of the test database into `out`, as the runbook's
+    /// `pg_dump --no-owner` does, beside the server that keeps serving.
+    pub fn dump_schema(url: &str, schema: &str, out: &Path) {
+        let file = std::fs::File::create(out).unwrap();
+        let status = dump(url, schema)
+            .stdout(std::process::Stdio::from(file))
+            .status()
+            .expect("pg_dump runs");
+        assert!(status.success(), "pg_dump of {schema} failed");
+    }
+
+    /// A `psql -v ON_ERROR_STOP=1` against the test database. The
+    /// caller adds `-c <sql>` or the dump on stdin.
+    pub fn psql(url: &str) -> Command {
+        if let Ok(container) = std::env::var("SCION_TEST_PG_CONTAINER") {
+            let db = url.rsplit('/').next().unwrap().to_owned();
+            let mut c = Command::new("docker");
+            c.args(["exec", "-i", &container, "psql", "-U", "postgres"]);
+            c.args(["-v", "ON_ERROR_STOP=1", "-d", &db]);
+            return c;
+        }
+        let mut c = Command::new("psql");
+        c.args(["-v", "ON_ERROR_STOP=1"]).arg(url);
+        c
+    }
+
+    /// Loads a dump into the test database, as the runbook's restore
+    /// does, with the same tools the dump ran.
+    pub fn load_schema(url: &str, file: &Path) {
+        let dump = std::fs::File::open(file).unwrap();
+        let output = psql(url)
+            .stdin(Stdio::from(dump))
+            .output()
+            .expect("psql runs");
+        assert!(
+            output.status.success(),
+            "the dump failed to load: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
