@@ -1189,6 +1189,12 @@ mod tests {
         client.resolve_ref(request).await.unwrap_err().code()
     }
 
+    /// The deadline the refusal tests put on their client's connect and
+    /// on its one call: the server answers a failed handshake at once
+    /// (it drops the stream), so anything that hangs is a client that
+    /// keeps the channel and reconnects - the flake this bounds.
+    const REFUSAL_BOUND: Duration = Duration::from_secs(10);
+
     /// Whether the process closes a raw TCP connection that sends `sent` and
     /// then never answers, within 10 s.
     async fn closes_a_peer_that_sends(addr: SocketAddr, sent: &'static [u8]) -> bool {
@@ -1499,15 +1505,32 @@ mod tests {
         // The connect of a client can end before the server has checked its
         // certificate, so the refusal may show in the connect or in the
         // call. A served client gets the stub's `NotFound`; anything else is
-        // the refusal.
-        match client(addr, &certs.authority.cert(), None).await {
-            Err(_) => {}
-            Ok(mut call) => {
-                let code = call
-                    .resolve_ref(ResolveRefRequest::default())
-                    .await
-                    .unwrap_err()
-                    .code();
+        // the refusal. Both steps carry the bound: the server drops a
+        // failed handshake at once, so a client that kept the channel and
+        // reconnected under the refusal would hang the test.
+        match tokio::time::timeout(REFUSAL_BOUND, client(addr, &certs.authority.cert(), None)).await
+        {
+            Err(elapsed) => {
+                panic!(
+                    "the client neither connected nor was refused in {REFUSAL_BOUND:?}: {elapsed}"
+                )
+            }
+            Ok(Err(_refused_at_the_connect)) => {}
+            Ok(Ok(mut call)) => {
+                let code = match tokio::time::timeout(
+                    REFUSAL_BOUND,
+                    call.resolve_ref(ResolveRefRequest::default()),
+                )
+                .await
+                {
+                    Err(elapsed) => {
+                        panic!(
+                            "the call past a doubtful handshake hung past {REFUSAL_BOUND:?}: {elapsed}"
+                        )
+                    }
+                    Ok(Ok(_)) => panic!("the stub served the client"),
+                    Ok(Err(status)) => status.code(),
+                };
                 assert_ne!(code, Code::NotFound, "the stub served the client");
             }
         }
@@ -1544,15 +1567,35 @@ mod tests {
         let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
         let (addr, _) = serve_tls(Limits::default(), TIMERS, &server_tls, HANDSHAKE_TIMEOUT).await;
-        // As above: the refusal may show in the connect or in the call.
-        match client(addr, &certs.authority.cert(), Some(&certs.stranger_client)).await {
-            Err(_) => {}
-            Ok(mut call) => {
-                let code = call
-                    .resolve_ref(ResolveRefRequest::default())
-                    .await
-                    .unwrap_err()
-                    .code();
+        // As above: the refusal may show in the connect or in the call,
+        // and both carry the bound.
+        match tokio::time::timeout(
+            REFUSAL_BOUND,
+            client(addr, &certs.authority.cert(), Some(&certs.stranger_client)),
+        )
+        .await
+        {
+            Err(elapsed) => {
+                panic!(
+                    "the client neither connected nor was refused in {REFUSAL_BOUND:?}: {elapsed}"
+                )
+            }
+            Ok(Err(_refused_at_the_connect)) => {}
+            Ok(Ok(mut call)) => {
+                let code = match tokio::time::timeout(
+                    REFUSAL_BOUND,
+                    call.resolve_ref(ResolveRefRequest::default()),
+                )
+                .await
+                {
+                    Err(elapsed) => {
+                        panic!(
+                            "the call past a doubtful handshake hung past {REFUSAL_BOUND:?}: {elapsed}"
+                        )
+                    }
+                    Ok(Ok(_)) => panic!("the stub served the client"),
+                    Ok(Err(status)) => status.code(),
+                };
                 assert_ne!(code, Code::NotFound, "the stub served the client");
             }
         }
