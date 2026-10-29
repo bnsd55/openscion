@@ -226,6 +226,14 @@ impl Backend {
         data: &Path,
         open: impl FnOnce(&str, Option<&Path>, usize, &Path, Marker) -> Result<Pg>,
     ) -> Result<Self> {
+        // A fresh open makes the data directory it names, private (the
+        // data is this user's alone): the first open on a new host
+        // writes its marker into a directory that exists. A directory
+        // that already exists keeps the checks below, and its mode is
+        // not touched (the DirBuilder's mode applies to created
+        // components only).
+        scion_proto::runtime::auth::create_private_dir_all(data)
+            .map_err(crate::error::Error::Io)?;
         // The directory's own checks run before anything reads it: a
         // symlink or a shared mode is refused by kind, before the marker
         // read could follow a link.

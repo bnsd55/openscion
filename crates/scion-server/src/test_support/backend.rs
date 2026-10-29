@@ -67,6 +67,12 @@ impl Backend {
     #[cfg(any(test, feature = "test-hooks"))]
     fn ensure_private_dir(data: &Path) {
         use std::os::unix::fs::PermissionsExt as _;
+        // A fresh open makes the data directory it names: the first open
+        // on a new host writes its marker into a directory that exists.
+        if !data.exists() {
+            let _ = scion_proto::runtime::auth::create_private_dir_all(data);
+            return;
+        }
         if data.is_dir() {
             let _ = std::fs::set_permissions(data, std::fs::Permissions::from_mode(0o700));
         }

@@ -1699,6 +1699,45 @@ mod tests {
     }
 
     #[test]
+    fn an_open_spares_the_folder_another_is_still_making() {
+        // The race the open lock covers: the first open sweeps `tmp/`
+        // while the second sits between making its folder and flocking
+        // it (no lock file yet, so the sweep would call it dead and
+        // remove it, uploads and all). The lock holds the sweep back
+        // until the window is over, and the folder the second process
+        // made survives its own sweep's turn.
+        super::spawn_guard::across_release(|| {
+            let dir = crate::test_support::private_tempdir();
+            let tmp = dir.path().join("tmp");
+            fs::create_dir_all(tmp.join("mid-window")).unwrap();
+            fs::write(tmp.join("mid-window").join("staged"), b"").unwrap();
+            // The first open of the directory is in progress.
+            let opening = lock_file(dir.path(), "open.lock").unwrap();
+            assert!(flock(&opening, FlockOperation::NonBlockingLockExclusive).unwrap());
+            let path = dir.path().to_owned();
+            let second = thread::spawn(move || Blobs::open(&path));
+            // A negative cannot be polled for once, so the folder's
+            // survival is asserted across a window, every 20 ms. A slow
+            // start of the thread only strengthens the check.
+            let give_up = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < give_up {
+                assert!(
+                    tmp.join("mid-window").exists(),
+                    "an open swept a folder its maker had not locked yet"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+            // The window closes, the second open takes its turn, and the
+            // unheld folder goes: its maker never claimed it.
+            drop(opening);
+            let second = second.join().unwrap().unwrap();
+            assert!(!tmp.join("mid-window").exists());
+            assert_eq!(fs::read_dir(&tmp).unwrap().count(), 1);
+            drop(second);
+        });
+    }
+
+    #[test]
     fn a_put_records_one_observation_per_fsync_of_the_blob_path() {
         let dir = crate::test_support::private_tempdir();
         let metrics = std::sync::Arc::new(crate::metrics::Metrics::default());
