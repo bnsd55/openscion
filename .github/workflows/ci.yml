@@ -850,6 +850,12 @@ jobs:
       # can still upload. Without it the starved runner dies with
       # every log it kept.
       - run: |
+          # The coverage measure's own trick: no debug info in the test
+          # build. The full workspace's test binaries with line tables
+          # grew the disk past its floor mid-link (the guard tripped at
+          # 100 MB free with two linkers at 95% CPU); without them the
+          # build is also far faster.
+          printf '[profile.dev]\ndebug = false\nstrip = true\n\n[profile.test]\ndebug = false\nstrip = true\n' > .cargo/config.toml
           rm -f "$RUNNER_TEMP/arm64-test.log" "$RUNNER_TEMP/arm64-sampler.log" guard.trip measure.pgid measure.rc
           start_avail=$(df --output=avail -BG / 2> /dev/null | tail -1 | tr -dc '0-9') || true
           start_mem=$(free -m 2> /dev/null | awk 'NR==2 {print $7}') || true
