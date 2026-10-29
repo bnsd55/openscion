@@ -1195,8 +1195,9 @@ fn identity(
 
 /// The raw git date `<seconds> <sign><hhmm>`, as the pair gix parses it
 /// to, or `None` when the bytes are not that grammar. A zone with a
-/// seconds field (`+053030`) or a zone too long to read as two two-digit
-/// fields is refused here, where gix would coerce its offset to zero.
+/// seconds field (`+053030`), a zone too long to read as two two-digit
+/// fields, or one too short to hold them (`+1`, a bare `+`) is refused
+/// here, where gix would coerce its offset to zero.
 fn zone(raw: &str) -> Option<(i64, i32)> {
     let (seconds, offset) = raw.split_once(' ')?;
     let seconds = seconds.parse().ok()?;
@@ -1206,7 +1207,7 @@ fn zone(raw: &str) -> Option<(i64, i32)> {
         _ => return None,
     };
     let digits = offset.get(1..)?;
-    let (hours, minutes) = digits.split_at(2);
+    let (hours, minutes) = digits.split_at_checked(2)?;
     if minutes.len() != 2
         || !hours
             .bytes()
@@ -1234,7 +1235,6 @@ fn per_sec(count: usize, since: Instant) -> u128 {
 #[cfg(test)]
 mod tests {
     use crate::backend::Backend;
-    use crate::store::Store;
     use std::fs;
     use std::process::Command;
     use std::sync::Arc;
@@ -1298,7 +1298,7 @@ mod tests {
         };
         let import = |cache_entries| {
             let data = crate::test_support::private_tempdir();
-            let store = Backend::sqlite(Store::open(data.path()).unwrap());
+            let store = Backend::open_test(data.path()).unwrap();
             import_with_cache(&store, "main", dir, &opts, cache_entries, MAX_CHANGES).unwrap()
         };
         let tiny = import(2);
@@ -1320,7 +1320,7 @@ mod tests {
         git(dir, &["commit", "-q", "-m", "add"]);
 
         let data = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open(data.path()).unwrap());
+        let store = Backend::open_test(data.path()).unwrap();
         let opts = |rev: &str| ImportOptions {
             rev: rev.into(),
             target_ref: "main".into(),
@@ -1370,7 +1370,7 @@ mod tests {
         git(dir, &["commit", "-q", "-m", "one"]);
 
         let data = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open(data.path()).unwrap());
+        let store = Backend::open_test(data.path()).unwrap();
         let opts = ImportOptions {
             rev: "main".into(),
             target_ref: "main".into(),
@@ -1401,8 +1401,8 @@ mod tests {
     fn a_land_while_the_import_checks_the_ref_is_never_overwritten() {
         crate::store::spawn_guard::prime_gix_lookup();
         let data = crate::test_support::private_tempdir();
-        let server = Backend::sqlite(Store::open(data.path()).unwrap());
-        let importer = Backend::sqlite(Store::open_shared(data.path()).unwrap());
+        let server = Backend::open_test(data.path()).unwrap();
+        let importer = Backend::open_test_shared(data.path()).unwrap();
         // main is at root. Git has root ─ tip, and a land puts X on root.
         let changeset = |parents, message: &str| {
             Changeset::new(
@@ -1481,8 +1481,8 @@ mod tests {
     #[test]
     fn an_import_that_keeps_losing_the_ref_swap_gives_up() {
         let data = crate::test_support::private_tempdir();
-        let server = Backend::sqlite(Store::open(data.path()).unwrap());
-        let importer = Backend::sqlite(Store::open_shared(data.path()).unwrap());
+        let server = Backend::open_test(data.path()).unwrap();
+        let importer = Backend::open_test_shared(data.path()).unwrap();
         // main is at root. The chain root <- a1 <- a2 <- a3 <- tip hangs
         // under it, so every mover target is still an ancestor of the
         // imported tip and the import never hears "diverged".
@@ -1564,7 +1564,7 @@ mod tests {
             git(dir, &["commit", "-q", "-m", &i.to_string()]);
         }
         let data = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open(data.path()).unwrap());
+        let store = Backend::open_test(data.path()).unwrap();
         let import = |rev: &str| {
             let opts = ImportOptions {
                 rev: rev.into(),
@@ -1575,14 +1575,18 @@ mod tests {
         };
         import("main~1");
         // As after a version bump of the root tree: no stored root trees.
-        let sql = "DELETE FROM derived WHERE kind = ?1";
-        let removed = store.write(|c| {
-            c.sqlite()
-                .unwrap()
-                .execute(sql, [RootTree::NAME])
-                .map_err(crate::error::from_sqlite)
-        });
-        assert_eq!(removed.unwrap(), 4);
+        // The delete goes through the metadata trait, so the same reset
+        // runs on both backends.
+        let removed = store
+            .write(|c| {
+                c.delete_derived_below(
+                    RootTree::NAME,
+                    RootTree::VERSION.saturating_add(1),
+                    usize::MAX,
+                )
+            })
+            .unwrap();
+        assert_eq!(removed, 4);
 
         let commits = store.commits();
         assert_eq!(import("main").imported, 1);
@@ -1607,8 +1611,8 @@ mod tests {
             );
         }
         let data = crate::test_support::private_tempdir();
-        let server = Backend::sqlite(Store::open(data.path()).unwrap());
-        let importer = Backend::sqlite(Store::open_shared(data.path()).unwrap());
+        let server = Backend::open_test(data.path()).unwrap();
+        let importer = Backend::open_test_shared(data.path()).unwrap();
         let opts = ImportOptions {
             rev: "main".into(),
             target_ref: "main".into(),
@@ -1646,6 +1650,13 @@ mod tests {
 
     #[test]
     fn an_import_that_is_alone_runs_its_batch_in_one_transaction() {
+        // An import on Postgres always shares the schema with a server
+        // (the shared flag names Postgres outright), so the budget always
+        // applies there: the alone shape has no Postgres form.
+        if Backend::test_is_postgres() {
+            eprintln!("skip on postgres: the budget always applies on Postgres");
+            return;
+        }
         crate::store::spawn_guard::prime_gix_lookup();
         let repo = crate::test_support::private_tempdir();
         let dir = repo.path();
@@ -1659,7 +1670,7 @@ mod tests {
             );
         }
         let data = crate::test_support::private_tempdir();
-        let importer = Backend::sqlite(Store::open(data.path()).unwrap());
+        let importer = Backend::open_test(data.path()).unwrap();
         let opts = ImportOptions {
             rev: "main".into(),
             target_ref: "main".into(),

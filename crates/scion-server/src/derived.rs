@@ -206,20 +206,6 @@ impl DeriveFlights {
         }
     }
 
-    /// A flights set whose bounded walks share `walk_bytes`. For tests of
-    /// the byte budget, which use a pool a chain can outgrow.
-    #[cfg(test)]
-    pub(crate) fn with_walk_bytes(walks_cap: usize, walk_bytes: crate::memory::Bytes) -> Self {
-        Self {
-            flights: Mutex::new(HashMap::new()),
-            in_flight: Mutex::new(0),
-            woken: Condvar::new(),
-            walks_cap,
-            walk_bytes,
-            metrics: std::sync::OnceLock::new(),
-        }
-    }
-
     /// Gives the walks the server's metrics registry, once, before the
     /// server serves.
     pub(crate) fn set_metrics(&self, metrics: std::sync::Arc<crate::metrics::Metrics>) {
@@ -230,6 +216,20 @@ impl DeriveFlights {
     /// pool is a shared handle.
     pub(crate) fn walk_bytes(&self) -> crate::memory::Bytes {
         self.walk_bytes.clone()
+    }
+
+    /// A flights set whose bounded walks share `walk_bytes`. For tests of
+    /// the cap and the budget, which use a pool a chain can outgrow.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) fn with_walk_bytes(walks_cap: usize, walk_bytes: crate::memory::Bytes) -> Self {
+        Self {
+            flights: Mutex::new(HashMap::new()),
+            in_flight: Mutex::new(0),
+            woken: Condvar::new(),
+            walks_cap,
+            walk_bytes,
+            metrics: std::sync::OnceLock::new(),
+        }
     }
 }
 
@@ -991,6 +991,7 @@ mod tests {
 
     use super::*;
     use crate::db::testing;
+    use crate::pg::damage;
     use crate::store::{FSYNC_LEAVES_DRIVE_CACHE, SCHEMA_VERSION, migrate};
     use crate::tree::{self, RootTree};
 
@@ -1259,17 +1260,6 @@ mod tests {
     /// A new store with `history` in repo `r`, as [`store_chain`] stores it.
     fn store_with(history: &[Edits]) -> (tempfile::TempDir, Backend, RepoId, Vec<ChangesetId>) {
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
-        let (repo, ids) = store.write(|c| store_chain(c, history)).unwrap();
-        (dir, store, repo, ids)
-    }
-
-    /// [`store_with`] on the backend the tests run on: the Postgres test
-    /// schemas on the Postgres job, the data directory's store otherwise.
-    fn store_with_here(
-        history: &[Edits],
-    ) -> (tempfile::TempDir, Backend, RepoId, Vec<ChangesetId>) {
-        let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test(dir.path()).unwrap();
         let (repo, ids) = store.write(|c| store_chain(c, history)).unwrap();
         (dir, store, repo, ids)
@@ -1373,11 +1363,23 @@ mod tests {
 
     /// The rows of kind `name` at `version`, as (changeset, value).
     fn rows_of(store: &Backend, name: &str, version: u32) -> Vec<(Vec<u8>, Vec<u8>)> {
-        let all = store.read(|c| Ok(rows(c.sqlite().unwrap()))).unwrap();
-        all.into_iter()
-            .filter(|(kind, v, ..)| kind == name && *v == version)
+        damage::derived_rows(store)
+            .unwrap()
+            .into_iter()
+            .filter(|(kind, v, ..)| kind == name && *v == i64::from(version))
             .map(|(_, _, cs, value)| (cs, value))
             .collect()
+    }
+
+    /// The commits one run made, as steps: `steps(n)` when the count
+    /// means anything. SQLite only: `commits()` is always 0 on Postgres,
+    /// whose one write connection batches, so the commit-count claims
+    /// are SQLite claims (the Postgres write path has its own tests).
+    fn commits_delta(store: &Backend, before: u64, steps: u64, what: &str) {
+        if Backend::test_is_postgres() {
+            return;
+        }
+        assert_eq!(store.commits() - before, steps, "{what}");
     }
 
     /// The rows of the test kind at `version`, as (changeset, value).
@@ -1449,6 +1451,13 @@ mod tests {
 
     #[test]
     fn a_version_2_database_upgrades_and_rederives_its_root_trees() {
+        // The old shape is a SQLite file of schema version 2, made
+        // through `migrate`: there is no Postgres form of an older
+        // build's store, and the schema-drift tests cover the Postgres
+        // migrations. This test leaves with the engine.
+        if Backend::test_is_postgres() {
+            return;
+        }
         let dir = crate::test_support::private_tempdir();
         let (repo, ids, before) = {
             let c = Connection::open(dir.path().join("scion.db")).unwrap();
@@ -1509,8 +1518,9 @@ mod tests {
 
     /// How many root tree rows the store holds.
     fn root_trees(store: &Backend) -> usize {
-        let all = store.read(|c| Ok(rows(c.sqlite().unwrap()))).unwrap();
-        all.iter()
+        damage::derived_rows(store)
+            .unwrap()
+            .iter()
             .filter(|(kind, ..)| kind == RootTree::NAME)
             .count()
     }
@@ -1544,7 +1554,7 @@ mod tests {
             7
         );
         assert_eq!(DERIVES.get(), 7, "each changeset once");
-        assert_eq!(store.commits() - commits, steps(7), "one per step");
+        commits_delta(&store, commits, steps(7), "one per step");
         // Each step went on from the value of the step before it.
         for (count, &cs) in (1..).zip(&ids) {
             assert_eq!(
@@ -1644,19 +1654,18 @@ mod tests {
     /// growth, never more.
     #[test]
     fn a_derive_walk_over_its_byte_budget_stops_busy_and_a_retry_resumes() {
+        let _slot = damage::slot();
         // The walk of a chain of 12 takes six steps (STEP is 2 in tests);
         // the store's budget holds seven steps' worth, and this test holds
         // two of them, as the walks of other callers would.
         let budget = 7 * walk_step_bytes();
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(
-            Store::open_with_walk_bytes(
-                dir.path(),
-                DERIVE_WALKS_CAP,
-                crate::memory::Bytes::named(budget, "derive walk"),
-            )
-            .unwrap(),
-        );
+        let store = Backend::open_test_with_walks(
+            dir.path(),
+            DERIVE_WALKS_CAP,
+            crate::memory::Bytes::named(budget, "derive walk"),
+        )
+        .unwrap();
         let (repo, ids) = store.write(|c| store_chain(c, &chain(12))).unwrap();
         let tip = ids[11];
         let held = store
@@ -1702,16 +1711,15 @@ mod tests {
     /// bytes: a history the budget cannot hold still derives.
     #[test]
     fn an_unbounded_derive_walk_takes_no_bytes() {
+        let _slot = damage::slot();
         let budget = walk_step_bytes();
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(
-            Store::open_with_walk_bytes(
-                dir.path(),
-                DERIVE_WALKS_CAP,
-                crate::memory::Bytes::named(budget, "derive walk"),
-            )
-            .unwrap(),
-        );
+        let store = Backend::open_test_with_walks(
+            dir.path(),
+            DERIVE_WALKS_CAP,
+            crate::memory::Bytes::named(budget, "derive walk"),
+        )
+        .unwrap();
         let (repo, ids) = store.write(|c| store_chain(c, &chain(12))).unwrap();
         assert_eq!(
             get_unbounded::<Ancestry>(&store, repo, ids[11])
@@ -1775,7 +1783,7 @@ mod tests {
         backfill::<ChangedPathsV2>(&store, "r", tip).unwrap();
         assert_eq!(DERIVES.get(), 0);
         assert!(kind_rows(&store, 1).is_empty(), "version 1 is removed");
-        assert_eq!(store.commits() - commits, steps(7));
+        commits_delta(&store, commits, steps(7), "one per step");
         let one = u64::from(FSYNC_LEAVES_DRIVE_CACHE);
         assert_eq!(store.blobs().full_flushes() - flushes, one);
         assert_eq!(kind_rows(&store, 2).len(), 7);
@@ -1789,16 +1797,7 @@ mod tests {
     #[test]
     fn a_write_removes_root_trees_of_older_versions() {
         let (_dir, store, repo, ids) = store_with(&chain(7));
-        let older = "INSERT INTO derived (kind, version, cs, value)
-                     SELECT kind, 0, cs, value FROM derived WHERE kind = ?1";
-        let added = store
-            .write(|c| {
-                c.sqlite()
-                    .unwrap()
-                    .execute(older, [RootTree::NAME])
-                    .map_err(crate::error::from_sqlite)
-            })
-            .unwrap();
+        let added = damage::downgrade_derived_rows(&store, RootTree::NAME).unwrap();
         assert_eq!(added, 7);
 
         // The chain puts "a"; its blob file makes the real lens work.
@@ -1826,14 +1825,11 @@ mod tests {
         parents: &[Vec<usize>],
     ) -> (tempfile::TempDir, Backend, RepoId, Vec<ChangesetId>) {
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let store = Backend::open_test(dir.path()).unwrap();
         let (repo, ids) = store
             .write(|c| {
                 let repo = c.create_repo("r")?;
-                Ok((
-                    repo,
-                    testing::insert_graph(c.sqlite().unwrap(), repo, parents)?,
-                ))
+                Ok((repo, testing::insert_graph(c, repo, parents)?))
             })
             .unwrap();
         (dir, store, repo, ids)
@@ -1922,7 +1918,7 @@ mod tests {
             model[7]
         );
         assert_eq!(DERIVES.get(), 8, "each changeset once");
-        assert_eq!(store.commits() - commits, steps(8), "one per step");
+        commits_delta(&store, commits, steps(8), "one per step");
         for (i, &cs) in ids.iter().enumerate() {
             assert_eq!(
                 get_unbounded::<Ancestry>(&store, repo, cs).unwrap(),
@@ -1986,7 +1982,9 @@ mod tests {
                 let commits = store.commits();
                 proptest::prop_assert_eq!(&get_unbounded::<Ancestry>(&store, repo, ids[i]).unwrap(), &model[i]);
                 proptest::prop_assert_eq!(DERIVES.get(), missing);
-                proptest::prop_assert_eq!(store.commits() - commits, steps(missing));
+                if !Backend::test_is_postgres() {
+                    proptest::prop_assert_eq!(store.commits() - commits, steps(missing));
+                }
                 derived.extend(model[i].iter().map(|&id| (id, i)));
             }
         }
@@ -2094,7 +2092,7 @@ mod tests {
         }
         let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         COLD_DERIVES.store(0, Ordering::Relaxed);
-        let (_dir, store, repo, ids) = store_with_here(&chain(12));
+        let (_dir, store, repo, ids) = store_with(&chain(12));
         let tip = *ids.last().unwrap();
         // The same flight, held in the Postgres backend's own walks: eight
         // cold readers of one repo join one walk, and the walk derives
@@ -2158,12 +2156,17 @@ mod tests {
         // its permit taken. The gate, not a clock, holds it there: the
         // walk's permit stays taken for as long as the test wants.
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open_with_walks(dir.path(), 1).unwrap());
+        let store = Backend::open_test_with_walks(
+            dir.path(),
+            1,
+            crate::memory::Bytes::named(DERIVE_WALK_BUDGET, "derive walk"),
+        )
+        .unwrap();
         let (repo1, ids1) = another_chain(&store, "one", &chain(3));
         let (repo2, ids2) = another_chain(&store, "two", &chain(3));
         let (repo3, ids3) = another_chain(&store, "three", &chain(3));
         let dir2 = crate::test_support::private_tempdir();
-        let store2 = Backend::sqlite(Store::open(dir2.path()).unwrap());
+        let store2 = Backend::open_test(dir2.path()).unwrap();
         let (repo_b, ids_b) = another_chain(&store2, "r", &chain(3));
         let (owner, beside) = std::thread::scope(|scope| {
             let _gate = gate_closed();
@@ -2300,7 +2303,12 @@ mod tests {
         let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         COLD_DERIVES.store(0, Ordering::Relaxed);
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open_with_walks(dir.path(), 1).unwrap());
+        let store = Backend::open_test_with_walks(
+            dir.path(),
+            1,
+            crate::memory::Bytes::named(DERIVE_WALK_BUDGET, "derive walk"),
+        )
+        .unwrap();
         // r2's walk holds the store's only walk permit, parked at the
         // gate. r1's owner then waits for a permit that never comes, and
         // its short deadline fires inside the permit wait — an early `?`
@@ -2422,6 +2430,11 @@ mod tests {
 
     #[test]
     fn a_land_finishes_while_cold_reads_walk_deep_history() {
+        // The cap of two is a Store constructor's knob; the Postgres twin
+        // below runs the same storm against the database's default cap.
+        if Backend::test_is_postgres() {
+            return;
+        }
         let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         COLD_DERIVES.store(0, Ordering::Relaxed);
         // A cap of two walks, and a storm of cold reads: forty repos, each
@@ -2434,7 +2447,12 @@ mod tests {
         // transactions on the write connection, and the land would wait
         // behind all of them.
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open_with_walks(dir.path(), 2).unwrap());
+        let store = Backend::open_test_with_walks(
+            dir.path(),
+            2,
+            crate::memory::Bytes::named(DERIVE_WALK_BUDGET, "derive walk"),
+        )
+        .unwrap();
         let mut repos: Vec<(RepoId, ChangesetId)> = Vec::new();
         for i in 0..40 {
             let (repo, ids) = another_chain(&store, &format!("r{i}"), &chain(4));
@@ -2477,8 +2495,62 @@ mod tests {
         });
         COLD_SLEEP.store(0, Ordering::Relaxed);
     }
+
+    /// The same storm against the database: forty repos of cold reads
+    /// walk while a land lands. The claim is the bound: the land waits
+    /// well under 1.5 s, whatever the cap's exact arithmetic.
+    #[test]
+    fn a_land_finishes_while_cold_reads_walk_deep_history_on_postgres() {
+        if !Backend::test_is_postgres() {
+            return;
+        }
+        let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        COLD_DERIVES.store(0, Ordering::Relaxed);
+        let (_dir, store, _repo, _ids) = store_with(&chain(1));
+        let mut repos: Vec<(RepoId, ChangesetId)> = Vec::new();
+        for i in 0..40 {
+            let (repo, ids) = another_chain(&store, &format!("r{i}"), &chain(4));
+            repos.push((repo, *ids.last().unwrap()));
+        }
+        COLD_SLEEP.store(100, Ordering::Relaxed);
+        std::thread::scope(|scope| {
+            let mut walkers: Vec<_> = repos
+                .iter()
+                .map(|&(repo, tip)| {
+                    let store = store.clone();
+                    scope.spawn(move || {
+                        let deadline = crate::deadline::Deadline::new(
+                            Instant::now() + Duration::from_secs(60),
+                        );
+                        get_by::<Cold<1>>(&store, repo, tip, &deadline).unwrap()
+                    })
+                })
+                .collect();
+            wait_entered(20);
+            let at = Instant::now();
+            let (land_repo, _) = another_chain(&store, "land", &chain(1));
+            let waited = at.elapsed();
+            assert!(
+                waited < Duration::from_millis(1_500),
+                "the land waited {waited:?}"
+            );
+            eprintln!("the land waited {waited:?} against the 1.5 s bound");
+            COLD_SLEEP.store(0, Ordering::Relaxed);
+            for walker in walkers.drain(..) {
+                assert_eq!(walker.join().unwrap(), 4);
+            }
+            let _ = land_repo;
+        });
+        COLD_SLEEP.store(0, Ordering::Relaxed);
+    }
+
     #[test]
     fn a_walk_waits_while_a_writer_waits_for_the_connection() {
+        // The Postgres twin below covers the database; this one stays on
+        // the data directory, whose connection the walk alone holds.
+        if Backend::test_is_postgres() {
+            return;
+        }
         let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         COLD_DERIVES.store(0, Ordering::Relaxed);
         let (_dir, store, repo, ids) = store_with(&chain(12));
@@ -2549,7 +2621,7 @@ mod tests {
         }
         let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         COLD_DERIVES.store(0, Ordering::Relaxed);
-        let (_dir, store, repo, ids) = store_with_here(&chain(12));
+        let (_dir, store, repo, ids) = store_with(&chain(12));
         let tip = *ids.last().unwrap();
         // The same writer priority, over the Postgres writer mutex: the
         // walk's step ends, it sees a writer waiting for the connection,

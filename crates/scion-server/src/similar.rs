@@ -709,7 +709,7 @@ impl<R: FnMut(&RepoPath, BlobId, usize) -> Result<Option<Chunks>>> Search<'_, R>
 mod tests {
     use super::*;
     use crate::backend::Backend;
-    use crate::store::Store;
+    use crate::pg::damage;
 
     /// A file cut in two parts anywhere after its first 8,000 bytes has
     /// the same chunks as when it comes whole, also where a part ends
@@ -755,8 +755,9 @@ mod tests {
     /// costs what it costs with one path, and finds the same rename.
     #[test]
     fn a_blob_added_at_many_paths_is_indexed_once() {
+        let _slot = damage::slot();
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let store = Backend::open_test(dir.path()).unwrap();
         let new = store.blobs().put(&lines(0..4000)).unwrap();
         // 90% like `new`.
         let old = store
@@ -790,8 +791,9 @@ mod tests {
     /// deleted file with the name of the added file, and step 3 would.
     #[test]
     fn a_file_refused_is_read_once() {
+        let _slot = damage::slot();
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let store = Backend::open_test(dir.path()).unwrap();
         let new = store.blobs().put(&lines(0..1000)).unwrap();
         let refused = store.blobs().put(&lines(0..900)).unwrap();
         let paths = ["a/new", "b/new"].map(|p| RepoPath::new(p).unwrap());
@@ -823,8 +825,9 @@ mod tests {
     /// rows indexed.
     #[test]
     fn a_file_whose_indexing_crosses_the_budget_stops_before_its_read() {
+        let _slot = damage::slot();
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let store = Backend::open_test(dir.path()).unwrap();
         let deleted_blob = store.blobs().put(&lines(0..60)).unwrap();
         // Two added files, 60 chunks each and of a different content, so no
         // same-content pair is found before step 3: the first slot that
@@ -869,8 +872,9 @@ mod tests {
     /// each call looks at one more deleted file past the cap.
     #[test]
     fn resumed_calls_reach_the_renames_of_one_uncapped_call() {
+        let _slot = damage::slot();
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let store = Backend::open_test(dir.path()).unwrap();
         let added_blob = store.blobs().put(&lines(0..60)).unwrap();
         let added_path = RepoPath::new("new").unwrap();
         // One deleted file 90% like the added file, two unlike.

@@ -923,7 +923,7 @@ mod tests {
             // time.
             let ids = store
                 .write(|c| {
-                    let ids = testing::insert_history(c.sqlite().unwrap(), repo, &parents, &edits)?;
+                    let ids = testing::insert_history(c, repo, &parents, &edits)?;
                     for &tip in &ids {
                         derived::derive::<PathHistory>(c, repo, tip, &mut crate::tree::lens_none())?;
                     }

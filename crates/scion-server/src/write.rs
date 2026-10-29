@@ -344,7 +344,7 @@ fn check_blobs(
 #[cfg(test)]
 mod tests {
     use crate::backend::Backend;
-    use crate::store::Store;
+    use crate::pg::damage;
     use std::collections::BTreeMap;
 
     use scion_core::{FileState, GitOid, IdentityTime};
@@ -377,7 +377,7 @@ mod tests {
     /// A store with repo `main` and an empty root changeset in it.
     fn store_with_root() -> (tempfile::TempDir, Backend, ChangesetId) {
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let store = Backend::open_test(dir.path()).unwrap();
         let root = store
             .write(|c| {
                 let repo = c.create_repo("main")?;
@@ -444,6 +444,7 @@ mod tests {
     #[test]
     fn an_upload_keeps_a_stored_copy_only_for_a_blob_of_its_repo() {
         use std::os::unix::fs::MetadataExt as _;
+        let _slot = damage::slot();
         let (_dir, store, _root) = store_with_root();
         let (main, other) = (repo(&store, "main"), repo(&store, "other"));
         let inode = |id| {
@@ -464,6 +465,7 @@ mod tests {
 
     #[test]
     fn an_upload_shares_one_full_flush_with_its_row() {
+        let _slot = damage::slot();
         let (_dir, store, _root) = store_with_root();
         let main = repo(&store, "main");
         let before = store.blobs().full_flushes();
@@ -480,6 +482,7 @@ mod tests {
 
     #[test]
     fn a_blob_of_another_repo_is_refused_before_it_is_read() {
+        let _slot = damage::slot();
         let (_dir, store, root) = store_with_root();
         let secret = upload(&store, repo(&store, "other"), b"secret");
         let never = BlobId::of(b"stored nowhere");
@@ -502,6 +505,7 @@ mod tests {
 
     #[test]
     fn a_blob_of_another_repo_fails_the_changeset_before_any_blob_is_read() {
+        let _slot = damage::slot();
         let (_dir, store, root) = store_with_root();
         let theirs = upload(&store, repo(&store, "other"), b"theirs");
         let mine = upload(&store, repo(&store, "main"), b"mine");
@@ -515,6 +519,7 @@ mod tests {
 
     #[test]
     fn a_gitlink_names_no_blob_whatever_its_bytes() {
+        let _slot = damage::slot();
         let (_dir, store, root) = store_with_root();
         let theirs = upload(&store, repo(&store, "other"), b"theirs");
         let module = FileState::Gitlink {
@@ -540,6 +545,7 @@ mod tests {
 
     #[test]
     fn a_changeset_makes_its_blobs_durable_before_it_commits() {
+        let _slot = damage::slot();
         let (_dir, store, root) = store_with_root();
         // Backendd by an upload that never synced.
         let mut upload = store.blobs().batch();
@@ -549,16 +555,28 @@ mod tests {
 
         let before = store.blobs().full_flushes();
         create_changeset(&store, "main", &child(root, &[("f", blob)]), &later()).unwrap();
-        // One flush for the blob before the commit, and one for the commit
-        // where a plain fsync leaves it in the drive cache.
-        assert_eq!(
-            store.blobs().full_flushes() - before,
-            1 + u64::from(FSYNC_LEAVES_DRIVE_CACHE)
-        );
+        // One flush for the blob before the commit, and one for the
+        // commit where a plain fsync leaves it in the drive cache.
+        //
+        // On Postgres the one flush before the commit is already a full
+        // flush where the drive cache needs it: pg.rs's flush calls
+        // blobs.full_flush() under FSYNC_LEAVES_DRIVE_CACHE, and the
+        // commit's own durability is Postgres's (synchronous_commit=on,
+        // checked at open). SQLite needs the second full flush because
+        // its own database file sits on the same drive.
+        if Backend::test_is_postgres() {
+            assert_eq!(store.blobs().full_flushes() - before, 1);
+        } else {
+            assert_eq!(
+                store.blobs().full_flushes() - before,
+                1 + u64::from(FSYNC_LEAVES_DRIVE_CACHE)
+            );
+        }
     }
 
     #[test]
     fn a_parent_without_a_root_tree_is_derived_in_steps_before_the_write() {
+        let _slot = damage::slot();
         let (_dir, store, root) = store_with_root();
         // Changesets without root trees, as after a version bump of the kind.
         let tip = store
@@ -571,12 +589,17 @@ mod tests {
             .unwrap();
         let commits = store.commits();
         create_changeset(&store, "main", &child(tip, &[]), &later()).unwrap();
-        // Five root trees in steps, then the write.
-        assert_eq!(store.commits() - commits, crate::derived::steps(5) + 1);
+        // Five root trees in steps, then the write. Until #682's Postgres
+        // counters land, commits() is always 0 on Postgres, so the count
+        // is a SQLite claim.
+        if !Backend::test_is_postgres() {
+            assert_eq!(store.commits() - commits, crate::derived::steps(5) + 1);
+        }
     }
 
     #[test]
     fn a_blob_that_many_paths_name_is_read_once() {
+        let _slot = damage::slot();
         let (_dir, store, root) = store_with_root();
         let blob = upload(&store, repo(&store, "main"), b"same");
         let paths: Vec<String> = (0..100).map(|i| format!("f{i}")).collect();
@@ -588,6 +611,7 @@ mod tests {
 
     #[test]
     fn a_missing_repo_or_parent_fails_before_any_blob_is_read() {
+        let _slot = damage::slot();
         let (_dir, store, root) = store_with_root();
         let blob = store.blobs().put(b"new").unwrap();
         let before = store.blobs().verifies();
@@ -606,6 +630,7 @@ mod tests {
 
     #[test]
     fn the_error_names_the_first_path_whose_blob_is_missing() {
+        let _slot = damage::slot();
         let (_dir, store, root) = store_with_root();
         // Path order is the reverse of blob ID order.
         let (x, y) = (BlobId::of(b"x"), BlobId::of(b"y"));

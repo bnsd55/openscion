@@ -55,6 +55,13 @@ use crate::store::Blobs;
 #[path = "test_support/pg.rs"]
 pub(crate) mod test_hooks;
 
+/// The damage tests make: one function per kind, each doing the SQLite
+/// or the Postgres form. A child module of `pg` (same as `test_hooks`)
+/// so its Postgres arm can reach this file's error mapping.
+#[cfg(test)]
+#[path = "test_support/damage.rs"]
+pub(crate) mod damage;
+
 /// The schema version this build makes and reads.
 pub(crate) const PG_SCHEMA_VERSION: u32 = 5;
 
@@ -159,6 +166,15 @@ struct PgInner {
     /// keeps its own.
     #[cfg(any(test, feature = "test-hooks"))]
     hooks: crate::store::test_hooks::ImportHooks,
+    /// The commit seams the tests share with the SQLite store: the
+    /// commits made, the write transactions run, and how many of the
+    /// next commits fail as a busy database.
+    #[cfg(any(test, feature = "test-hooks"))]
+    committed: std::sync::atomic::AtomicU64,
+    #[cfg(any(test, feature = "test-hooks"))]
+    txes: std::sync::atomic::AtomicU64,
+    #[cfg(any(test, feature = "test-hooks"))]
+    fail_commits: std::sync::atomic::AtomicU64,
     /// The operator metrics, set once by the server before it serves: a
     /// commit's wait for the collector's advisory key records how long
     /// it waited. Empty in import, fsck and gc, which export none.
@@ -816,7 +832,7 @@ impl Pg {
         data: &Path,
         marker: Marker,
     ) -> Result<Self> {
-        Self::open_in(url, ca, readers, data, None, false, marker)
+        Self::open_in(url, ca, readers, data, None, false, marker, None)
     }
 
     /// [`Pg::open`], as the one server process of the database: a second
@@ -837,11 +853,11 @@ impl Pg {
         // setup asks the database `current_schema()` and locks that, so
         // parallel servers of distinct schemas do not fence each other,
         // and a plain URL fences the whole default schema.
-        Self::open_in(url, ca, readers, data, None, true, marker)
+        Self::open_in(url, ca, readers, data, None, true, marker, None)
     }
 
     /// [`Pg::open`], in the search path of `schema` when it is set.
-    #[allow(clippy::unused_self)]
+    #[allow(clippy::unused_self, clippy::too_many_arguments)]
     fn open_in(
         url: &str,
         ca: Option<&Path>,
@@ -850,6 +866,9 @@ impl Pg {
         schema: Option<&str>,
         exclusive: bool,
         marker: Marker,
+        // The derive walks to run with, or the default cap when `None`.
+        // The test constructor of the walk caps passes its own.
+        flights: Option<crate::derived::DeriveFlights>,
     ) -> Result<Self> {
         let options = base_options();
         let fence = Arc::new(Fence::new());
@@ -888,9 +907,17 @@ impl Pg {
             blobs,
             writers: Mutex::new(0),
             write_woken: Condvar::new(),
-            derive: crate::derived::DeriveFlights::new(crate::store::DERIVE_WALKS_CAP),
+            derive: flights.unwrap_or_else(|| {
+                crate::derived::DeriveFlights::new(crate::store::DERIVE_WALKS_CAP)
+            }),
             #[cfg(any(test, feature = "test-hooks"))]
             hooks: crate::store::test_hooks::ImportHooks::default(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            committed: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(any(test, feature = "test-hooks"))]
+            txes: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(any(test, feature = "test-hooks"))]
+            fail_commits: std::sync::atomic::AtomicU64::new(0),
             metrics: std::sync::OnceLock::new(),
         });
         // The probe of a server that lost its lock: once a minute the
@@ -1118,6 +1145,18 @@ impl Pg {
             Ok(value) => {
                 let unflushed = tx.cs_pending.as_deref().is_some_and(|p| !p.is_empty())
                     || tx.derived_pending.as_deref().is_some_and(|p| !p.is_empty());
+                #[cfg(any(test, feature = "test-hooks"))]
+                if self.inner.fail_commits.load(Ordering::Relaxed) > 0 {
+                    self.inner.fail_commits.fetch_sub(1, Ordering::Relaxed);
+                    // Counted as ended, as a real failed commit is: the
+                    // transaction rolls back below, nothing was written,
+                    // exactly as a busy commit ends on SQLite.
+                    self.inner.committed.fetch_add(1, Ordering::Release);
+                    let _ = tx.rollback();
+                    let fail =
+                        std::io::Error::other("the commit was made to fail by the test hook");
+                    return Err(Error::Storage(Storage::busy(fail)));
+                }
                 if unflushed {
                     // A caller that turned the importer's batching on and
                     // ended the transaction without the flush would
@@ -1137,7 +1176,12 @@ impl Pg {
                         "the transaction holds changeset rows it never flushed".to_owned(),
                     ));
                 }
-                tx.commit()?;
+                #[cfg(any(test, feature = "test-hooks"))]
+                self.inner.committed.fetch_add(1, Ordering::Release);
+                let committed = tx.commit();
+                #[cfg(any(test, feature = "test-hooks"))]
+                self.inner.txes.fetch_add(1, Ordering::Relaxed);
+                committed?;
                 Ok(value)
             }
             Err(error) => {
@@ -1156,6 +1200,31 @@ impl Pg {
     /// As [`Pg::commit`].
     pub(crate) fn write<T>(&self, f: impl FnOnce(&mut PgTx<'_>) -> Result<T>) -> Result<T> {
         self.commit(f)
+    }
+
+    /// Commits made so far: the seam the tests of the batching watch,
+    /// the same shape as the SQLite store's counter.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[must_use]
+    pub(crate) fn commits(&self) -> u64 {
+        self.inner.committed.load(Ordering::Acquire)
+    }
+
+    /// Write transactions run so far: the batching tests' counter, the
+    /// same shape as the SQLite store's.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[must_use]
+    pub(crate) fn txes(&self) -> u64 {
+        self.inner.txes.load(Ordering::Relaxed)
+    }
+
+    /// Sets how many of the next commits fail as a busy database: the
+    /// transaction runs and rolls back, so the retry re-runs it whole.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) fn fail_next_commits(&self, n: u32) {
+        self.inner
+            .fail_commits
+            .store(u64::from(n), Ordering::Relaxed);
     }
 
     /// Takes the write client, counted as a writer that waits: the
@@ -2770,6 +2839,8 @@ impl MetaTx for PgTx<'_> {
     /// [`Error::NotFound`] if `repo` does not have it, [`Error::Corrupt`]
     /// if it does not decode or match.
     fn get_changeset(&mut self, repo: RepoId, id: ChangesetId) -> Result<Changeset> {
+        #[cfg(test)]
+        crate::db::CHANGESET_READS.set(crate::db::CHANGESET_READS.get() + 1);
         let body: Vec<u8> = self
             .c
             .query_opt(
@@ -3133,15 +3204,18 @@ impl MetaTx for PgTx<'_> {
              WHERE kind = $1 AND version = $2 AND cs = ANY($3)",
             &[P::text(kind), P::i64(version), P::bytea_array(cs)],
         )?;
-        let mut found = rows
+        let found = rows
             .into_iter()
             .map(|row| {
                 let cs: Vec<u8> = row.get(0);
                 Ok((to_id(&cs)?, row.get::<_, Option<Vec<u8>>>(1)))
             })
             .collect::<Result<std::collections::HashMap<_, _>>>()?;
+        // Answered from the map without removing it: a batch may name the
+        // same id twice (two merges can share a side parent), and each
+        // ask gets the row - the reply has one entry per ASKED id.
         ids.iter()
-            .map(|id| Ok(found.remove(id).flatten()))
+            .map(|id| Ok(found.get(id).cloned().flatten()))
             .collect()
     }
 
@@ -3487,12 +3561,15 @@ impl MetaTx for PgTx<'_> {
                 "SELECT id, body FROM trees WHERE id = ANY($1)",
                 &[P::bytea_array(keys.clone())],
             )?;
-            let mut bodies: std::collections::HashMap<Vec<u8>, Vec<u8>> = rows
+            let bodies: std::collections::HashMap<Vec<u8>, Vec<u8>> = rows
                 .into_iter()
                 .map(|row| (row.get::<_, Vec<u8>>(0), row.get::<_, Vec<u8>>(1)))
                 .collect();
+            // Answered from the map without removing it: one tree can sit
+            // under two paths, so a batch may name the same id twice, and
+            // each ask gets the body.
             for key in keys {
-                out.push(bodies.remove(&key));
+                out.push(bodies.get(&key).cloned());
             }
         }
         Ok(out)
@@ -4650,7 +4727,10 @@ mod pool_tests {
             return None;
         }
         let data = crate::test_support::private_tempdir();
-        let backend = crate::backend::Backend::open_test(data.path()).unwrap();
+        // The pool tests hold the whole reader pool: they need the
+        // server's pool size, not the suite's small test pool.
+        let backend =
+            crate::backend::Backend::open_test_with_readers(data.path(), READERS).unwrap();
         let pg = backend
             .as_postgres()
             .cloned()

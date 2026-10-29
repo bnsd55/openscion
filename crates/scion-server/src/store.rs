@@ -207,16 +207,11 @@ impl Store {
         Self::open_as(dir, true, &build(), DeriveFlights::new(DERIVE_WALKS_CAP))
     }
 
-    /// Opens or creates a data directory as its server, with a cap of
-    /// `walks` derive walks in flight. For tests of the cap.
-    #[cfg(test)]
-    pub(crate) fn open_with_walks(dir: &Path, walks: usize) -> Result<Self> {
-        Self::open_as(dir, true, &build(), DeriveFlights::new(walks))
-    }
-
-    /// Opens or creates a data directory as its server, with a byte budget
-    /// for its bounded derive walks. For tests of the budget.
-    #[cfg(test)]
+    /// Opens or creates a data directory as its server, with the derive
+    /// walks built for `walks` in flight and `walk_bytes` of budget. For
+    /// the tests of the caps, which change the numbers, never the
+    /// machinery.
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn open_with_walk_bytes(
         dir: &Path,
         walks: usize,
@@ -226,7 +221,7 @@ impl Store {
             dir,
             true,
             &build(),
-            DeriveFlights::with_walk_bytes(walks, walk_bytes),
+            crate::derived::DeriveFlights::with_walk_bytes(walks, walk_bytes),
         )
     }
 

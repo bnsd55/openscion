@@ -1,6 +1,6 @@
 //! The capacity table of docs/operations.md (issue #387) cannot drift
 //! from the envelope's shape: every cell of the grid (3 writers x 3
-//! readers x 2 backends) is a row, numbers parse or the percentile
+//! readers) is a row, numbers parse or the percentile
 //! group is all `-` together (no half-filled cell publishes), the
 //! caption states the edges, and
 //! the footer names a commit that exists in this checkout's git - so a
@@ -11,8 +11,10 @@ use std::process::Command;
 
 const DOC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/operations.md");
 
-/// The grid's axes, in the order the table lists them.
-const BACKENDS: [&str; 2] = ["sqlite", "postgres"];
+/// The grid's axes, in the order the table lists them. One backend:
+/// the store is Postgres, and a table with any other backend's rows
+/// fails here.
+const BACKENDS: [&str; 1] = ["postgres"];
 const WRITERS: [u32; 3] = [2, 50, 200];
 const READERS: [u32; 3] = [0, 5, 20];
 

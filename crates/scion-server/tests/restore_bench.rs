@@ -11,10 +11,9 @@ use std::path::Path;
 use std::time::Instant;
 
 use scion_core::{BlobId, Changeset, ChangesetId, FileState, IdentityTime, RepoPath};
+use scion_server::Backend;
 use scion_server::fsck;
-use scion_server::test_support::backend::from_store;
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
-use scion_server::test_support::store::Store;
 
 /// The stated size of the measured store: repos and changesets per repo.
 /// Big enough that the per-byte and per-changeset costs of a restore
@@ -32,7 +31,7 @@ const RESTORE_BOUND_SECS: u64 = 600;
 #[ignore = "a measurement for the restore-time job: run with --ignored --nocapture"]
 fn a_restore_of_a_stated_store_takes_a_stated_time() {
     let dir = scion_server::test_support::private_tempdir();
-    let store = from_store(Store::open(dir.path()).unwrap());
+    let store = Backend::open_test(dir.path()).unwrap();
 
     // The build: REPOS repos of CHANGESETS_PER_REPO changesets each, one
     // file of FILE_BYTES per changeset, every chain deriving as it grows.
@@ -110,7 +109,7 @@ fn a_restore_of_a_stated_store_takes_a_stated_time() {
     // directories holding them are fsynced before the clock stops.
     fsync_tree(&restored_dir.path().join("objects"));
     fsync_dir(restored_dir.path());
-    let restored = from_store(Store::open(restored_dir.path()).unwrap());
+    let restored = Backend::open_test(restored_dir.path()).unwrap();
     let report = fsck::run(&restored, 1, &mut |_| {}).unwrap();
     assert!(
         report.problems.is_empty(),

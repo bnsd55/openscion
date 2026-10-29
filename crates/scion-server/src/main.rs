@@ -48,7 +48,9 @@ struct Cli {
     postgres_url_file: Option<PathBuf>,
     /// Verify the certificate of the Postgres server with this CA (PEM).
     /// Required when `--postgres-url` names a host that is not local.
-    #[arg(long, global = true, requires = "postgres_url", value_name = "FILE")]
+    /// The URL may come from any source: `--postgres-url`,
+    /// `--postgres-url-file` or `SCION_POSTGRES_URL`.
+    #[arg(long, global = true, value_name = "FILE")]
     postgres_ca: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
@@ -810,6 +812,13 @@ async fn main() -> anyhow::Result<()> {
     // The Postgres URL of the flags: the file form wins (the two cannot
     // be given together), the argv form warns, the env is quiet.
     let postgres_url = postgres_url_of(&cli)?;
+    // A CA without a URL from any source is refused here, after the
+    // resolution: clap cannot see the file and env forms.
+    if cli.postgres_ca.is_some() && postgres_url.is_none() {
+        anyhow::bail!(
+            "--postgres-ca needs a Postgres URL: give --postgres-url, --postgres-url-file or SCION_POSTGRES_URL"
+        );
+    }
     // `verify` and `restore` run without a store: verify reads only the
     // archive, and restore makes a data directory of its own. Handle them
     // before the store opens, so a restore's empty target stays empty of
@@ -831,7 +840,7 @@ async fn main() -> anyhow::Result<()> {
                 audit,
                 &cli.data,
                 &archive,
-                cli.postgres_url.as_deref(),
+                postgres_url.as_deref(),
                 cli.postgres_ca.as_deref(),
             )
             .await;

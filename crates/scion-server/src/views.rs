@@ -288,7 +288,6 @@ fn context_digest(ctx: &Context) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::Store;
     use proptest::prelude::*;
     use proptest::test_runner::TestCaseError;
     use scion_core::{Changeset, FileEntry, FileState, PathElem};
@@ -320,7 +319,7 @@ mod tests {
 
     fn store() -> (tempfile::TempDir, Backend) {
         let dir = crate::test_support::private_tempdir();
-        let store = Backend::sqlite(crate::test_support::store::Store::open(dir.path()).unwrap());
+        let store = Backend::open_test(dir.path()).unwrap();
         (dir, store)
     }
 
@@ -963,8 +962,10 @@ mod tests {
     /// set that names each file. Returns the store, the repo, the tip and
     /// the rule set's digest and prefixes.
     #[allow(clippy::type_complexity)]
-    fn repo_of_two_folders() -> (tempfile::TempDir, Backend, RepoId, ChangesetId, [u8; 32]) {
-        let (dir, store) = store();
+    fn repo_of_two_folders_on(
+        dir: tempfile::TempDir,
+        store: Backend,
+    ) -> (tempfile::TempDir, Backend, RepoId, ChangesetId, [u8; 32]) {
         let (a, b, z) = (
             file(&store, b"a\n"),
             file(&store, b"b\n"),
@@ -1011,23 +1012,19 @@ mod tests {
         (dir, store, repo, tip, digest)
     }
 
-    /// How many view rows `store` holds.
-    fn rows(store: &Backend) -> i64 {
-        let store = store.as_sqlite().expect("the view tests run on SQLite");
-        // `SqliteTx` derefs to the connection.
-        store
-            .read(|c| {
-                c.query_row("SELECT count() FROM view_trees", [], |row| row.get(0))
-                    .map_err(crate::error::from_sqlite)
-            })
-            .unwrap()
+    /// How many view rows `store` holds, on either backend: the count
+    /// goes through the damage module's two arms, so the row-count tests
+    /// run on both engines.
+    fn rows(store: &Backend) -> usize {
+        crate::pg::damage::view_tree_rows(store).unwrap()
     }
 
     /// A memo row serves a later derivation of the same real tree under
     /// the same context, without a walk, on any changeset that reaches it.
     #[test]
     fn a_stored_row_serves_the_next_derivation_without_a_walk() {
-        let (_dir, store, repo, tip, digest) = repo_of_two_folders();
+        let (dir, store) = store();
+        let (_dir, store, repo, tip, digest) = repo_of_two_folders_on(dir, store);
         let prefixes: Vec<RepoPath> = ["left/x", "right/y"]
             .iter()
             .map(|p| RepoPath::new(*p).unwrap())
@@ -1090,7 +1087,8 @@ mod tests {
     /// the rest comes from the rows, and their view IDs do not move.
     #[test]
     fn a_changed_folder_rederives_only_its_path() {
-        let (_dir, store, repo, tip, digest) = repo_of_two_folders();
+        let (dir, store) = store();
+        let (_dir, store, repo, tip, digest) = repo_of_two_folders_on(dir, store);
         let prefixes: Vec<RepoPath> = ["left/x", "right/y"]
             .iter()
             .map(|p| RepoPath::new(*p).unwrap())
@@ -1184,7 +1182,7 @@ mod tests {
         let dir = std::env::var("SCION_TEST_VIEW_BENCH_DATA").expect("SCION_TEST_VIEW_BENCH_DATA");
         let repo_name =
             std::env::var("SCION_TEST_VIEW_BENCH_REPO").unwrap_or_else(|_| "main".into());
-        let store = Backend::sqlite(Store::open(Path::new(&dir)).unwrap());
+        let store = Backend::open_test(Path::new(&dir)).unwrap();
         let repo = store.read(|c| c.repo_id(&repo_name)).unwrap();
         let tip = store
             .read(|c| c.get_ref(repo, "main"))

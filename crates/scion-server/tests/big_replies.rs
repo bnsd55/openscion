@@ -10,12 +10,11 @@ use scion_proto::v1::scion_client::ScionClient;
 use scion_proto::v1::{
     CreateChangesetRequest, GetChangesetRequest, ListDirRequest, PutBlobRequest,
 };
-use scion_server::test_support::backend::from_store;
-use scion_server::test_support::meta::MetaTx;
+use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use std::sync::Arc;
 
 use scion_server::Metrics;
-use scion_server::test_support::{service, store::Store};
+use scion_server::{Backend, test_support::service};
 use tokio::net::TcpListener;
 use tokio_stream::StreamExt;
 use tonic::Status;
@@ -34,7 +33,7 @@ fn author() -> IdentityTime {
 }
 
 /// Stores `repo` with `root` as its root changeset.
-fn seed_root(store: &Store, root: &Changeset) -> scion_core::ChangesetId {
+fn seed_root(store: &Backend, root: &Changeset) -> scion_core::ChangesetId {
     store
         .write(|c| {
             let repo = c.create_repo(REPO)?;
@@ -50,7 +49,7 @@ fn seed_root(store: &Store, root: &Changeset) -> scion_core::ChangesetId {
 /// would fail to decode.
 async fn big_repo(names: usize) -> (tempfile::TempDir, Scion, ChangesetId) {
     let dir = scion_server::test_support::private_tempdir();
-    let store = Store::open(dir.path()).unwrap();
+    let store = Backend::open_test(dir.path()).unwrap();
     // The root changeset, so the changeset under test has a parent.
     let root = Changeset::new(
         vec![],
@@ -72,7 +71,7 @@ async fn big_repo(names: usize) -> (tempfile::TempDir, Scion, ChangesetId) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(service::serve(
-        from_store(store.clone()),
+        store.clone(),
         listener,
         TOKEN,
         service::ServeOptions {
