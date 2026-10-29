@@ -1732,6 +1732,17 @@ pub mod pg {
         c
     }
 
+    /// The name of the database container a test may stop, as
+    /// `SCION_TEST_PG_CONTAINER` names it. Stopping the database is a
+    /// test's premise (the takeover's), so without the name the test
+    /// fails, it does not skip.
+    pub fn container() -> String {
+        std::env::var("SCION_TEST_PG_CONTAINER").expect(
+            "SCION_TEST_PG_CONTAINER names the database container this test \
+             stops and starts again",
+        )
+    }
+
     /// Loads a dump into the test database, as the runbook's restore
     /// does, with the same tools the dump ran.
     pub fn load_schema(url: &str, file: &Path) {
