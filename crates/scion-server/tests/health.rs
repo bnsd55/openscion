@@ -57,11 +57,9 @@ fn spawn_with(extra: &[&str], data: &Path, log: &Path) -> Server {
         .unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_scion-server"));
     cmd.arg("--data").arg(data);
-    // Postgres mode: the same schema the test helpers filled (the marker
-    // file in the data directory makes a plain SQLite start refuse).
-    if scion_server::Backend::test_is_postgres() {
-        cmd.arg("--postgres-url").arg(common::postgres_url(data));
-    }
+    // The same schema the test helpers filled: the server serves the
+    // rows the test wrote, not a fresh schema.
+    cmd.arg("--postgres-url").arg(common::postgres_url(data));
     let child = cmd
         .args(["serve", "--token", common::TOKEN, "--listen", "127.0.0.1:0"])
         .args(extra)
@@ -469,11 +467,9 @@ async fn after_the_restart(
     }
     let mut fsck = Command::new(env!("CARGO_BIN_EXE_scion-server"));
     fsck.arg("--data").arg(data);
-    // On Postgres the store lives in the database; a bare fsck would
-    // read the data directory's SQLite and report what is not there.
-    if scion_server::Backend::test_is_postgres() {
-        fsck.arg("--postgres-url").arg(common::postgres_url(data));
-    }
+    // The store lives in the database; the URL names the schema the
+    // server served.
+    fsck.arg("--postgres-url").arg(common::postgres_url(data));
     let clean = fsck.arg("fsck").output().unwrap();
     assert_eq!(clean.status.code(), Some(0), "fsck is clean");
     drop(again);

@@ -180,12 +180,10 @@ fn start_server_named(work: &std::path::Path, log: &str) -> Child {
         .expect("the log opens");
     let err = out.try_clone().expect("the log clones");
     let mut command = Command::new(env!("CARGO_BIN_EXE_scion-server"));
-    // The child needs the same URL rule every suite uses: on Postgres,
-    // the data directory's own schema.
-    if Backend::test_is_postgres() {
-        let url = common::postgres_url(&work.join("data"));
-        command.arg("--postgres-url").arg(url);
-    }
+    // The child needs the test database, under the data directory's
+    // own schema.
+    let url = common::postgres_url(&work.join("data"));
+    command.arg("--postgres-url").arg(url);
     command
         .arg("--data")
         .arg(work.join("data"))

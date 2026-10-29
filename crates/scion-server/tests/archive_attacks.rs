@@ -20,6 +20,14 @@ fn url_of(dir: &std::path::Path) -> String {
     scion_server::Backend::test_postgres_url(dir).unwrap()
 }
 
+/// The test database's URL, under a schema of its own that no store
+/// uses: a refused restore opens nothing, but the open still needs a
+/// URL to refuse against.
+fn url_of_data() -> String {
+    let dir = scion_server::test_support::private_tempdir();
+    url_of(dir.path())
+}
+
 static LOG: std::sync::LazyLock<Captured> = std::sync::LazyLock::new(Captured::default);
 
 #[derive(Clone, Default)]
@@ -407,7 +415,7 @@ fn a_changeset_naming_an_unlisted_blob_is_named_and_refused() {
 fn a_mid_replay_failure_leaves_the_target_empty() {
     let (_keep, out, _main, _second) = sound_archive();
     let empty = scion_server::test_support::private_tempdir();
-    let restored = archive::restore_with(&out, empty.path(), None, None, |path, url, ca| {
+    let restored = archive::restore_with(&out, empty.path(), &url_of(empty.path()), None, |path, url, ca| {
         let store = scion_server::Backend::open(path, url, ca)?;
         // The seam: the store's next commit — the whole metadata
         // transaction, every repo — fails as busy, the way a disk or a
@@ -1037,7 +1045,7 @@ fn an_archive_of_an_unknown_version_or_format_is_refused() {
     let error = archive::restore(
         &out,
         scion_server::test_support::private_tempdir().path(),
-        None,
+        &url_of_data(),
         None,
     )
     .expect_err("a version-2 archive must not restore");
@@ -1062,7 +1070,7 @@ fn an_archive_of_an_unknown_version_or_format_is_refused() {
     let error = archive::restore(
         &out,
         scion_server::test_support::private_tempdir().path(),
-        None,
+        &url_of_data(),
         None,
     )
     .expect_err("a foreign archive must not restore");

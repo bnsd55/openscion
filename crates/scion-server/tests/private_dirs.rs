@@ -306,7 +306,7 @@ fn an_open_refuses_a_data_directory_that_group_or_others_can_read() {
     let path = dir.path().join("data");
     fs::create_dir(&path).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-    let Err(err) = Backend::open(&path, &url_of(path), None) else {
+    let Err(err) = Backend::open(&path, &url_of(&path), None) else {
         panic!("the open of a readable data directory must fail");
     };
     assert!(

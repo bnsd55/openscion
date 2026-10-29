@@ -129,11 +129,10 @@ fn exit_report(log: &Path, mark: usize, status: std::process::ExitStatus) -> Str
 
 impl Server {
     /// Starts a server on `data` and waits until it listens. It appends its
-    /// log to `log`. In Postgres mode (`SCION_TEST_BACKEND=postgres`) it
-    /// proves the backend it was asked for before it returns: the data
-    /// directory carries the Postgres marker and no SQLite database, so a
-    /// run whose spawn lost its `--postgres-url` fails here, not vacuously
-    /// as a second SQLite run.
+    /// log to `log`. It proves the backend before it returns: the data
+    /// directory carries the Postgres marker and no SQLite database, so
+    /// a run whose spawn lost its `--postgres-url` fails here, not as a
+    /// server on some other database.
     pub(crate) fn start(data: &Path, log: &Path) -> Self {
         let mut server = Self::spawn(data, log);
         // Only this start's lines are its business, and the CI log
@@ -1067,7 +1066,7 @@ impl LandsReader {
 
     /// Opens the read for a store the suite reopened under another
     /// directory's schema (`start_reopened`).
-    pub(crate) fn open_reopened(data: &Path, schema_source: &Path) -> Self {
+    pub(crate) fn open_reopened(_data: &Path, schema_source: &Path) -> Self {
         let schema = Backend::test_schema(schema_source);
         let url = std::env::var("SCION_TEST_POSTGRES_URL")
             .expect("SCION_TEST_POSTGRES_URL must name the test database");
@@ -1122,7 +1121,6 @@ impl Drop for LandsReader {
 /// the number of pending lands. Rows in `seen` are skipped, and new rows
 /// added: a row never changes. The rows come from the store's schema.
 fn metadata(
-    store: &Backend,
     dir: &Path,
     schema_source: &Path,
     seen: &mut HashSet<Vec<u8>>,
@@ -1368,14 +1366,11 @@ pub(crate) async fn check(
 
     // Every blob that the metadata names is intact, and so is every blob
     // file: a file reaches its name only whole. The store is the same
-    // backend the server serves: a SQLite open here would create the
-    // data directory's scion.db beside a Postgres server, and the
-    // restart after the cut would refuse the directory. The schema
-    // follows the store, not the path: a reopen from the backing
-    // directory walks another path, whose name would be a fresh, empty
-    // schema.
+    // backend the server serves. The schema follows the store, not the
+    // path: a reopen from the backing directory walks another path,
+    // whose name would be a fresh, empty schema.
     let store = open_store_shared_reopened(data, schema_source);
-    let (named, pending) = metadata(&store, data, schema_source, &mut checked.rows);
+    let (named, pending) = metadata(data, schema_source, &mut checked.rows);
     assert_eq!(pending, 0, "every land sent was retried");
     let files = blob_files(data);
     for id in named.into_iter().chain(files) {

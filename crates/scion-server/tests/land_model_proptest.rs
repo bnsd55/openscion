@@ -810,30 +810,23 @@ async fn run_script(script: &[Op]) -> RunSummary {
                         Some((idx, changeset_id(&reply.result_changeset_id)))
                     }));
                 if *op == Op::KillAtPending {
-                    // A crash that meets a pending row. The store may be
-                    // Postgres in the parity job, where the SQLite file
-                    // does not exist; then wait a moment and kill. The
-                    // wait can miss: a land can pass through pending and
-                    // finish between two polls of the file. A missed row
-                    // is logged, and the kill still runs - it is the
-                    // plain kill then, which the checks already hold.
-                    let db = data.join("scion.db");
-                    if db.exists() {
-                        let conn = rusqlite::Connection::open(&db).unwrap();
-                        let saw = wait_until_or_timeout("a land pending in the database", || {
-                            pending_lands(&conn) > 0
+                    // A crash that meets a pending row. The wait can
+                    // miss: a land can pass through pending and finish
+                    // between two polls of the rows. A missed row is
+                    // logged, and the kill still runs - it is the plain
+                    // kill then, which the checks already hold.
+                    let saw =
+                        wait_until_or_timeout("a land pending in the database", || {
+                            common::LandsReader::open(&data).counts().1 > 0
                         })
                         .await;
-                        if !saw {
-                            println!(
-                                "seed {}: kill-pending saw no pending row; \
-                                 the land finished between two polls, and \
-                                 the kill is a plain kill",
-                                seed()
-                            );
-                        }
-                    } else {
-                        tokio::time::sleep(Duration::from_millis(150)).await;
+                    if !saw {
+                        println!(
+                            "seed {}: kill-pending saw no pending row; \
+                             the land finished between two polls, and \
+                             the kill is a plain kill",
+                            seed()
+                        );
                     }
                 }
                 state.killed = true;
@@ -857,21 +850,15 @@ async fn run_script(script: &[Op]) -> RunSummary {
                 // its store; without a bound it was the one op that
                 // could block past the script's own budget.
                 {
-                    let db = data.join("scion.db");
-                    if db.exists() {
-                        let conn = rusqlite::Connection::open(&db).unwrap();
-                        println!(
-                            "gc: pending rows in the database before the sweep: {}",
-                            pending_lands(&conn)
-                        );
-                    }
+                    let (_, pending) = common::LandsReader::open(&data).counts();
+                    println!("gc: pending rows in the database before the sweep: {pending}");
                 }
                 let mut gc = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"));
                 gc.arg("--data").arg(&data);
-                // On Postgres the gc subprocess reads the store through
-                // the URL, the way the server does: the schema follows
-                // the store, not the path.
-                if scion_server::Backend::test_is_postgres() {
+                // The gc subprocess reads the store through the URL, the
+                // way the server does: the schema follows the store, not
+                // the path.
+                {
                     gc.arg("--postgres-url").arg(common::postgres_url(&data));
                 }
                 let mut child = gc
@@ -967,20 +954,15 @@ async fn run_script(script: &[Op]) -> RunSummary {
                     let mut conn = state.scion.clone();
                     calls.spawn(async move { (idx, conn.land(request).await) });
                 }
-                let db = data.join("scion.db");
-                if db.exists() {
-                    let conn = rusqlite::Connection::open(&db).unwrap();
-                    let saw =
-                        wait_until_or_timeout("a queued land pending in the database", || {
-                            pending_lands(&conn) > 0
-                        })
-                        .await;
-                    if !saw {
-                        println!(
-                            "seed {}: burst-cut saw no pending row; the queue drained before the kill",
-                            seed()
-                        );
-                    }
+                let saw = wait_until_or_timeout("a queued land pending in the database", || {
+                    common::LandsReader::open(&data).counts().1 > 0
+                })
+                .await;
+                if !saw {
+                    println!(
+                        "seed {}: burst-cut saw no pending row; the queue drained before the kill",
+                        seed()
+                    );
                 }
                 state.killed = true;
                 drop(server); // SIGKILL
@@ -1038,14 +1020,12 @@ async fn run_script(script: &[Op]) -> RunSummary {
     }
     // fsck sees no damage. It is read-only and safe beside a live
     // server, and the retry phase of the final Check has settled every
-    // land, so nothing is pending to look like a problem. On Postgres
-    // the fsck subprocess reads the store through the URL, the way the
-    // server does: the schema follows the store, not the path.
+    // land, so nothing is pending to look like a problem. The fsck
+    // subprocess reads the store through the URL, the way the server
+    // does: the schema follows the store, not the path.
     let mut fsck = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"));
     fsck.arg("--data").arg(&data);
-    if scion_server::Backend::test_is_postgres() {
-        fsck.arg("--postgres-url").arg(common::postgres_url(&data));
-    }
+    fsck.arg("--postgres-url").arg(common::postgres_url(&data));
     let out = fsck.arg("fsck").output().unwrap();
     assert!(
         out.status.success(),
@@ -1700,8 +1680,7 @@ fn the_seed_corpus_holds() {
         let path = entry.unwrap().path();
         if path.extension().is_some_and(|e| e == "txt") {
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            if std::env::var("SCION_TEST_BACKEND").as_deref() == Ok("postgres")
-                && std::env::var("SCION_LANDMODEL_CASES").is_err()
+            if std::env::var("SCION_LANDMODEL_CASES").is_err()
                 && !short_on_postgres.iter().any(|p| name.starts_with(p))
             {
                 continue;
@@ -1776,16 +1755,12 @@ fn the_seed_corpus_holds() {
 #[test]
 fn the_model_holds_across_a_random_script() {
     install_panic_hook();
-    // Postgres pays per-op commits and full server restarts: the
-    // whole suite under it ran past this job's 30 minutes, and the
-    // nightly workflow carries the full random coverage there
-    // instead (8 cases, its own job). The per-PR Postgres share
-    // stays the corpus, measured at about 2 minutes.
-    if std::env::var("SCION_TEST_BACKEND").as_deref() == Ok("postgres")
-        && std::env::var("SCION_LANDMODEL_CASES").is_err()
-    {
+    // The random case is a nightly shape: the per-PR job stays the
+    // corpus, measured at about 2 minutes. SCION_LANDMODEL_CASES
+    // forces the random case on.
+    if std::env::var("SCION_LANDMODEL_CASES").is_err() {
         println!(
-            "skipping the random case on Postgres: the nightly land-model workflow carries it there (SCION_LANDMODEL_CASES forces it on)"
+            "skipping the random case here: the nightly land-model workflow carries it there (SCION_LANDMODEL_CASES forces it on)"
         );
         return;
     }

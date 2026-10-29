@@ -46,10 +46,6 @@ fn changeset(files: &[String]) -> Changeset {
 
 #[test]
 fn the_derivation_of_a_hundred_directories_costs_four_statements_more() {
-    if !Backend::test_is_postgres() {
-        eprintln!("skip on sqlite: the statement count is a Postgres seam");
-        return;
-    }
     let mut counts = Vec::new();
     for d in [10, 100] {
         let dir = scion_server::test_support::private_tempdir();

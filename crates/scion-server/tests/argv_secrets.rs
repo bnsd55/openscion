@@ -205,14 +205,7 @@ fn a_serve_token_file_starts_the_server() {
 // and a canary of system randomness that rides the URL as an
 // `application_name` parameter no log line could carry by accident.
 //
-// Postgres only: the URL comes from `SCION_TEST_POSTGRES_URL`, and every
-// test skips itself when `SCION_TEST_BACKEND` does not name `postgres`.
-
-/// Whether the Postgres mode of the URL tests can run.
-fn is_pg() -> bool {
-    std::env::var("SCION_TEST_BACKEND").as_deref() == Ok("postgres")
-}
-
+// The URL comes from `SCION_TEST_POSTGRES_URL`.
 /// How the serve process receives the database URL.
 #[derive(Clone, Copy)]
 enum UrlForm {
@@ -496,10 +489,6 @@ fn assert_no_leak(form: UrlForm, run: &Serve, url: &str, canary: &str, password:
 
 #[test]
 fn the_env_url_and_its_password_reach_no_output() {
-    if !is_pg() {
-        println!("skipping: Postgres only");
-        return;
-    }
     let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
@@ -510,10 +499,6 @@ fn the_env_url_and_its_password_reach_no_output() {
 
 #[test]
 fn the_argv_url_warns_without_quoting_itself() {
-    if !is_pg() {
-        println!("skipping: Postgres only");
-        return;
-    }
     let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();

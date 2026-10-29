@@ -62,7 +62,6 @@ fn a_gc_of_a_postgres_backed_directory_removes_no_blob_file() {
         .arg("--data")
         .arg(dir.path())
         .arg("gc")
-        .env_remove("SCION_TEST_BACKEND")
         .env_remove("SCION_TEST_POSTGRES_URL")
         .output()
         .unwrap();
@@ -193,7 +192,7 @@ fn a_lost_server_lock_fences_the_backend() {
     // The takeover: kill the store's session, then take the lock before
     // the store's next statement can.
     let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
-    let schema = Backend::test_schema(dir.path()).unwrap();
+    let schema = Backend::test_schema(dir.path());
     let key = Backend::test_server_lock(dir.path()).unwrap();
     let mut taker = postgres::Client::connect(&url, postgres::NoTls).unwrap();
     taker
@@ -238,7 +237,7 @@ fn a_reconnect_ends_the_dead_transaction_and_a_new_begin_passes() {
         .write(|c| c.create_repo("before").map(|_| ()))
         .unwrap();
     let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
-    let schema = Backend::test_schema(dir.path()).unwrap();
+    let schema = Backend::test_schema(dir.path());
     let mut killer = postgres::Client::connect(&url, postgres::NoTls).unwrap();
     // The transaction dies mid-flight: the kill lands between its BEGIN
     // and its next statement. The lock is left alone, so the reconnect

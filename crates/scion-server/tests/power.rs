@@ -1039,10 +1039,8 @@ async fn import_process_races_the_server_on_the_same_blob() {
         // The import child takes the same URL rule every spawned server
         // takes: the store's own schema, the one the server it races
         // serves.
-        if Backend::test_is_postgres() {
-            let url = common::postgres_url(&data);
-            command.arg("--postgres-url").arg(url);
-        }
+        let url = common::postgres_url(&data);
+        command.arg("--postgres-url").arg(url);
         command
             .args([
                 "--data",

@@ -87,19 +87,11 @@ fn backend_marker(data: &Path) -> String {
         .unwrap_or_else(|e| panic!("the target must name its backend: {e}"))
 }
 
-fn skip_without_postgres() -> bool {
-    !scion_server::Backend::test_is_postgres()
-}
-
 /// A restore whose URL comes from `--postgres-url-file` lands in
 /// Postgres: the restored directory names its backend, and it is
 /// Postgres.
 #[test]
 fn a_restore_with_the_url_from_a_file_lands_in_postgres() {
-    if skip_without_postgres() {
-        println!("skipping: SCION_TEST_POSTGRES_URL is not set");
-        return;
-    }
     let dir = scion_server::test_support::private_tempdir();
     let (_data, url_file) = import_from_url_file(dir.path());
     let out = dir.path().join("archive");
@@ -143,10 +135,6 @@ fn a_restore_with_the_url_from_a_file_lands_in_postgres() {
 /// Postgres too: the environment form.
 #[test]
 fn a_restore_with_the_url_from_the_env_lands_in_postgres() {
-    if skip_without_postgres() {
-        println!("skipping: SCION_TEST_POSTGRES_URL is not set");
-        return;
-    }
     let dir = scion_server::test_support::private_tempdir();
     let (data, url_file) = import_from_url_file(dir.path());
     let out = dir.path().join("archive");
@@ -196,10 +184,6 @@ fn a_restore_with_the_url_from_the_env_lands_in_postgres() {
 /// CA without a URL belongs after the resolution, not in clap.
 #[test]
 fn a_postgres_ca_with_a_url_from_a_file_is_accepted() {
-    if skip_without_postgres() {
-        println!("skipping: SCION_TEST_POSTGRES_URL is not set");
-        return;
-    }
     let dir = scion_server::test_support::private_tempdir();
     let (_data, url_file) = import_from_url_file(dir.path());
     // Any readable CA file passes the flag's existence check; the CA

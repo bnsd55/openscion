@@ -192,51 +192,6 @@ fn a_full_disk_answers_out_of_space_and_needs_no_repair() {
     assert!(report.is_clean(), "{:?}", report.problems);
 }
 
-#[test]
-fn a_full_metadata_disk_answers_out_of_space_and_needs_no_repair() {
-    if !required() {
-        return;
-    }
-    if Backend::test_is_postgres() {
-        // The metadata lives in the database then; its disk full is the
-        // SQLSTATE 53100 arm of the pg mapping, a unit test of pg.rs,
-        // not a data-directory row.
-        return;
-    }
-    let mount = Mount::new("meta", "1m", "4096");
-    let store = open_store(&mount, "first open of the metadata test");
-    // Repos fill the metadata database until its file cannot grow.
-    let mut names = Vec::new();
-    let error = loop {
-        let name = format!("repo-{}", names.len());
-        match store.write(|c| c.create_repo(&name)) {
-            Ok(_) => names.push(name),
-            Err(error) => break error,
-        }
-    };
-    assert!(is_out_of_space(&error), "{error:?}");
-    // The client's view: the real error, one fixed out-of-space reply.
-    let status = tonic::Status::from(error);
-    assert_eq!(status.code(), tonic::Code::ResourceExhausted, "{status:?}");
-    assert_eq!(
-        status.message(),
-        "the server is out of disk space; retry later"
-    );
-    // Reads work: every repo row that landed is still there.
-    assert_eq!(store.read(|c| c.repos()).unwrap().len(), names.len());
-    // The disk comes back, and the next row works with no restart.
-    mount.remount_bigger("64m", "4096");
-    store.write(|c| c.create_repo("after")).unwrap();
-    drop(store);
-    // As above: the reopen must not race a lingering lock.
-    common::spawn_guard::across_release(|| {
-        common::spawn_guard::wait_for_lock_release(&mount.0.join("data"));
-    });
-    // A restart needs no repair, and fsck is clean.
-    let store = open_store(&mount, "reopen of the metadata test");
-    let report = scion_server::fsck::run(&store, 1, &mut |_| {}).unwrap();
-    assert!(report.is_clean(), "{:?}", report.problems);
-}
 
 #[test]
 fn a_disk_out_of_inodes_answers_out_of_space_and_needs_no_repair() {
@@ -295,12 +250,12 @@ fn seed_client_blob(
 /// directory's database corner and not beside it.
 fn gc_args(data: &std::path::Path, dry: bool) -> String {
     let mut args = vec!["--data".to_owned(), data.display().to_string()];
-    if Backend::test_is_postgres()
-        && let Ok(url) = std::env::var("SCION_TEST_POSTGRES_URL")
     {
         // The URL is a flag of the root command, so it goes before the
         // subcommand; its options carry this directory's schema.
-        let schema = Backend::test_schema(data).expect("the test names a schema");
+        let schema = Backend::test_schema(data);
+        let url = std::env::var("SCION_TEST_POSTGRES_URL")
+            .expect("SCION_TEST_POSTGRES_URL");
         args.push("--postgres-url".to_owned());
         args.push(format!(
             "{url}{}options=--search_path%3D{schema}",
@@ -701,10 +656,6 @@ fn land_until(store: &Backend, from: usize, blob: scion_core::BlobId, dry: bool)
 
 #[test]
 fn a_full_postgres_database_answers_out_of_space_and_needs_no_repair() {
-    if !Backend::test_is_postgres() {
-        println!("skipping: the database's own disk full is a Postgres row");
-        return;
-    }
     // The dry run: the plumbing of this row - margin, drop, open, repo,
     // wide lands - against any Postgres, with the fill capped small and
     // the lands stopped by a count. No wall, so no 53100 to assert; the

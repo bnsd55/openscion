@@ -176,7 +176,14 @@ fn a_restore_commits_bounded_transactions_and_answers_like_its_source() {
     // and after, so the assertion is about work done, not work planned.
     let before = scion_server::test_support::archive::restore_tx_count();
     let restored_dir = scion_server::test_support::private_tempdir();
-    archive::restore_with_budget(&out, restored_dir.path(), None, None, BUDGET, Backend::open)
+    archive::restore_with_budget(
+        &out,
+        restored_dir.path(),
+        &url_of(restored_dir.path()),
+        None,
+        BUDGET,
+        Backend::open,
+    )
         .unwrap_or_else(|e| panic!("restore failed: {e:#}"));
     let txs = scion_server::test_support::archive::restore_tx_count() - before;
     println!("the restore committed {txs} transactions");
@@ -314,7 +321,7 @@ fn measure_ceiling(store: &Backend, out: &std::path::Path, tx_kb: u64, slack_kb:
     );
 
     // The restored store answers like the source.
-    let restored = Backend::open(&target, &url_of(target), None).unwrap();
+    let restored = Backend::open(&target, &url_of(&target), None).unwrap();
     assert_restore_equals_source(store, &restored);
     let problems = fsck::run(&restored, fsck::BATCH, &mut |_| {}).unwrap();
     assert!(problems.problems.is_empty(), "{problems:?}");
@@ -383,7 +390,7 @@ fn a_killed_restore_leaves_the_next_one_clean() {
     let report = archive::restore(&out, &target, &url_of(&target), None)
         .unwrap_or_else(|e| panic!("the restore after the kill failed: {e:#}"));
     assert_eq!(report.repos.len(), 2);
-    let restored = Backend::open(&target, &url_of(target), None).unwrap();
+    let restored = Backend::open(&target, &url_of(&target), None).unwrap();
     assert_restore_equals_source(&store, &restored);
     let problems = fsck::run(&restored, fsck::BATCH, &mut |_| {}).unwrap();
     assert!(problems.problems.is_empty(), "{problems:?}");
@@ -507,7 +514,7 @@ fn a_stream_cut_after_the_first_batch_fails_and_leaves_no_store() {
     drop(f);
 
     let target = tempfile::tempdir().unwrap().path().join("target");
-    let error = archive::restore_with_budget(&out, &target, None, None, BUDGET, Backend::open)
+    let error = archive::restore_with_budget(&out, &target, &url_of(&target), None, BUDGET, Backend::open)
         .expect_err("a cut stream must not restore");
     assert!(
         error.to_string().contains("ends inside a record"),
