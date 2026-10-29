@@ -922,6 +922,57 @@ jobs:
           SCION_DISK_REQUIRE: "1"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
 
+  kill-probe:
+    name: kill probe (arm64)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        env:
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: scion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: protoc
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: build
+        run: |
+          df -h / || true
+          free -m || true
+          cargo test -p open-scion-server --test crash_pg --test write --no-run
+        env:
+          CARGO_TERM_COLOR: always
+      - run: |
+          free -m || true
+          rm -f "$RUNNER_TEMP/probe.log" probe.rc
+          setsid bash -c 'echo $$ > probe.pgid; timeout -k 60 300 cargo test -p open-scion-server --test crash_pg --test write --no-fail-fast > '"$RUNNER_TEMP"'/probe.raw 2>&1; echo $? > probe.rc' || true
+          code="$(cat probe.rc 2> /dev/null || echo 124)"
+          while IFS= read -r l; do printf '%s %s\n' "$(date -u +%H:%M:%S)" "$l"; done \
+            < "$RUNNER_TEMP/probe.raw" | tee "$RUNNER_TEMP/probe.log"
+          exit "$code"
+        env:
+          PROPTEST_CASES: "2000"
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+      - name: the probe's log, even on a cancelled run
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kill-probe-log
+          path: ${{ runner.temp }}/probe.log
+          if-no-files-found: ignore
+
   # The xfs cell of the support matrix (docs/support.md): every store
   # the server suite opens lands on a real xfs loop device, through
   # TMPDIR, so the storage-touching tests run on xfs natively. The
