@@ -289,7 +289,7 @@ impl Backend {
     /// the derive-walk gauges and the collector-key wait. Without it,
     /// import, fsck and gc record nothing.
     pub fn set_metrics(&self, metrics: Arc<Metrics>) {
-        self.pg.set_metrics(metrics)
+        self.pg.set_metrics(metrics);
     }
 
     /// The age of the oldest open Postgres read transaction, for the

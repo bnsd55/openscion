@@ -235,6 +235,7 @@ pub mod test_support {
         /// the migration story without naming a literal that the next
         /// migration turns stale.
         pub mod schema_version {
+            /// The Postgres schema's version, for the tests that pin it.
             pub const POSTGRES: u32 = crate::pg::PG_SCHEMA_VERSION;
         }
     }

@@ -163,19 +163,6 @@ impl DurabilityLog {
             .expect("the durability log's lock")
             .push(step);
     }
-
-    /// The steps recorded so far, oldest first.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the log's lock is poisoned.
-    #[must_use]
-    pub fn steps(&self) -> Vec<DurabilityStep> {
-        self.steps
-            .lock()
-            .expect("the durability log's lock")
-            .clone()
-    }
 }
 
 /// The rename of a temp file onto the blob's name, with its step recorded
