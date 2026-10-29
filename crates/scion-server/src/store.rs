@@ -1397,16 +1397,17 @@ pub(crate) mod spawn_guard {
 
 #[cfg(test)]
 mod tests {
-    use crate::backend::old_store;
-    use crate::meta::MetaTx as _;
-    use std::cell::{Cell, RefCell};
-    use std::panic;
-    use std::rc::Rc;
+    use crate::Backend;
+    use std::sync::Barrier;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Barrier, mpsc};
     use std::thread;
+    use std::time::Duration;
 
     use super::*;
+
+    /// A URL that names no live database: the directory checks refuse
+    /// before the open reaches it, so a refused open never connects.
+    const NO_URL: &str = "postgres://postgres:scion@127.0.0.1:1/scion";
 
     /// A symlinked data directory is refused by kind, not by the link's
     /// mode: on macOS lchmod can give a symlink any mode, so a mode check
@@ -1418,7 +1419,7 @@ mod tests {
         let holder = crate::test_support::private_tempdir();
         let link = holder.path().join("data");
         std::os::unix::fs::symlink(real.path(), &link).unwrap();
-        let err = match Backend::open(&link, NO_SERVER_URL, None) {
+        let err = match Backend::open(&link, NO_URL, None) {
             Err(err) => err.to_string(),
             Ok(_) => panic!("a symlinked data directory is accepted"),
         };
@@ -1432,15 +1433,6 @@ mod tests {
     /// fails. The replacing upload takes the same lock, so the second
     /// test repeats the shape on the `replace_stored` path, which the
     /// gRPC race of an upload with a copy stored reaches.
-    #[test]
-    fn a_write_of_one_blob_waits_for_the_stripe() {
-        held_stripe_waits(|store, id, content| {
-            let mut batch = store.blobs().batch();
-            batch.put(content).unwrap();
-            let _ = id;
-        });
-    }
-
     #[test]
     fn a_write_of_one_blob_waits_for_the_stripe() {
         held_stripe_waits(|blobs, id, content| {
@@ -1594,17 +1586,15 @@ mod tests {
         };
         for _ in 0..100 {
             let dir = crate::test_support::private_tempdir();
-            let first = Store::open(dir.path()).unwrap();
-            let clone = first.clone();
+            let first = Blobs::open(dir.path()).unwrap();
             super::spawn_guard::across_release(|| {
                 drop(first);
-                drop(clone);
-                // The window between the drops and this open is where a
-                // forked child still holds the lock, one tick past the
-                // reaper on macOS. The poll waits for the real
+                // The window between the drop and this open is where a
+                // forked child still holds a lock the open took, one tick
+                // past the reaper on macOS. The poll waits for the real
                 // condition: the lock is free.
                 super::spawn_guard::wait_for_lock_release(dir.path());
-                Store::open(dir.path()).unwrap();
+                Blobs::open(dir.path()).unwrap();
             });
         }
         stop.store(true, Ordering::Relaxed);
@@ -1613,23 +1603,40 @@ mod tests {
 
     #[test]
     fn a_data_directory_opens_in_one_server_store_at_a_time() {
-        // The last part of this test drops every store and asserts the
-        // lock released, so no child may spawn beside it.
+        // The one-server lock is the database's advisory lock of the
+        // schema (the open refuses with "another server holds this
+        // store"); the open itself still serializes on the directory's
+        // open lock, so no child may spawn beside the drops.
         super::spawn_guard::across_release(|| {
             let dir = crate::test_support::private_tempdir();
-            let first = Store::open(dir.path()).unwrap();
-            let clone = first.clone();
-            assert_in_use(Store::open(dir.path()), dir.path(), "another server");
-            // Shared stores open beside it, and a server beside them.
-            let shared = [0, 1].map(|_| Store::open_shared(dir.path()).unwrap());
+            let first = Backend::open_test(dir.path()).unwrap();
+            match Backend::open_test(dir.path()) {
+                Err(Error::FailedPrecondition(msg)) => {
+                    assert!(msg.contains("another server holds this store"), "{msg}");
+                }
+                other => panic!("expected the second server to fail, got {:?}", other.err()),
+            }
+            // Shared stores open beside it, the way an import does.
+            let shared = [0, 1].map(|_| Backend::open_test_shared(dir.path()).unwrap());
             drop(first);
-            assert!(
-                Store::open(dir.path()).is_err(),
-                "a live clone keeps the lock"
-            );
-            drop(clone);
-            super::spawn_guard::wait_for_lock_release(dir.path());
-            Store::open(dir.path()).unwrap();
+            // The advisory lock rides the server's connection: until its
+            // session ends, the database still refuses a second server.
+            // The worker closes it on its own clock, so the reopen waits
+            // for the real condition, like `wait_for_lock_release` does
+            // for a file lock.
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                match Backend::open_test(dir.path()) {
+                    Ok(reopen) => {
+                        drop(reopen);
+                        break;
+                    }
+                    Err(e) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(e) => panic!("the store never reopened: {e}"),
+                }
+            }
             drop(shared);
         });
     }
@@ -1654,14 +1661,14 @@ mod tests {
             // folder lists them.
             let listed_first = fs::read_dir(&dead).unwrap().next().unwrap().unwrap().path();
             let path = dir.path().to_owned();
-            let first = thread::spawn(move || Store::open(&path));
+            let first = thread::spawn(move || Blobs::open(&path));
             while listed_first.exists() && !first.is_finished() {
                 thread::yield_now();
             }
             // The first open is removing the dead folder. A second open waits
             // for it, so the folder that it writes next is safe from that sweep:
             // the dead folder is gone, and the two live ones stay.
-            let second = Store::open_shared(dir.path()).unwrap();
+            let second = Blobs::open(dir.path()).unwrap();
             assert_eq!(fs::read_dir(&tmp).unwrap().count(), 2);
             drop((first.join().unwrap().unwrap(), second));
         });
@@ -1677,7 +1684,7 @@ mod tests {
             let opening = lock_file(dir.path(), "open.lock").unwrap();
             assert!(flock(&opening, FlockOperation::NonBlockingLockExclusive).unwrap());
             let path = dir.path().to_owned();
-            let open = thread::spawn(move || Store::open_shared(&path).map(drop));
+            let open = thread::spawn(move || Blobs::open(&path).map(drop));
             // The open must not finish while the lock is held: a negative
             // cannot be polled for once, so it is asserted across a
             // window, every 20 ms. A slow start of the thread only
@@ -1696,14 +1703,14 @@ mod tests {
     fn a_put_records_one_observation_per_fsync_of_the_blob_path() {
         let dir = crate::test_support::private_tempdir();
         let metrics = std::sync::Arc::new(crate::metrics::Metrics::default());
-        let store = Store::open(dir.path()).unwrap();
-        store.set_metrics(Arc::clone(&metrics));
+        let blobs = Blobs::open(dir.path()).unwrap();
+        blobs.set_metrics(Arc::clone(&metrics));
         assert!(
             !metrics.render().contains("scion_blob_sync_seconds"),
             "nothing synced yet: {}",
             metrics.render()
         );
-        store.blobs().put(b"recorded").unwrap();
+        blobs.put(b"recorded").unwrap();
         let text = metrics.render();
         // One put fsyncs the temp file and the fan-out directory in
         // `sync`, and `sync` then runs one full flush of the drive cache
@@ -2000,24 +2007,24 @@ mod tests {
     #[test]
     fn a_crash_before_the_rename_leaves_no_blob_and_no_file() {
         let dir = crate::test_support::private_tempdir();
-        let store = Store::open(dir.path()).unwrap();
+        let blobs = Blobs::open(dir.path()).unwrap();
         let content = b"never stored";
         let id = BlobId::of(content);
         // A crash during an upload: no destructor runs.
-        std::mem::forget(store.blobs().upload().unwrap().append(content).unwrap());
+        std::mem::forget(blobs.upload().unwrap().append(content).unwrap());
         // A crash after the compressed file is written, before its rename,
         // in the staging folder of the process that crashed.
-        let mut torn = tempfile::NamedTempFile::new_in(&store.blobs().mine).unwrap();
+        let mut torn = tempfile::NamedTempFile::new_in(&blobs.mine).unwrap();
         torn.write_all(&zstd::bulk::compress(content, 3).unwrap())
             .unwrap();
         torn.keep().unwrap();
-        assert_eq!(staged(store.blobs()), 1, "the spool file has no name");
-        drop(store);
+        assert_eq!(staged(&blobs), 1, "the spool file has no name");
+        drop(blobs);
 
-        let store = Store::open(dir.path()).unwrap();
-        assert_eq!(store.blobs().verify(id).unwrap(), BlobStatus::Missing);
+        let blobs = Blobs::open(dir.path()).unwrap();
+        assert_eq!(blobs.verify(id).unwrap(), BlobStatus::Missing);
         // The folder of the dead process is gone, and this one is empty.
-        assert_eq!(staged(store.blobs()), 0, "open removes what a crash left");
+        assert_eq!(staged(&blobs), 0, "open removes what a crash left");
     }
 
     #[test]
@@ -2112,10 +2119,5 @@ mod tests {
             let err = result.expect_err("every caller sees the failure");
             assert_eq!(err.to_string(), "the drive is gone");
         }
-    }
-
-    thread_local! {
-        /// What the WAL hook of a test runs.
-        static ON_COMMIT: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
     }
 }
