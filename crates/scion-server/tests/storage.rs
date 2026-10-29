@@ -280,7 +280,7 @@ fn a_fsync_hook_refuses_exactly_one_fsync_per_count() {
 /// The failing-disk runbook (`docs/operations.md`, the failure section),
 /// on the Postgres-backed store: damage on disk, the `fsck` command to
 /// its exit 1 with the problem named, the restore of a backup into a
-/// fresh directory - the runbook's pg_dump snapshot plus the blob copy,
+/// fresh directory - the runbook's `pg_dump` snapshot plus the blob copy,
 /// loaded under the fresh directory's own schema - and fsck clean on the
 /// restored copy before the server starts./// The failing-disk runbook (`docs/operations.md`, the failure section),
 /// on the Postgres-backed store: a blob file the disk damaged answers
@@ -382,19 +382,29 @@ fn a_failing_disk_runbook_fscks_restores_and_serves() {
         "fsck names the damaged blob: {report}"
     );
 
-    // The restore, section 3's recipe: a fresh directory gets the
-    // metadata snapshot and the objects copy, fsck runs on it, and the
-    // server opens it. The snapshot loads under the fresh directory's
-    // own schema, the way a restore of a `pg_dump` lands in the
-    // target's schema.
-    let fresh = dir.path().join("restored");
+    the_restored_store_serves(dir.path(), &backup, &dump, &schema, repo, cs);
+}
+
+/// The restore, section 3's recipe: a fresh directory gets the metadata
+/// snapshot and the objects copy, fsck runs on it, and the server opens
+/// it. The snapshot loads under the fresh directory's own schema, the
+/// way a restore of a `pg_dump` lands in the target's schema.
+fn the_restored_store_serves(
+    dir: &std::path::Path,
+    backup: &std::path::Path,
+    dump: &std::path::Path,
+    schema: &str,
+    repo: scion_server::test_support::meta::RepoId,
+    cs: scion_core::ChangesetId,
+) -> Backend {
+    let fresh = dir.join("restored");
     scion_proto::runtime::auth::create_private_dir_all(&fresh).unwrap();
     let fresh_schema = Backend::test_schema(&fresh);
-    rename_in(&dump, &schema, &fresh_schema);
-    load_schema(&dump);
+    rename_in(dump, schema, &fresh_schema);
+    load_schema(dump);
     // The backend marker travels with the metadata (the runbook's step:
     // it holds the store UUID the metadata holds too).
-    std::fs::copy(dir.path().join("backend"), fresh.join("backend")).unwrap();
+    std::fs::copy(dir.join("backend"), fresh.join("backend")).unwrap();
     copy_tree(&backup.join("objects"), &fresh.join("objects"));
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(["--data", fresh.to_str().unwrap(), "fsck"])
@@ -421,6 +431,7 @@ fn a_failing_disk_runbook_fscks_restores_and_serves() {
         Some(cs),
         "the restored ref names the restored changeset"
     );
+    restored
 }
 
 /// The backup the runbook's pg arm restores from: `pg_dump` of the live
@@ -430,7 +441,6 @@ fn a_failing_disk_runbook_fscks_restores_and_serves() {
 /// to the same database.
 fn dump_schema(schema: &str, out: &std::path::Path) {
     let url = std::env::var("SCION_TEST_POSTGRES_URL").expect("SCION_TEST_POSTGRES_URL");
-    let file = std::fs::File::create(out).unwrap();
     let (mut cmd, target): (std::process::Command, String) =
         match std::env::var("SCION_TEST_PG_CONTAINER") {
             Ok(container) => {
