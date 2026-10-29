@@ -827,8 +827,10 @@ jobs:
   # The nightly's proof that the whole proptest budget (2000 cases)
   # passes on Postgres: the per-job counts above keep the per-push jobs
   # under their caps, and this job carries the full run once a night in
-  # its own longer window.
-  test-proptest-full:
+  # its own longer window. The job id does not start with `test`: the
+  # support-matrix test holds every `test*` job to a matrix row, and
+  # this one is a budget proof, not a support cell.
+  proptest-full:
     name: test (proptest full)
     if: github.event_name == 'schedule'
     runs-on: ubuntu-24.04
