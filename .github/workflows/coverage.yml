@@ -1,13 +1,15 @@
 # The statement-coverage gate: the roadmap's v0.8.0 bar, measured over
 # production code with a pinned tool, the exclusions checked in
-# (scripts/coverage-exclusions.txt). One Postgres job runs the whole
-# workspace against the pg17 service (every suite is Postgres now), it
-# uploads its profiles, and the gate job rebuilds the instrumented
-# binaries without tests and turns the upload into the one number it
-# checks. The build links two objects at a time and the suite runs two
-# tests at a time, because the instrumented build plus the whole suite
-# is the heaviest thing this repository runs and the runner's agent
-# dies of memory when the machine is pushed harder.
+# (scripts/coverage-exclusions.txt). The gate runs on the merged report
+# of two measures, split by backend: one default-backend job runs the
+# whole workspace against SQLite without a database container beside
+# it, one Postgres job runs the server crate against Postgres with the
+# service, each uploads its profiles, and the gate job rebuilds the
+# instrumented binaries without tests and merges both uploads into the
+# one number it checks. The build links two objects at a time and the
+# suite runs two tests at a time, because the instrumented build plus
+# the whole suite is the heaviest thing this repository runs and the
+# runner's agent dies of memory when the machine is pushed harder.
 #
 # No pull_request trigger on purpose: the PR lane does not pay for the
 # coverage build, and an edit to this file is not a workflow-lane PR
@@ -52,32 +54,19 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
-  measure:
-    name: coverage
+  measure-sqlite:
+    name: coverage, the default backend
     runs-on: ubuntu-24.04
     timeout-minutes: 90
-    services:
-      postgres:
-        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
-        env:
-          POSTGRES_PASSWORD: scion
-          POSTGRES_DB: scion
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: protoc
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -136,7 +125,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
-          key: coverage-build-${{ runner.os }}-stable-${{ hashFiles('Cargo.lock') }}
+          key: coverage-build-${{ runner.os }}-stable-${{ hashFiles('Cargo.lock') }}-sqlite
           restore-keys: coverage-build-${{ runner.os }}-stable-${{ hashFiles('Cargo.lock') }}-
       # The image ships dozens of gigabytes of toolchains this job
       # never touches; they go.
@@ -163,10 +152,331 @@ jobs:
           df -h / | tail -1; free -m | awk 'NR==2'
       - name: stale profiles go
         run: rm -f target/coverage/*.profraw target/coverage/*.profdata target/coverage/*-profraw-list
-      - name: measure
+      - name: build, the default backend
         run: |
           set -o pipefail
-          # The same watcher-guard the measure always had: no
+          # The coverage profile lives in the committed
+          # .config/nextest.toml: retries = 0 (no other CI job retries,
+          # and a retry hides both a flake and the hang this hunts),
+          # and a slow test dies at five minutes, named.
+          # The README's recipe: show-env exports the instrumentation
+          # RUSTFLAGS and the profile environment, plain cargo nextest
+          # runs the tests against the binaries the build makes. The
+          # profiles accumulate in the target dir; the report step below
+          # merges them into the one number the gate checks. nextest
+          # isolates every test in its own process with its own timeout.
+          # A per-process address-space cap of 6 GB: a test whose
+          # allocations run away under instrumentation freezes the
+          # runner in swap thrash and kills the agent with every log.
+          # Under this cap the runaway test is the one that dies, and
+          # the step fails cleanly with its name in the log.
+          ulimit -v 6291456
+          # shellcheck disable=SC1090
+          source <(cargo llvm-cov show-env --sh)
+          # The build phase writes profiles too: instrumented
+          # proc-macro and build-script processes run while cargo
+          # compiles, and their counters map to no binary the report
+          # reads - they were the 794 "functions have mismatched data"
+          # the corrected split still printed. So the build runs with
+          # profiles discarded, and only the run phase writes them.
+          LLVM_PROFILE_FILE=/dev/null nice -n 19 cargo nextest run \
+            --workspace --no-run
+          echo "default build ends at $(date -u +%T)" >> "${GITHUB_STEP_SUMMARY:-/dev/null}" || true
+      # The save rides right behind the build: a run whose agent dies
+      # later still leaves a warm build for the next run, which breaks
+      # the cold-rebuild loop that loses the runner every other push.
+      - name: save the instrumented build
+        if: steps.restore-build.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: coverage-build-${{ runner.os }}-stable-${{ hashFiles('Cargo.lock') }}-sqlite
+      - name: measure, the default backend
+        run: |
+          set -o pipefail
+          # Steps do not share a shell: the 6 GB per-process cap and the
+          # instrumentation flags live in this step too, so the test run
+          # sees the same environment the build compiled with. The cap
+          # stays on: an A/B with and without it ran 6 of 6 green both
+          # ways, so it neither causes nor prevents the rare loss.
+          ulimit -v 6291456
+          # shellcheck disable=SC1090
+          source <(cargo llvm-cov show-env --sh)
+          # One .profraw per test process made thousands per job, and
+          # the runner was lost four runs in a row with no log (#565).
+          # The %4m pool folds them into four files per test binary.
+          # The gate merges *.profraw, so the report does not change.
+          export LLVM_PROFILE_FILE="$PWD/target/coverage/sqlite-%4m.profraw"
+
+          # The watcher doubles as a guard: a runner whose disk fills or
+          # whose memory drains loses its agent mid-suite, with every
+          # log — so the measure fails itself, loudly, while there is
+          # still room to log the numbers. Two rules the first watcher
+          # broke (run 40188469520): no pipe may end in SIGPIPE (a ps
+          # piped to head dies with the subshell under pipefail, and
+          # the step then fails at the kill of a watcher already gone),
+          # and a trip must stop the measure, not only print - the
+          # nextest process group dies here, so the step fails with the
+          # hog's name in a log that still uploads.
+          rm -f guard.trip watcher.log watcher.ps
+          # The absolute floors are late: a leak that eats the runner
+          # kills its agent before 3G/600M arrive. The watch also
+          # trips on GROWTH against this measure's own start, which
+          # fires while there is still room to leave the evidence.
+          start_avail=$(df --output=avail -BG / 2> /dev/null | tail -1 | tr -dc '0-9') || true
+          start_mem=$(free -m 2> /dev/null | awk 'NR==2 {print $7}') || true
+          # The agent can also die of a process or thread leak: servers a
+          # test left behind pile up until the runner cannot fork. The
+          # watch counts processes, threads and the store family every
+          # tick, and trips on growth against this measure's own start.
+          start_procs=$(ps -e --no-headers 2> /dev/null | wc -l | tr -d ' ') || true
+          pgrep -c -f 'scion-(server|daemon|cache)' 2> /dev/null > /dev/null || true
+          ( while sleep 10; do
+              { date -u +%T; df -h / | tail -1; free -m | awk 'NR==2'; du -sh target/coverage 2>/dev/null; } || true
+              { ps -eo pid,rss,pcpu,etime,comm --sort=-rss > watcher.ps && head -4 watcher.ps >> watcher.log; } || true
+              procs=$(ps -e --no-headers 2> /dev/null | wc -l | tr -d ' ') || true
+              threads=$(ps -eLo --no-headers 2> /dev/null | wc -l | tr -d ' ') || true
+              family=$(pgrep -c -f 'scion-(server|daemon|cache)' 2> /dev/null) || true
+              family=${family:-0}
+              # shellcheck disable=SC2034
+              echo "processes=$procs threads=$threads store_family=$family" >> watcher.log || true
+              avail=$(df --output=avail -BG / | tail -1 | tr -dc '0-9' 2> /dev/null) || true
+              mem=$(free -m | awk 'NR==2 {print $7}' 2> /dev/null) || true
+              swap_used=$(free -m 2> /dev/null | awk 'NR==3 {print $3}') || true
+              echo "procs=$procs threads=$threads family=$family mem_avail=${mem:-?}M swap_used=${swap_used:-?}M disk_avail=${avail:-?}G" || true
+              avail_drop=0; mem_drop=0; proc_growth=0
+              if [ -n "${avail:-}" ] && [ -n "${start_avail:-}" ]; then
+                avail_drop=$((start_avail - avail))
+              fi
+              if [ -n "${mem:-}" ] && [ -n "${start_mem:-}" ]; then
+                mem_drop=$((start_mem - mem))
+              fi
+              if [ -n "${procs:-}" ] && [ -n "${start_procs:-}" ]; then
+                proc_growth=$((procs - start_procs))
+              fi
+              if [ "${avail:-10}" -le 3 ] || [ "${mem:-10000}" -le 600 ] || [ "$avail_drop" -ge 6 ] || [ "$mem_drop" -ge 4000 ] || [ "$proc_growth" -ge 500 ] || [ "$family" -ge 200 ]; then
+                {
+                  echo "the runner is out of disk or memory, or is leaking: avail=${avail:-?}G avail_floor=3G free_mem=${mem:-?}M mem_floor=600M disk_drop_since_start=${avail_drop:-?}G mem_drop_since_start=${mem_drop:-?}M processes=$procs (start ${start_procs:-?}, growth $proc_growth, floor +500) store_family=$family (floor 200) threads=$threads"
+                  df -h / || true
+                  free -m || true
+                  { ps -eo pid,rss,pcpu,etime,comm,args --sort=-rss > watcher.top && head -14 watcher.top; } || true
+                  { ps -eo ppid,comm | sort | uniq -c | sort -rn | head -10; } || true
+                } | tee -a watcher.log
+                # The reason goes to a file FIRST: the kill below takes
+                # the measure's process group, and anything this
+                # subshell only teed could die with the flush. The kill
+                # reaches exactly the measure's own session (setsid
+                # above): the negative pgid signals the wrapper, the
+                # runner and every test process. A setsid that failed
+                # would record the step's own group - the guard then
+                # stands down rather than kill its family, and the
+                # numbers below name that.
+                printf 'trip at %s: avail=%s mem=%s disk_drop=%s mem_drop=%s pgid=%s step_pgid=%s\n' "$(date -u +%T)" "${avail:-?}" "${mem:-?}" "${avail_drop:-?}" "${mem_drop:-?}" "$(cat measure.pgid 2> /dev/null || echo none)" "$(ps -o pgid= -p $$ 2> /dev/null | tr -d ' ')" > guard.trip 2> /dev/null || true
+                if [ -f measure.pgid ] && [ "$(ps -o pgid= -p "$(cat measure.pgid)" 2> /dev/null | tr -d ' ')" != "$(ps -o pgid= -p $$ 2> /dev/null | tr -d ' ')" ]; then
+                  kill -TERM -- "-$(cat measure.pgid)" || true
+                else
+                  echo "the guard stands down: no separate measure group (setsid failed?)" >> guard.trip || true
+                fi
+                exit 2
+              fi
+            done ) &
+          watcher=$!
+          # The measure runs in its own process group (setsid): the
+          # guard's trip kills that group by number, which reaches the
+          # wrapper, the runner and every test process and nothing
+          # else - no name pattern, nothing of the step or the watcher.
+          sum="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          echo "default measure starts at $(date -u +%T)" >> "$sum" || true
+          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --profile coverage --workspace --no-fail-fast; echo $? > measure.rc' \
+            | tee measure.log
+          echo "default measure ends at $(date -u +%T)" >> "$sum" || true
+          # The step must not fail on a watcher that is already gone:
+          # a tripped guard exited by design, and its trip file says so
+          # below. A watcher that died any other way is a harness bug
+          # and fails the step with its log.
+          # One wait only: a second wait on the reaped job re-fires
+          # the saved status and, under errexit, kills this step with
+          # it - that was the exit-143 after every green measure. The
+          # watcher ends three ways: 2 = it tripped (the file says
+          # so below), 143 = the kill above, the normal shutdown,
+          # anything else = a harness bug.
+          kill "$watcher" 2> /dev/null || true
+          watch_rc=0
+          wait "$watcher" 2> /dev/null || watch_rc=$?
+          if [ -f guard.trip ]; then
+            echo 'the guard tripped: the measure above was stopped by it'
+            tail -30 watcher.log
+            exit 1
+          fi
+          if [ -f measure.rc ] && [ "$(cat measure.rc)" != "0" ]; then
+            echo "the measure itself failed: nextest status $(cat measure.rc)"
+            exit "$(cat measure.rc)"
+          fi
+          if [ "$watch_rc" -eq 143 ]; then
+            echo 'the watcher was stopped by this step, as it should be'
+          elif [ "$watch_rc" -eq 0 ]; then
+            echo 'the watcher ran to the end, as it should be'
+          else
+            echo "the watcher exited early without tripping: status $watch_rc - a harness bug"
+            tail -30 watcher.log
+            exit 1
+          fi
+          df -h / | tail -1; free -m | awk 'NR==2'
+          du -sh target/coverage; find target/coverage -name '*.profraw' | wc -l
+          echo "the measure's instrumented units:"
+          find target/debug -type f -perm -u+x ! -name '*.d' ! -name '*.rlib' ! -name '*.so' -exec du -ch {} + | tail -1
+          find target/debug -type f -perm -u+x ! -name '*.d' ! -name '*.rlib' ! -name '*.so' | wc -l
+          # The report maps raw counters against these EXACT bytes; a
+          # rebuild in the gate produced per-build mapping hashes the
+          # counters could never match (#597's 1,221). The tar carries
+          # the unit paths target/debug/... so the report reads them
+          # where a build would have put them.
+          # shellcheck disable=SC2046
+          tar czf units-sqlite.tgz $(find target/debug -type f -perm -u+x ! -name '*.d' ! -name '*.rlib' ! -name '*.so')
+
+      - name: upload the measure's units
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-units-sqlite
+          retention-days: 1
+          path: units-sqlite.tgz
+          if-no-files-found: error
+
+      - name: upload the measure's profiles
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-sqlite
+          path: target/coverage/*.profraw
+          if-no-files-found: error
+      - name: the measure's log, even on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: measure-log-sqlite
+          path: measure.log
+          if-no-files-found: ignore
+      - name: the watcher's process samples, always
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: watcher-sqlite
+          path: watcher.log
+          if-no-files-found: ignore
+  measure-postgres:
+    name: coverage, the postgres backend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    services:
+      postgres:
+        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        env:
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: scion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: protoc
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # The instrumented build is one build, saved even on a failed
+          # run, so one green build turns every later run into the warm
+          # measure.
+          key: coverage-instrumented
+          cache-on-failure: true
+          cache-targets: false
+      - run: |
+          curl -fsSL -o /tmp/cargo-llvm-cov.tgz \
+            https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.9.1/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz
+          echo "b3f68e625481fed9b16444174f3fa5ebcdbde4a1878803a35eabe2dcefcdc41a  /tmp/cargo-llvm-cov.tgz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf /tmp/cargo-llvm-cov.tgz -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: the checked-in exclusions, as one regex
+        run: |
+          regex=$(sed 's/^[[:space:]]*//; s/#.*//; s/[[:space:]]*$//' scripts/coverage-exclusions.txt \
+            | grep -v '^$' | paste -s -d '|' -)
+          # An empty file holds no patterns, and an empty regex would
+          # match everything: the flag is passed only when a pattern
+          # exists.
+          if [ -n "$regex" ]; then
+            echo "COVERAGE_IGNORE=$regex" >> "$GITHUB_ENV"
+          fi
+      # A vacuous exclusion is the same bug class as the soak's zero
+      # counts: a pattern that matches no tracked file excludes nothing
+      # and promises a number the report does not hold.
+      - name: every exclusion pattern matches a tracked file
+        run: |
+          ok=1
+          while IFS= read -r pattern; do
+            if ! git ls-files | grep -qE "$pattern"; then
+              echo "the exclusion pattern '$pattern' matches no tracked file"
+              ok=0
+            fi
+          done < <(sed 's/^[[:space:]]*//; s/#.*//; s/[[:space:]]*$//' scripts/coverage-exclusions.txt | grep -v '^$')
+          [ "$ok" = 1 ]
+      - name: the runner's disk and memory, before the build
+        run: df -h / | tail -1; free -m | awk 'NR==2'
+      # A leaner instrumented build: no debuginfo (coverage needs the
+      # coverage mapping, not DWARF), stripped binaries, and a linker
+      # that keeps less of its working set in RAM. The agent that dies
+      # is the largest process when the linker and the agent share a
+      # 7 GB machine. The swap file gives the suite's tail somewhere to
+      # go instead of the OOM killer.
+      - name: lean build settings for the instrumented build
+        run: |
+          mkdir -p .cargo
+          printf '[profile.dev]\ndebug = false\nstrip = true\n\n[profile.test]\ndebug = false\nstrip = true\n' > .cargo/config.toml
+          echo "RUSTFLAGS=-C link-arg=-Wl,--no-keep-memory" >> "$GITHUB_ENV"
+      - name: restore the last instrumented build
+        id: restore-build
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: coverage-build-${{ runner.os }}-stable-${{ hashFiles('Cargo.lock') }}-sqlite
+          restore-keys: coverage-build-${{ runner.os }}-stable-${{ hashFiles('Cargo.lock') }}-
+      # The image ships dozens of gigabytes of toolchains this job
+      # never touches; they go.
+      - name: free the runner's disk for the instrumented build
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost /usr/lib/jvm 2>/dev/null || true
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          # The image may already run a swap file (this one does);
+          # only grow the machine when it has none.
+          if [ -z "$(swapon --show)" ]; then
+            if sudo fallocate -l 4G /covswap \
+              && sudo chmod 600 /covswap \
+              && sudo mkswap /covswap \
+              && sudo swapon /covswap; then
+              echo "a 4G swap file is on"
+            else
+              echo "the swap file did not come up; the build lives without it"
+            fi
+          fi
+          swapon --show || true
+          df -h / | tail -1; free -m | awk 'NR==2'
+      - name: stale profiles go
+        run: rm -f target/coverage/*.profraw target/coverage/*.profdata target/coverage/*-profraw-list
+      - name: measure, the postgres backend
+        run: |
+          set -o pipefail
+          # The same watcher-guard as the default measure above: no
           # SIGPIPE death, and a trip stops the measure while the log
           # can still say what ate the runner.
           rm -f guard.trip watcher.log watcher.ps
@@ -235,13 +545,16 @@ jobs:
           ulimit -v 6291456
           # shellcheck disable=SC1090
           source <(cargo llvm-cov show-env --sh)
-          # The build set is the whole workspace, the same feature
-          # unification as the gate: a -p build gives the crate a
-          # different coverage mapping, and the gate's report drops the
-          # -p side's counters as mismatched data (pg.rs read 6% while
-          # its job ran 635 tests green - the split's artifact, not
-          # missing tests). The run set is the whole workspace: the one
-          # measure is what the gate checks, so every crate's tests run.
+          # The server crate is what ci.yml's postgres job proves, and
+          # the profiles of the default measure already carry its
+          # sqlite-side lines. The build set is the whole workspace so
+          # the crate compiles under the same feature unification as
+          # the default measure and the gate: a -p build gives the
+          # crate a different coverage mapping, and the gate's report
+          # drops the -p side's counters as mismatched data (pg.rs read
+          # 6% while the postgres job ran 635 tests green - the split's
+          # artifact, not missing tests). The run set is the server
+          # crate's tests.
           # SHORTCUT: one graph walk runs longer than eight minutes
           # under postgres plus instrumentation, because the ancestry
           # walk issues one query per node link. Remove this exclusion
@@ -254,16 +567,16 @@ jobs:
           # else - no name pattern, nothing of the step or the watcher.
           sum="${GITHUB_STEP_SUMMARY:-/dev/null}"
           echo "postgres measure starts at $(date -u +%T)" >> "$sum" || true
-          if nice -n 19 cargo nextest run --no-run --workspace -E "not test(graph_queries_across_many_merges_answer)" > build-postgres.log 2>&1; then
+          if nice -n 19 cargo nextest run --no-run --workspace -E "package(open-scion-server) and not test(graph_queries_across_many_merges_answer)" > build-postgres.log 2>&1; then
             echo "postgres build ends at $(date -u +%T)" >> "$sum" || true
           else
             echo "the postgres build failed:"
             tail -40 build-postgres.log
             exit 1
           fi
-          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --profile coverage --workspace --no-fail-fast -E "not test(graph_queries_across_many_merges_answer)"; echo $? > measure.rc' \
-            | tee measure.log
-          # The same end-of-step rules the measure always had.
+          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --profile coverage --workspace --no-fail-fast -E "package(open-scion-server) and not test(graph_queries_across_many_merges_answer)"; echo $? > measure.rc' \
+            | tee measure-postgres.log
+          # The same end-of-step rules as the default measure above.
           # One wait only: a second wait on the reaped job re-fires
           # the saved status and, under errexit, kills this step with
           # it - that was the exit-143 after every green measure. The
@@ -304,13 +617,12 @@ jobs:
       - name: upload the measure's units
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: coverage-units
+          name: coverage-units-postgres
           retention-days: 1
           path: units-postgres.tgz
           if-no-files-found: error
       - name: upload the measure's profiles
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-
         with:
           name: coverage-postgres
           path: target/coverage/*.profraw
@@ -319,7 +631,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: measure-log
+          name: measure-log-postgres
           path: measure.log
           if-no-files-found: ignore
       - name: the watcher's process samples, always
@@ -331,7 +643,7 @@ jobs:
           if-no-files-found: ignore
   gate:
     name: coverage, the gate
-    needs: [measure]
+    needs: [measure-sqlite, measure-postgres]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -346,23 +658,28 @@ jobs:
           if [ -n "$regex" ]; then
             echo "COVERAGE_IGNORE=$regex" >> "$GITHUB_ENV"
           fi
-      - name: the measure's profiles and units
+      - name: the profiles of both measures, and their units
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: coverage-*
           path: target/coverage
           merge-multiple: true
-      - name: the measure's units, unpacked where a build would put them
+      - name: the two measures' units, unpacked where a build would put them
         run: |
-          # The tar carries the unit paths target/debug/...; the report
-          # maps the counters against THE EXACT BYTES the tests ran.
-          mkdir -p target/units-postgres
+          # Each tar carries the unit paths target/debug/...; the two
+          # measures built the same workspace with the same flags, so
+          # their units must be the same bytes - the report maps each
+          # job's counters against BOTH jobs' units and the assert
+          # below fails the run when that is not so.
+          mkdir -p target/units-sqlite target/units-postgres
+          tar xzf target/coverage/units-sqlite.tgz -C target/units-sqlite
           tar xzf target/coverage/units-postgres.tgz -C target/units-postgres
+          echo "sqlite units: $(find target/units-sqlite -type f | wc -l) files, $(du -sh target/units-sqlite | cut -f1)"
           echo "postgres units: $(find target/units-postgres -type f | wc -l) files, $(du -sh target/units-postgres | cut -f1)"
       - name: the merged report, and the gate
         run: |
           set -o pipefail
-          # The report maps the measure's raw counters against THE
+          # The report maps the two measures' raw counters against THE
           # EXACT BYTES those tests ran - no rebuild, no recompile, no
           # second copy of any unit. A rebuild was the whole bug: a
           # unit's mapping hash is build-specific, so the report could
@@ -383,7 +700,7 @@ jobs:
           # rest into nothing.
           objects=()
           while IFS= read -r f; do objects+=(-object "$f"); done \
-            < <(find target/units-postgres -type f | sort)
+            < <(find target/units-sqlite target/units-postgres -type f | sort)
           echo "coverage objects: $(( ${#objects[@]} / 2 ))"
           if ! "$lcv" report "${objects[@]}" \
             -instr-profile=target/coverage/merged.profdata \
@@ -458,11 +775,11 @@ jobs:
             echo "the total line coverage is under 80"
             exit 2
           fi
-          # Guard 2: pg.rs's lines must be above a floor. pg.rs carries
-          # the Postgres backend's code, and the one measure runs the
-          # whole suite against Postgres, so a correct measure reads it
-          # far above half. The floor is well under the reading, so a
-          # lost profile still fails.
+          # Guard 2: the Postgres side's lines must be above a floor.
+          # pg.rs carries the Postgres backend's code; a correct merge
+          # of both measures' profiles reads it far above half. The
+          # floor is half of the corrected reading, well under it, so a
+          # half-lost merge still fails.
           pg_floor=45
           pg_cover=$(jq -r '[.data[0].files[] | select(.filename | endswith("crates/scion-server/src/pg.rs"))][0].summary.lines.percent // "none"' target/coverage/report.json)
           echo "pg.rs lines covered: ${pg_cover:-none}% (floor $pg_floor%)"
