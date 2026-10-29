@@ -227,7 +227,9 @@ fn a_postgres_ca_without_any_url_is_refused() {
     assert!(!out.status.success(), "a CA without a URL must be refused");
     let why = String::from_utf8_lossy(&out.stderr);
     assert!(
-        why.contains("no Postgres URL: give --postgres-url, --postgres-url-file or SCION_POSTGRES_URL"),
+        why.contains(
+            "no Postgres URL: give --postgres-url, --postgres-url-file or SCION_POSTGRES_URL"
+        ),
         "{why}"
     );
 }
