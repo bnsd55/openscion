@@ -122,7 +122,7 @@ pub(crate) mod record {
 /// waits for a signal. The changes go to an overlay directory, which
 /// `scn commit --from-mount DIR` commits.
 pub async fn mount(ctx: &mut Ctx, args: MountArgs) -> Result<()> {
-    let dir = std::path::absolute(&args.dir)?;
+    let dir = mount_dir(&args.dir)?;
     // Refuse before anything is served: a missing mount point fails at
     // mount time anyway, and a second mount of a live dir would start a
     // second NFS server that no one can use.
@@ -236,7 +236,7 @@ pub async fn mount(ctx: &mut Ctx, args: MountArgs) -> Result<()> {
 // The signature matches the other commands, which are all async.
 #[allow(clippy::unused_async)]
 pub async fn unmount(_ctx: &mut Ctx, args: UnmountArgs) -> Result<()> {
-    let dir = std::path::absolute(&args.dir)?;
+    let dir = mount_dir(&args.dir)?;
     let file = session_file()?;
     let record = drop_session(&file, &dir)?
         .ok_or_else(|| anyhow!("{}: no mount of scn is recorded", dir.display()))?;
@@ -262,6 +262,21 @@ pub async fn unmount(_ctx: &mut Ctx, args: UnmountArgs) -> Result<()> {
     }
     outln!("unmounted {}", dir.display());
     Ok(())
+}
+
+/// The mount directory as the session table records and finds it:
+/// absolute, with its parent resolved, so `scn mount a/../m`, `scn unmount
+/// ../m` from another directory, and a path through a symlinked directory
+/// above it name one record. The last part is kept as given: resolving it
+/// would stat the mount point, which a dead NFS server can hang.
+fn mount_dir(dir: &Path) -> Result<PathBuf> {
+    let dir = std::path::absolute(dir)?;
+    match (dir.parent(), dir.file_name()) {
+        (Some(parent), Some(name)) => Ok(std::fs::canonicalize(parent)
+            .with_context(|| format!("cannot resolve {}", parent.display()))?
+            .join(name)),
+        _ => Ok(dir),
+    }
 }
 
 /// Refuses a mount point that is not a directory: the plain mount would
@@ -616,7 +631,7 @@ async fn wait_stopped() -> Result<()> {
 
 /// The recorded mount of `dir`.
 pub(crate) fn session_for_dir(dir: &Path) -> Result<MountRecord> {
-    let dir = std::path::absolute(dir).context("cannot resolve the mount directory")?;
+    let dir = mount_dir(dir).context("cannot resolve the mount directory")?;
     load_sessions()?
         .into_iter()
         .find(|record| record.dir == dir)
@@ -1148,6 +1163,45 @@ mod silent_failures {
         let found = read_sessions(&file).unwrap();
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].dir, PathBuf::from("/mnt/view"));
+    }
+
+    /// One directory, spelled three ways: with a `..`, through a symlinked
+    /// directory above it, and plainly. The record a mount keeps under one
+    /// spelling is found under the others, so a second mount is refused
+    /// and `scn unmount` finds the mount.
+    #[test]
+    fn a_mount_is_found_by_any_spelling_of_its_directory() {
+        let base = tempfile::tempdir().unwrap();
+        fs::create_dir_all(base.path().join("a")).unwrap();
+        fs::create_dir_all(base.path().join("real/m")).unwrap();
+        std::os::unix::fs::symlink(base.path().join("real"), base.path().join("link")).unwrap();
+        let plain = mount_dir(&base.path().join("real/m")).unwrap();
+        for other in ["a/../real/m", "link/m"] {
+            let spelled = mount_dir(&base.path().join(other)).unwrap();
+            assert_eq!(spelled, plain, "{other}");
+            let file = base.path().join("mounts.json");
+            let _ = fs::remove_file(&file);
+            add_session(
+                &file,
+                &MountRecord {
+                    dir: spelled,
+                    overlay: base.path().join("overlay"),
+                    rev: "main".to_owned(),
+                    pid: 1,
+                    writable: false,
+                },
+            )
+            .unwrap();
+            let sessions = read_sessions(&file).unwrap();
+            assert!(
+                live_record_for(&plain, &sessions, &|_| true).is_some(),
+                "a mount of {other} does not hold off a second mount"
+            );
+            assert!(
+                drop_session(&file, &plain).unwrap().is_some(),
+                "scn unmount does not find a mount of {other}"
+            );
+        }
     }
 
     /// Waits until `cond` holds, with a ceiling: macOS may keep a reaped
