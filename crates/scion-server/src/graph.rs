@@ -844,7 +844,7 @@ mod tests {
     /// deadline, this call returned a result.
     #[test]
     fn a_query_with_a_past_deadline_derives_nothing() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let parents = vec![vec![], vec![0], vec![0], vec![1, 2]];
         let (_dir, store, repo, ids) = store_graph(&parents);
         let past = Deadline::new(Instant::now());
@@ -976,7 +976,7 @@ mod tests {
             parents in proptest::prop_oneof![testing::graphs(20), sparse_graphs(20)],
             pairs in proptest::collection::vec(any::<(Sample, Sample)>(), PAIRS),
         ) {
-            let _serial = damage::serial();
+            let _slot = damage::slot();
             let (_dir, store, repo, ids) = store_graph(&parents);
             let histories = histories(&parents);
             let ancestors = ancestors(&parents);
@@ -1134,7 +1134,7 @@ mod tests {
         const N: usize = 4_096;
         let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test(dir.path()).unwrap();
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (repo, ids, side) = deep_chain(&store, N);
         let tip = ids[N - 1];
         // Myers bounds a walk down to a depth by about 3 log2 n moves.
@@ -1202,7 +1202,7 @@ mod tests {
 
     #[test]
     fn an_old_database_derives_the_graph_in_steps_on_first_query() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let parents: Vec<Vec<usize>> = vec![vec![], vec![0], vec![0], vec![1, 2], vec![3], vec![]];
         let (_dir, store, repo, ids) = store_graph(&parents);
         let commits = store.commits();
@@ -1245,7 +1245,7 @@ mod tests {
         // changeset that branched from the one before. `side` branched from
         // the 100th, and is not merged.
         const N: usize = 20_000;
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let mut parents: Vec<Vec<usize>> = vec![vec![]];
         let mut history = vec![0];
         for i in 1..N {
@@ -1340,7 +1340,7 @@ mod tests {
 
     #[test]
     fn a_walk_stops_at_its_deadline() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         // The walks from the tip go through every merge down to `side`.
         let (_dir, store, repo, ids) = store_graph(&ladder(100));
         let (side, tip) = (ids[1], *ids.last().unwrap());
@@ -1378,7 +1378,7 @@ mod tests {
 
     #[test]
     fn a_walk_blocks_no_write_and_no_read() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, repo, ids) = store_graph_with_nodes(&ladder(20));
         let (side, tip) = (ids[1], *ids.last().unwrap());
         let mut paint = Paint::new(
@@ -1422,7 +1422,7 @@ mod tests {
             eprintln!("skip on postgres: the flush steps are the SQLite store's");
             return;
         }
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, repo, ids) = store_graph_with_nodes(&ladder(20));
         let (side, tip) = (ids[1], *ids.last().unwrap());
         let mut paint = Paint::new(
@@ -1471,7 +1471,7 @@ mod tests {
     /// statement: the merge's parents read became the merge's node read.
     #[test]
     fn the_parents_batch_counts_the_same_reads() {
-        let _serial = damage::serial();
+        let _slot = damage::slot();
         let (_dir, store, repo, ids) = store_graph(&ladder(100));
         let (side, tip) = (ids[1], *ids.last().unwrap());
         let floor = store.read(|c| c.generation(repo, side)).unwrap();
