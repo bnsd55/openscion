@@ -1454,7 +1454,6 @@ mod tests {
     use super::*;
     use crate::meta::testing;
     use crate::pg::damage;
-    use crate::pg::damage;
     use crate::store::FSYNC_LEAVES_DRIVE_CACHE;
     use scion_core::{BlobId, Entry, FileEntry, IdentityTime};
 

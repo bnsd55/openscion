@@ -26,13 +26,13 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
-    /// The data directory. Holds the SQLite database and the objects.
+    /// The data directory. Holds the objects and the backend marker file.
     #[arg(long, global = true, env = "SCION_DATA", default_value = "scion-data")]
     data: PathBuf,
-    /// Serve metadata from Postgres at this URL instead of the SQLite
-    /// database of the data directory. The URL holds the credentials, so it
-    /// is never logged. Prefer `--postgres-url-file` or `SCION_POSTGRES_URL`:
-    /// a URL on the command line is readable by every local account (`ps`).
+    /// Serve metadata from Postgres at this URL. The URL holds the
+    /// credentials, so it is never logged. Prefer `--postgres-url-file` or
+    /// `SCION_POSTGRES_URL`: a URL on the command line is readable by every
+    /// local account (`ps`).
     #[arg(long, global = true, value_name = "URL")]
     postgres_url: Option<String>,
     /// File with the Postgres URL, read like the access file: the owner
