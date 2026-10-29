@@ -4554,19 +4554,35 @@ mod tests {
 }
 
 #[cfg(test)]
-mod pool_tests {
+pub(crate) mod pool_tests {
     use super::*;
     use crate::store::READERS;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::{Mutex, MutexGuard, PoisonError};
 
-    /// A Postgres backend of a test database.
-    fn pg() -> Pg {
+    /// The tests that hold a pool of the server's size run one at a
+    /// time: each holds a write connection and `READERS` readers, and
+    /// the suite's other backends fill the rest of the database's
+    /// `max_connections` (E53300, "too many clients").
+    pub(crate) static SERVER_SIZED_POOL: Mutex<()> = Mutex::new(());
+
+    fn server_sized_pool() -> MutexGuard<'static, ()> {
+        SERVER_SIZED_POOL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A Postgres backend of a test database, with the pool gate: the
+    /// caller holds the pair for its whole test body.
+    fn pg() -> (MutexGuard<'static, ()>, Pg) {
+        let gate = server_sized_pool();
         let data = crate::test_support::private_tempdir();
         // The pool tests hold the whole reader pool: they need the
         // server's pool size, not the suite's small test pool.
-        crate::backend::Backend::open_test_with_readers(data.path(), READERS)
+        let pg = crate::backend::Backend::open_test_with_readers(data.path(), READERS)
             .unwrap()
-            .into_pg()
+            .into_pg();
+        (gate, pg)
     }
 
     /// A transaction whose connection dies mid-way leaves the worker's
@@ -4577,7 +4593,7 @@ mod pool_tests {
     /// forever.
     #[test]
     fn a_read_whose_connection_died_mid_transaction_recovers() {
-        let pg = pg();
+        let (_pool, pg) = pg();
         // One reader client, out of the pool, in a transaction.
         let mut reader = pg.inner.readers.take(READER_WAIT).unwrap();
         let client = reader.client();
@@ -4609,7 +4625,7 @@ mod pool_tests {
     /// reader comes back to the pool.
     #[test]
     fn a_read_statement_past_its_bound_is_cancelled() {
-        let pg = pg();
+        let (_pool, pg) = pg();
         let err = pg
             .read_bounded(
                 |tx| {
@@ -4640,7 +4656,7 @@ mod pool_tests {
     /// `Unavailable`, instead of blocking to its deadline.
     #[test]
     fn a_call_that_waits_past_the_pool_bound_is_refused() {
-        let pg = pg();
+        let (_pool, pg) = pg();
         let pg = Arc::new(pg);
         let busy = Arc::new(AtomicUsize::new(0));
         let holds: Vec<_> = (0..READERS)
@@ -4696,7 +4712,7 @@ mod pool_tests {
     /// ceiling keeps this a fast failure that names the step.
     #[test]
     fn a_reader_taken_and_given_back_is_taken_again() {
-        let pg = pg();
+        let (_pool, pg) = pg();
         let pg = Arc::new(pg);
         let done = Arc::new(AtomicUsize::new(0));
         std::thread::scope(|scope| {
@@ -4736,7 +4752,7 @@ mod pool_tests {
     /// to zero when the reads are done.
     #[test]
     fn the_pool_records_its_waits_and_its_busy_readers() {
-        let pg = pg();
+        let (_pool, pg) = pg();
         let metrics = Arc::new(Metrics::default());
         pg.set_metrics(Arc::clone(&metrics));
         let pg = Arc::new(pg);
@@ -4815,7 +4831,7 @@ mod pool_tests {
     /// back to zero when it ends.
     #[test]
     fn the_tx_age_gauge_tracks_the_oldest_open_read() {
-        let pg = pg();
+        let (_pool, pg) = pg();
         let pg = Arc::new(pg);
         assert_eq!(pg.tx_age(), Duration::ZERO);
         let hold = {

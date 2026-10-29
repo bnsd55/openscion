@@ -3328,7 +3328,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn at_most_max_graph_queries_run_at_once() {
         // root ─ a, and root ─ b. The pool is the server's size: the test
-        // holds every read connection, so the cap's wait is visible.
+        // holds every read connection, so the cap's wait is visible. The
+        // gate keeps it alone among the suite's backends, or the database
+        // runs out of connections (E53300).
+        let _pool = crate::pg::pool_tests::SERVER_SIZED_POOL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test_with_readers(dir.path(), crate::store::READERS).unwrap();
         let ids = store
