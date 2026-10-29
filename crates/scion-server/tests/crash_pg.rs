@@ -639,6 +639,12 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
     let mut saw_old = false;
     let mut saw_new = false;
     let mut reps = 0usize;
+    // A scale on the kill's step. A rep whose kill always comes after
+    // the move says the call land runs quicker than its probe (a warm
+    // runner's second land reuses what the first warmed), so the scale
+    // walks the kills back into the land: the assert below needs both
+    // endings, and the factors alone do not reach the early ones.
+    let mut scale = 1.0;
     for (k, (name, cs, probe_name, probe_cs)) in cuts.iter().enumerate() {
         let mut server = PgServer::spawn(&data, &schema, &log);
         // The measure is the kill's twin: the same server, the same
@@ -660,7 +666,7 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
         // past the whole measured land (up to 11/8 of it): a kill after
         // the reply still shows the new ending.
         let factor = k % 11 + 1;
-        std::thread::sleep(step * u32::try_from(factor).unwrap());
+        std::thread::sleep(step.mul_f64(scale * factor as f64));
         server.kill_and_wait();
         let _ = handle.join();
 
@@ -717,6 +723,12 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
         }
         if moved {
             saw_new = true;
+            if !saw_old {
+                // The kill came after the move again: the next rep's
+                // kills sit at half the delay, so one of them lands
+                // inside the land.
+                scale /= 2.0;
+            }
         } else {
             saw_old = true;
         }
@@ -833,17 +845,20 @@ fn a_kill_during_a_schema_upgrade_leaves_one_whole_version() {
         // Drop, so the next round's spawn cannot race its sessions.
         verify.kill_and_wait();
         if served {
+            if during == 0 {
+                // The step overshot a faster upgrade: the kills march
+                // back into it, from half the step, and a later rep
+                // lands one inside.
+                step /= 2;
+                k = 1;
+                continue;
+            }
+            // A kill landed during the upgrade before this one, so the
+            // march crossed the whole upgrade: the last migration
+            // already stands, the loop is done.
             break;
         }
-        // No kill has landed during the upgrade yet, and this one came
-        // after serving: the step overshot, the next rep starts at half
-        // of it.
-        if during == 0 {
-            step /= 2;
-            k = 1;
-        } else {
-            k += 1;
-        }
+        k += 1;
     }
     assert!(
         during > 0,
