@@ -9,7 +9,7 @@ use std::path::Path;
 
 use super::{Backend, Marker, marker_agrees, refuse_damaged_marker, refuse_sqlite_dir};
 use crate::error::Result;
-use crate::pg::Pg;
+use crate::pg::{Pg, map_pg_error};
 
 /// The reader-pool size of a test backend. Tests run many backends at
 /// once - the lib suite runs its tests on threads, and each backend
@@ -37,7 +37,7 @@ impl Backend {
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn open_test_shared(data: &Path) -> Result<Self> {
-        Self::open_test_with_readers(data, PG_TEST_READERS, Pg::open_test_shared)
+        Self::open_test_in_schema_with(data, &test_schema(data), PG_TEST_READERS, Pg::open_test_shared)
     }
     /// [`Backend::open_test_shared`], for a store the suite reopens from
     /// another path than the one its first open used: the power suite
@@ -94,19 +94,6 @@ impl Backend {
         Self::open_test_in_schema_with(data, &test_schema(data), readers, Pg::open_test)
     }
 
-    /// [`Backend::open_test_with_readers`], on the schema the caller
-    /// names: a store the suite reopens from another path than the one
-    /// its first open used. The schema follows the store, not the path.
-    ///
-    /// # Errors
-    ///
-    /// As [`Backend::open_test`].
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-hooks"))]
-    pub fn open_test_shared_in_schema_named(data: &Path, schema: &str) -> Result<Self> {
-        Self::open_test_in_schema_with(data, schema, PG_TEST_READERS, Pg::open_test_shared)
-    }
-
     /// [`Backend::open_test`], with the opener chosen: the one seam the
     /// open shapes share.
     fn open_test_in_schema_with(
@@ -154,6 +141,38 @@ impl Backend {
         )?;
         marker_agrees(data, pg.store_uuid())?;
         Ok(Self { pg })
+    }
+
+    /// The URL a server, an import or a restore on `data` takes: the
+    /// test database, with the data directory's own schema as the
+    /// search path, which this creates first. The name is the one
+    /// [`Backend::open_test`] gives the same directory, so a pre-seeded
+    /// store and the process that serves it share one schema.
+    ///
+    /// # Errors
+    ///
+    /// A missing test URL.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn test_postgres_url(data: &Path) -> Result<String> {
+        // The connect is one blocking call at setup; some callers run
+        // inside an async runtime, and the client blocks its own thread,
+        // so the call runs on a thread of its own to stay out of the
+        // runtime's way.
+        let data = data.to_path_buf();
+        std::thread::spawn(move || {
+            let url = test_url()?;
+            let schema = test_schema(&data);
+            let mut client =
+                postgres::Client::connect(&url, postgres::NoTls).map_err(map_pg_error)?;
+            client
+                .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"))
+                .map_err(map_pg_error)?;
+            let sep = if url.contains('?') { '&' } else { '?' };
+            Ok(format!("{url}{sep}options=--search_path%3D{schema}"))
+        })
+        .join()
+        .expect("the URL helper never panics")
     }
 
     /// The Postgres statements this process has run since the last

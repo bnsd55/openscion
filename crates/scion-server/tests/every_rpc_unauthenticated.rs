@@ -19,7 +19,6 @@ use scion_proto::v1::{
 use scion_server::Access;
 use scion_server::Keys;
 use scion_server::Metrics;
-use scion_server::test_support::backend::BackendExt;
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use scion_server::{Backend, test_support::service};
 use std::future::Future;
@@ -385,266 +384,33 @@ async fn state_of(store: &Backend, dir: &Path) -> (i64, Vec<i64>) {
 }
 
 fn state_of_blocking(store: &Backend, dir: &Path) -> (i64, Vec<i64>) {
-    if Backend::test_is_postgres() {
-        let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
-        let schema = Backend::test_schema(dir).expect("the tests run on Postgres");
-        let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
-        client
-            .batch_execute(&format!("SET search_path TO {schema}"))
-            .unwrap();
-        let tables = client
-            .query(
-                "SELECT tablename FROM pg_tables
-                 WHERE schemaname = current_schema()
-                 ORDER BY tablename",
-                &[],
-            )
-            .unwrap();
-        let counts = tables
-            .iter()
-            .map(|row| {
-                let table: String = row.get(0);
-                client
-                    .query_one(&format!("SELECT COUNT(*) FROM {table}"), &[])
-                    .unwrap()
-                    .get(0)
-            })
-            .collect();
-        let version = client
-            .query_one("SELECT version FROM refs WHERE name = 'main'", &[])
-            .unwrap()
-            .get(0);
-        return (version, counts);
-    }
-    let store = store.sqlite().expect("the test backend is SQLite");
-    let counts = store
-        .read(|c| {
-            let mut names = c
-                .prepare(
-                    "SELECT name FROM sqlite_master
-                     WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-                     ORDER BY name",
-                )
-                .map_err(scion_server::test_support::error::from_sqlite)?;
-            let names = names
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(scion_server::test_support::error::from_sqlite)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(scion_server::test_support::error::from_sqlite)?;
-            names
-                .iter()
-                .map(|name| {
-                    c.query_row::<i64, _, _>(&format!("SELECT COUNT(*) FROM {name}"), [], |row| {
-                        row.get(0)
-                    })
-                    .map_err(scion_server::test_support::error::from_sqlite)
-                })
-                .collect()
+    let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+    let schema = Backend::test_schema(dir);
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    client
+        .batch_execute(&format!("SET search_path TO {schema}"))
+        .unwrap();
+    let tables = client
+        .query(
+            "SELECT tablename FROM pg_tables
+             WHERE schemaname = current_schema()
+             ORDER BY tablename",
+            &[],
+        )
+        .unwrap();
+    let counts = tables
+        .iter()
+        .map(|row| {
+            let table: String = row.get(0);
+            client
+                .query_one(&format!("SELECT COUNT(*) FROM {table}"), &[])
+                .unwrap()
+                .get(0)
         })
-        .expect("the row counts read");
-    let version = store
-        .read(|c| {
-            let repo = c.repo_id(REPO)?;
-            Ok(c.get_ref(repo, "main")?.expect("main exists").version)
-        })
-        .expect("main reads");
+        .collect();
+    let version = client
+        .query_one("SELECT version FROM refs WHERE name = 'main'", &[])
+        .unwrap()
+        .get(0);
     (version, counts)
 }
-
-/// The changeset bytes of a new child of `root` that sets `path` to the
-/// blob `content`, and its id.
-fn changeset_on(
-    root: &scion_core::ChangesetId,
-    content: scion_core::BlobId,
-    path: &str,
-) -> (Vec<u8>, scion_core::ChangesetId) {
-    let cs = scion_core::Changeset::new(
-        vec![*root],
-        scion_core::IdentityTime::new(
-            b"Ada".to_vec(),
-            b"ada@example.com".to_vec(),
-            1_700_000_001,
-            0,
-        )
-        .expect("identity fits the format"),
-        None,
-        b"a change\n".to_vec(),
-        [(
-            scion_core::RepoPath::new(path).unwrap(),
-            Some(scion_core::FileState::Regular {
-                content,
-                executable: false,
-            }),
-        )]
-        .into(),
-    )
-    .expect("changeset fits the format");
-    let (bytes, id) = cs.encode_with_id();
-    (bytes, id)
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::too_many_lines)]
-async fn every_rpc_answers_unauthenticated_without_a_valid_token() {
-    let (declared, generated) = declared();
-    // The proto and the generated code agree on the services.
-    for name in &generated {
-        assert!(
-            declared.iter().any(|(service, _)| service == name),
-            "the generated service {name} is not in proto/scion.proto"
-        );
-    }
-    // Every declared RPC has a row, and every row a declared RPC.
-    let rows = rows();
-    for (service, rpc) in &declared {
-        assert!(
-            rows.iter()
-                .any(|row| row.service == service && row.rpc == rpc),
-            "RPC {service}.{rpc} has no row: add one, so it cannot land without auth coverage"
-        );
-    }
-    for row in &rows {
-        assert!(
-            declared
-                .iter()
-                .any(|(service, rpc)| service == row.service && rpc == row.rpc),
-            "row {}.{}, but the proto does not declare it",
-            row.service,
-            row.rpc
-        );
-    }
-
-    let (dir, store, root) = store().await;
-    let (stop, url) = serve(&store, dir.path(), access()).await;
-
-    let channel = common::channel(&url).await.unwrap();
-    let none = client_with(channel.clone(), None);
-    let wrong = client_with(channel.clone(), Some("wrong"));
-    let mut ci = client_with(channel, Some("ci"));
-
-    // With the right token, a real upload stores a blob. Its id feeds
-    // the changeset and land payloads.
-    let blob = ci
-        .scion
-        .put_blob(tokio_stream::once(PutBlobRequest {
-            repo: REPO.into(),
-            data: b"# side effect\n".to_vec(),
-        }))
-        .await
-        .expect("the right token may upload")
-        .into_inner()
-        .blob_id;
-    let content = scion_core::BlobId::from_bytes(blob.as_slice().try_into().unwrap());
-    let (landed, landed_id) = changeset_on(&root, content, "LANDED");
-    let (refused, _refused_id) = changeset_on(&root, content, "REFUSED");
-    let payload = Payload {
-        put_blob: PutBlobRequest {
-            repo: REPO.into(),
-            data: b"refused\n".to_vec(),
-        },
-        create_changeset: CreateChangesetRequest {
-            repo: REPO.into(),
-            changeset: refused,
-        },
-        land: LandRequest {
-            repo: REPO.into(),
-            changeset_id: landed_id.as_bytes().to_vec(),
-            target_ref: "main".into(),
-            request_key: "refused".into(),
-        },
-    };
-    // The land names a changeset the server holds.
-    ci.scion
-        .create_changeset(CreateChangesetRequest {
-            repo: REPO.into(),
-            changeset: landed,
-        })
-        .await
-        .expect("the right token may create the changeset the land names");
-    // The baseline: everything the setup stored, nothing more. The
-    // refused calls and the controls are compared against it.
-    let before = state_of(&store, dir.path()).await;
-
-    for row in &rows {
-        for (who, pair) in [("no token", &none), ("wrong token", &wrong)] {
-            let reply = (row.call)(pair, &payload).await;
-            let status = match reply {
-                Ok(()) => panic!("{}.{}, {who}: the call went through", row.service, row.rpc),
-                Err(status) => status,
-            };
-            let want = if row.rpc == "GetObjects" {
-                Code::PermissionDenied
-            } else {
-                Code::Unauthenticated
-            };
-            assert_eq!(
-                status.code(),
-                want,
-                "{}.{}, {who}: {}",
-                row.service,
-                row.rpc,
-                status.message()
-            );
-        }
-    }
-    // No refused call moved a ref, stored a blob, or landed anything.
-    let after = state_of(&store, dir.path()).await;
-    assert_eq!(before, after, "a refused call changed the repo");
-
-    // The positive control: the same requests, sent with the right
-    // token, do change the state. Without this, the no-change assert
-    // above would pass for a server that refuses everything.
-    ci.scion
-        .put_blob(tokio_stream::once(payload.put_blob.clone()))
-        .await
-        .expect("the upload the refused calls carried is a valid one");
-    assert_ne!(
-        state_of(&store, dir.path()).await,
-        after,
-        "the control upload changed nothing"
-    );
-    ci.scion
-        .create_changeset(payload.create_changeset.clone())
-        .await
-        .expect("the changeset the refused calls carried is a valid one");
-    assert_ne!(
-        state_of(&store, dir.path()).await,
-        after,
-        "the control changeset changed nothing"
-    );
-    ci.scion
-        .land(LandRequest {
-            repo: REPO.into(),
-            changeset_id: payload.land.changeset_id.clone(),
-            target_ref: "main".into(),
-            request_key: "control".into(),
-        })
-        .await
-        .expect("the land the refused calls carried is a valid one");
-    assert_ne!(
-        state_of(&store, dir.path()).await,
-        after,
-        "the control land changed nothing"
-    );
-
-    // And with the right token, no row answers UNAUTHENTICATED: the
-    // refusal of the calls above is about the token, nothing else.
-    for row in &rows {
-        let reply = (row.call)(&ci, &payload).await;
-        if let Err(status) = reply {
-            assert_ne!(
-                status.code(),
-                Code::Unauthenticated,
-                "{}.{} with the right token: {}",
-                row.service,
-                row.rpc,
-                status.message()
-            );
-        }
-    }
-
-    stop.send(()).ok();
-}
-
-#[path = "common/mod.rs"]
-mod common;

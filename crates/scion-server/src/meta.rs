@@ -468,9 +468,6 @@ pub trait MetaTx {
         conflict_paths: Vec<RepoPath>,
     ) -> Result<LandOutcome>;
 
-    /// Records that a git commit became the changeset. Safe to repeat.
-    fn put_git_import(&mut self, repo: RepoId, oid: ObjectId, cs: ChangesetId) -> Result<()>;
-
     /// Records that the git commits became the changesets, all of the
     /// pairs, in one statement where the backend can. Safe to repeat.
     fn put_git_imports(&mut self, repo: RepoId, pairs: &[(ObjectId, ChangesetId)]) -> Result<()>;
@@ -553,9 +550,6 @@ pub trait MetaTx {
     ///
     /// A database error.
     fn restore_ref(&mut self, repo: RepoId, name: &str, target: &[u8], version: i64) -> Result<()>;
-
-    /// Removes the row that names `blob` for `repo`.
-    fn delete_repo_blob(&mut self, repo: RepoId, blob: &[u8]) -> Result<()>;
 
     /// Removes the rows that name any of `blobs` for `repo`, all of
     /// them, in one statement where the backend can.

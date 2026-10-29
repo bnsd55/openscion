@@ -54,7 +54,7 @@ use std::time::{Duration, SystemTime};
 use scion_core::{BlobId, Changeset, ChangesetId};
 
 use crate::backend::Backend;
-use crate::db;
+use crate::meta as db;
 use crate::meta::{Meta as _, MetaTx, RepoChangeset, RepoId};
 use std::str::FromStr as _;
 
@@ -1378,10 +1378,6 @@ mod tests {
     #[test]
     fn the_collector_waits_for_a_changeset_that_holds_the_blob_lock() {
         let _serial = damage::serial();
-        if !Backend::test_is_postgres() {
-            eprintln!("skip on sqlite: the lock is the write lock itself");
-            return;
-        }
         // The collector side opens the way the `gc` CLI does - shared,
         // with no one-server lock - and the writer the way a server
         // does, with the per-schema lock. One data directory, as they

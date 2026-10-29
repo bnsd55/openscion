@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::SystemTime;
 
 use rustix::fs::FlockOperation;
 use rustix::io::Errno;
@@ -53,7 +53,7 @@ use crate::error::{Error, Result};
 pub(crate) mod test_hooks;
 
 #[cfg(any(test, feature = "test-hooks"))]
-use test_hooks::WritePark;
+use test_hooks::{DurabilityLog, DurabilityStep, WritePark};
 
 /// Largest object accepted or read back, uncompressed: 100 MiB, the hard
 /// per-file limit on GitHub, so any file from a GitHub repository fits.
@@ -89,7 +89,10 @@ pub enum BlobStatus {
     Corrupt,
 }
 
-/// Opens (or makes) `dir`'s file `name`, for a `flock`.
+/// Opens (or makes) `dir`'s file `name`, for a `flock`. Only the tests
+/// of a released lock hold one now: the server's locks live on the
+/// database and in [`Blobs`]' own `.lock` files.
+#[cfg(test)]
 fn lock_file(dir: &Path, name: &str) -> io::Result<fs::File> {
     fs::OpenOptions::new()
         .create(true)
@@ -1283,8 +1286,9 @@ pub(crate) fn fsync_dir(path: &Path) -> io::Result<()> {
 pub(crate) mod spawn_guard {
     use super::{flock, lock_file};
     use rustix::fs::FlockOperation;
-use rustix::io::Errno;
+    use rustix::io::Errno;
     use std::path::Path;
+    use std::time::{Duration, Instant};
     use std::sync::RwLock;
     
     static SPAWNS: RwLock<()> = RwLock::new(());

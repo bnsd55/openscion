@@ -13,6 +13,13 @@ use scion_core::{BlobId, Changeset, ChangesetId, FileState, IdentityTime, RepoPa
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use std::os::unix::fs::PermissionsExt as _;
 
+/// The URL a store on `dir` opens with: the test database, under the
+/// directory's own schema, created first.
+fn url_of(dir: &std::path::Path) -> String {
+    scion_server::Backend::test_postgres_url(dir).unwrap()
+}
+
+
 /// Creates the data directory of `dir`, seeds it with repo `r` whose
 /// rows are all dead (no stored changeset puts them): one row names a
 /// stored blob file, one names a blob with no file at all. Returns the
@@ -21,7 +28,7 @@ fn seed(data: &std::path::Path) -> BlobId {
     // A store directory is private: the open refuses one group or
     // others can read.
     scion_proto::runtime::auth::create_private_dir_all(data).unwrap();
-    let store = scion_server::Backend::open(data, None, None).unwrap();
+    let store = scion_server::Backend::open(data, &url_of(data), None).unwrap();
     let blob = store.blobs().put(b"a prunable file\n").unwrap();
     let fake = BlobId::from_bytes([7u8; 32]);
     store
@@ -294,7 +301,7 @@ fn one_changeset(parents: Vec<ChangesetId>, changes: &[(&str, Option<FileState>)
 fn seed_exportable(data: &std::path::Path) {
     scion_proto::runtime::auth::create_private_dir_all(data).unwrap();
     {
-        let store = scion_server::Backend::open(data, None, None).unwrap();
+        let store = scion_server::Backend::open(data, &url_of(data), None).unwrap();
         store.blobs().put(b"a\n").unwrap();
         store
             .write(|c| {
@@ -760,61 +767,3 @@ fn base64_of(bytes: &[u8]) -> String {
     out
 }
 
-/// An open that migrates an older store writes its line once: the
-/// migration ran inside the store's open, before the audit could open,
-/// so its record goes in before the command's own pair. A second open
-/// migrates nothing, and writes no line.
-#[test]
-fn an_open_that_migrates_writes_its_line_once() {
-    if scion_server::Backend::test_is_postgres() {
-        // The Postgres line rides the same code path this test pins (the
-        // open's migration reports its versions, and the record goes in
-        // before the command's pair); a test of it needs a schema at an
-        // older version, and the Postgres migrations are not idempotent,
-        // so no test seam makes one.
-        println!("skipping: the migrate line's path is pinned on SQLite");
-        return;
-    }
-    let dir = scion_server::test_support::private_tempdir();
-    let data = dir.path().join("data");
-    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
-    // The metadata at version 1, as the build's first migration makes it.
-    let db = rusqlite::Connection::open(data.join("scion.db")).unwrap();
-    scion_server::test_support::store::migrate(&db, 1).unwrap();
-    drop(db);
-
-    let out = gc(&data, &["--grace-secs", "0"]);
-    assert!(
-        out.status.success(),
-        "gc ran: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let lines = audit_lines(&data);
-    assert_eq!(lines.len(), 3, "migrate, then the gc's pair: {lines:?}");
-    assert_eq!(lines[0]["event"], "admin");
-    assert_eq!(lines[0]["outcome"], "ok");
-    assert_eq!(lines[0]["what"], "migrate");
-    assert_eq!(lines[0]["from"], 1);
-    assert!(
-        lines[0]["to"].as_u64().unwrap_or(0) > 1,
-        "the open moved the schema up: {lines:?}"
-    );
-    assert_eq!(lines[1]["what"], "gc");
-    assert_eq!(lines[1]["outcome"], "intent");
-    assert_eq!(lines[2]["outcome"], "ok");
-
-    // The second open finds the schema at this build's version, and
-    // writes no migration line.
-    let out = gc(&data, &["--grace-secs", "0"]);
-    assert!(out.status.success(), "the second gc ran");
-    let lines = audit_lines(&data);
-    assert_eq!(
-        lines.len(),
-        5,
-        "the second run adds its own pair: {lines:?}"
-    );
-    assert_eq!(lines[3]["what"], "gc");
-    assert_eq!(lines[3]["outcome"], "intent");
-    assert_eq!(lines[4]["outcome"], "ok");
-}

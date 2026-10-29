@@ -26,7 +26,7 @@ use std::str::FromStr as _;
 use scion_core::{BlobId, Changeset, ChangesetId, Tree, TreeId};
 
 use crate::backend::Backend;
-use crate::db;
+use crate::meta as db;
 use crate::derived::Kind as _;
 use crate::graph::CommitGraph;
 use crate::history::{self, NodeId, PathHistory};

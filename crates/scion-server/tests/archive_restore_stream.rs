@@ -15,6 +15,13 @@ use scion_core::{BlobId, Changeset, ChangesetId, FileState, IdentityTime, RepoPa
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use scion_server::{Backend, archive, fsck, test_support::tree};
 
+/// The URL a store on `dir` opens with: the test database, under the
+/// directory's own schema, created first.
+fn url_of(dir: &std::path::Path) -> String {
+    scion_server::Backend::test_postgres_url(dir).unwrap()
+}
+
+
 const CHAIN: usize = 400;
 const BUDGET: usize = 16 * 1024;
 
@@ -180,7 +187,7 @@ fn a_restore_commits_bounded_transactions_and_answers_like_its_source() {
     );
 
     // Every read equals the source's, and both stores are clean.
-    let restored = Backend::open(restored_dir.path(), None, None).unwrap();
+    let restored = Backend::open(restored_dir.path(), &url_of(restored_dir.path()), None).unwrap();
     assert_restore_equals_source(&store, &restored);
     for store in [&store, &restored] {
         let problems = fsck::run(store, fsck::BATCH, &mut |_| {}).unwrap();
@@ -308,7 +315,7 @@ fn measure_ceiling(store: &Backend, out: &std::path::Path, tx_kb: u64, slack_kb:
     );
 
     // The restored store answers like the source.
-    let restored = Backend::open(&target, None, None).unwrap();
+    let restored = Backend::open(&target, &url_of(target), None).unwrap();
     assert_restore_equals_source(store, &restored);
     let problems = fsck::run(&restored, fsck::BATCH, &mut |_| {}).unwrap();
     assert!(problems.problems.is_empty(), "{problems:?}");
@@ -374,10 +381,10 @@ fn a_killed_restore_leaves_the_next_one_clean() {
     child.wait().unwrap();
 
     // The next restore starts over and lands whole.
-    let report = archive::restore(&out, &target, None, None)
+    let report = archive::restore(&out, &target, &url_of(&target), None)
         .unwrap_or_else(|e| panic!("the restore after the kill failed: {e:#}"));
     assert_eq!(report.repos.len(), 2);
-    let restored = Backend::open(&target, None, None).unwrap();
+    let restored = Backend::open(&target, &url_of(target), None).unwrap();
     assert_restore_equals_source(&store, &restored);
     let problems = fsck::run(&restored, fsck::BATCH, &mut |_| {}).unwrap();
     assert!(problems.problems.is_empty(), "{problems:?}");

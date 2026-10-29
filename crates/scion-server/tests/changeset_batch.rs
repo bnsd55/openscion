@@ -89,10 +89,6 @@ fn opts(rev: &str) -> ImportOptions {
 
 #[test]
 fn the_imports_changeset_family_costs_one_statement_per_commit_plus_the_batchs() {
-    if !Backend::test_is_postgres() {
-        eprintln!("skip on sqlite: the statement count is a Postgres seam");
-        return;
-    }
     let mut counts: Vec<u64> = Vec::new();
     let mut flushes: Vec<u64> = Vec::new();
     for n in [100, 1000] {

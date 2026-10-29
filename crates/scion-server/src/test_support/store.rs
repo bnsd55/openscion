@@ -12,6 +12,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use super::{BlobId, Blobs};
+use crate::error::Result;
 
 /// A step the tests run at a counted batch boundary of the import, with
 /// the count of batches done so far.

@@ -543,7 +543,7 @@ async fn restore_command(
     audit: scion_server::Audit,
     data: &Path,
     archive: &Path,
-    postgres_url: Option<&str>,
+    postgres_url: &str,
     postgres_ca: Option<&Path>,
 ) -> anyhow::Result<()> {
     let what = serde_json::json!({ "what": "restore" });

@@ -17,7 +17,7 @@ use scion_core::{
 };
 
 use crate::backend::Backend;
-use crate::db;
+use crate::meta as db;
 use crate::deadline::Deadline;
 use crate::derived::{self, Kind};
 use crate::error::{ApplyError, Error, Result};

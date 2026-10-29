@@ -14,6 +14,13 @@ use std::process::{Command, Stdio};
 use scion_server::Backend;
 use std::time::{Duration, Instant};
 
+/// The URL a store on `dir` opens with: the test database, under the
+/// directory's own schema, created first.
+fn url_of(dir: &std::path::Path) -> String {
+    scion_server::Backend::test_postgres_url(dir).unwrap()
+}
+
+
 /// `scion-server` with `args`, run by a shell that first sets umask `umask`,
 /// as a login shell or a service manager does. The process's own umask
 /// cannot be changed for one test: it is the whole test process's.
@@ -300,7 +307,7 @@ fn an_open_refuses_a_data_directory_that_group_or_others_can_read() {
     let path = dir.path().join("data");
     fs::create_dir(&path).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-    let Err(err) = Backend::open(&path, None, None) else {
+    let Err(err) = Backend::open(&path, &url_of(path), None) else {
         panic!("the open of a readable data directory must fail");
     };
     assert!(

@@ -1646,41 +1646,4 @@ mod tests {
         assert_eq!(report.imported, 160);
     }
 
-    #[test]
-    fn an_import_that_is_alone_runs_its_batch_in_one_transaction() {
-        // An import on Postgres always shares the schema with a server
-        // (the shared flag names Postgres outright), so the budget always
-        // applies there: the alone shape has no Postgres form.
-        if Backend::test_is_postgres() {
-            eprintln!("skip on postgres: the budget always applies on Postgres");
-            return;
-        }
-        crate::store::spawn_guard::prime_gix_lookup();
-        let repo = crate::test_support::private_tempdir();
-        let dir = repo.path();
-        git(dir, &["init", "-q", "-b", "main"]);
-        // More slow records than one budget-sized transaction takes, so a
-        // shared import would split the batch.
-        for i in 0..30 {
-            git(
-                dir,
-                &["commit", "-q", "--allow-empty", "-m", &i.to_string()],
-            );
-        }
-        let data = crate::test_support::private_tempdir();
-        let importer = Backend::open_test(data.path()).unwrap();
-        let opts = ImportOptions {
-            rev: "main".into(),
-            target_ref: "main".into(),
-            verify_sample: 0,
-        };
-        // 30 x 40 ms of records is over the 1 s budget: an import that is
-        // alone ignores the budget and runs the batch in one transaction.
-        SLOW_RECORD.with(|c| c.set(Duration::from_millis(40)));
-        let report = import_git(&importer, "r", dir, &opts).unwrap();
-        // One transaction each for the repo, the batch, and the ref: the
-        // batch did not split at the budget.
-        assert_eq!(importer.txes(), 3);
-        assert_eq!(report.imported, 30);
-    }
 }

@@ -14,6 +14,13 @@ use scion_core::{BlobId, Changeset, ChangesetId, FileState, IdentityTime, RepoPa
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use scion_server::{Backend, archive, test_support::tree};
 
+/// The URL a store on `dir` opens with: the test database, under the
+/// directory's own schema, created first.
+fn url_of(dir: &std::path::Path) -> String {
+    scion_server::Backend::test_postgres_url(dir).unwrap()
+}
+
+
 static LOG: std::sync::LazyLock<Captured> = std::sync::LazyLock::new(Captured::default);
 
 #[derive(Clone, Default)]
@@ -175,7 +182,7 @@ fn a_manifest_naming_one_repo_twice_is_refused_before_any_write() {
     );
 
     let empty = scion_server::test_support::private_tempdir();
-    let restored = archive::restore(&out, empty.path(), None, None);
+    let restored = archive::restore(&out, empty.path(), &url_of(empty.path()), None);
     assert!(
         restored.is_err(),
         "a manifest that names one repo twice must not restore"
@@ -258,7 +265,7 @@ fn a_changeset_recorded_twice_is_named_or_tolerated_not_half_restored() {
     // The reader was silent: the replay must still not leave a partial
     // store. It may tolerate the duplicate, or refuse before writing.
     let empty = scion_server::test_support::private_tempdir();
-    let restored = archive::restore(&out, empty.path(), None, None);
+    let restored = archive::restore(&out, empty.path(), &url_of(empty.path()), None);
     if restored.is_err() {
         let written = std::fs::read_dir(empty.path()).unwrap().count();
         assert_eq!(
@@ -287,7 +294,7 @@ fn a_duplicated_member_line_verifies_and_restores() {
         "a duplicated member line is noise, not damage: {damages:?}"
     );
     let empty = scion_server::test_support::private_tempdir();
-    let report = archive::restore(&out, empty.path(), None, None)
+    let report = archive::restore(&out, empty.path(), &url_of(empty.path()), None)
         .expect("a duplicated member line must not break the restore");
     assert_eq!(report.repos.len(), 2);
 }
@@ -316,7 +323,7 @@ fn a_ref_to_another_repos_changeset_is_refused() {
     );
     let empty = scion_server::test_support::private_tempdir();
     assert!(
-        archive::restore(&out, empty.path(), None, None).is_err(),
+        archive::restore(&out, empty.path(), &url_of(empty.path()), None).is_err(),
         "a cross-repo ref must not restore"
     );
 }
@@ -348,7 +355,7 @@ fn two_pending_lands_sharing_a_request_key_are_named_or_tolerated() {
         return;
     }
     let empty = scion_server::test_support::private_tempdir();
-    let restored = archive::restore(&out, empty.path(), None, None);
+    let restored = archive::restore(&out, empty.path(), &url_of(empty.path()), None);
     if restored.is_err() {
         let written = std::fs::read_dir(empty.path()).unwrap().count();
         assert_eq!(
@@ -382,7 +389,7 @@ fn a_changeset_naming_an_unlisted_blob_is_named_and_refused() {
     );
 
     let empty = scion_server::test_support::private_tempdir();
-    let restored = archive::restore(&out, empty.path(), None, None);
+    let restored = archive::restore(&out, empty.path(), &url_of(empty.path()), None);
     assert!(restored.is_err(), "a named damage must refuse the replay");
     let written = std::fs::read_dir(empty.path()).unwrap().count();
     assert_eq!(
@@ -494,7 +501,7 @@ fn a_pg_replay_that_dies_halfway_leaves_the_database_empty() {
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
     });
-    let restored = archive::restore_with(&out, empty.path(), Some(&url), None, |path, url, ca| {
+    let restored = archive::restore_with(&out, empty.path(), &url, None, |path, url, ca| {
         let store = scion_server::Backend::open(path, url, ca)?;
         // The lock is on the table before the replay may write: the
         // store's 5 s clock runs out against it, and the write dies.
@@ -605,7 +612,7 @@ fn a_stale_lock_cannot_hang_the_failed_restore_and_the_next_one_lands() {
     });
     let mark = mark();
     let started = std::time::Instant::now();
-    let restored = archive::restore_with(&out, empty.path(), Some(&url), None, |path, url, ca| {
+    let restored = archive::restore_with(&out, empty.path(), &url, None, |path, url, ca| {
         let store = scion_server::Backend::open(path, url, ca)?;
         wait_locked
             .recv_timeout(std::time::Duration::from_secs(30))
@@ -634,7 +641,7 @@ fn a_stale_lock_cannot_hang_the_failed_restore_and_the_next_one_lands() {
     holder.join().unwrap();
     // The lock is gone: the next restore's start resets the leftover
     // schema, and the restore lands whole.
-    let report = archive::restore(&out, empty.path(), Some(&url), None)
+    let report = archive::restore(&out, empty.path(), &url, None)
         .unwrap_or_else(|e| panic!("the restore after the stale lock failed: {e:#}"));
     assert_eq!(report.repos.len(), 2);
     maker
@@ -672,7 +679,7 @@ fn a_restore_at_a_stopped_stores_url_refuses_and_leaves_it_whole() {
     // A real store, with data: one repo, one row the restore has no
     // right to touch.
     let data = scion_server::test_support::private_tempdir();
-    let store = Backend::open(data.path(), Some(&url), None).unwrap();
+    let store = Backend::open(data.path(), &url, None).unwrap();
     store.write(|c| c.create_repo("real").map(|_| ())).unwrap();
     drop(store);
     // The counts come from the scratch database the store lives in,
@@ -690,7 +697,7 @@ fn a_restore_at_a_stopped_stores_url_refuses_and_leaves_it_whole() {
         .path()
         .join("restored");
     std::fs::create_dir_all(&target).unwrap();
-    let restored = archive::restore(&out, &target, Some(&url), None);
+    let restored = archive::restore(&out, &target, &url, None);
     assert!(
         restored.is_err(),
         "a restore at a stopped store's URL must refuse, not drop it"
@@ -755,7 +762,7 @@ fn a_stopped_store_in_a_search_path_schema_is_refused_whole() {
         .join("restored-schema");
     std::fs::create_dir_all(&target).unwrap();
     // Restore A publishes into the private schema: a complete store.
-    archive::restore(&out, &target, Some(&url), None)
+    archive::restore(&out, &target, &url, None)
         .unwrap_or_else(|e| panic!("restore A failed: {e:#}"));
     let mut check = postgres::Client::connect(&plain, postgres::NoTls).unwrap();
     let repos_before: i64 = check
@@ -773,7 +780,7 @@ fn a_stopped_store_in_a_search_path_schema_is_refused_whole() {
         .path()
         .join("restored-schema-b");
     std::fs::create_dir_all(&target_b).unwrap();
-    let restored = archive::restore(&out, &target_b, Some(&url), None);
+    let restored = archive::restore(&out, &target_b, &url, None);
     assert!(
         restored.is_err(),
         "a restore at a stopped store's search_path URL must refuse"
@@ -837,7 +844,7 @@ fn a_mixed_case_schema_is_read_and_dropped_as_itself() {
         .path()
         .join("restored-case");
     std::fs::create_dir_all(&target).unwrap();
-    archive::restore(&out, &target, Some(&url), None)
+    archive::restore(&out, &target, &url, None)
         .unwrap_or_else(|e| panic!("restore A failed: {e:#}"));
     let mut check = postgres::Client::connect(&plain, postgres::NoTls).unwrap();
     let repos_before: i64 = check
@@ -861,7 +868,7 @@ fn a_mixed_case_schema_is_read_and_dropped_as_itself() {
         .join("restored-case-b");
     std::fs::create_dir_all(&target_b).unwrap();
     assert!(
-        archive::restore(&out, &target_b, Some(&url), None).is_err(),
+        archive::restore(&out, &target_b, &url, None).is_err(),
         "a restore at a stopped store's mixed-case schema must refuse"
     );
     let mut check = postgres::Client::connect(&plain, postgres::NoTls).unwrap();
@@ -919,7 +926,7 @@ fn a_restored_store_does_not_carry_the_mark_and_a_later_restore_refuses() {
         .join("restored-a");
     std::fs::create_dir_all(&target).unwrap();
     // Restore A publishes; the mark must be gone when it reports.
-    archive::restore(&out, &target, Some(&url), None)
+    archive::restore(&out, &target, &url, None)
         .unwrap_or_else(|e| panic!("restore A failed: {e:#}"));
     // The checks run against the scratch database the restore used,
     // not the shared one: a query on the wrong database passes
@@ -946,7 +953,7 @@ fn a_restored_store_does_not_carry_the_mark_and_a_later_restore_refuses() {
         .path()
         .join("restored-b");
     std::fs::create_dir_all(&target_b).unwrap();
-    let restored = archive::restore(&out, &target_b, Some(&url), None);
+    let restored = archive::restore(&out, &target_b, &url, None);
     assert!(
         restored.is_err(),
         "a restore at the published store's URL must refuse"
@@ -993,7 +1000,7 @@ fn a_pg_restore_that_dies_at_the_open_leaves_the_database_empty() {
     );
     let (_keep, out, _main, _second) = sound_archive();
     let empty = scion_server::test_support::private_tempdir();
-    let restored = archive::restore_with(&out, empty.path(), Some(&url), None, |_, _, _| {
+    let restored = archive::restore_with(&out, empty.path(), &url, None, |_, _, _| {
         Err(scion_server::Error::FailedPrecondition(
             "the open itself dies before any table exists".into(),
         ))
@@ -1089,7 +1096,7 @@ fn a_kill_between_repos_resets_cleanly_on_the_next_restore() {
         let _ = archive::restore(
             std::path::Path::new(&archive),
             std::path::Path::new(&data),
-            Some(&url),
+            &url,
             None,
         );
         return;
@@ -1147,7 +1154,7 @@ fn a_kill_between_repos_resets_cleanly_on_the_next_restore() {
     // lands the whole archive.
     let target_b = data.path().join("restored-again");
     std::fs::create_dir_all(&target_b).unwrap();
-    archive::restore(&out, &target_b, Some(&url), None)
+    archive::restore(&out, &target_b, &url, None)
         .unwrap_or_else(|e| panic!("the next restore must reset the leftover: {e:#}"));
     let mut check = postgres::Client::connect(&url, postgres::NoTls).unwrap();
     let repos: i64 = check
@@ -1192,12 +1199,12 @@ fn a_zero_repo_archive_leaves_no_staging_mark() {
     let url_b = format!("{root}/{b}");
     // The archive of an empty store: the manifest carries "repos": [].
     let data = scion_server::test_support::private_tempdir();
-    let store = Backend::open(data.path(), Some(&url_a), None).unwrap();
+    let store = Backend::open(data.path(), &url_a, None).unwrap();
     drop(store);
     let (_keep, out) = {
         let parent = scion_server::test_support::private_tempdir();
         let out = parent.path().join("archive");
-        let store = Backend::open(data.path(), Some(&url_a), None).unwrap();
+        let store = Backend::open(data.path(), &url_a, None).unwrap();
         archive::export(&store, data.path(), None, true, &out).unwrap();
         drop(store);
         (parent, out)
@@ -1212,7 +1219,7 @@ fn a_zero_repo_archive_leaves_no_staging_mark() {
         .path()
         .join("restored-empty");
     std::fs::create_dir_all(&target).unwrap();
-    archive::restore(&out, &target, Some(&url_b), None)
+    archive::restore(&out, &target, &url_b, None)
         .unwrap_or_else(|e| panic!("the empty restore failed: {e:#}"));
     // The published store must not carry the mark: a store with no
     // repos is still a store, and clients will write repos into it.
@@ -1230,7 +1237,7 @@ fn a_zero_repo_archive_leaves_no_staging_mark() {
     // store, then a second restore at that URL must refuse - and with
     // the mark gone it does, for the right reason: the rows, not a
     // leftover mark.
-    let grown = Backend::open(&target, Some(&url_b), None).unwrap();
+    let grown = Backend::open(&target, &url_b, None).unwrap();
     grown.write(|c| c.create_repo("grown").map(|_| ())).unwrap();
     drop(grown);
     // A fresh target: the refusal must come from the rows at the URL,
@@ -1239,7 +1246,7 @@ fn a_zero_repo_archive_leaves_no_staging_mark() {
         .path()
         .join("restored-empty-b");
     std::fs::create_dir_all(&target_b).unwrap();
-    let second = archive::restore(&out, &target_b, Some(&url_b), None);
+    let second = archive::restore(&out, &target_b, &url_b, None);
     assert!(
         second.is_err(),
         "a second restore at a stopped store's URL must refuse"
@@ -1323,7 +1330,7 @@ fn a_failed_restore_resets_a_quoted_schema_as_itself() {
         }
     });
     let empty = scion_server::test_support::private_tempdir();
-    let restored = archive::restore_with(&out, empty.path(), Some(&url), None, |path, url, ca| {
+    let restored = archive::restore_with(&out, empty.path(), &url, None, |path, url, ca| {
         let store = scion_server::Backend::open(path, url, ca)?;
         wait_locked
             .recv_timeout(std::time::Duration::from_secs(30))

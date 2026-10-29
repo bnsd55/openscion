@@ -1491,23 +1491,7 @@ impl<'a> PgTx<'a> {
         Ok(tx)
     }
 
-    /// One transaction over the same client, for a caller that wraps this
-    /// one. It ends nothing: `commit` and `rollback` stay with the original.
-    pub(crate) fn reborrow(&mut self) -> PgTx<'_> {
-        PgTx {
-            c: self.c,
-            gen_cache: std::collections::HashMap::new(),
-            inserted_gens: std::collections::HashMap::new(),
-            cs_batching: false,
-            // The reborrows share the pending list with the original, so
-            // its commit path sees what they inserted.
-            cs_pending: self.cs_pending.as_deref_mut(),
-            derived_pending: self.derived_pending.as_deref_mut(),
-            derived_preload: self.derived_preload.as_deref_mut(),
-            history_pending: self.history_pending.as_deref_mut(),
-            ended: true,
-        }
-    }
+
 
     /// Reads back the land another writer recorded for this request key
     /// first: its land wins, and its input must match this one's.
@@ -2220,7 +2204,7 @@ fn connect_on(url: &str, ca: Option<&Path>, options: &str) -> Result<Client> {
 /// A database error that a caller may retry maps to a busy [`Storage`]:
 /// the importer retries a batch on it, and the gRPC status becomes
 /// UNAVAILABLE. The rest keep the engine's error as the source.
-fn map_pg_error(e: postgres::Error) -> Error {
+pub(crate) fn map_pg_error(e: postgres::Error) -> Error {
     let code = e
         .code()
         .map(postgres::error::SqlState::code)
@@ -3821,21 +3805,6 @@ impl MetaTx for PgTx<'_> {
         })
     }
 
-    /// Records that a git commit became the changeset. Safe to repeat.
-    fn put_git_import(&mut self, repo: RepoId, commit: ObjectId, cs: ChangesetId) -> Result<()> {
-        self.c.execute(
-            "INSERT INTO git_import (repo_id, git_algo, git_oid, cs) VALUES ($1, $2, $3, $4)
-             ON CONFLICT (repo_id, git_algo, git_oid) DO NOTHING",
-            &[
-                P::i64(repo.0),
-                P::i64(SHA1),
-                P::bytes(commit.as_slice()),
-                P::bytes(&id_bytes(cs.as_bytes())),
-            ],
-        )?;
-        Ok(())
-    }
-
     /// Records that the git commits became the changesets. One statement
     /// per 1,000 pairs: the ids travel as one bytea array each, and the
     /// conflict rule is the single row's, so a repeated pair is skipped.
@@ -4059,15 +4028,6 @@ impl MetaTx for PgTx<'_> {
             &[P::i64(repo.0)],
         )?;
         Ok(rows.iter().map(|row| row.get(0)).collect())
-    }
-
-    /// Removes the row that names `blob` for `repo`.
-    fn delete_repo_blob(&mut self, repo: RepoId, blob: &[u8]) -> Result<()> {
-        self.c.execute(
-            "DELETE FROM repo_blobs WHERE repo_id = $1 AND blob = $2",
-            &[P::i64(repo.0), P::bytes(blob)],
-        )?;
-        Ok(())
     }
 
     /// Removes the rows that name any of `blobs` for `repo`. One
@@ -4444,9 +4404,6 @@ mod tests {
     /// only the schema is missing.
     #[test]
     fn a_search_path_that_names_no_schema_refuses_with_the_fix() {
-        if !crate::Backend::test_is_postgres() {
-            return;
-        }
         let url = crate::backend::test_hooks::test_url().unwrap();
         let mut client = Client::connect(&url, NoTls).unwrap();
         let setup = super::Setup::new(Some("scion_test_missing"), true, &mut client);
@@ -4541,9 +4498,6 @@ mod tests {
     /// metrics: the gauge an operator watches for a busy database.
     #[test]
     fn a_commit_records_its_wait_for_the_collectors_key() {
-        if !crate::Backend::test_is_postgres() {
-            return;
-        }
         let url = crate::backend::test_hooks::test_url().unwrap();
         let dir = crate::test_support::private_tempdir();
         let schema = crate::backend::test_hooks::test_schema(dir.path());
@@ -5021,9 +4975,6 @@ mod pool_tests {
     fn a_batch_that_never_flushes_refuses_to_commit() {
         use crate::test_support::meta::{Meta as _, MetaTx as _};
 
-        if !crate::Backend::test_is_postgres() {
-            return;
-        }
         let dir = crate::test_support::private_tempdir();
         let store = crate::Backend::open_test(dir.path()).unwrap();
         let repo = store.write(|c| c.create_repo("main")).unwrap();
