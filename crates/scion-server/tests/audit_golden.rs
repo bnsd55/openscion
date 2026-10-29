@@ -643,6 +643,12 @@ async fn exercise() -> (tempfile::TempDir, std::path::PathBuf) {
         .args(["gc", "--grace-secs", "0", "--audit-file"])
         .arg(&audit_path)
         .env("NO_COLOR", "1")
+        // The gc opens the store: the URL rides the env, quietly, and
+        // the schema is the data directory's own.
+        .env(
+            "SCION_POSTGRES_URL",
+            scion_server::Backend::test_postgres_url(&gc_data).unwrap(),
+        )
         .output()
         .expect("the gc subcommand runs");
     assert!(
