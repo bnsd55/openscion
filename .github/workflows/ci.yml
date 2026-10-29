@@ -784,20 +784,22 @@ jobs:
 
 
   # The arm64 cells of the support matrix (docs/support.md) are proven
-  # here, natively: a hosted arm64 runner builds and runs the whole
-  # workspace on its own architecture. Cross-compiling is not evidence.
-  # The block-level power-cut suites (dm-log-writes) and the LazyFS
-  # power-loss job stay on x64: their loop-device and FUSE harnesses
-  # are proven there, and one platform carries that evidence.
-  test-arm64:
-    name: test (linux arm64)
+  # here, natively: hosted arm64 runners build and run the workspace on
+  # its own architecture, split into two jobs (the server crate's
+  # suite, and the rest of the workspace) so neither sits under load
+  # for the 45+ minutes in which the runner has been losing
+  # communication. Cross-compiling is not evidence. The block-level
+  # power-cut suites (dm-log-writes) and the LazyFS power-loss job
+  # stay on x64: their loop-device and FUSE harnesses are proven
+  # there, and one platform carries that evidence.
+  test-arm64-server:
+    name: test (linux arm64 server)
     # The arm64 cells are best effort until v0.8: the nightly and a
     # release candidate's dispatch prove them, a push does not.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04-arm
-    # A cold cache puts a whole-workspace build in front of the suite;
-    # 40 minutes cancelled runs that had everything to do (the nightly
-    # warms the cache, a fresh key starts cold).
+    # The suite on Postgres stays well under 30 minutes; the cap only
+    # bounds a pathological cache.
     timeout-minutes: 60
     services:
       # The suite's Postgres tests read this database: the backend they
@@ -822,7 +824,7 @@ jobs:
         with:
           tool: protoc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo test --workspace
+      - run: cargo test -p open-scion-server
         env:
           PROPTEST_CASES: "256"
           SCION_TEST_BACKEND: postgres
@@ -836,6 +838,42 @@ jobs:
           SCION_DISK_REQUIRE: "1"
           SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+
+  # The arm64 suite's second half: every workspace crate except the
+  # server. One job per suite keeps each arm64 run short - the runner
+  # deaths all landed in a single job that carried the whole workspace
+  # at once.
+  test-arm64-rest:
+    name: test (linux arm64 rest)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        env:
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: scion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: protoc
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo test --workspace --exclude open-scion-server
+        env:
+          PROPTEST_CASES: "256"
+          SCION_TEST_BACKEND: postgres
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+          SCION_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
 
   # The nightly's proof that the whole proptest budget (2000 cases)
   # passes on Postgres: the per-job counts above keep the per-push jobs
