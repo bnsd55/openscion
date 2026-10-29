@@ -990,10 +990,10 @@ jobs:
         run: |
           free -m || true
           cargo test --workspace --no-fail-fast --lib --bins \
-            && cargo test -p scn --no-fail-fast \
-            && cargo test -p scion-core --no-fail-fast \
-            && cargo test -p scion-proto --no-fail-fast \
-            && cargo test -p scion-tier --no-fail-fast
+            && cargo test -p open-scion --no-fail-fast \
+            && cargo test -p open-scion-core --no-fail-fast \
+            && cargo test -p open-scion-proto --no-fail-fast \
+            && cargo test -p open-scion-tier --no-fail-fast
       - name: a real disk full (tmpfs)
         run: cargo test -p open-scion-server --test disk_full
         env:
