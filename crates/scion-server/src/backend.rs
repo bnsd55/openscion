@@ -40,7 +40,8 @@ const PG_READERS: usize = crate::store::READERS;
 const _: () = assert!(PG_READERS == crate::store::READERS);
 
 /// The file that names the backend of a data directory. Absent, the
-/// directory is a SQLite one: directories of older builds have no file.
+/// directory was made by a build that wrote no marker; its files say
+/// what it holds.
 const MARKER: &str = "backend";
 
 /// The store UUID the data directory's marker held when an open began.
@@ -61,15 +62,16 @@ impl Marker {
 /// Refuses to open Postgres on a directory whose metadata a SQLite
 /// store already holds: its rows live in that database, and a second,
 /// empty store here would look like a server with no data at all. This
-/// build keeps no metadata on disk, so such a directory stays with the
-/// build that made it.
+/// build keeps metadata only in Postgres, so such a directory stays
+/// with the build that made it.
 fn refuse_sqlite_dir(data: &Path) -> Result<()> {
     let db = data.join("scion.db");
     if db.metadata().is_ok_and(|m| m.len() > 0) {
         return Err(crate::error::Error::InvalidArgument(
-            "this data directory already keeps its metadata in its own \
-             database, which this build does not read: its store needs \
-             the build that made it"
+            "this data directory holds a SQLite metadata database (scion.db), \
+             which this build does not read: this build keeps its metadata \
+             only in Postgres, so this directory stays with the build that \
+             made it"
                 .into(),
         ));
     }
@@ -106,8 +108,7 @@ fn refuse_damaged_marker(data: &Path) -> Result<()> {
                 "the backend marker {} is damaged: its first line is \
                  {:?}, but this build wrote either no marker or `postgres`. \
                  Check whether the directory was restored over, \
-                 hand-edited, or written by another build; give \
-                 --postgres-url if its metadata lives in Postgres",
+                 hand-edited, or written by another build",
                 path.display(),
                 first
             )))

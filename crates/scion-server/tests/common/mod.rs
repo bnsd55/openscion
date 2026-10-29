@@ -1132,7 +1132,7 @@ fn metadata(
     let schema = schema.clone();
     for table in ["changesets", "trees"] {
         let schema = &schema;
-        for (id, body) in raw_rows(store, schema, table) {
+        for (id, body) in raw_rows(schema, table) {
             if !seen.insert(id) {
                 continue;
             }
@@ -1155,13 +1155,13 @@ fn metadata(
 }
 
 /// The (id, body) rows of one metadata table, from the store's schema.
-fn raw_rows(store: &Backend, schema: &str, table: &str) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let table = table.to_string();
+fn raw_rows(schema: &str, table: &str) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let (schema, table) = (schema.to_string(), table.to_string());
     // The sync client's connect and queries block on the connection's
     // own runtime, so they cannot run inside a tokio runtime: like
     // the URL helper, they run on a thread of their own.
     std::thread::spawn(move || {
-        let mut db = raw_with_schema(schema);
+        let mut db = raw_with_schema(&schema);
         db.query(&format!("SELECT id, body FROM {table} ORDER BY id"), &[])
             .expect("the table reads")
             .iter()

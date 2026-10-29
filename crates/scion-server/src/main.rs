@@ -805,21 +805,22 @@ async fn main() -> anyhow::Result<()> {
         _ => None,
     };
     // `hash-token`, `verify`, and `restore` need no data directory (verify
-    // reads only the archive; restore makes a new one). An import does not
-    // land, so it can run beside the server. `derive` removes rows of older
-    // versions of a kind, which a running server of an older build may
-    // read, so it opens as the server.
-    // The Postgres URL of the flags: the file form wins (the two cannot
-    // be given together), the argv form warns, the env is quiet. Every
-    // command needs one; `hash-token` reads none of the store, but a
-    // missing URL is refused once, here, before anything runs.
-    let postgres_url = postgres_url_of(&cli)?;
+    // reads only the archive; restore makes a new one), and `hash-token`
+    // and `ticket-key` read no store, so none of the four needs the
+    // Postgres URL. An import does not land, so it can run beside the
+    // server. `derive` removes rows of older versions of a kind, which a
+    // running server of an older build may read, so it opens as the
+    // server.
     // `verify` and `restore` run without a store: verify reads only the
     // archive, and restore makes a data directory of its own. Handle them
     // before the store opens, so a restore's empty target stays empty of
     // one, and an archive check opens nothing at all.
     match cli.command {
         Command::Verify { archive } => verify_command(&archive),
+        // `hash-token` reads none of the store: it runs before the URL
+        // is resolved, so an operator who hashes a token needs no
+        // database.
+        Command::HashToken { .. } => return hash_token(),
         Command::Restore {
             archive,
             audit_file,
@@ -831,6 +832,9 @@ async fn main() -> anyhow::Result<()> {
             scion_proto::runtime::auth::create_private_dir_all(&cli.data)
                 .with_context(|| format!("cannot create {}", cli.data.display()))?;
             let audit = cli_audit(&cli.data, audit_file.as_deref())?;
+            // Restore makes a store, so it needs the URL.
+            let postgres_url =
+                postgres_url_of(cli.postgres_url_file.as_ref(), cli.postgres_url.as_ref())?;
             return restore_command(
                 audit,
                 &cli.data,
@@ -845,19 +849,12 @@ async fn main() -> anyhow::Result<()> {
     // A missing data directory is refused, not created (#578). Every
     // subcommand that touches a store or writes into the directory must
     // find it there; `restore` is the one command whose job is to
-    // create one, `verify` reads only the archive, and `hash-token`
-    // touches no store. A silent `./scion-data` in whatever directory a
+    // create one, and `verify`, `hash-token` and `ticket-key` returned
+    // above. A silent `./scion-data` in whatever directory a
     // run happened to start in has bitten once already: ticket-key
     // wrote an audit log into the cwd's default, where CI's ACL
     // refused it.
-    if let Err(refusal) = if matches!(
-        cli.command,
-        Command::Verify { .. } | Command::Restore { .. } | Command::HashToken { .. }
-    ) {
-        Ok(())
-    } else {
-        refuse_missing_data_dir(&cli.data)
-    } {
+    if let Err(refusal) = refuse_missing_data_dir(&cli.data) {
         if matches!(cli.command, Command::Fsck) {
             // fsck's exit table promises 2 for "could not run"
             // (docs/stability.md, 1.x): the refusal is that case.
@@ -866,19 +863,38 @@ async fn main() -> anyhow::Result<()> {
         }
         return Err(refusal);
     }
+    // `ticket-key` writes the key file and the audit log, and reads no
+    // store: it runs before the URL is resolved, so a key run needs no
+    // database.
+    if let Command::TicketKey { out, audit_file } = cli.command {
+        // The key file lives wherever the operator says; the audit
+        // log lives in the data directory, as for every other
+        // command. A run that cannot record refuses to make the key.
+        scion_proto::runtime::auth::create_private_dir_all(&cli.data)
+            .with_context(|| format!("cannot create {}", cli.data.display()))?;
+        let audit = cli_audit(&cli.data, audit_file.as_deref())?;
+        return ticket_key_command(audit, &out).await;
+    }
+    // Every remaining command opens the store, so all of them need the
+    // Postgres URL: resolve it once, here. The commands that read none
+    // of the store - `verify`, `hash-token`, `ticket-key` - returned
+    // above, and never refuse a missing one. `fsck`'s exit table
+    // promises 2 for "could not run", and a missing URL is that case;
+    // the other commands fail with the generic open failure's 1.
+    let postgres_url =
+        match postgres_url_of(cli.postgres_url_file.as_ref(), cli.postgres_url.as_ref()) {
+            Ok(url) => url,
+            Err(why) => {
+                if matches!(cli.command, Command::Fsck) {
+                    eprintln!("scion-server fsck: {why:#}");
+                    std::process::exit(2);
+                }
+                return Err(why);
+            }
+        };
     let store = match cli.command {
         Command::Import { .. } | Command::Gc { .. } | Command::Export { .. } => {
             Backend::open_shared(&cli.data, &postgres_url, cli.postgres_ca.as_deref())
-        }
-        Command::HashToken { .. } => return hash_token(),
-        Command::TicketKey { out, audit_file } => {
-            // The key file lives wherever the operator says; the audit
-            // log lives in the data directory, as for every other
-            // command. A run that cannot record refuses to make the key.
-            scion_proto::runtime::auth::create_private_dir_all(&cli.data)
-                .with_context(|| format!("cannot create {}", cli.data.display()))?;
-            let audit = cli_audit(&cli.data, audit_file.as_deref())?;
-            return ticket_key_command(audit, &out).await;
         }
         // `fsck` cannot run when the store cannot open, and its table
         // says that is 2, not the generic open failure's 1.
@@ -894,16 +910,19 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        // `verify` and `restore` ended the function above: verify exits,
-        // and restore returns.
-        Command::Verify { .. } | Command::Restore { .. } => {
+        // `verify`, `restore`, `hash-token` and `ticket-key` ended the
+        // function above: verify exits, and the others return.
+        Command::Verify { .. }
+        | Command::Restore { .. }
+        | Command::HashToken { .. }
+        | Command::TicketKey { .. } => {
             unreachable!("handled before the store opens")
         }
         Command::Serve { .. } | Command::Derive { .. } => {
             Backend::open(&cli.data, &postgres_url, cli.postgres_ca.as_deref())
         }
     }
-    .with_context(|| format!("cannot open data directory {}", cli.data.display()))?;
+    .with_context(|| format!("cannot open the store at {}", cli.data.display()))?;
     // A one-shot command removes its own staging folder when it ends -
     // success, error, or panic - so the next open's sweep has nothing of
     // a live run to call a crash's leftover. The guard is armed after
@@ -1355,11 +1374,12 @@ fn secret_file(file: &Path) -> anyhow::Result<String> {
 /// The Postgres URL of the CLI, required: the file form wins (clap
 /// refuses both at once), the argv form warns, the env is quiet. Every
 /// command that opens the store needs one: the metadata has nowhere
-/// else to live.
-fn postgres_url_of(cli: &Cli) -> anyhow::Result<String> {
-    let url = if let Some(file) = &cli.postgres_url_file {
+/// else to live. The fields come in one at a time, because a caller
+/// that matched its command out of `Cli` holds a partially moved value.
+fn postgres_url_of(url_file: Option<&PathBuf>, url_arg: Option<&String>) -> anyhow::Result<String> {
+    let url = if let Some(file) = url_file {
         secret_file(file)?
-    } else if let Some(url) = &cli.postgres_url {
+    } else if let Some(url) = url_arg {
         warn_argv_secret(
             "--postgres-url",
             "--postgres-url-file (or SCION_POSTGRES_URL)",
