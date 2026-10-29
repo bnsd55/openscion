@@ -375,13 +375,22 @@ fn spawn_server(
     cmd.spawn().expect("the server starts")
 }
 
+/// The log line that names the gRPC listener: it says `serving` and
+/// carries the bound address. The metrics line says "serving metrics"
+/// and carries another listener's address, so it is not the gate - a
+/// bare `serving` match returns one log line early, and the address
+/// read that follows fails (the #715 train's Postgres 18 run).
+fn is_the_listener_line(line: &str) -> bool {
+    line.contains("serving") && !line.contains("metrics") && line.contains("listen=")
+}
+
 /// Waits, bounded, until the server logs that it serves, and returns its
 /// log so far. A server that exits early fails here, with its own lines.
 fn wait_listening(child: &mut std::process::Child, stderr: &Path) -> String {
     let started = Instant::now();
     loop {
         let text = std::fs::read_to_string(stderr).unwrap_or_default();
-        if text.contains("serving") {
+        if text.lines().any(is_the_listener_line) {
             return text;
         }
         if let Some(status) = child.try_wait().unwrap() {
@@ -520,4 +529,17 @@ fn the_argv_url_warns_without_quoting_itself() {
     let (url, canary, password) = leak_url(&data);
     let run = Serve::run(UrlForm::Argv, &url, &data);
     assert_no_leak(UrlForm::Argv, &run, &url, &canary, password.as_deref());
+}
+
+/// Only the listener's own line opens the gate: the metrics line says
+/// `serving` too and carries a `listen=` of its own, so a run where it
+/// is the newest line must keep waiting for the listener's own line.
+#[test]
+fn the_gate_is_the_listener_line_not_any_serving_line() {
+    let metrics_line =
+        "2026-10-29T16:00:00.000Z INFO scion_server: serving metrics listen=127.0.0.1:54321";
+    let listener_line =
+        "2026-10-29T16:00:00.001Z INFO scion_server: serving listen=127.0.0.1:49152";
+    assert!(!is_the_listener_line(metrics_line));
+    assert!(is_the_listener_line(listener_line));
 }
