@@ -136,7 +136,11 @@ cat >"$check/CHANGELOG.md" <<'EOF'
 ## [v0.1.0] - unreleased
 EOF
 
-for bad in 'front-matter' 'bad-section' 'empty' 'row-marker'; do
+for bad in 'front-matter' 'bad-section' 'empty' 'row-marker' \
+    'no-final-newline' 'blank-last-line'; do
+    # Each case alone in changes/: a bad fragment left by the case before
+    # would fail the check for its own reason, and pass this one.
+    rm -f "$check"/changes/*
     case $bad in
         front-matter)
             printf -- '---\nms: "x"\n---\n\nA thing.\n' >"$check/changes/1.fixed.md"
@@ -149,6 +153,12 @@ for bad in 'front-matter' 'bad-section' 'empty' 'row-marker'; do
             ;;
         row-marker)
             printf -- '- A thing.\n' >"$check/changes/1.fixed.md"
+            ;;
+        no-final-newline)
+            printf 'A thing.' >"$check/changes/1.fixed.md"
+            ;;
+        blank-last-line)
+            printf 'A thing.\n\n' >"$check/changes/1.fixed.md"
             ;;
     esac
     if (cd "$check" && "$here/merge-changelog.sh" --check) >/dev/null 2>&1; then
@@ -182,6 +192,48 @@ grep -q '^0 fragments pass the checks$' "$check/out.txt" || {
     exit 1
 }
 echo "merge-changelog --check: fixture ok"
+
+# Two fragments of one section, the first without a final newline: the
+# merge must refuse it, not glue the second's row onto its last line
+# ("- One (#1)- Two (#2)").
+glue=$(mktemp -d)
+trap 'rm -rf "$work" "$check" "$glue"' EXIT
+mkdir "$glue/changes"
+printf '## [v0.1.0] - unreleased\n' >"$glue/CHANGELOG.md"
+printf 'One (#1)' >"$glue/changes/1.fixed.md"
+printf 'Two (#2)\n' >"$glue/changes/2.fixed.md"
+if (cd "$glue" && "$here/merge-changelog.sh" v0.1.0) >/dev/null 2>"$glue/err.txt"; then
+    echo "the merge took a fragment with no final newline:" >&2
+    cat "$glue/CHANGELOG.md" >&2
+    exit 1
+fi
+grep -q 'does not end in a newline: changes/1.fixed.md' "$glue/err.txt" || {
+    echo "the refusal does not name the rule and the file; it said:" >&2
+    cat "$glue/err.txt" >&2
+    exit 1
+}
+
+# A release with no heading in the changelog: the rows would land
+# nowhere, so the merge must refuse before it changes anything - every
+# fragment and CHANGELOG.md keep the checksum they had.
+nohead=$(mktemp -d)
+trap 'rm -rf "$work" "$check" "$glue" "$nohead"' EXIT
+mkdir "$nohead/changes"
+printf '## [v0.1.0] - unreleased\n' >"$nohead/CHANGELOG.md"
+printf 'A fragment that must stay on the books.\n' >"$nohead/changes/1.fixed.md"
+before=$(find "$nohead" -type f | sort | xargs cat | cksum)
+if (cd "$nohead" && "$here/merge-changelog.sh" v0.2.0) >/dev/null 2>"$nohead/err.txt"; then
+    echo "the merge ran for a release the changelog has no heading for" >&2
+    exit 1
+fi
+rm "$nohead/err.txt"
+after=$(find "$nohead" -type f | sort | xargs cat | cksum)
+if [ "$before" != "$after" ]; then
+    echo "the merge for a missing heading changed files:" >&2
+    ls -R "$nohead" >&2
+    exit 1
+fi
+echo "merge-changelog refusals: fixture ok"
 
 # The argument is either --check or a release name: a flag nobody reads
 # ("--dry-run" merged every fragment under "## [--dry-run]" and deleted

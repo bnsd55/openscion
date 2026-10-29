@@ -168,6 +168,8 @@ pub fn seed_cold(store: &DiskStore, path: &Path) -> io::Result<Seeded> {
         damaged: false,
     };
     let mut record = [0; RECORD];
+    // The objects put, counted once the file is read: see below.
+    let mut put = Vec::new();
     while !file.fill_buf()?.is_empty() {
         // A size over the largest object is not a record.
         let entry = fill(&mut file, &mut record)?
@@ -190,9 +192,15 @@ pub fn seed_cold(store: &DiskStore, path: &Path) -> io::Result<Seeded> {
             seeded.skipped += 1;
             continue;
         }
-        // A put that the store's limit refused leaves nothing: it counts
-        // as skipped, so the log line says what the store really holds.
         store.put(key, &Bytes::from(data))?;
+        put.push((key, size));
+    }
+    // A put that the store's limit refused leaves nothing, and a later put
+    // of this seed can evict an earlier object to stay under the limit:
+    // either one counts as skipped, so the log line says what the store
+    // really holds. Asked in the order of the puts, which keeps the order
+    // of use they made.
+    for (key, size) in put {
         if store.size(key)?.is_some() {
             seeded.stored += 1;
             seeded.bytes += size;
@@ -569,6 +577,26 @@ mod tests {
         assert!(!seeded.damaged);
         assert_eq!(store.get(small.0, small.1.len()).unwrap(), Some(small.1));
         assert_eq!(store.size(big.0).unwrap(), None);
+    }
+
+    /// Each object fits the store's limit alone, but not both: the put of
+    /// the second evicts the first, so the report counts the first as
+    /// skipped, not stored.
+    #[test]
+    fn a_seed_that_overflows_the_limit_counts_what_the_store_keeps() {
+        let dir = crate::private_tempdir();
+        let first = blob(b"aa");
+        let second = blob(&vec![b'x'; 4096]);
+        let path = dir.path().join("r.scnsnap");
+        write(&path, "r", &[first.clone(), second.clone()]).unwrap();
+        let store = DiskStore::open(&dir.path().join("data"), second.1.len()).unwrap();
+        let seeded = seed(&store, &path).unwrap().unwrap();
+        assert_eq!(store.size(first.0).unwrap(), None, "the first was evicted");
+        assert_eq!(
+            (seeded.stored, seeded.skipped, seeded.bytes),
+            (1, 1, second.1.len()),
+            "the report counts an object the store no longer holds"
+        );
     }
 
     #[tokio::test]
