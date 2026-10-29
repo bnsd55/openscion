@@ -85,7 +85,6 @@ jobs:
           restore-keys: fuzz-corpus-${{ matrix.crate }}-${{ matrix.target }}-
       - name: fuzz ${{ matrix.target }} for ${{ matrix.budget }} s
         env:
-          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
         run: |
           # The prebuilt cargo-fuzz defaults to a musl target, where the
