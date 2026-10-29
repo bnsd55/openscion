@@ -838,9 +838,18 @@ jobs:
       # cancelled run still carries the evidence; pipefail keeps the
       # step's verdict cargo's. A child that outlives cargo's TERM (a
       # spawned server holding the pipe) gets KILLed 60 s later.
+      # cargo writes to a file, not a pipe: a spawned server that
+      # outlives cargo cannot hold the step open past its timeout. The
+      # stamping runs after cargo is done, so the step always returns
+      # and the upload below always runs.
       - run: |
           set -o pipefail
-          timeout -k 60 2100 cargo test --workspace --no-fail-fast 2>&1             | while IFS= read -r l; do printf '%s %s\n' "$(date -u +%H:%M:%S)" "$l"; done             | tee "$RUNNER_TEMP/arm64-test.log"
+          timeout -k 60 2100 cargo test --workspace --no-fail-fast \
+            > "$RUNNER_TEMP/arm64-test.raw" 2>&1
+          code=$?
+          while IFS= read -r l; do printf '%s %s\n' "$(date -u +%H:%M:%S)" "$l"; done \
+            < "$RUNNER_TEMP/arm64-test.raw" | tee "$RUNNER_TEMP/arm64-test.log"
+          exit $code
         env:
           PROPTEST_CASES: "2000"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
