@@ -8,7 +8,9 @@ use std::io::{BufRead as _, Write as _};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
+
+mod common;
 
 use scion_proto::runtime::auth::Bearer;
 use scion_proto::v1::{PutBlobRequest, scion_client::ScionClient};
@@ -198,9 +200,9 @@ fn a_serve_token_file_starts_the_server() {
 // /metrics. The two tests here serve for real, once with the URL in
 // `SCION_POSTGRES_URL` and once on the command line (whose deprecation
 // warning must print and must not quote the URL), and check every
-// surface a leak could reach. The database role they connect as exists
-// for the test alone, and its password is a canary no log line could
-// carry by accident.
+// surface a leak could reach: the whole URL, the password it carries,
+// and a canary of system randomness that rides the URL as an
+// `application_name` parameter no log line could carry by accident.
 //
 // Postgres only: the URL comes from `SCION_TEST_POSTGRES_URL`, and every
 // test skips itself when `SCION_TEST_BACKEND` does not name `postgres`.
@@ -219,115 +221,31 @@ enum UrlForm {
     Argv,
 }
 
-/// The database side of one test: a login role whose password is the
-/// canary, and a schema of its own, both named for this run. The URL it
-/// returns reaches the server through the form the test is proving; the
-/// admin URL stays here only, and drops the schema and the role when the
-/// guard falls, panic or not.
-struct Canary {
-    admin: String,
-    schema: String,
-    role: String,
-}
-
-impl Canary {
-    /// Makes the role, the schema, and the grants, and returns the guard
-    /// with the server URL and the canary password.
-    fn new(name: &str) -> (Self, String, String) {
-        let admin = std::env::var("SCION_TEST_POSTGRES_URL")
-            .expect("SCION_TEST_POSTGRES_URL must name the test database");
-        let suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("the clock is past the epoch")
-            .as_nanos();
-        let schema = format!("scion_leak_{name}_{}", suffix & 0xffff);
-        let role = format!("scion_leak_{name}_{}", suffix & 0xffff);
-        // The canary is 16 bytes of system randomness: no constant feeds
-        // it, so a leak that prints it is a leak of this run's own
-        // secret, and nothing in the source reads as a credential.
-        let mut bytes = [0u8; 16];
-        getrandom::fill(&mut bytes).expect("system randomness");
-        let password: String = bytes.iter().fold(String::new(), |mut text, byte| {
-            use std::fmt::Write as _;
-            let _ = write!(text, "{byte:02x}");
-            text
-        });
-        // The host, port and name the canary URL keeps from the admin
-        // one, taken before the guard takes the string.
-        let host = host_of(&admin).to_owned();
-        let db = db_of(&admin).to_owned();
-        // The connect is one blocking call at setup; the test may sit in
-        // a runtime elsewhere, so the call runs on a thread of its own,
-        // the way the shared harness's URL helper does.
-        std::thread::spawn({
-            let (admin, schema, role, password) = (
-                admin.clone(),
-                schema.clone(),
-                role.clone(),
-                password.clone(),
-            );
-            move || {
-                let mut client = postgres::Client::connect(&admin, postgres::NoTls)
-                    .expect("the test database connects");
-                client
-                    .batch_execute(&format!(
-                        "DROP SCHEMA IF EXISTS {schema} CASCADE; \
-                         DROP ROLE IF EXISTS {role}; \
-                         CREATE ROLE {role} LOGIN PASSWORD '{password}'; \
-                         CREATE SCHEMA {schema}; \
-                         GRANT USAGE, CREATE ON SCHEMA {schema} TO {role};"
-                    ))
-                    .expect("the canary role and schema are made");
-            }
-        })
-        .join()
-        .unwrap();
-        let guard = Self {
-            admin,
-            schema: schema.clone(),
-            role,
-        };
-        // The schema rides the URL as the libpq `options` search path,
-        // the same shape the shared harness's URL helper builds.
-        let url = format!(
-            "postgres://{schema}:{password}@{host}/{db}{sep}options=--search_path%3D{schema}",
-            sep = if db.contains('?') { '&' } else { '?' },
-        );
-        (guard, url, password)
-    }
-}
-
-impl Drop for Canary {
-    fn drop(&mut self) {
-        // Best effort: a failed test may leave its name behind, and the
-        // next run makes its own.
-        let admin = self.admin.clone();
-        let (schema, role) = (self.schema.clone(), self.role.clone());
-        let _ = std::thread::spawn(move || {
-            let Ok(mut client) = postgres::Client::connect(&admin, postgres::NoTls) else {
-                return;
-            };
-            let _ = client.batch_execute(&format!(
-                "DROP SCHEMA IF EXISTS {schema} CASCADE; DROP ROLE IF EXISTS {role};"
-            ));
-        })
-        .join();
-    }
-}
-
-/// The authority of `url` without its userinfo: the host and port, which
-/// the canary URL keeps, and only the login it swaps.
-fn host_of(url: &str) -> &str {
+/// The URL the test serves with, and the secrets it must not leak: the
+/// shared harness's URL for `data` (the test database, the data
+/// directory's own schema) plus a canary of system randomness as the
+/// application name, which the server only ever holds as part of the
+/// URL. The password is the test database's own, as it arrives from the
+/// environment; no constant in this file reads as a credential.
+fn leak_url(data: &Path) -> (String, String, Option<String>) {
+    let url = common::postgres_url(data);
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).expect("system randomness");
+    let canary = bytes.iter().fold(String::new(), |mut text, byte| {
+        use std::fmt::Write as _;
+        let _ = write!(text, "{byte:02x}");
+        text
+    });
+    let url = format!("{url}&application_name=leak-{canary}");
+    // The credentials the URL carries: everything between the scheme and
+    // the host. A URL without a password has none to leak.
     let rest = url.split("://").nth(1).expect("the URL has a scheme");
-    let authority = rest.split('/').next().expect("the URL names a database");
-    authority.split('@').next_back().expect("a non-empty URL")
-}
-
-/// The path of `url`: the database name and any parameters it rides.
-fn db_of(url: &str) -> &str {
-    let rest = url.split("://").nth(1).expect("the URL has a scheme");
-    let (_authority, path) = rest.split_once('/').expect("the URL names a database");
-    path
+    let userinfo = rest.split('/').next().expect("the URL names a database");
+    let userinfo = userinfo.rsplit('@').next().expect("a non-empty URL");
+    let password = userinfo
+        .split_once(':')
+        .map(|(_, secret)| secret.to_owned());
+    (url, canary, password)
 }
 
 /// What a serve run left on the surfaces a leak could reach. The server
@@ -343,15 +261,17 @@ impl Serve {
     /// Serves once with the URL in the form `form` names, uploads one
     /// blob through the gRPC API, scrapes /metrics, stops the server,
     /// and returns the three surfaces. Every wait is bounded.
-    fn run(form: UrlForm, url: &str) -> Self {
-        let dir = scion_server::test_support::private_tempdir();
-        let data = dir.path().join("data");
-        scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
-        seed_repo(&data, url);
-        let secret = write_secret(dir.path(), "token", 0o600, "the-token\n");
-        let stdout_path = dir.path().join("stdout");
-        let stderr_path = dir.path().join("stderr");
-        let mut child = spawn_server(form, url, &data, &secret, &stdout_path, &stderr_path);
+    fn run(form: UrlForm, url: &str, data: &Path) -> Self {
+        seed_repo(data);
+        let secret = write_secret(
+            data.parent().expect("the data directory has a parent"),
+            "token",
+            0o600,
+            "the-token\n",
+        );
+        let stdout_path = data.parent().unwrap().join("stdout");
+        let stderr_path = data.parent().unwrap().join("stderr");
+        let mut child = spawn_server(form, url, data, &secret, &stdout_path, &stderr_path);
         let log = wait_listening(&mut child, &stderr_path);
         let metrics_addr = logged_addr(&log, |line| line.contains("serving metrics"));
         // One real upload: the call touches the database through the
@@ -387,15 +307,14 @@ impl Serve {
     }
 }
 
-/// The repo the upload lands in, made through the same URL the server
-/// will get, before the server opens it exclusively: an upload into a
-/// missing repo is refused, and a migration made by another login would
-/// leave the canary role a store it cannot touch.
-fn seed_repo(data: &Path, url: &str) {
-    let store = scion_server::Backend::open(data, Some(url), None).unwrap();
+/// The repo the upload lands in, made through the shared harness's own
+/// open before the server starts: an upload into a missing repo is
+/// refused, and this is the seeding every suite of the harness does.
+fn seed_repo(data: &Path) {
+    let store = common::open_store(data);
     store
         .write(|c| {
-            let repo = c.create_repo("r")?;
+            let repo = c.create_repo(common::REPO)?;
             let root = c.insert_changeset(
                 repo,
                 &scion_core::Changeset::new(
@@ -530,18 +449,24 @@ fn scrape(url: &str) -> String {
     body.to_owned()
 }
 
-/// The shared check of the two serve forms: the password and the whole
-/// URL reach none of the surfaces. The argv form alone must carry the
-/// deprecation warning, and must print it without the URL.
-fn assert_no_leak(form: UrlForm, run: &Serve, url: &str, password: &str) {
+/// The shared check of the two serve forms: the URL, the password it
+/// carries, and the run's canary reach none of the surfaces. The argv
+/// form alone must carry the deprecation warning, and must print it
+/// without the URL.
+fn assert_no_leak(form: UrlForm, run: &Serve, url: &str, canary: &str, password: Option<&str>) {
     let surfaces = [
         ("stdout", &run.stdout),
         ("the log (stderr)", &run.stderr),
         ("/metrics", &run.metrics),
     ];
     for (name, text) in surfaces {
-        assert!(!text.contains(password), "the password leaked to {name}");
+        assert!(!text.contains(canary), "the canary leaked to {name}");
         assert!(!text.contains(url), "the database URL leaked to {name}");
+    }
+    if let Some(password) = password {
+        for (name, text) in surfaces {
+            assert!(!text.contains(password), "the password leaked to {name}");
+        }
     }
     let warning = matches!(form, UrlForm::Argv);
     assert_eq!(
@@ -564,10 +489,12 @@ fn the_env_url_and_its_password_reach_no_output() {
         println!("skipping: Postgres only");
         return;
     }
-    let (canary, url, password) = Canary::new("env");
-    let run = Serve::run(UrlForm::Env, &url);
-    assert_no_leak(UrlForm::Env, &run, &url, &password);
-    drop(canary);
+    let dir = scion_server::test_support::private_tempdir();
+    let data = dir.path().join("data");
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
+    let (url, canary, password) = leak_url(&data);
+    let run = Serve::run(UrlForm::Env, &url, &data);
+    assert_no_leak(UrlForm::Env, &run, &url, &canary, password.as_deref());
 }
 
 #[test]
@@ -576,8 +503,10 @@ fn the_argv_url_warns_without_quoting_itself() {
         println!("skipping: Postgres only");
         return;
     }
-    let (canary, url, password) = Canary::new("argv");
-    let run = Serve::run(UrlForm::Argv, &url);
-    assert_no_leak(UrlForm::Argv, &run, &url, &password);
-    drop(canary);
+    let dir = scion_server::test_support::private_tempdir();
+    let data = dir.path().join("data");
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
+    let (url, canary, password) = leak_url(&data);
+    let run = Serve::run(UrlForm::Argv, &url, &data);
+    assert_no_leak(UrlForm::Argv, &run, &url, &canary, password.as_deref());
 }
