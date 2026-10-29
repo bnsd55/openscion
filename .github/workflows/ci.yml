@@ -844,9 +844,27 @@ jobs:
       # and the upload below always runs.
       - run: |
           set -o pipefail
+          # A background sampler every 20 s: the runner has died of
+          # resource starvation before, so the last sample before
+          # death names the hog (memory, disk, the biggest processes).
+          sampler() {
+            while :; do
+              {
+                printf 'SAMPLE %s\n' "$(date -u +%H:%M:%S)"
+                free -m | head -2
+                df -h / | tail -1
+                ps -eo rss,comm,args --sort=-rss | head -6
+                printf 'scion procs: %s\n' "$(pgrep -fc scion || true)"
+                printf 'pg conns: %s\n' "$(psql postgres://postgres:scion@localhost:5432/scion -Atc 'select count(*) from pg_stat_activity' 2>/dev/null || echo n/a)"
+              } >> "$RUNNER_TEMP/arm64-test.log"
+              sleep 20
+            done
+          }
+          sampler & SAMPLER=$!
           timeout -k 60 2100 cargo test --workspace --no-fail-fast \
             > "$RUNNER_TEMP/arm64-test.raw" 2>&1
           code=$?
+          kill $SAMPLER 2>/dev/null || true
           while IFS= read -r l; do printf '%s %s\n' "$(date -u +%H:%M:%S)" "$l"; done \
             < "$RUNNER_TEMP/arm64-test.raw" | tee "$RUNNER_TEMP/arm64-test.log"
           exit $code
