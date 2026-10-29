@@ -678,10 +678,11 @@ pub(crate) mod testing {
 
     use proptest::prelude::{Strategy, any};
     use proptest::sample::Index;
-    use scion_core::{BlobId, FileState, IdentityTime, RepoPath};
+    use scion_core::{BlobId, FileState, RepoPath};
 
+    use crate::error::Result;
     use crate::meta::MetaTx;
-    use crate::meta::{Changeset, ChangesetId, RepoId, RepoPath};
+    use crate::meta::{Changeset, ChangesetId, RepoId};
 
     /// Stores a graph of changesets in `repo`, so with no derived rows.
     /// Changeset `i` has the parents `parents[i]`, in order, each an

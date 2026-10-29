@@ -978,9 +978,6 @@ fn require(c: &mut dyn MetaTx, repo: RepoId, cs: ChangesetId) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use crate::backend::Backend;
-    use crate::db::SqliteTx;
-    use crate::store::{DERIVE_WALKS_CAP, Store};
-    use rusqlite::Connection;
     use std::cell::Cell;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -992,7 +989,7 @@ mod tests {
     use super::*;
     use crate::meta::testing;
     use crate::pg::damage;
-    use crate::store::{FSYNC_LEAVES_DRIVE_CACHE, SCHEMA_VERSION, migrate};
+    use crate::store::{DERIVE_WALKS_CAP, FSYNC_LEAVES_DRIVE_CACHE};
     use crate::tree::{self, RootTree};
 
     thread_local! {
@@ -1349,17 +1346,6 @@ mod tests {
     }
 
     /// Every `derived` row, as (kind, version, changeset, value).
-    fn rows(c: &Connection) -> Vec<(String, u32, Vec<u8>, Vec<u8>)> {
-        let mut stmt = c
-            .prepare("SELECT kind, version, cs, value FROM derived ORDER BY kind, version, cs")
-            .unwrap();
-        stmt.query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-        })
-        .unwrap()
-        .collect::<rusqlite::Result<_>>()
-        .unwrap()
-    }
 
     /// The rows of kind `name` at `version`, as (changeset, value).
     fn rows_of(store: &Backend, name: &str, version: u32) -> Vec<(Vec<u8>, Vec<u8>)> {
@@ -1447,73 +1433,6 @@ mod tests {
             kind_rows(&store, 1).is_empty(),
             "its steps removed version 1"
         );
-    }
-
-    #[test]
-    fn a_version_2_database_upgrades_and_rederives_its_root_trees() {
-        // The old shape is a SQLite file of schema version 2, made
-        // through `migrate`: there is no Postgres form of an older
-        // build's store, and the schema-drift tests cover the Postgres
-        // migrations. This test leaves with the engine.
-        if Backend::test_is_postgres() {
-            return;
-        }
-        let dir = crate::test_support::private_tempdir();
-        let (repo, ids, before) = {
-            let c = Connection::open(dir.path().join("scion.db")).unwrap();
-            migrate(&c, 2).unwrap();
-            // The write path of version 2 stored root trees only.
-            let mut tx = SqliteTx(&c);
-            let (repo, ids) = chain_with(&mut tx, &HISTORY, |c, repo, cs| {
-                let id = c.insert_changeset(repo, cs)?;
-                tree::derive_root_tree(c, repo, id, &mut tree::lens_none())?;
-                Ok(id)
-            })
-            .unwrap();
-            (repo, ids, rows(&c))
-        };
-        // The rows that version 2 holds: a root tree for each changeset.
-        assert_eq!(before.len(), 3);
-        assert!(
-            before
-                .iter()
-                .all(|(kind, v, ..)| kind == RootTree::NAME && *v == RootTree::VERSION)
-        );
-
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
-        let version: u32 = store
-            .read(|c| {
-                c.sqlite()
-                    .unwrap()
-                    .pragma_query_value(None, "user_version", |row| row.get(0))
-                    .map_err(crate::error::from_sqlite)
-            })
-            .unwrap();
-        assert_eq!(version, SCHEMA_VERSION);
-        // Migration 7 drops the old root trees: they predate the entry
-        // lengths, so they are re-derived from the blob store.
-        assert_eq!(
-            store.read(|c| Ok(rows(c.sqlite().unwrap()))).unwrap(),
-            vec![]
-        );
-        // The blobs the chain names, by the chain's own convention.
-        for path in ["a", "b", "c", "d"] {
-            store.blobs().put(path.as_bytes()).unwrap();
-        }
-        let mut after = Vec::new();
-        for &cs in &ids {
-            let tree = tree::root_tree_unbounded(&store, repo, cs).unwrap();
-            after.push((
-                RootTree::NAME.to_owned(),
-                RootTree::VERSION,
-                cs.as_bytes().to_vec(),
-                tree.as_bytes().to_vec(),
-            ));
-        }
-        let mut got = store.read(|c| Ok(rows(c.sqlite().unwrap()))).unwrap();
-        got.sort();
-        after.sort();
-        assert_eq!(got, after);
     }
 
     /// How many root tree rows the store holds.
