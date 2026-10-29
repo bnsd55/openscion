@@ -2,8 +2,8 @@ The runbook states what an acknowledged write has survived - the
 durability point: a blob put is answered after the file fsync, the
 rename, the directory fsyncs and the drive-cache flush; a land is
 answered after its blobs synced and its metadata commit was made
-durable (SQLite's `synchronous = FULL` WAL commit, Postgres's
-`synchronous_commit = on`, which the server checks at every open).
+durable (`synchronous_commit = on`, which the server checks at every
+open).
 
 Section 3 also states the recovery point of a backup (its metadata
 snapshot; a backup every N minutes loses about N minutes of

@@ -202,18 +202,18 @@ fn check_row(row: &[String]) {
 }
 
 /// The row shapes the rule must accept and refuse, as fixture rows in
-/// the table's own shape: a filled no-reader row, a dead bench's row,
-/// and the half-filled row that must never publish.
+/// the table's own shape: a filled row, a no-reader row, a dead bench's
+/// row, and the half-filled row that must never publish.
 #[test]
 fn a_no_reader_row_names_the_land_and_dashes_the_reads() {
-    let shapes: [(&[&str], bool); 6] = [
+    let shapes: [(&[&str], bool); 5] = [
         // (cells after the cell name, does the rule accept it?)
         (
             &[
-                "63.1", "70", "115", "0", "0", "30376", "2000", "155.4", "1106", "-",
+                "63.1", "70", "115", "0", "0", "30376", "2000", "11.4", "1402",
             ],
             true,
-        ), // a live sqlite cell
+        ), // a live cell: both growth columns
         (
             &[
                 "63.1", "-", "-", "0", "0", "30376", "2000", "155.4", "1106", "-",
@@ -232,19 +232,13 @@ fn a_no_reader_row_names_the_land_and_dashes_the_reads() {
         ), // half-filled: never
         (
             &[
-                "63.1", "70", "115", "0", "0", "30376", "2000", "11.4", "1402",
-            ],
-            true,
-        ), // a live postgres cell: both growth columns
-        (
-            &[
                 "63.1", "70", "115", "0", "0", "30376", "2000", "11.4", "nonsense", "-",
             ],
             false,
         ), // a growth column that is neither number nor "-": never
     ];
     for (cells, accepts) in shapes {
-        let mut row: Vec<String> = vec!["sqlite".into(), "2".into(), "0".into()];
+        let mut row: Vec<String> = vec!["postgres".into(), "2".into(), "0".into()];
         row.extend(cells.iter().map(ToString::to_string));
         let checked = std::panic::catch_unwind(|| check_row(&row));
         assert_eq!(checked.is_ok(), accepts, "the rule disagrees about {row:?}");
@@ -293,7 +287,9 @@ fn the_footer_names_a_commit_that_exists() {
         panic!("the capacity table has numbers but the footer names no commit");
     };
     // A shallow checkout (a PR's) may not carry the object; the
-    // capacity run's clone is full, and there the commit must resolve.
+    // capacity run's clone is full, and the docs-tests job checks out
+    // with a full history too, so the check below runs there instead
+    // of skipping on a shallow clone.
     let shallow = match Command::new("git")
         .args(["rev-parse", "--is-shallow-repository"])
         .current_dir(repo_dir())
@@ -305,11 +301,19 @@ fn the_footer_names_a_commit_that_exists() {
     if shallow != "false" {
         return;
     }
+    // The commit must exist AND be reachable from origin/main: a
+    // commit of a side branch exists in a full clone (refs/pull keeps
+    // it) but is not a commit of main, and the table claims to
+    // measure main's code. The bench's full checkout carries
+    // origin/main, so the claim is checkable where the table is made.
     let ok = Command::new("git")
-        .args(["cat-file", "-e", &format!("{hex}^{{commit}}")])
+        .args(["merge-base", "--is-ancestor", hex, "origin/main"])
         .current_dir(repo_dir())
         .status()
         .expect("git runs")
         .success();
-    assert!(ok, "the commit the capacity table names does not exist");
+    assert!(
+        ok,
+        "the commit the capacity table names is not an ancestor of origin/main"
+    );
 }

@@ -1,7 +1,7 @@
-//! `scion-server fsck <data>`: checks a SQLite data directory and reports
+//! `scion-server fsck <data>`: checks a data directory and reports
 //! what it finds. It changes nothing: it reads, and leaves every repair to
-//! you. It belongs to the SQLite backend: its SQL lives in `db.rs`, and
-//! another backend brings its own check.
+//! you. It reads the store's own tables and the blob folder, so it works
+//! on the Postgres metadata with the same checks.
 //!
 //! It reads in short batches, so it runs beside a live server. Each check
 //! looks at the state at the moment it looks: a row's blob file is checked
@@ -26,10 +26,10 @@ use std::str::FromStr as _;
 use scion_core::{BlobId, Changeset, ChangesetId, Tree, TreeId};
 
 use crate::backend::Backend;
-use crate::db;
 use crate::derived::Kind as _;
 use crate::graph::CommitGraph;
 use crate::history::{self, NodeId, PathHistory};
+use crate::meta as db;
 use crate::meta::{FsckDerivedRow, Meta as _, MetaTx as _, RepoId};
 use crate::store::BlobStatus;
 use crate::tree::RootTree;

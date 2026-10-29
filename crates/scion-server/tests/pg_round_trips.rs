@@ -176,10 +176,6 @@ fn bearer() -> impl Interceptor {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn one_land_stays_under_the_round_trip_budget() {
-    if !Backend::test_is_postgres() {
-        println!("skipping: Postgres only");
-        return;
-    }
     let (dir, tip) = git_seed();
     let store = open_store(dir.path());
     // Two changesets on the same base: the first lands on the head (the

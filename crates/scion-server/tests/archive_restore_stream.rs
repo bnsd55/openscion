@@ -15,6 +15,12 @@ use scion_core::{BlobId, Changeset, ChangesetId, FileState, IdentityTime, RepoPa
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use scion_server::{Backend, archive, fsck, test_support::tree};
 
+/// The URL a store on `dir` opens with: the test database, under the
+/// directory's own schema, created first.
+fn url_of(dir: &std::path::Path) -> String {
+    scion_server::Backend::test_postgres_url(dir).unwrap()
+}
+
 const CHAIN: usize = 400;
 const BUDGET: usize = 16 * 1024;
 
@@ -170,8 +176,15 @@ fn a_restore_commits_bounded_transactions_and_answers_like_its_source() {
     // and after, so the assertion is about work done, not work planned.
     let before = scion_server::test_support::archive::restore_tx_count();
     let restored_dir = scion_server::test_support::private_tempdir();
-    archive::restore_with_budget(&out, restored_dir.path(), None, None, BUDGET, Backend::open)
-        .unwrap_or_else(|e| panic!("restore failed: {e:#}"));
+    archive::restore_with_budget(
+        &out,
+        restored_dir.path(),
+        &url_of(restored_dir.path()),
+        None,
+        BUDGET,
+        Backend::open,
+    )
+    .unwrap_or_else(|e| panic!("restore failed: {e:#}"));
     let txs = scion_server::test_support::archive::restore_tx_count() - before;
     println!("the restore committed {txs} transactions");
     assert!(
@@ -180,7 +193,7 @@ fn a_restore_commits_bounded_transactions_and_answers_like_its_source() {
     );
 
     // Every read equals the source's, and both stores are clean.
-    let restored = Backend::open(restored_dir.path(), None, None).unwrap();
+    let restored = Backend::open(restored_dir.path(), &url_of(restored_dir.path()), None).unwrap();
     assert_restore_equals_source(&store, &restored);
     for store in [&store, &restored] {
         let problems = fsck::run(store, fsck::BATCH, &mut |_| {}).unwrap();
@@ -308,7 +321,7 @@ fn measure_ceiling(store: &Backend, out: &std::path::Path, tx_kb: u64, slack_kb:
     );
 
     // The restored store answers like the source.
-    let restored = Backend::open(&target, None, None).unwrap();
+    let restored = Backend::open(&target, &url_of(&target), None).unwrap();
     assert_restore_equals_source(store, &restored);
     let problems = fsck::run(&restored, fsck::BATCH, &mut |_| {}).unwrap();
     assert!(problems.problems.is_empty(), "{problems:?}");
@@ -335,6 +348,9 @@ fn a_killed_restore_leaves_the_next_one_clean() {
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .arg("--data")
         .arg(&target)
+        // The restore reads its URL from the environment: the target's
+        // own schema, so the replay lands where the open below reads.
+        .env("SCION_POSTGRES_URL", url_of(&target))
         .env("SCION_TEST_RESTORE_TX_BYTES", "4096")
         .env("SCION_TEST_RESTORE_ECHO_BATCH", "1")
         .arg("restore")
@@ -352,12 +368,21 @@ fn a_killed_restore_leaves_the_next_one_clean() {
     let reader = std::thread::spawn(move || {
         use std::io::BufRead as _;
         let reader = std::io::BufReader::new(stderr);
+        let mut text = String::new();
+        let mut seen = false;
         for line in reader.lines() {
-            let line = line.unwrap();
+            let line = line.unwrap_or_default();
+            text.push_str(&line);
+            text.push('\n');
             if line.contains("batch 2 committed") {
+                seen = true;
                 break;
             }
         }
+        // The kill must hit real work: a restore that died at startup
+        // (a missing URL, a refused open) closes its stderr before any
+        // batch, and a test that killed it anyway would prove nothing.
+        assert!(seen, "the restore never reached its second batch: {text}");
     });
     let start = std::time::Instant::now();
     loop {
@@ -374,10 +399,10 @@ fn a_killed_restore_leaves_the_next_one_clean() {
     child.wait().unwrap();
 
     // The next restore starts over and lands whole.
-    let report = archive::restore(&out, &target, None, None)
+    let report = archive::restore(&out, &target, &url_of(&target), None)
         .unwrap_or_else(|e| panic!("the restore after the kill failed: {e:#}"));
     assert_eq!(report.repos.len(), 2);
-    let restored = Backend::open(&target, None, None).unwrap();
+    let restored = Backend::open(&target, &url_of(&target), None).unwrap();
     assert_restore_equals_source(&store, &restored);
     let problems = fsck::run(&restored, fsck::BATCH, &mut |_| {}).unwrap();
     assert!(problems.problems.is_empty(), "{problems:?}");
@@ -415,6 +440,9 @@ fn restore_sampled(archive: &std::path::Path, target: &std::path::Path, tx_bytes
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .arg("--data")
         .arg(target)
+        // The restore reads its URL from the environment: the target's
+        // own schema, so the reset and the replay stay in one schema.
+        .env("SCION_POSTGRES_URL", url_of(target))
         .arg("restore")
         .arg("--archive")
         .arg(archive)
@@ -501,8 +529,9 @@ fn a_stream_cut_after_the_first_batch_fails_and_leaves_no_store() {
     drop(f);
 
     let target = tempfile::tempdir().unwrap().path().join("target");
-    let error = archive::restore_with_budget(&out, &target, None, None, BUDGET, Backend::open)
-        .expect_err("a cut stream must not restore");
+    let error =
+        archive::restore_with_budget(&out, &target, &url_of(&target), None, BUDGET, Backend::open)
+            .expect_err("a cut stream must not restore");
     assert!(
         error.to_string().contains("ends inside a record"),
         "the refusal must name the torn stream: {error}"

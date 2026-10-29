@@ -626,8 +626,8 @@ fn diff_skips_a_subtree_with_the_same_id_on_both_sides() {
         .unwrap();
     // Delete the shared subtree row: the walk that reads it must fail
     // the diff, on the engine's own rows.
-    if Backend::test_is_postgres() {
-        let schema = Backend::test_schema(data.path()).expect("postgres mode names a schema");
+    {
+        let schema = Backend::test_schema(data.path());
         let url = std::env::var("SCION_TEST_POSTGRES_URL").expect("the test database's URL");
         std::thread::spawn(move || {
             let mut db = postgres::Client::connect(&url, postgres::NoTls)
@@ -640,16 +640,6 @@ fn diff_skips_a_subtree_with_the_same_id_on_both_sides() {
         })
         .join()
         .unwrap();
-    } else {
-        store
-            .write(|c| {
-                c.sqlite()
-                    .unwrap()
-                    .execute("DELETE FROM trees WHERE id = ?1", [keep.as_bytes()])
-                    .map_err(scion_server::test_support::error::from_sqlite)?;
-                Ok(())
-            })
-            .unwrap();
     }
     let entries = diff_all(&store, ids[0], ids[1], None, None);
     assert_eq!(entries.len(), 1);

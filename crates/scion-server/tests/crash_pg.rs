@@ -4,7 +4,7 @@
 //! old or new target with the metadata whole, and the schema at one
 //! version. The next start serves.
 //!
-//! Postgres only: every test skips itself when `SCION_TEST_BACKEND` does
+//! The crash suite of the database-backed store: a kill during a land.
 //! not name `postgres`; the database URL comes from
 //! `SCION_TEST_POSTGRES_URL`. The clients here build their own timeouts
 //! (a 5 s connect, a 30 s call) until a shared builder lands.
@@ -60,10 +60,6 @@ fn pg_url() -> String {
 /// sessions to end, so no session of a dead server can appear - and
 /// take a lock - after the wait said the database is clear.
 static SPAWN_SEQ: AtomicU64 = AtomicU64::new(1);
-
-fn is_pg() -> bool {
-    std::env::var("SCION_TEST_BACKEND").as_deref() == Ok("postgres")
-}
 
 /// The server's URL on the test's own schema: the same name
 /// `Backend::test_schema` derives for this data directory, in the URL's
@@ -592,10 +588,6 @@ fn warm_land(server: &PgServer, changeset: ChangesetId, key: &str) -> Duration {
 /// agreeing with what the ref says.
 #[test]
 fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
-    if !is_pg() {
-        println!("skipping: Postgres only");
-        return;
-    }
     let _one = one_server();
     let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
@@ -604,7 +596,7 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
     // The schema is the hash of the data directory's canonical path: the
     // directory exists first, so the name the test derives and the name
     // the harness derives are the same one.
-    let schema = Backend::test_schema(&data).expect("the test names a schema");
+    let schema = Backend::test_schema(&data);
     drop_schema(&schema);
     create_schema(&schema);
     seed_repo(&data);
@@ -639,6 +631,12 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
     let mut saw_old = false;
     let mut saw_new = false;
     let mut reps = 0usize;
+    // A scale on the kill's step. A rep whose kill always comes after
+    // the move says the call land runs quicker than its probe (a warm
+    // runner's second land reuses what the first warmed), so the scale
+    // walks the kills back into the land: the assert below needs both
+    // endings, and the factors alone do not reach the early ones.
+    let mut scale = 1.0;
     for (k, (name, cs, probe_name, probe_cs)) in cuts.iter().enumerate() {
         let mut server = PgServer::spawn(&data, &schema, &log);
         // The measure is the kill's twin: the same server, the same
@@ -660,7 +658,7 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
         // past the whole measured land (up to 11/8 of it): a kill after
         // the reply still shows the new ending.
         let factor = k % 11 + 1;
-        std::thread::sleep(step * u32::try_from(factor).unwrap());
+        std::thread::sleep(step.mul_f64(scale) * u32::try_from(factor).unwrap());
         server.kill_and_wait();
         let _ = handle.join();
 
@@ -717,6 +715,12 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
         }
         if moved {
             saw_new = true;
+            if !saw_old {
+                // The kill came after the move again: the next rep's
+                // kills sit at half the delay, so one of them lands
+                // inside the land.
+                scale /= 2.0;
+            }
         } else {
             saw_old = true;
         }
@@ -732,10 +736,6 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
 /// version, and the next start upgrades it and serves.
 #[test]
 fn a_kill_during_a_schema_upgrade_leaves_one_whole_version() {
-    if !is_pg() {
-        println!("skipping: Postgres only");
-        return;
-    }
     let _one = one_server();
     let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
@@ -744,31 +744,44 @@ fn a_kill_during_a_schema_upgrade_leaves_one_whole_version() {
     // The schema is the hash of the data directory's canonical path: the
     // directory exists first, so the name the test derives and the name
     // the harness derives are the same one.
-    let schema = Backend::test_schema(&data).expect("the test names a schema");
+    let schema = Backend::test_schema(&data);
     drop_schema(&schema);
     create_schema(&schema);
 
-    // A whole start from empty, measured from the PROCESS to the serving
-    // line: its eighth sets the step of the kills, so their placement
-    // does not depend on the speed of the machine.
-    // eighth sets the step of the kills, so their placement does not
-    // depend on the speed of the machine.
-    let started = Instant::now();
+    // A whole start from empty, then a whole UPGRADE start, measured
+    // from the PROCESS to the serving line: the kills land on an
+    // upgrade start (a pre-UUID schema upgraded 3 -> last), which is a
+    // different and much cheaper run than a start from empty, so the
+    // step comes from the upgrade's own measurement. Their eighth sets
+    // the step of the kills, so their placement does not depend on the
+    // speed of the machine.
     let mut first = PgServer::spawn(&data, &schema, &log);
-    let step = started.elapsed() / 8;
     let last = schema_version(&schema);
     first.kill_and_wait();
     assert!(last >= 1, "the first start left no schema");
+    drop_schema(&schema);
+    create_schema(&schema);
+    build_pre_uuid_store(&schema, &data, 0);
+    let started = Instant::now();
+    let mut probe = PgServer::spawn(&data, &schema, &log);
+    let mut step = started.elapsed() / 8;
+    probe.kill_and_wait();
 
     // Kill 1, 2, 3 steps into the next start's own work, each from a
     // fresh empty schema. The spawn does not wait: the sleep starts
     // when the process starts, so the kill can fall inside the upgrade.
     // A kill whose log already says `serving` came after the upgrade
-    // committed; that rep ends the loop, the way the last migration
-    // already stands.
+    // committed; once one has landed during the upgrade, a rep like
+    // that ends the loop, the way the last migration already stands.
+    // A first rep whose kill lands after serving says the step
+    // overshot a faster upgrade (a warm runner's next upgrade runs
+    // quicker than the probe's): the kills march back by halving the
+    // step, because the assert below needs at least one kill inside
+    // the upgrade to prove anything.
     let mut during = 0usize;
     let mut total = 0usize;
-    for k in 1..64 {
+    let mut k = 1usize;
+    while total < 64 {
         drop_schema(&schema);
         create_schema(&schema);
         // Each rep restores the shape the store-UUID open adopts: a
@@ -820,8 +833,20 @@ fn a_kill_during_a_schema_upgrade_leaves_one_whole_version() {
         // Drop, so the next round's spawn cannot race its sessions.
         verify.kill_and_wait();
         if served {
+            if during == 0 {
+                // The step overshot a faster upgrade: the kills march
+                // back into it, from half the step, and a later rep
+                // lands one inside.
+                step /= 2;
+                k = 1;
+                continue;
+            }
+            // A kill landed during the upgrade before this one, so the
+            // march crossed the whole upgrade: the last migration
+            // already stands, the loop is done.
             break;
         }
+        k += 1;
     }
     assert!(
         during > 0,

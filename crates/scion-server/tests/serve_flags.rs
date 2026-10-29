@@ -13,7 +13,6 @@ fn serve(data: &std::path::Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .env_remove("SCION_TOKEN")
         .env_remove("SCION_DATA")
-        .env_remove("SCION_TEST_BACKEND")
         .env_remove("SCION_TEST_POSTGRES_URL")
         .output()
         .expect("scion-server runs")
@@ -92,7 +91,6 @@ fn a_serve_that_gives_token_and_access_is_refused_before_the_store_opens() {
         .arg(&file)
         .env_remove("SCION_TOKEN")
         .env_remove("SCION_DATA")
-        .env_remove("SCION_TEST_BACKEND")
         .env_remove("SCION_TEST_POSTGRES_URL")
         .output()
         .unwrap();

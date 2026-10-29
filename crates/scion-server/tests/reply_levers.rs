@@ -109,13 +109,11 @@ fn token_file(dir: &Path) -> PathBuf {
 /// replies hold about 65 KB each.
 fn spawn_server(data: &Path, token: &Path, lever: Option<&str>) -> (Child, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_scion-server"));
-    // The child needs the same URL rule every suite uses: on Postgres,
-    // the data directory's own schema.
-    if Backend::test_is_postgres() {
-        command
-            .arg("--postgres-url")
-            .arg(common::postgres_url(data));
-    }
+    // The child needs the test database, under the data directory's
+    // own schema.
+    command
+        .arg("--postgres-url")
+        .arg(common::postgres_url(data));
     command
         .arg("--data")
         .arg(data)

@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn a_tls_key_the_group_or_others_can_read_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let (cert, key) = pem_files(&dir);
         std::fs::set_permissions(&key, fs::Permissions::from_mode(0o640)).unwrap();
         let err = match ServerTls::load(&cert, &key, None) {
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn a_private_tls_key_loads_and_a_plain_certificate_loads() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let (cert, key) = pem_files(&dir);
         std::fs::set_permissions(&cert, fs::Permissions::from_mode(0o644)).unwrap();
         ServerTls::load(&cert, &key, None).unwrap();
@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn a_symlinked_tls_key_is_refused_with_a_perfect_target() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let (cert, key) = pem_files(&dir);
         let link = dir.path().join("link.key");
         std::os::unix::fs::symlink(&key, &link).unwrap();
@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn a_client_key_the_group_can_read_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let (cert, key) = pem_files(&dir);
         std::fs::set_permissions(&key, fs::Permissions::from_mode(0o640)).unwrap();
         let err = match ClientTls::load(None, Some(&cert), Some(&key)) {
@@ -240,7 +240,7 @@ mod tests {
     /// certificate lets someone else be the server.
     #[test]
     fn a_certificate_the_group_or_others_can_write_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let (cert, key) = pem_files(&dir);
         std::fs::set_permissions(&cert, fs::Permissions::from_mode(0o664)).unwrap();
         let err = match ServerTls::load(&cert, &key, None) {
@@ -254,7 +254,7 @@ mod tests {
     /// target has a perfect mode and owner.
     #[test]
     fn a_symlinked_certificate_is_refused_with_a_perfect_target() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let (cert, key) = pem_files(&dir);
         let link = dir.path().join("link.pem");
         std::os::unix::fs::symlink(&cert, &link).unwrap();
@@ -269,7 +269,7 @@ mod tests {
     /// CA changes whose client certificates the server accepts.
     #[test]
     fn a_client_ca_the_group_or_others_can_write_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let (cert, key) = pem_files(&dir);
         let (ca, _) = pem_files(&dir);
         std::fs::set_permissions(&ca, fs::Permissions::from_mode(0o662)).unwrap();
@@ -284,7 +284,7 @@ mod tests {
     /// whom the client believes it is talking to.
     #[test]
     fn a_client_tls_ca_the_group_or_others_can_write_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let (ca, _) = pem_files(&dir);
         std::fs::set_permissions(&ca, fs::Permissions::from_mode(0o662)).unwrap();
         let err = match ClientTls::load(Some(&ca), None, None) {

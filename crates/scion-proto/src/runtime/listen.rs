@@ -1189,6 +1189,12 @@ mod tests {
         client.resolve_ref(request).await.unwrap_err().code()
     }
 
+    /// The deadline the refusal tests put on their client's connect and
+    /// on its one call: the server answers a failed handshake at once
+    /// (it drops the stream), so anything that hangs is a client that
+    /// keeps the channel and reconnects - the flake this bounds.
+    const REFUSAL_BOUND: Duration = Duration::from_secs(10);
+
     /// Whether the process closes a raw TCP connection that sends `sent` and
     /// then never answers, within 10 s.
     async fn closes_a_peer_that_sends(addr: SocketAddr, sent: &'static [u8]) -> bool {
@@ -1482,7 +1488,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_tls_client_is_served() {
         let certs = test_certs();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, None);
         let (addr, _) = serve_tls(Limits::default(), TIMERS, &server_tls, HANDSHAKE_TIMEOUT).await;
         let mut client = client(addr, &certs.authority.cert(), None).await.unwrap();
@@ -1493,21 +1499,38 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_mtls_server_refuses_a_client_without_a_certificate() {
         let certs = test_certs();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
         let (addr, _) = serve_tls(Limits::default(), TIMERS, &server_tls, HANDSHAKE_TIMEOUT).await;
         // The connect of a client can end before the server has checked its
         // certificate, so the refusal may show in the connect or in the
         // call. A served client gets the stub's `NotFound`; anything else is
-        // the refusal.
-        match client(addr, &certs.authority.cert(), None).await {
-            Err(_) => {}
-            Ok(mut call) => {
-                let code = call
-                    .resolve_ref(ResolveRefRequest::default())
-                    .await
-                    .unwrap_err()
-                    .code();
+        // the refusal. Both steps carry the bound: the server drops a
+        // failed handshake at once, so a client that kept the channel and
+        // reconnected under the refusal would hang the test.
+        match tokio::time::timeout(REFUSAL_BOUND, client(addr, &certs.authority.cert(), None)).await
+        {
+            Err(elapsed) => {
+                panic!(
+                    "the client neither connected nor was refused in {REFUSAL_BOUND:?}: {elapsed}"
+                )
+            }
+            Ok(Err(_refused_at_the_connect)) => {}
+            Ok(Ok(mut call)) => {
+                let code = match tokio::time::timeout(
+                    REFUSAL_BOUND,
+                    call.resolve_ref(ResolveRefRequest::default()),
+                )
+                .await
+                {
+                    Err(elapsed) => {
+                        panic!(
+                            "the call past a doubtful handshake hung past {REFUSAL_BOUND:?}: {elapsed}"
+                        )
+                    }
+                    Ok(Ok(_)) => panic!("the stub served the client"),
+                    Ok(Err(status)) => status.code(),
+                };
                 assert_ne!(code, Code::NotFound, "the stub served the client");
             }
         }
@@ -1517,7 +1540,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_mtls_server_serves_a_client_with_a_certificate() {
         let certs = test_certs();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
         let (addr, _) = serve_tls(Limits::default(), TIMERS, &server_tls, HANDSHAKE_TIMEOUT).await;
         let mut client = client(addr, &certs.authority.cert(), Some(&certs.client))
@@ -1531,7 +1554,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_client_with_the_wrong_ca_is_refused() {
         let certs = test_certs();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, None);
         let (addr, _) = serve_tls(Limits::default(), TIMERS, &server_tls, HANDSHAKE_TIMEOUT).await;
         assert!(client(addr, &certs.stranger.cert(), None).await.is_err());
@@ -1541,18 +1564,38 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_mtls_server_refuses_a_client_of_another_ca() {
         let certs = test_certs();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
         let (addr, _) = serve_tls(Limits::default(), TIMERS, &server_tls, HANDSHAKE_TIMEOUT).await;
-        // As above: the refusal may show in the connect or in the call.
-        match client(addr, &certs.authority.cert(), Some(&certs.stranger_client)).await {
-            Err(_) => {}
-            Ok(mut call) => {
-                let code = call
-                    .resolve_ref(ResolveRefRequest::default())
-                    .await
-                    .unwrap_err()
-                    .code();
+        // As above: the refusal may show in the connect or in the call,
+        // and both carry the bound.
+        match tokio::time::timeout(
+            REFUSAL_BOUND,
+            client(addr, &certs.authority.cert(), Some(&certs.stranger_client)),
+        )
+        .await
+        {
+            Err(elapsed) => {
+                panic!(
+                    "the client neither connected nor was refused in {REFUSAL_BOUND:?}: {elapsed}"
+                )
+            }
+            Ok(Err(_refused_at_the_connect)) => {}
+            Ok(Ok(mut call)) => {
+                let code = match tokio::time::timeout(
+                    REFUSAL_BOUND,
+                    call.resolve_ref(ResolveRefRequest::default()),
+                )
+                .await
+                {
+                    Err(elapsed) => {
+                        panic!(
+                            "the call past a doubtful handshake hung past {REFUSAL_BOUND:?}: {elapsed}"
+                        )
+                    }
+                    Ok(Ok(_)) => panic!("the stub served the client"),
+                    Ok(Err(status)) => status.code(),
+                };
                 assert_ne!(code, Code::NotFound, "the stub served the client");
             }
         }
@@ -1563,7 +1606,7 @@ mod tests {
     #[tokio::test]
     async fn a_peer_without_the_tls_handshake_is_dropped() {
         let certs = test_certs();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, None);
         let (addr, _) = serve_tls(
             Limits::default(),
@@ -1580,7 +1623,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_peer_silent_after_the_tls_handshake_is_closed() {
         let certs = test_certs();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, None);
         // All timers are short (timers("age")), so the peer is closed soon
         // after it goes silent: the TLS handshake timeout can no longer
@@ -1608,7 +1651,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_silent_tls_peer_is_closed_within_one_deadline() {
         let certs = test_certs();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, None);
         let deadline = Duration::from_secs(1);
         let (addr, _) = serve_tls(Limits::default(), TIMERS, &server_tls, deadline).await;
@@ -1655,7 +1698,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_silent_tls_handshake_does_not_block_other_clients() {
         let certs = test_certs();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, None);
         // The silent peer's handshake timeout: far beyond the next test
         // step, so only the blocking of a sequential handshake can end it.

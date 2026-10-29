@@ -42,5 +42,4 @@ jobs:
         env:
           SCION_DISK_REQUIRE: "1"
           SCION_PG_TMPFS_BYTES: "268435456"
-          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion

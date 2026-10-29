@@ -17,7 +17,7 @@
 //! - Reads and writes run at READ COMMITTED. Rows that content addresses
 //!   never change once written, and refs and lands move only through
 //!   compare-and-swap predicates (`version = $n`, `state = 'pending'`), so
-//!   a lost swap is visible to the caller, as on SQLite.
+//!   a lost swap is visible to the caller.
 //! - Land IDs come from an identity sequence, so no ID is handed out
 //!   twice, and the newest land holds the largest one.
 
@@ -55,9 +55,9 @@ use crate::store::Blobs;
 #[path = "test_support/pg.rs"]
 pub(crate) mod test_hooks;
 
-/// The damage tests make: one function per kind, each doing the SQLite
-/// or the Postgres form. A child module of `pg` (same as `test_hooks`)
-/// so its Postgres arm can reach this file's error mapping.
+/// The damage tests make: one function per kind, each doing its kind's
+/// damage. A child module of `pg` (same as `test_hooks`) so the tests
+/// can reach this file's error mapping.
 #[cfg(test)]
 #[path = "test_support/damage.rs"]
 pub(crate) mod damage;
@@ -83,6 +83,14 @@ const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The advisory lock of the one server process of a database.
 const SERVER_LOCK: i64 = 0x5343_494F_4E53_5256;
+
+// The tests bound a walk's changeset-read cost by this counter, and the
+// full-stop gate keeps another test's statements out of its delta.
+#[cfg(any(test, feature = "test-hooks"))]
+thread_local! {
+    pub(crate) static CHANGESET_READS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
 /// The advisory lock of one migration run of a database.
 const SCHEMA_LOCK: i64 = 0x5343_494F_4E53_4348;
 
@@ -151,7 +159,7 @@ struct PgInner {
     /// first open creates the schema, and reports none.
     migrated: Option<(u32, u32)>,
     /// Clients for [`Pg::read`], at most [`READERS`](crate::store::READERS)
-    /// at once, like the readers of a SQLite store.
+    /// at once.
     readers: Readers,
     /// The blob folder: blob files stay on local disk in every backend.
     blobs: Blobs,
@@ -162,13 +170,12 @@ struct PgInner {
     write_woken: Condvar,
     /// The walks in flight of this backend's derivations.
     derive: crate::derived::DeriveFlights,
-    /// The import's test hooks and busy-retry count, as the SQLite store
-    /// keeps its own.
+    /// The import's test hooks and busy-retry count.
     #[cfg(any(test, feature = "test-hooks"))]
     hooks: crate::store::test_hooks::ImportHooks,
-    /// The commit seams the tests share with the SQLite store: the
-    /// commits made, the write transactions run, and how many of the
-    /// next commits fail as a busy database.
+    /// The commit seams the tests watch: the commits made, the write
+    /// transactions run, and how many of the next commits fail as a busy
+    /// database.
     #[cfg(any(test, feature = "test-hooks"))]
     committed: std::sync::atomic::AtomicU64,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -699,9 +706,9 @@ impl PgClient {
 /// here: it is a statement on the live connection, which the server
 /// cannot lose between connections.
 fn base_options() -> String {
-    // A lock a writer waits for is a busy database: 5 s, like the busy
-    // timeout of the SQLite store. A statement itself may walk the graph
-    // for minutes, so only the lock is under the short clock.
+    // A lock a writer waits for is a busy database: 5 s, the lock
+    // bound. A statement itself may walk the graph for minutes, so only
+    // the lock is under the short clock.
     format!(
         "-csynchronous_commit=on -cstatement_timeout=600000 -clock_timeout={LOCK_TIMEOUT_FOR_WRITERS}"
     )
@@ -897,7 +904,6 @@ impl Pg {
         // [`store_identity`].
         let store_uuid = store_identity(&mut writer, marker)?;
         let blobs = Blobs::open(data)?;
-        blobs.sweep_tmp(false)?;
         let inner = Arc::new(PgInner {
             writer: Mutex::new(writer),
             fence,
@@ -1098,10 +1104,8 @@ impl Pg {
             &mut history,
         )?;
         // Every writer and the collector's batches of one schema order on
-        // one advisory key, held to the end of the transaction: what a
-        // SQLite write transaction gets from the data directory's one
-        // write connection (store.rs `commit`,
-        // `TransactionBehavior::Immediate`).
+        // one advisory key, held to the end of the transaction: the
+        // store's write transactions serialize on it.
         //
         // SHORTCUT: one key per schema orders every writer of the schema
         // against one collector, which is right for one server per schema
@@ -1150,7 +1154,7 @@ impl Pg {
                     self.inner.fail_commits.fetch_sub(1, Ordering::Relaxed);
                     // Counted as ended, as a real failed commit is: the
                     // transaction rolls back below, nothing was written,
-                    // exactly as a busy commit ends on SQLite.
+                    // exactly as a busy commit ends.
                     self.inner.committed.fetch_add(1, Ordering::Release);
                     let _ = tx.rollback();
                     let fail =
@@ -1202,16 +1206,14 @@ impl Pg {
         self.commit(f)
     }
 
-    /// Commits made so far: the seam the tests of the batching watch,
-    /// the same shape as the SQLite store's counter.
+    /// Commits made so far: the seam the tests of the batching watch.
     #[cfg(any(test, feature = "test-hooks"))]
     #[must_use]
     pub(crate) fn commits(&self) -> u64 {
         self.inner.committed.load(Ordering::Acquire)
     }
 
-    /// Write transactions run so far: the batching tests' counter, the
-    /// same shape as the SQLite store's.
+    /// Write transactions run so far: the batching tests' counter.
     #[cfg(any(test, feature = "test-hooks"))]
     #[must_use]
     pub(crate) fn txes(&self) -> u64 {
@@ -1332,9 +1334,8 @@ type HistoryPending = std::collections::HashMap<Vec<u8>, Vec<u8>>;
 /// of the client, so a `PgTx` is a plain client handle: it stays covariant
 /// in its lifetime, which the backend enum's transaction needs.
 ///
-/// `pub` with the unreachable-pub allow, like [`SqliteTx`](crate::db::SqliteTx):
-/// [`Meta::Tx`] names it, and the trait re-exports through
-/// `test_support::meta`.
+/// `pub` with the unreachable-pub allow: [`Meta::Tx`] names it, and the
+/// trait re-exports through `test_support::meta`.
 #[allow(unreachable_pub)]
 pub struct PgTx<'a> {
     c: &'a mut PgClient,
@@ -1492,24 +1493,6 @@ impl<'a> PgTx<'a> {
         Ok(tx)
     }
 
-    /// One transaction over the same client, for a caller that wraps this
-    /// one. It ends nothing: `commit` and `rollback` stay with the original.
-    pub(crate) fn reborrow(&mut self) -> PgTx<'_> {
-        PgTx {
-            c: self.c,
-            gen_cache: std::collections::HashMap::new(),
-            inserted_gens: std::collections::HashMap::new(),
-            cs_batching: false,
-            // The reborrows share the pending list with the original, so
-            // its commit path sees what they inserted.
-            cs_pending: self.cs_pending.as_deref_mut(),
-            derived_pending: self.derived_pending.as_deref_mut(),
-            derived_preload: self.derived_preload.as_deref_mut(),
-            history_pending: self.history_pending.as_deref_mut(),
-            ended: true,
-        }
-    }
-
     /// Reads back the land another writer recorded for this request key
     /// first: its land wins, and its input must match this one's.
     fn read_back_land(&mut self, repo: RepoId, caller: &Caller, req: &LandRequest) -> Result<i64> {
@@ -1567,8 +1550,7 @@ impl<'a> PgTx<'a> {
 
 impl Drop for PgTx<'_> {
     fn drop(&mut self) {
-        // A transaction that its caller did not end rolls back, as a
-        // dropped SQLite transaction does.
+        // A transaction that its caller did not end rolls back.
         if !self.ended {
             let _ = self.c.execute("ROLLBACK", &[]);
         }
@@ -2221,7 +2203,7 @@ fn connect_on(url: &str, ca: Option<&Path>, options: &str) -> Result<Client> {
 /// A database error that a caller may retry maps to a busy [`Storage`]:
 /// the importer retries a batch on it, and the gRPC status becomes
 /// UNAVAILABLE. The rest keep the engine's error as the source.
-fn map_pg_error(e: postgres::Error) -> Error {
+pub(crate) fn map_pg_error(e: postgres::Error) -> Error {
     let code = e
         .code()
         .map(postgres::error::SqlState::code)
@@ -2247,9 +2229,9 @@ fn pg_error_of(code: Option<&str>, e: postgres::Error) -> Error {
             tracing::warn!("the database is busy: {e}");
             Error::Storage(Storage::busy(e))
         }
-        // The lock or the statement waited past its clock, as a SQLite
-        // write does past its busy timeout: the caller has been at it
-        // too long, and the client retries past its own deadline.
+        // The lock or the statement waited past its clock: the caller
+        // has been at it too long, and the client retries past its own
+        // deadline.
         Some("57014") => {
             tracing::warn!("the database gave the statement up: {e}");
             Error::DeadlineExceeded("the database kept the caller waiting".to_owned())
@@ -2840,7 +2822,7 @@ impl MetaTx for PgTx<'_> {
     /// if it does not decode or match.
     fn get_changeset(&mut self, repo: RepoId, id: ChangesetId) -> Result<Changeset> {
         #[cfg(test)]
-        crate::db::CHANGESET_READS.set(crate::db::CHANGESET_READS.get() + 1);
+        CHANGESET_READS.set(CHANGESET_READS.get() + 1);
         let body: Vec<u8> = self
             .c
             .query_opt(
@@ -3655,7 +3637,7 @@ impl MetaTx for PgTx<'_> {
                 // key (see `commit`) until it commits, so two lands that
                 // record at the same time, even from two processes, run
                 // one after the other, and the second counts the first
-                // one's row. SQLite gets the same from its one writer.
+                // one's row. The one writer serializes them.
                 let pending: i64 = self
                     .c
                     .query_opt(
@@ -3822,21 +3804,6 @@ impl MetaTx for PgTx<'_> {
             detail,
             conflict_paths,
         })
-    }
-
-    /// Records that a git commit became the changeset. Safe to repeat.
-    fn put_git_import(&mut self, repo: RepoId, commit: ObjectId, cs: ChangesetId) -> Result<()> {
-        self.c.execute(
-            "INSERT INTO git_import (repo_id, git_algo, git_oid, cs) VALUES ($1, $2, $3, $4)
-             ON CONFLICT (repo_id, git_algo, git_oid) DO NOTHING",
-            &[
-                P::i64(repo.0),
-                P::i64(SHA1),
-                P::bytes(commit.as_slice()),
-                P::bytes(&id_bytes(cs.as_bytes())),
-            ],
-        )?;
-        Ok(())
     }
 
     /// Records that the git commits became the changesets. One statement
@@ -4064,15 +4031,6 @@ impl MetaTx for PgTx<'_> {
         Ok(rows.iter().map(|row| row.get(0)).collect())
     }
 
-    /// Removes the row that names `blob` for `repo`.
-    fn delete_repo_blob(&mut self, repo: RepoId, blob: &[u8]) -> Result<()> {
-        self.c.execute(
-            "DELETE FROM repo_blobs WHERE repo_id = $1 AND blob = $2",
-            &[P::i64(repo.0), P::bytes(blob)],
-        )?;
-        Ok(())
-    }
-
     /// Removes the rows that name any of `blobs` for `repo`. One
     /// statement: the blobs travel as one bytea array.
     fn delete_repo_blobs(&mut self, repo: RepoId, blobs: &[Vec<u8>]) -> Result<()> {
@@ -4083,8 +4041,8 @@ impl MetaTx for PgTx<'_> {
         Ok(())
     }
 
-    /// Whether any repo names `blob`. Driven from `repos`, as the SQLite
-    /// one is: `repo_blobs` has no index on `blob` alone.
+    /// Whether any repo names `blob`. Driven from `repos`:
+    /// `repo_blobs` has no index on `blob` alone.
     fn any_repo_names(&mut self, blob: &[u8]) -> Result<bool> {
         Ok(self
             .c
@@ -4417,7 +4375,7 @@ impl Meta for Pg {
         // synchronous_commit is on: a commit is durable when it returns.
         // The blob files are the backend's own disk state, though: on a
         // drive whose cache fsync does not clear, they reach the drive on
-        // their own schedule, like a SQLite store's.
+        // their own schedule.
         if crate::store::FSYNC_LEAVES_DRIVE_CACHE {
             self.inner.blobs.full_flush()?;
         }
@@ -4427,8 +4385,7 @@ impl Meta for Pg {
 
 #[cfg(test)]
 mod tests {
-    use super::{Client, NoTls, P, merged_options};
-    use crate::backend::old_store;
+    use super::{Client, NoTls, merged_options};
     use crate::pg::Pg;
     use std::sync::Arc;
 
@@ -4447,9 +4404,6 @@ mod tests {
     /// only the schema is missing.
     #[test]
     fn a_search_path_that_names_no_schema_refuses_with_the_fix() {
-        if !crate::Backend::test_is_postgres() {
-            return;
-        }
         let url = crate::backend::test_hooks::test_url().unwrap();
         let mut client = Client::connect(&url, NoTls).unwrap();
         let setup = super::Setup::new(Some("scion_test_missing"), true, &mut client);
@@ -4504,125 +4458,9 @@ mod tests {
         assert_eq!(merged_options(Some(""), OWN), OWN);
     }
 
-    /// A Postgres store of schema version 1 opens on this build, migrates
-    /// forward through every migration it has not run, and serves what it
-    /// held ([#318]). The fixture is the schema of
-    /// `migrations/postgres/0001` with the rows an old build's write
-    /// paths left: one repo, its root changeset, the blobs it names, and
-    /// its ref. The plain open runs migrations 2 to the end under the
-    /// schema lock, and the shared asserts of `backend::old_store` run
-    /// the rest. Postgres only: it needs the test database.
-    #[test]
-    fn a_store_of_schema_version_1_opens_upgrades_and_serves() {
-        if !crate::Backend::test_is_postgres() {
-            return;
-        }
-        let url = crate::backend::test_hooks::test_url().unwrap();
-        let dir = crate::test_support::private_tempdir();
-        let schema = crate::backend::test_hooks::test_schema(dir.path());
-        // The blob files, made by this build's writer and copied into the
-        // old store's object folder: blob files carry no schema.
-        let (blob_a, blob_b) = {
-            let scratch = crate::test_support::private_tempdir();
-            let store = crate::store::Store::open(scratch.path()).unwrap();
-            let a = store.blobs().put(old_store::A).unwrap();
-            let b = store.blobs().put(old_store::B).unwrap();
-            for id in [a, b] {
-                // The file of `id` sits at objects/blob/<2 hex>/<rest>;
-                // the copy must land at the same place in the old store's
-                // object folder. A prefix strip would miss: an open may
-                // spell the same directory through its canonical path.
-                let (_, from) = store.blobs().location(id);
-                let hex = id.to_string();
-                let to = dir
-                    .path()
-                    .join("objects")
-                    .join("blob")
-                    .join(&hex[..2])
-                    .join(&hex[2..]);
-                std::fs::create_dir_all(to.parent().unwrap()).unwrap();
-                std::fs::copy(from, &to).unwrap();
-            }
-            (a, b)
-        };
-        // The metadata at version 1: the schema of 0001, the ledger at 1,
-        // and the rows an old build's write paths left.
-        let cs = old_store::changeset(blob_a, blob_b);
-        let (body, id) = cs.encode_with_id();
-        {
-            let mut db = Client::connect(&url, NoTls).unwrap();
-            db.batch_execute(&format!(
-                "CREATE SCHEMA {schema}; SET search_path TO {schema}"
-            ))
-            .unwrap();
-            db.batch_execute(super::PG_MIGRATIONS[0]).unwrap();
-            // The ledger is not a migration file: an old build's open
-            // made it under its lock, at the shape of `migrate_under_lock`.
-            db.batch_execute(
-                "CREATE TABLE IF NOT EXISTS schema_migrations (
-                     version BIGINT PRIMARY KEY,
-                     name    TEXT NOT NULL
-                 )",
-            )
-            .unwrap();
-            db.batch_execute(
-                "INSERT INTO schema_migrations (version, name) \
-                 VALUES (1, 'postgres schema')",
-            )
-            .unwrap();
-            db.execute("INSERT INTO repos (repo_id, name) VALUES (1, 'main')", &[])
-                .unwrap();
-            db.execute(
-                "INSERT INTO changesets (id, gen, body) VALUES ($1, 1, $2)",
-                &[&P::bytes(&id.as_bytes()[..]), &P::bytes(&body)],
-            )
-            .unwrap();
-            db.execute(
-                "INSERT INTO repo_changesets (repo_id, cs) VALUES (1, $1)",
-                &[&P::bytes(&id.as_bytes()[..])],
-            )
-            .unwrap();
-            db.execute(
-                "INSERT INTO repo_blobs (repo_id, blob) VALUES (1, $1), (1, $2)",
-                &[
-                    &P::bytes(&blob_a.as_bytes()[..]),
-                    &P::bytes(&blob_b.as_bytes()[..]),
-                ],
-            )
-            .unwrap();
-            db.execute(
-                "INSERT INTO refs (repo_id, name, target, version) \
-                 VALUES (1, 'main', $1, 1)",
-                &[&P::bytes(&id.as_bytes()[..])],
-            )
-            .unwrap();
-        }
-        // A plain open of this build runs the migrations it has not run,
-        // under the schema's lock, and serves.
-        let pg = Pg::open_test(
-            &url,
-            &schema,
-            2,
-            dir.path(),
-            crate::backend::Marker::read(dir.path()),
-        )
-        .unwrap();
-        let ledger: i64 = {
-            let mut db = Client::connect(&url, NoTls).unwrap();
-            db.batch_execute(&format!("SET search_path TO {schema}"))
-                .unwrap();
-            db.query_one("SELECT max(version) FROM schema_migrations", &[])
-                .unwrap()
-                .get(0)
-        };
-        assert_eq!(ledger, i64::from(super::PG_SCHEMA_VERSION));
-        let backend = crate::Backend::postgres(pg);
-        old_store::assert_serves(&backend, &cs, id, blob_a, blob_b);
-    }
-
-    /// The shipped Postgres migrations are frozen, like the SQLite ones
-    /// (the twin test in store.rs): a database an old build made was
-    /// built from these files as they shipped, and an edit would cut it
+    /// The shipped Postgres migrations are frozen: a database an old
+    /// build made was built from these files as they shipped, and an
+    /// edit would cut it
     /// off ([#318]).
     #[test]
     fn the_shipped_migrations_stay_as_they_shipped() {
@@ -4660,9 +4498,6 @@ mod tests {
     /// metrics: the gauge an operator watches for a busy database.
     #[test]
     fn a_commit_records_its_wait_for_the_collectors_key() {
-        if !crate::Backend::test_is_postgres() {
-            return;
-        }
         let url = crate::backend::test_hooks::test_url().unwrap();
         let dir = crate::test_support::private_tempdir();
         let schema = crate::backend::test_hooks::test_schema(dir.path());
@@ -4713,29 +4548,35 @@ mod tests {
 }
 
 #[cfg(test)]
-mod pool_tests {
+pub(crate) mod pool_tests {
     use super::*;
     use crate::store::READERS;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::{Mutex, MutexGuard, PoisonError};
 
-    /// A Postgres backend of a test database, or [`None`] on SQLite: the
-    /// pool is a Postgres shape, so the pool tests skip the data
-    /// directory.
-    fn pg() -> Option<Pg> {
-        if !crate::backend::Backend::test_is_postgres() {
-            eprintln!("skip on sqlite: the reader pool is Postgres");
-            return None;
-        }
+    /// The tests that hold a pool of the server's size run one at a
+    /// time: each holds a write connection and `READERS` readers, and
+    /// the suite's other backends fill the rest of the database's
+    /// `max_connections` (E53300, "too many clients").
+    pub(crate) static SERVER_SIZED_POOL: Mutex<()> = Mutex::new(());
+
+    fn server_sized_pool() -> MutexGuard<'static, ()> {
+        SERVER_SIZED_POOL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A Postgres backend of a test database, with the pool gate: the
+    /// caller holds the pair for its whole test body.
+    fn pg() -> (MutexGuard<'static, ()>, Pg) {
+        let gate = server_sized_pool();
         let data = crate::test_support::private_tempdir();
         // The pool tests hold the whole reader pool: they need the
         // server's pool size, not the suite's small test pool.
-        let backend =
-            crate::backend::Backend::open_test_with_readers(data.path(), READERS).unwrap();
-        let pg = backend
-            .as_postgres()
-            .cloned()
-            .expect("the env named postgres");
-        Some(pg)
+        let pg = crate::backend::Backend::open_test_with_readers(data.path(), READERS)
+            .unwrap()
+            .into_pg();
+        (gate, pg)
     }
 
     /// A transaction whose connection dies mid-way leaves the worker's
@@ -4746,7 +4587,7 @@ mod pool_tests {
     /// forever.
     #[test]
     fn a_read_whose_connection_died_mid_transaction_recovers() {
-        let Some(pg) = pg() else { return };
+        let (_pool, pg) = pg();
         // One reader client, out of the pool, in a transaction.
         let mut reader = pg.inner.readers.take(READER_WAIT).unwrap();
         let client = reader.client();
@@ -4778,7 +4619,7 @@ mod pool_tests {
     /// reader comes back to the pool.
     #[test]
     fn a_read_statement_past_its_bound_is_cancelled() {
-        let Some(pg) = pg() else { return };
+        let (_pool, pg) = pg();
         let err = pg
             .read_bounded(
                 |tx| {
@@ -4791,8 +4632,7 @@ mod pool_tests {
             )
             .unwrap_err();
         // SQLSTATE 57014 is the statement clock, and map_pg_error gives
-        // it the deadline answer, as for a SQLite write past its busy
-        // timeout.
+        // it the deadline answer.
         assert!(
             matches!(err, Error::DeadlineExceeded(_)),
             "the cancelled read came back as {err}"
@@ -4809,7 +4649,7 @@ mod pool_tests {
     /// `Unavailable`, instead of blocking to its deadline.
     #[test]
     fn a_call_that_waits_past_the_pool_bound_is_refused() {
-        let Some(pg) = pg() else { return };
+        let (_pool, pg) = pg();
         let pg = Arc::new(pg);
         let busy = Arc::new(AtomicUsize::new(0));
         let holds: Vec<_> = (0..READERS)
@@ -4865,7 +4705,7 @@ mod pool_tests {
     /// ceiling keeps this a fast failure that names the step.
     #[test]
     fn a_reader_taken_and_given_back_is_taken_again() {
-        let Some(pg) = pg() else { return };
+        let (_pool, pg) = pg();
         let pg = Arc::new(pg);
         let done = Arc::new(AtomicUsize::new(0));
         std::thread::scope(|scope| {
@@ -4905,7 +4745,7 @@ mod pool_tests {
     /// to zero when the reads are done.
     #[test]
     fn the_pool_records_its_waits_and_its_busy_readers() {
-        let Some(pg) = pg() else { return };
+        let (_pool, pg) = pg();
         let metrics = Arc::new(Metrics::default());
         pg.set_metrics(Arc::clone(&metrics));
         let pg = Arc::new(pg);
@@ -4984,7 +4824,7 @@ mod pool_tests {
     /// back to zero when it ends.
     #[test]
     fn the_tx_age_gauge_tracks_the_oldest_open_read() {
-        let Some(pg) = pg() else { return };
+        let (_pool, pg) = pg();
         let pg = Arc::new(pg);
         assert_eq!(pg.tx_age(), Duration::ZERO);
         let hold = {
@@ -5150,9 +4990,6 @@ mod pool_tests {
     fn a_batch_that_never_flushes_refuses_to_commit() {
         use crate::test_support::meta::{Meta as _, MetaTx as _};
 
-        if !crate::Backend::test_is_postgres() {
-            return;
-        }
         let dir = crate::test_support::private_tempdir();
         let store = crate::Backend::open_test(dir.path()).unwrap();
         let repo = store.write(|c| c.create_repo("main")).unwrap();

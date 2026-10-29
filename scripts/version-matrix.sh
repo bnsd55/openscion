@@ -6,11 +6,10 @@
 # N-1 is PREV_REF when set (any commit or tag), else the newest release
 # tag that is an ancestor of HEAD and not HEAD itself: when HEAD carries
 # the release tag, N-1 is the one before it. With no tag and no
-# PREV_REF, N-1 is the newest commit of the stand-in ladder below - the
-# same two pinned commits scripts/store-upgrade.sh runs, chosen where
-# the store schema changed, so every leg has something real to prove
-# from the first nightly on. A run with nothing to compare against
-# fails; the matrix never passes as a skip.
+# PREV_REF, N-1 is the newest commit of the stand-in ladder below,
+# chosen where the store schema changed, so every leg has something
+# real to prove from the first nightly on. A run with nothing to
+# compare against fails; the matrix never passes as a skip.
 # SHORTCUT: the pins stand in for release tags; the first release tag
 # replaces them, because a release tag is an ancestor of HEAD and the
 # pins sit on main.
