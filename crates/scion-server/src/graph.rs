@@ -925,7 +925,7 @@ mod tests {
                         .expect("identity fits the format"),
                     None,
                     format!("f{}", ids.len()).into_bytes(),
-                    Default::default(),
+                    std::collections::BTreeMap::default(),
                 )
                 .expect("changeset fits the format");
                 ids.push(cs.encode_with_id().1);
