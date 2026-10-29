@@ -240,7 +240,8 @@ jobs:
           # different coverage mapping, and the gate's report drops the
           # -p side's counters as mismatched data (pg.rs read 6% while
           # its job ran 635 tests green - the split's artifact, not
-          # missing tests). The run set is the server crate's tests.
+          # missing tests). The run set is the whole workspace: the one
+          # measure is what the gate checks, so every crate's tests run.
           # SHORTCUT: one graph walk runs longer than eight minutes
           # under postgres plus instrumentation, because the ancestry
           # walk issues one query per node link. Remove this exclusion
@@ -253,14 +254,14 @@ jobs:
           # else - no name pattern, nothing of the step or the watcher.
           sum="${GITHUB_STEP_SUMMARY:-/dev/null}"
           echo "postgres measure starts at $(date -u +%T)" >> "$sum" || true
-          if nice -n 19 cargo nextest run --no-run --workspace -E "package(open-scion-server) and not test(graph_queries_across_many_merges_answer)" > build-postgres.log 2>&1; then
+          if nice -n 19 cargo nextest run --no-run --workspace -E "not test(graph_queries_across_many_merges_answer)" > build-postgres.log 2>&1; then
             echo "postgres build ends at $(date -u +%T)" >> "$sum" || true
           else
             echo "the postgres build failed:"
             tail -40 build-postgres.log
             exit 1
           fi
-          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --profile coverage --workspace --no-fail-fast -E "package(open-scion-server) and not test(graph_queries_across_many_merges_answer)"; echo $? > measure.rc' \
+          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 cargo nextest run --profile coverage --workspace --no-fail-fast -E "not test(graph_queries_across_many_merges_answer)"; echo $? > measure.rc' \
             | tee measure.log
           # The same end-of-step rules the measure always had.
           # One wait only: a second wait on the reaped job re-fires
