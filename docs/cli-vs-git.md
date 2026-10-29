@@ -15,7 +15,7 @@ behind the mappings are in
 | `scn blame REV:PATH` | `git blame --first-parent REV:PATH` | none (GitHub has no blame API) | per-line authorship, renames followed |
 | `scn show REV` | `git show --stat REV` | `gh api repos/O/R/commits/SHA` | one changeset: message, author, changed paths |
 | `scn checkout REV --into DIR` | `git clone O/R DIR && git -C DIR checkout REV` | `gh repo clone O/R DIR` | materialize files on disk |
-| `scn checkout REV --sparse DIR` | `git clone --filter=blob:none` + `git sparse-checkout` | (partial-clone flags on `gh repo clone`) | materialize part of the tree |
+| `scn checkout REV --into DIR --sparse SUBDIR` | `git clone --filter=blob:none` + `git sparse-checkout` | (partial-clone flags on `gh repo clone`) | materialize part of the tree |
 | `scn mount DIR [REV]` | none (git has no lazy per-file mount) | none | serve a ref over NFS; files load when first read |
 | `scn unmount DIR` | none | none | stop the mount |
 | `scn commit --message M --put P=F` | `git add F && git commit -m M` | `gh api -X PUT repos/O/R/contents/P` (single file) | create a changeset; multi-file via the Git Data API chain (blobs, tree, commit), then push |

@@ -195,8 +195,11 @@ async fn main() -> anyhow::Result<()> {
         cli.tls_client_cert.as_deref(),
         cli.tls_client_key.as_deref(),
     )?;
+    // Cold once, before the first file: each file's objects make the
+    // store hold objects, and the rest of the files must still be read.
+    let cold = store.is_empty();
     for path in &cli.seed {
-        seed(&store, path);
+        seed(&store, path, cold);
     }
     // A daemon checks no ticket and walks nothing: it forwards the
     // ticket as it came, and the 0600 socket (one OS user, the socket's
@@ -254,11 +257,12 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Seeds a cold `store` from the snapshot at `path`. A seed only saves
-/// fetches, so a failure is logged, and the daemon starts as it is.
-fn seed(store: &DiskStore, path: &std::path::Path) {
+/// Seeds `store` from the snapshot at `path` if it was `cold`, empty before
+/// the first `--seed` file. A seed only saves fetches, so a failure is
+/// logged, and the daemon starts as it is.
+fn seed(store: &DiskStore, path: &std::path::Path, cold: bool) {
     let started = Instant::now();
-    match snapshot::seed(store, path) {
+    match cold.then(|| snapshot::seed_cold(store, path)).transpose() {
         Ok(Some(seeded)) => {
             let ms = started.elapsed().as_millis();
             let snapshot::Seeded {

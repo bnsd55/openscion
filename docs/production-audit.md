@@ -54,7 +54,7 @@ document landed on.
 | Finding | Evidence | Status |
 | --- | --- | --- |
 | The Postgres writer pings the database with an autocommit `SELECT 1` while holding the writer mutex | `crates/scion-server/src/pg.rs:905` | bounded — ceiling: 1 statement per writer-idle probe (not per call); the probe's role is stated in `operations.md`'s connection-cap paragraph (the server holds 9 connections). Untested: the probe is a timer with no seam (the 60 s interval is a literal in the spawned thread), so no test pins its cadence |
-| The sweep below ran over both backends. No production site pays a statement per repository item over the wire: Postgres chunks every multi-row write (1,000 rows per `unnest` insert) or answers one `ANY($1)` statement per list, every paged read is a keyset page with a matching `ORDER BY`, and SQLite's per-item loops are local prepared statements on its one connection (no round trips), which the code names as its batch at `db.rs:276,876,1181,1372` | `db.rs:228,278,875,1193,1346,1384,1518`; `pg.rs:1330,2401,2573,2634,2979,3313,3599,3710-3910`; `fsck.rs:240,300`; `land.rs:1170`; `import.rs:236` | fixed by design (chunked or local; no REPO-SIZED site) |
+| No production site pays a statement per repository item over the wire: Postgres chunks every multi-row write (1,000 rows per `unnest` insert) or answers one `ANY($1)` statement per list, and every paged read is a keyset page with a matching `ORDER BY` | `pg.rs:1330,2401,2573,2634,2979,3313,3599,3710-3910`; `fsck.rs:240,300`; `land.rs:1170`; `import.rs:236` | fixed by design (chunked; no REPO-SIZED site) |
 
 ### The sweep, per site
 
@@ -92,8 +92,7 @@ each caller answers per row and the reply is a set:
 | --- | --- | --- | --- |
 | Writes (`pg.rs:1355`, plain `BEGIN`) | READ COMMITTED (Postgres's default) — one in-process writer mutex, and every write transaction of the schema holds the schema's one advisory key until it commits, so two writers serialize even across processes | `cas_ref` keeps its version predicate inside the UPDATE; `record_land`'s count-then-insert runs under the advisory key (`pg.rs:3407`); `settle` re-reads the ref and writes only under the version it read (`land.rs:810`); `put_derived`'s agree-check reads and writes in one writer-serialized transaction | No — `two_lands_that_record_together_respect_the_pending_cap` (`pg.rs:4735`) proves the count, `a_conflict_recorded_while_an_import_moved_the_ref_is_not_final` (`land.rs:1982`, run on both backends) proves the verdict's CAS window |
 | Reads (`pg.rs:1389`) | REPEATABLE READ, READ ONLY — one snapshot per read, with `SET LOCAL` statement and idle timeouts | none (read-only) | No |
-| SQLite | one writer; plain reads run per-statement autocommit on pooled readers, `read_snapshot` holds one explicit read transaction (`store.rs:494`) | the same CAS and quota shapes, one writer | No |
-| A server asked for Postgres refuses rather than falling back to SQLite (a mismatched data directory is refused at the open) | `crates/scion-server/src/backend.rs:128,183` | fixed by design (refusal, not fallback) |
+| A server refuses a data directory whose marker names another backend at the open | `crates/scion-server/src/backend.rs:128,183` | fixed by design (refusal, not fallback) |
 
 ## 5. Failure paths
 
@@ -157,10 +156,6 @@ leaves behind, and whether the next holder checks it.
 
 | Lock | Guards | A panicking holder leaves | Verdict |
 | --- | --- | --- | --- |
-| `store.rs:131` `db: Mutex<Connection>` (the SQLite write connection) | every commit and unflushed read | an open transaction — `SqliteTx`'s Drop rolls it back on unwind, so the connection is usable and the store keeps every committed byte | SAFE — the invariant is stated at `store.rs:649-651` and holds at every panic point inside `commit` (the txn guard drops before any code sees the poison) |
-| `store.rs:172` `writers: Mutex<usize>` + `write_woken` | the writer count for the handoff | a stale count | SAFE — the count is repaired by `WriteWaiter`'s Drop, which runs on unwind |
-| `store.rs:2021` the flush-state lock | the flush bookkeeping | a stale marker | SAFE — the holder holds it only across counter reads and `fetch_max`es; no panic point inside leaves an inconsistent value (counters are monotonic) |
-| `store.rs:2062,2114` `SPAWNS: RwLock` | the spawn-serialization guard | — | SAFE — it fails loud (`.expect("not poisoned")`), which is fail-closed |
 | `derived.rs:178` `flights: Mutex<HashMap<FlightKey, Arc<Flight>>>` | which repo/kind walks are live | a live flight whose walk never retires: every later joiner waits for a walk counter that never moves — a caller with no deadline waits forever. Two exit paths leaked it: the panic unwind past `retire`, and the permit wait's early `?` on the owner's deadline | UNSAFE — fixed in the panic-fix PR: one drop guard (`RetireOnDrop`), created the moment the join makes the caller an owner, retires the flight on every exit; the panic still propagates. Tests: a panicking derive (the next caller owns a fresh walk) and a permit timeout (red before: the next caller hung to its DeadlineExceeded; green: it finishes the chain) |
 | `derived.rs:180` `in_flight: Mutex<usize>` | the walk-permit count | a stale permit count | SAFE — `Permit`'s Drop runs on unwind and decrements |
 | `derived.rs` `flight.walks` per-flight counter + `woken` | the walk-end signal for waiters | a counter that never advances | covered by the `flights` fix above: with `retire` on every owner exit the waiters wake and take over a fresh walk |
