@@ -642,7 +642,6 @@ jobs:
           fi
           container=$names
           SCION_TEST_PG_CONTAINER="$container" \
-          
           SCION_TEST_POSTGRES_URL=postgres://postgres:scion@localhost:5432/scion \
           cargo test -p open-scion-server --test backend_refusals -- --ignored
 
