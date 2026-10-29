@@ -490,6 +490,13 @@ fn diff_continues_past_one_reply() {
         };
         assert_eq!(entry["new"]["kind"], kind, "{path:?}");
         assert_eq!(entry["new"]["id"], id.as_str(), "{path:?}");
+        // A file state names a blob, not a length: the reply carries no
+        // size, so the entry prints none.
+        assert!(
+            entry["new"].get("size").is_none(),
+            "{path:?}: {}",
+            entry["new"]
+        );
     }
     let below = server.json(&["diff", &old.to_string(), &new.to_string(), "--path", "d3"]);
     assert_eq!(

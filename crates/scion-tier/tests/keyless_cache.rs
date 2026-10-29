@@ -55,3 +55,39 @@ fn a_cache_without_a_public_key_does_not_start() {
         "the refusal names the flag: {err}"
     );
 }
+
+/// A key the cache cannot use is refused at start, and the refusal names
+/// the cache's own flag: `--ticket-key` is the server's, which the cache
+/// does not take.
+#[test]
+fn a_bad_public_key_is_refused_by_the_cache_s_own_flag() {
+    let key = "0".repeat(64);
+    for keys in [vec!["not hex"], vec![key.as_str(); 3]] {
+        let mut args = vec![
+            "--listen",
+            "127.0.0.1:0",
+            "--token",
+            "t",
+            "--upstream-token",
+            "t",
+            "--upstream",
+            "http://127.0.0.1:39999",
+        ];
+        for key in &keys {
+            args.extend(["--ticket-public-key", key]);
+        }
+        let out = Command::new(env!("CARGO_BIN_EXE_scion-cache"))
+            .args(&args)
+            .env_remove("SCION_TOKEN")
+            .env_remove("SCION_UPSTREAM_TOKEN")
+            .stdin(Stdio::null())
+            .output()
+            .expect("the binary runs");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{keys:?} was accepted: {err}");
+        assert!(
+            err.contains("--ticket-public-key") && !err.contains("--ticket-key"),
+            "the refusal of {keys:?} names the cache's flag: {err}"
+        );
+    }
+}

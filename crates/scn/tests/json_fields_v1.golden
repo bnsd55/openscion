@@ -46,11 +46,9 @@ blame blame[0].start_line:number
 diff diff[0].new.executable:boolean
 diff diff[0].new.id:string
 diff diff[0].new.kind:string
-diff diff[0].new.size:number
 diff diff[0].old.executable:boolean
 diff diff[0].old.id:string
 diff diff[0].old.kind:string
-diff diff[0].old.size:number
 diff diff[0].path:string
 diff diff[0].status:string
 merge-base merge-base[0]:string

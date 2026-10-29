@@ -1812,7 +1812,7 @@ mod tests {
     /// A file is `Some(exec)` for a regular file, `None` for a symlink
     /// whose blob holds the target bytes.
     async fn start(files: &[(&str, &[u8], Option<bool>)]) -> Test {
-        let data = tempfile::tempdir().unwrap();
+        let data = scion_server::test_support::private_tempdir();
         let overlay = tempfile::tempdir().unwrap();
         let store = Backend::open_test(&data.path().join("store")).unwrap();
         let mut contents = Vec::new();

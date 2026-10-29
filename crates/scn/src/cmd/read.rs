@@ -315,7 +315,7 @@ fn changeset_json(id: ChangesetId, cs: &Changeset) -> Value {
 /// An entry as JSON: kind, ID, and the executable flag of a regular file.
 /// The JSON of a file state: kind, ID, and the executable flag. A state
 /// names a blob, not a length, so it carries no size.
-fn state_json(state: &FileState) -> Value {
+pub(crate) fn state_json(state: &FileState) -> Value {
     let (kind, id) = match state {
         FileState::Regular { content: blob, .. } => ("file", blob.to_string()),
         FileState::Symlink { target: blob } => ("symlink", blob.to_string()),
