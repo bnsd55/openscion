@@ -594,24 +594,6 @@ pub(crate) fn age_land(backend: &Backend, land_id: i64, secs: i64) -> Result<usi
     }
 }
 
-/// Empties every metadata table of one backend's schema, so a store
-/// reused across a proptest's cases costs the next case what a fresh
-/// store would: the cost of a query no longer grows with the case
-/// count. Postgres only; SQLite's per-case stores are cheap, and their
-/// fixture makes a new one.
-pub(crate) fn truncate_all(backend: &Backend) -> Result<()> {
-    let data = data_dir(backend);
-    pg_with(data, |client| {
-        client
-            .batch_execute(
-                "TRUNCATE repos, changesets, changeset_parents, repo_changesets, refs, lands, \
-                 trees, derived, git_import, repo_blobs, history_nodes, view_roots, view_trees, \
-                 store_uuid CASCADE",
-            )
-            .map_err(map_pg_error)
-    })
-}
-
 /// Moves the time every pending land was created `secs` into the past.
 pub(crate) fn age_pending_lands(backend: &Backend, secs: i64) -> Result<()> {
     let data = data_dir(backend);
