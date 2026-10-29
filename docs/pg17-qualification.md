@@ -4,9 +4,10 @@ The promotion decision (`docs/ROADMAP.md` v0.6) moves Postgres 17 to
 production when
 four things hold: (a) the contract test passes on Postgres 17, (b) the
 real Postgres fault rows pass, (c) backup and restore pass on Postgres
-17, and (d) the release-candidate trial runs on Postgres 17 as well as
-on SQLite. Today every Postgres cell is **experimental**
-(`docs/support.md`).
+17, and (d) the release-candidate trial runs on Postgres 17. Postgres
+is the metadata store the project supports today (`docs/support.md`):
+17 runs per push on data-path changes, 16 and 18 nightly and on
+release candidates.
 
 This document is the gap list: one row per requirement and per fault
 row of `docs/faults.md`, what proves it on Postgres 17 today, and the
