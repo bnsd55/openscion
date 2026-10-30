@@ -626,7 +626,7 @@ its value is readable by every local account through `ps`.
 | `SCION_REPO` | `--repo` | `scn` | Default `main`. |
 
 Two more names exist for the test suite only, never for an operator:
-`SCION_TEST_POSTGRES_URL`.
+`SCION_TEST_POSTGRES_URL` and `SCION_TEST_PG_CONTAINER`.
 
 ## 2. Ticket keys
 
