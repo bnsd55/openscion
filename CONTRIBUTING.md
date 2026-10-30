@@ -23,13 +23,12 @@ cd openscion
 cargo test --workspace
 ```
 
-To run the suite on Postgres, name a test database and its Docker container.
+The suite needs a Postgres database: name one and its Docker container.
 Each data directory gets its own schema in the database. The backup and
 crash tests run the Postgres tools inside the container, so they match the
 server's version:
 
 ```sh
-SCION_TEST_BACKEND=postgres \
 SCION_TEST_POSTGRES_URL=postgres://postgres:scion@127.0.0.1:5432/postgres \
 SCION_TEST_PG_CONTAINER=scion-pg \
   cargo test -p open-scion-server -- --test-threads=4

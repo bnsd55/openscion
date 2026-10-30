@@ -113,7 +113,7 @@ cargo test -p open-scion-server --test access --test tickets \
 ```
 
 Postgres lanes need a scratch instance:
-`SCION_TEST_BACKEND=postgres SCION_TEST_POSTGRES_URL=postgres://...`.
+`SCION_TEST_POSTGRES_URL=postgres://...`.
 
 ## 5. The fuzz targets and their corpora
 
