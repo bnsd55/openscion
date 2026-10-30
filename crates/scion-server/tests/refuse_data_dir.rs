@@ -143,7 +143,6 @@ fn an_existing_data_directory_works_as_today_and_restore_still_creates() {
     // schema the URL names), not the data directory's.
     let archive = make_archive(cwd.path());
     let target = cwd.path().join("made-by-restore");
-    let target_url = scion_server::Backend::test_postgres_url(&target).unwrap();
     let out = Command::new(bin)
         .args(["--data"])
         .arg(&target)
