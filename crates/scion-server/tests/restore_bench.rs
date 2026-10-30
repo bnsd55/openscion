@@ -107,6 +107,14 @@ fn a_restore_of_a_stated_store_takes_a_stated_time() {
         &backup.path().join("objects"),
         &restored_dir.path().join("objects"),
     );
+    // The marker travels with the metadata: the restore copies the data
+    // directory back, and the open pairs the marker's UUID with the
+    // database's.
+    std::fs::copy(
+        backup.path().join("backend"),
+        restored_dir.path().join("backend"),
+    )
+    .unwrap();
     // Durability inside the timer: an operator's restore is done when a
     // crash cannot lose what was restored, so the copied files and the
     // directories holding them are fsynced before the clock stops.
@@ -194,6 +202,10 @@ fn take_the_guides_backup(store_dir: &Path, backup: &Path, snapshot: &Path) {
             ("/backups/scion-$(date +%F)", backup.to_str().unwrap()),
         ],
     );
+    // The guide's third copy: the `backend` marker is part of the
+    // metadata - it holds the store UUID the metadata holds too, and
+    // the restore pairs the two.
+    fs::copy(store_dir.join("backend"), backup.join("backend")).unwrap();
 }
 
 /// Renames the schema in the dump, so it loads under the name the
