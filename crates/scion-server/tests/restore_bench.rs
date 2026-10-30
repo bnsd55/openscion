@@ -201,12 +201,16 @@ fn take_the_guides_backup(store_dir: &Path, backup: &Path, snapshot: &Path) {
 /// `scion_test_<16 hex digits>`, which no stored data contains.
 fn rename_schema(file: &Path, to: &str) {
     let text = fs::read_to_string(file).unwrap();
+    // The bare name: the dump line carries the statement's semicolon,
+    // and a `from` that kept it would eat every semicolon it replaced
+    // - the CREATE SCHEMA would swallow the next statement, and every
+    // other spelling of the name would keep the old schema.
     let from = text
         .lines()
         .find_map(|line| {
             let rest = line.trim_start();
             rest.strip_prefix("CREATE SCHEMA ")
-                .map(|name| name.trim_end().to_owned())
+                .map(|name| name.trim_end().trim_end_matches(';').to_owned())
         })
         .expect("the dump carries its schema's name");
     std::fs::write(file, text.replace(&from.clone(), to)).unwrap();
