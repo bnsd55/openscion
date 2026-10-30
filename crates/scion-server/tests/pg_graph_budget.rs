@@ -21,9 +21,7 @@
 //!
 //! The test runs alone in its file: the statement counter is global to
 //! the process, and the other test files are separate processes, so
-//! nothing else writes between the reset and the read. On SQLite the
-//! store's statements are in-process calls, which is why the test skips
-//! there.
+//! nothing else writes between the reset and the read.
 #![cfg(unix)]
 
 use std::collections::BTreeMap;

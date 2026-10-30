@@ -5,10 +5,7 @@
 //! same shape costs many times the sum of the paths' depths: at two
 //! parts deep its next-level dedupe scans the whole level per changed
 //! path. The shape is 100,000 files over 20,000 directories: the card's
-//! 20,000 over 2,000 is too small to separate the two under load. The
-//! build runs on
-//! SQLite whatever the test backend is, so it never shares the Postgres
-//! statement counter with the statement guard.
+//! 20,000 over 2,000 is too small to separate the two under load.
 
 use scion_core::{Changeset, FileState, IdentityTime, RepoPath};
 

@@ -100,8 +100,6 @@ fn refused_statements(store: &Backend, n: usize, parent: scion_core::ChangesetId
 /// The member check reads its blob list in batches: 1,000 distinct puts
 /// cost no more statements than 100 of them plus the batch's own two.
 /// One statement per blob would cost about 900 more for the 1,000.
-/// SQLite counts no statements (its check is local), so the assert
-/// holds trivially there.
 #[test]
 fn the_member_check_costs_one_batch_not_one_query_per_blob() {
     let (_dir, store, root) = store_with_root(1000);

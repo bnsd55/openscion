@@ -4,8 +4,7 @@
 //! index tip must not cost 2,000 of them. The guard counts the
 //! statements of one land whose catch-up crosses 100 and 1,000
 //! changesets: the 1,000-deep land may cost a page or two more, not
-//! nine hundred. On SQLite the count is always zero, which is why the
-//! test skips there.
+//! nine hundred.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};

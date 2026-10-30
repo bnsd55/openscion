@@ -256,8 +256,7 @@ fn seed() -> u64 {
     seed
 }
 
-/// The lands pending in this directory's metadata, whatever backend
-/// holds it: a SQLite file beside the blobs, or the schema the test
+/// The lands pending in this directory's metadata: the schema the test
 /// database names for the directory. The read runs on threads of its
 /// own, because the sync client blocks on its connection's runtime and
 /// the test's async worker already hosts one.
@@ -1095,8 +1094,7 @@ async fn import_process_races_the_server_on_the_same_blob() {
     // the backing, where only synced writes live.
     let backing = lazy.backing.join("data");
     drop(lazy);
-    // The schema follows the store, not the path (inert on SQLite, whose
-    // metadata is the directory).
+    // The schema follows the store, not the path.
     let store = open_store_shared_reopened(&backing, &data);
     let status = store.blobs().verify(id).unwrap();
     assert_eq!(status, BlobStatus::Valid, "raced blob {id}");

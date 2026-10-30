@@ -3,9 +3,7 @@
 //! and each round trip is part of every land that queues behind it. A
 //! design note in the land performance issue holds the plan to shrink
 //! the count; this guard pins today's count of the real path - one land
-//! through the server's Land RPC - so it can only fall. On SQLite the
-//! store's statements are in-process calls, which is why the test skips
-//! there.
+//! through the server's Land RPC - so it can only fall.
 #![cfg(unix)]
 
 mod common;

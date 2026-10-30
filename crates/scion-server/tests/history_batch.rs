@@ -4,8 +4,7 @@
 //! is a process-wide seam, so this guard owns its binary: no other test
 //! speaks SQL in its process. Only the history family's statements are
 //! counted, so the changeset, tree, derived and provenance writes of the
-//! same import stay out. On SQLite the count is always zero, which is
-//! why the guard skips there.
+//! same import stay out.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
