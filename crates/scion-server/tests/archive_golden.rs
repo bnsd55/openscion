@@ -21,6 +21,12 @@ use scion_core::{BlobId, Changeset, ChangesetId, FileState, IdentityTime, RepoPa
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use scion_server::{Backend, archive, fsck, test_support::tree};
 
+/// The URL a store on `dir` opens with: the test database, under the
+/// directory's own schema, created first.
+fn url_of(dir: &std::path::Path) -> String {
+    scion_server::Backend::test_postgres_url(dir).unwrap()
+}
+
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/archive_v1.golden");
 const REPO: &str = "golden";
 
@@ -112,31 +118,23 @@ fn rows(archive: &Path) -> Vec<(String, String)> {
 /// golden's `main` - on a fresh store, `fsck` clean.
 /// The manifest is a format surface (docs/archive-format.md names its
 /// keys). Its two run-dependent values normalize: the store UUID to
-/// `<uuid or null>` - null on SQLite, which keeps the UUID in the
-/// database, and 32 lowercase hex on Postgres, which writes the marker
-/// file - and the snapshot instant to `<time>` after it shows as an
+/// `<uuid>`, 32 lowercase hex from the marker file, and the snapshot
+/// instant to `<time>` after it shows as an
 /// RFC 3339 stamp to the second with a Z. The rest of the manifest
 /// pins as text, so a renamed key or a dropped array shows as a
 /// readable diff.
 fn normalized_manifest(manifest: &serde_json::Value) -> String {
     let uuid = &manifest["store_uuid"];
-    if Backend::test_is_postgres() {
-        let hex = uuid
-            .as_str()
-            .unwrap_or_else(|| panic!("Postgres writes the marker file"));
-        assert!(
-            hex.len() == 32
-                && hex
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
-            "the store UUID is not 32 lowercase hex"
-        );
-    } else {
-        assert!(
-            uuid.is_null(),
-            "SQLite keeps the UUID in the database; the manifest names one"
-        );
-    }
+    let hex = uuid
+        .as_str()
+        .unwrap_or_else(|| panic!("Postgres writes the marker file"));
+    assert!(
+        hex.len() == 32
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "the store UUID is not 32 lowercase hex"
+    );
     let stamp = manifest["snapshot_at"]
         .as_str()
         .expect("the snapshot instant is a string");
@@ -150,7 +148,7 @@ fn normalized_manifest(manifest: &serde_json::Value) -> String {
     let mut normalized = serde_json::to_string_pretty(manifest).unwrap();
     normalized = normalized.replace(
         &format!("\"store_uuid\": {}", serde_json::to_string(uuid).unwrap()),
-        "\"store_uuid\": \"<uuid or null>\"",
+        "\"store_uuid\": \"<uuid>\"",
     );
     normalized.replace(
         &format!("\"snapshot_at\": \"{stamp}\""),
@@ -244,9 +242,15 @@ fn the_export_is_the_golden_and_restores_to_it() {
     // A restore of the golden into an empty data directory: fsck clean,
     // and `main` resolves to the ID the golden pins.
     let restored_dir = tempfile::tempdir().unwrap();
-    let report = archive::restore(&out, restored_dir.path(), None, None).unwrap();
+    let report = archive::restore(
+        &out,
+        restored_dir.path(),
+        &url_of(restored_dir.path()),
+        None,
+    )
+    .unwrap();
     assert_eq!(report.repos, vec![REPO]);
-    let restored = Backend::open(restored_dir.path(), None, None).unwrap();
+    let restored = Backend::open(restored_dir.path(), &url_of(restored_dir.path()), None).unwrap();
     let problems = fsck::run(&restored, fsck::BATCH, &mut |_| {}).unwrap();
     assert!(problems.problems.is_empty(), "{problems:?}");
     let repo = restored.read(|c| c.repo_id(REPO)).unwrap();

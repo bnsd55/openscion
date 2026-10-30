@@ -21,17 +21,16 @@ a changeset puts and the rows of its parents - the work that scales
 with the change's width. A third guard case pins that: a land of 50
 files ran 106 statements before the batch and 56 after.
 
-A repeated parent now stores the same way on both backends (the
-batched read had diverged from the per-row loop on Postgres), and a
-test holds the two backends to the same answer.
+A repeated parent now stores the way the per-row loop did (the batched
+read had diverged), and a test holds the batch to the rows the loop
+writes.
 
 The land's outcome check rides the plan's read transaction: one read
 answers both whether a twin call settled the land and what the land
 must do now, where the loop read them in two steps before. The counts
 do not move (the loop's read ran without transaction boilerplate
 already); what moves is that the plan can no longer run for a land
-that a twin call has settled. On SQLite that read is one snapshot; on
-Postgres it runs in autocommit statements, so the two reads can see
-different states - a settle that lands between them is stopped at
-`set_land_state`'s pending guard ("no longer pending"), which is the
-backstop there.
+that a twin call has settled. The read runs in autocommit statements,
+so two reads can see different states - a settle that lands between
+them is stopped at `set_land_state`'s pending guard ("no longer
+pending"), which is the backstop.

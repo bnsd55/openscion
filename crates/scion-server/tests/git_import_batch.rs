@@ -5,8 +5,7 @@
 //! statement count is a process-wide seam, so this guard owns its binary:
 //! no other test speaks SQL in its process. The count is what the job
 //! seam saw of the restore; only the `git_import` inserts are counted, so
-//! the changeset and tree writes of the same restore stay out. On SQLite
-//! the count is always zero, which is why the guard skips there.
+//! the changeset and tree writes of the same restore stay out.
 
 use std::collections::BTreeMap;
 
@@ -65,7 +64,9 @@ fn archive_with_provenance(
         .unwrap();
     for i in 0..n {
         let oid = gix::hash::ObjectId::from_hex(format!("{i:040x}").as_bytes()).unwrap();
-        store.write(|c| c.put_git_import(repo, oid, cs_id)).unwrap();
+        store
+            .write(|c| c.put_git_imports(repo, &[(oid, cs_id)]))
+            .unwrap();
     }
     // The blobs the tree names must be in the store, or the export's
     // verify refuses the section.
@@ -76,10 +77,6 @@ fn archive_with_provenance(
 
 #[test]
 fn the_restore_of_a_thousand_pairs_costs_three_provenance_statements() {
-    if !Backend::test_is_postgres() {
-        eprintln!("skip on sqlite: the statement count is a Postgres seam");
-        return;
-    }
     let base = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
     let mut counts = Vec::new();
     for n in [100, 1000] {
@@ -102,7 +99,7 @@ fn the_restore_of_a_thousand_pairs_costs_three_provenance_statements() {
         let (_data, out, _cs) = archive_with_provenance(n);
         let target = scion_server::test_support::private_tempdir();
         Backend::test_reset_statement_count();
-        let restored = archive::restore(&out, target.path(), Some(&url), None).unwrap();
+        let restored = archive::restore(&out, target.path(), &url, None).unwrap();
         assert_eq!(restored.repos, vec![REPO.to_owned()]);
         let puts = Backend::test_statement_log()
             .iter()
@@ -135,10 +132,6 @@ fn the_restore_of_a_thousand_pairs_costs_three_provenance_statements() {
 /// overwritten, and the repeat is no error.
 #[test]
 fn a_repeated_provenance_pair_is_a_no_op() {
-    if !Backend::test_is_postgres() {
-        eprintln!("skip on sqlite: this guard counts Postgres statements");
-        return;
-    }
     let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test_shared(dir.path()).unwrap();
     let repo = store.write(|c| c.create_repo(REPO)).unwrap();

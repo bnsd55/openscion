@@ -298,7 +298,6 @@ jobs:
           # shellcheck disable=SC2046
           tar czf units-postgres.tgz $(find target/debug -type f -perm -u+x ! -name '*.d' ! -name '*.rlib' ! -name '*.so')
         env:
-          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           # The backup and crash tests restart the job's own database, as
           # ci.yml's postgres job lets them: the container's id is the

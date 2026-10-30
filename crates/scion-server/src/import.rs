@@ -331,9 +331,8 @@ fn store_batch(
 ) -> Result<()> {
     #[cfg(test)]
     let slow_record = SLOW_RECORD.with(Cell::get);
-    // A Postgres database has one writer: a long batch holds it, like a
-    // shared data directory's write lock does. The budget applies to both.
-    let shared = store.is_shared() || store.as_postgres().is_some();
+    // A Postgres database has one writer: a long batch holds it, and the
+    // budget keeps its turn short.
     let mut rest = prepared;
     while !rest.is_empty() {
         let mut taken = 0;
@@ -351,7 +350,7 @@ fn store_batch(
             let lens = crate::tree::lens_of_puts(
                 store,
                 rest.iter()
-                    .flat_map(|(_, cs, _)| crate::db::puts(cs))
+                    .flat_map(|(_, cs, _)| crate::meta::puts(cs))
                     .map(|(_, blob)| blob),
             )?;
             let result = store.write(|c| {
@@ -404,7 +403,7 @@ fn store_batch(
                     }
                     provenance.push((*commit, id));
                     taken += 1;
-                    if shared && started_tx.elapsed() >= TX_BUDGET {
+                    if started_tx.elapsed() >= TX_BUDGET {
                         break;
                     }
                     #[cfg(any(test, feature = "test-hooks"))]
@@ -439,7 +438,7 @@ fn store_batch(
             commits_per_sec = per_sec(*done, started),
             "importing git commits"
         );
-        if shared && !rest.is_empty() {
+        if !rest.is_empty() {
             // A server write that waited for this transaction takes the lock
             // here, before the next one begins.
             std::thread::sleep(TX_YIELD);
@@ -1646,43 +1645,5 @@ mod tests {
         // its work.
         assert!(importer.txes() > 2, "the batch was one transaction");
         assert_eq!(report.imported, 160);
-    }
-
-    #[test]
-    fn an_import_that_is_alone_runs_its_batch_in_one_transaction() {
-        // An import on Postgres always shares the schema with a server
-        // (the shared flag names Postgres outright), so the budget always
-        // applies there: the alone shape has no Postgres form.
-        if Backend::test_is_postgres() {
-            eprintln!("skip on postgres: the budget always applies on Postgres");
-            return;
-        }
-        crate::store::spawn_guard::prime_gix_lookup();
-        let repo = crate::test_support::private_tempdir();
-        let dir = repo.path();
-        git(dir, &["init", "-q", "-b", "main"]);
-        // More slow records than one budget-sized transaction takes, so a
-        // shared import would split the batch.
-        for i in 0..30 {
-            git(
-                dir,
-                &["commit", "-q", "--allow-empty", "-m", &i.to_string()],
-            );
-        }
-        let data = crate::test_support::private_tempdir();
-        let importer = Backend::open_test(data.path()).unwrap();
-        let opts = ImportOptions {
-            rev: "main".into(),
-            target_ref: "main".into(),
-            verify_sample: 0,
-        };
-        // 30 x 40 ms of records is over the 1 s budget: an import that is
-        // alone ignores the budget and runs the batch in one transaction.
-        SLOW_RECORD.with(|c| c.set(Duration::from_millis(40)));
-        let report = import_git(&importer, "r", dir, &opts).unwrap();
-        // One transaction each for the repo, the batch, and the ref: the
-        // batch did not split at the budget.
-        assert_eq!(importer.txes(), 3);
-        assert_eq!(report.imported, 30);
     }
 }

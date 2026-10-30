@@ -52,8 +52,8 @@ use std::collections::{BTreeSet, HashMap};
 use scion_core::RepoPath;
 use scion_proto::runtime::auth::{Auth, Caller, DEFAULT_PRINCIPAL, token_digest};
 
-use crate::db;
 use crate::error::{Error, Result};
+use crate::meta as db;
 
 /// Longest principal name, in bytes.
 pub(crate) const MAX_PRINCIPAL_BYTES: usize = 64;

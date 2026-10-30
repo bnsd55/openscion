@@ -16,6 +16,12 @@ use scion_server::Backend;
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use scion_server::test_support::tree;
 
+/// The URL a store on `dir` opens with: the test database, under the
+/// directory's own schema, created first.
+fn url_of(dir: &std::path::Path) -> String {
+    scion_server::Backend::test_postgres_url(dir).unwrap()
+}
+
 const REPO: &str = "tree";
 
 fn changeset(files: &[String]) -> Changeset {
@@ -48,10 +54,8 @@ fn changeset(files: &[String]) -> Changeset {
 
 #[test]
 fn a_wide_changeset_builds_under_the_bound() {
-    // The public open with no URL is the data directory's SQLite store,
-    // whatever SCION_TEST_BACKEND says.
     let dir = scion_server::test_support::private_tempdir();
-    let store = Backend::open(dir.path(), None, None).unwrap();
+    let store = Backend::open(dir.path(), &url_of(dir.path()), None).unwrap();
     let repo = store.write(|c| c.create_repo(REPO)).unwrap();
     // The base commit creates the directories, so the counted build's
     // directories are stored trees the apply has to read.

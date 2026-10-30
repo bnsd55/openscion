@@ -182,11 +182,6 @@ jobs:
         run: scripts/test-merge-changelog.sh
       - name: the release tag verdicts hold (release-verify-tag)
         run: scripts/test-release-verify-tag.sh
-      # The store-upgrade ladder's cap: 9 tags -> 8 kept + a warning
-      # naming the dropped ones. No store-upgrade run holds 9 tags
-      # today, so the decision is tested here on a fixture repo.
-      - name: the store ladder keeps the newest 8 and names the rest
-        run: scripts/test-store-upgrade-cap.sh
       # A workflow that cannot parse fails here, on the PR that carries
       # it, not main's next push-triggered run (#416, #419). The
       # actionlint release is pinned by version and sha256.
@@ -305,7 +300,6 @@ jobs:
           cargo test -p open-scion-server "${server_args[@]}"
           cargo test -p open-scion "${cli_args[@]}"
         env:
-          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
 
   supply-chain:
@@ -405,7 +399,6 @@ jobs:
           # nightly and a dispatch 128; the nightly's own job below
           # still proves the full 2000 on Postgres.
           PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '64' || '128' }}
-          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           # The backup test dumps the live metadata with the job's own
           # Postgres, so its tools match the server: the container name
@@ -439,6 +432,7 @@ jobs:
         run: cargo test -p open-scion-server --test disk_full
         env:
           SCION_DISK_REQUIRE: "1"
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
       - name: block-level power cuts (dm-log-writes)
         run: |
           # replay-log, pinned at 7b70d8a6863c5de30933d42a7672d35d01d2dc6c so the tool cannot move under the test.
@@ -449,6 +443,7 @@ jobs:
         env:
           SCION_DMW_REQUIRE: "1"
           SCION_DMW_REPLAY: ${{ runner.temp }}/replay-log
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
 
   test-restore-ceiling:
     name: test (restore rss ceiling)
@@ -498,7 +493,6 @@ jobs:
       - name: the streamed restore stays under its ceiling
         run: cargo test --release -p open-scion-server --test archive_restore_stream a_big_restore -- --nocapture
         env:
-          SCION_TEST_BACKEND: postgres
           SCION_TEST_RESTORE_BIG: "1"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
       - name: the whole-file read would not (the guard is not vacuous)
@@ -524,6 +518,7 @@ jobs:
         env:
           SCION_TEST_RESTORE_BIG: "1"
           SCION_TEST_RESTORE_MUTATION: "whole_file"
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
 
   # The Postgres majors the support matrix claims (docs/support.md):
   # one native service per major, one matrix row each. The majors are
@@ -591,7 +586,6 @@ jobs:
           # The Postgres majors prove version parity, not more cases;
           # the main job on 17 already runs 2000.
           PROPTEST_CASES: "64"
-          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           # The backup test dumps the live metadata with the job's own
           # Postgres, so its tools match the server: the container name
@@ -607,7 +601,6 @@ jobs:
         run: cargo test -p open-scion-server --test disk_full
         env:
           SCION_DISK_REQUIRE: "1"
-          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
       - name: block-level power cuts (dm-log-writes), on Postgres
         run: |
@@ -619,7 +612,6 @@ jobs:
         env:
           SCION_DMW_REQUIRE: "1"
           SCION_DMW_REPLAY: ${{ runner.temp }}/replay-log
-          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
       - name: the work tree is still clean after the tests
         run: |
@@ -657,7 +649,6 @@ jobs:
           fi
           container=$names
           SCION_TEST_PG_CONTAINER="$container" \
-          SCION_TEST_BACKEND=postgres \
           SCION_TEST_POSTGRES_URL=postgres://postgres:scion@localhost:5432/scion \
           cargo test -p open-scion-server --test backend_refusals -- --ignored
 
@@ -701,7 +692,6 @@ jobs:
       # and the from-mount suite, which the default build compiles out.
       - run: cargo test -p open-scion --features unstable-writable-mount
         env:
-          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
 
   test-macos:
@@ -754,7 +744,6 @@ jobs:
           # A pull request runs 64 cases, main and the nightly 128;
           # the nightly's own job proves the full 2000.
           PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '64' || '128' }}
-          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
       - name: the work tree is still clean after the tests
         run: |
@@ -836,7 +825,6 @@ jobs:
       - run: cargo test -p open-scion-server
         env:
           PROPTEST_CASES: "256"
-          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           # The backup test dumps the live metadata with the job's own
           # Postgres, so its tools match the server.
@@ -845,7 +833,6 @@ jobs:
         run: cargo test -p open-scion-server --test disk_full
         env:
           SCION_DISK_REQUIRE: "1"
-          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
 
   # The arm64 suite's second half: every workspace crate except the
@@ -926,7 +913,6 @@ jobs:
       - run: cargo test --workspace
         env:
           PROPTEST_CASES: "2000"
-          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           # The backup test dumps the live metadata with the job's own
           # Postgres, so its tools match the server.
@@ -994,7 +980,6 @@ jobs:
           # The xfs job proves filesystem parity, not more cases; the
           # main job on the runner disk already runs 2000.
           PROPTEST_CASES: "64"
-          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           # The backup test dumps the live metadata with the job's own
           # Postgres, so its tools match the server.
@@ -1078,7 +1063,6 @@ jobs:
         env:
           SCION_LAZYFS: ${{ runner.temp }}/lazyfs
           SCION_LAZYFS_TRACE_DIR: ${{ runner.temp }}/lazyfs-trace
-          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
         # One server of the database at a time: the binary's Postgres open
         # takes the database's one-server lock, so the suite runs serially
@@ -1144,7 +1128,6 @@ jobs:
       # data dir; the run proves the mount of that half.
       - name: run the mount script
         env:
-          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
         run: timeout 600 scripts/mount-nfs.sh
 
@@ -1222,7 +1205,6 @@ jobs:
       # grpcurl release and checks its sha256 before it runs.
       - run: scripts/grpc-conformance.sh
         env:
-          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
 
   docker:
@@ -1291,7 +1273,6 @@ jobs:
           tool: cargo-fuzz
       - name: fuzz the parsers
         env:
-          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
         run: |
           # The prebuilt cargo-fuzz defaults to a musl target, where the

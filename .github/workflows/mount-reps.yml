@@ -87,7 +87,6 @@ jobs:
           # with an empty reps falls back to the same 100 the input
           # defaults to.
           REPS: ${{ github.event.inputs.reps || '100' }}
-          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
         run: |
           case "$REPS" in ''|*[!0-9]*|0)

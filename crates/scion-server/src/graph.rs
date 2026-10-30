@@ -827,16 +827,16 @@ fn node(c: &mut dyn MetaTx, id: ChangesetId) -> Result<Node> {
 #[cfg(test)]
 mod tests {
     use crate::backend::Backend;
+    use proptest::prelude::{Strategy, any};
+    use proptest::sample::Index as Sample;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    use proptest::prelude::{Strategy, any};
-    use proptest::sample::Index as Sample;
     use scion_core::{BlobId, FileState, IdentityTime, RepoPath};
 
     use super::*;
-    use crate::db::testing;
     use crate::derived::steps;
+    use crate::meta::testing;
     use crate::pg::damage;
 
     /// A cold commit graph and a past deadline: the query refuses instead of
@@ -1482,18 +1482,11 @@ mod tests {
         assert!(cost.steps > 1, "{cost:?}");
         // None where the commit's own fsync flushes the drive cache.
         //
-        // On Postgres the count is 0: the commit's durability is
-        // Postgres's (synchronous_commit=on, checked at open), and a
-        // commit whose changeset names no new blob file full-flushes
-        // nothing - unlike SQLite, whose own database file sits on the
-        // same drive, so its commit fsyncs the blob group too. A
-        // Postgres commit that starts to full-flush blob groups fails
-        // here.
-        let expected = if Backend::test_is_postgres() {
-            0
-        } else {
-            u64::from(crate::store::FSYNC_LEAVES_DRIVE_CACHE)
-        };
+        // The count is 0: the commit's durability is Postgres's
+        // (synchronous_commit=on, checked at open), and a commit whose
+        // changeset names no new blob file full-flushes nothing. A
+        // commit that starts to full-flush blob groups fails here.
+        let expected = 0;
         let flushes = store.blobs().full_flushes() - before;
         assert_eq!(flushes, expected);
     }

@@ -89,10 +89,6 @@ fn opts(rev: &str) -> ImportOptions {
 
 #[test]
 fn the_imports_derived_family_costs_no_statement_per_commit() {
-    if !Backend::test_is_postgres() {
-        eprintln!("skip on sqlite: the statement count is a Postgres seam");
-        return;
-    }
     for n in [100, 1000] {
         let git = Git::new();
         let tip = git.fast_commits(n);
@@ -124,8 +120,7 @@ fn the_imports_derived_family_costs_no_statement_per_commit() {
         // The batch wrote every derived row: the root tree, the commit
         // graph and the path history of each commit. An import that
         // drops the flush leaves the table short and fails here.
-        let schema = Backend::test_schema(dir.path())
-            .expect("the test backend is postgres, so the schema is named");
+        let schema = Backend::test_schema(dir.path());
         let mut client = postgres::Client::connect(
             &std::env::var("SCION_TEST_POSTGRES_URL").unwrap(),
             postgres::NoTls,

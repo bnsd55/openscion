@@ -14,17 +14,44 @@ use std::process::{Command, Stdio};
 use scion_server::Backend;
 use std::time::{Duration, Instant};
 
+/// The URL a store on `dir` opens with: the test database, under the
+/// directory's own schema, created first.
+fn url_of(dir: &std::path::Path) -> String {
+    scion_server::Backend::test_postgres_url(dir).unwrap()
+}
+
+/// A spawned server that cannot outlive its test: `Drop` sends SIGKILL
+/// and reaps, panics and timeouts included. Every `serve` spawn in this
+/// file hands its child to this guard before any wait.
+struct Guarded(std::process::Child);
+
+impl Drop for Guarded {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// `scion-server` with `args`, run by a shell that first sets umask `umask`,
 /// as a login shell or a service manager does. The process's own umask
 /// cannot be changed for one test: it is the whole test process's.
+/// The spawned child reads its URL from the environment (never
+/// `SCION_TEST_POSTGRES_URL`), so the helper hands it the store's own
+/// URL, taken from the `--data` argument's schema.
 fn server(umask: &str, args: &[&OsStr]) -> Command {
+    let data = args
+        .windows(2)
+        .find(|pair| pair[0] == "--data")
+        .map(|pair| std::path::PathBuf::from(pair[1]))
+        .expect("the spawned scion-server names its --data");
     let mut command = Command::new("/bin/sh");
     command
         .arg("-c")
         .arg(format!("umask {umask} && exec \"$0\" \"$@\""))
         .arg(env!("CARGO_BIN_EXE_scion-server"))
         .args(args)
-        .env("NO_COLOR", "1");
+        .env("NO_COLOR", "1")
+        .env("SCION_POSTGRES_URL", url_of(&data));
     command
 }
 
@@ -158,7 +185,7 @@ fn serve_starts_with_its_ticket_key_in_a_data_directory_that_it_made() {
     assert_eq!(mode_of(&key), 0o600);
 
     let log = tmp.path().join("serve.log");
-    let mut child = server(
+    let child = server(
         "000",
         &[
             "--data".as_ref(),
@@ -176,6 +203,9 @@ fn serve_starts_with_its_ticket_key_in_a_data_directory_that_it_made() {
     .stderr(fs::File::create(&log).unwrap())
     .spawn()
     .unwrap();
+    // The guard kills and reaps on every path out of here, panics
+    // included: no wait below orphans a serving server.
+    let mut child = Guarded(child);
     // A refused key or data directory exits at once; a good start logs
     // "serving" once the server listens. Wait for one of the two.
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -183,13 +213,12 @@ fn serve_starts_with_its_ticket_key_in_a_data_directory_that_it_made() {
         if fs::read_to_string(&log).unwrap().contains("serving") {
             break true;
         }
-        if child.try_wait().unwrap().is_some() || Instant::now() > deadline {
+        if child.0.try_wait().unwrap().is_some() || Instant::now() > deadline {
             break false;
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(child);
     assert!(
         served,
         "serve did not start: {}",
@@ -300,7 +329,7 @@ fn an_open_refuses_a_data_directory_that_group_or_others_can_read() {
     let path = dir.path().join("data");
     fs::create_dir(&path).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-    let Err(err) = Backend::open(&path, None, None) else {
+    let Err(err) = Backend::open(&path, &url_of(&path), None) else {
         panic!("the open of a readable data directory must fail");
     };
     assert!(

@@ -10,6 +10,12 @@ use scion_core::{BlobId, Changeset, ChangesetId, FileState, IdentityTime, RepoPa
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use scion_server::{Backend, archive, fsck, test_support::tree};
 
+/// The URL a store on `dir` opens with: the test database, under the
+/// directory's own schema, created first.
+fn url_of(dir: &std::path::Path) -> String {
+    scion_server::Backend::test_postgres_url(dir).unwrap()
+}
+
 const REPO: &str = "main";
 
 fn path(p: &str) -> RepoPath {
@@ -125,9 +131,15 @@ fn a_section_holds_one_snapshot_when_a_writer_lands_between_its_statements() {
 
     // And a restore replays it into an empty store with a clean fsck.
     let restored_dir = scion_server::test_support::private_tempdir();
-    let report = archive::restore(&out, restored_dir.path(), None, None).unwrap();
+    let report = archive::restore(
+        &out,
+        restored_dir.path(),
+        &url_of(restored_dir.path()),
+        None,
+    )
+    .unwrap();
     assert_eq!(report.repos, vec![REPO]);
-    let restored = Backend::open(restored_dir.path(), None, None).unwrap();
+    let restored = Backend::open(restored_dir.path(), &url_of(restored_dir.path()), None).unwrap();
     let problems = fsck::run(&restored, fsck::BATCH, &mut |_| {}).unwrap();
     assert!(problems.problems.is_empty(), "{problems:?}");
 }
@@ -185,9 +197,15 @@ fn an_export_beside_a_writer_verifies_and_restores_resolving_main() {
     // generations, a clean fsck, and a main that resolves to what the
     // snapshot read.
     let restored_dir = scion_server::test_support::private_tempdir();
-    let report = archive::restore(&out, restored_dir.path(), None, None).unwrap();
+    let report = archive::restore(
+        &out,
+        restored_dir.path(),
+        &url_of(restored_dir.path()),
+        None,
+    )
+    .unwrap();
     assert_eq!(report.repos, vec![REPO]);
-    let restored = Backend::open(restored_dir.path(), None, None).unwrap();
+    let restored = Backend::open(restored_dir.path(), &url_of(restored_dir.path()), None).unwrap();
     let problems = fsck::run(&restored, fsck::BATCH, &mut |_| {}).unwrap();
     assert!(problems.problems.is_empty(), "{problems:?}");
     let repo = restored.read(|c| c.repo_id(REPO)).unwrap();
@@ -239,7 +257,7 @@ fn a_verify_names_a_blob_whose_bytes_someone_corrupted() {
         "{damages:?}"
     );
     let empty = scion_server::test_support::private_tempdir();
-    match archive::restore(&out, empty.path(), None, None) {
+    match archive::restore(&out, empty.path(), &url_of(empty.path()), None) {
         Err(scion_server::Error::Corrupt(why)) => {
             assert!(why.contains("not sound"), "{why}");
         }
@@ -273,7 +291,7 @@ fn a_manifest_name_that_escapes_the_archive_is_refused() {
             Ok(damages) => panic!("expected a refusal for {name:?}, got {damages:?}"),
         }
         let empty = scion_server::test_support::private_tempdir();
-        match archive::restore(&out, empty.path(), None, None) {
+        match archive::restore(&out, empty.path(), &url_of(empty.path()), None) {
             Err(scion_server::Error::Corrupt(why)) => {
                 assert!(why.contains(name), "{why}");
             }
@@ -317,7 +335,7 @@ fn a_blob_file_that_expands_past_the_cap_is_refused() {
         "{damages:?}"
     );
     let empty = scion_server::test_support::private_tempdir();
-    match archive::restore(&out, empty.path(), None, None) {
+    match archive::restore(&out, empty.path(), &url_of(empty.path()), None) {
         Err(scion_server::Error::Corrupt(why)) => {
             assert!(why.contains("not sound"), "{why}");
         }
@@ -339,7 +357,7 @@ fn a_restore_refuses_a_data_directory_that_already_holds_a_store() {
         .path()
         .join("archive");
     archive::export(&store, data.path(), Some(REPO), false, &out).unwrap();
-    match archive::restore(&out, data.path(), None, None) {
+    match archive::restore(&out, data.path(), &url_of(data.path()), None) {
         Err(scion_server::Error::FailedPrecondition(why)) => {
             assert!(why.contains("already holds a store"), "{why}");
         }
@@ -485,7 +503,7 @@ fn an_archive_naming_two_repos_that_fold_to_one_is_refused() {
         "verify must name the folded pair: {damages:?}"
     );
     let empty = scion_server::test_support::private_tempdir();
-    let restored = archive::restore(&out, empty.path(), None, None);
+    let restored = archive::restore(&out, empty.path(), &url_of(empty.path()), None);
     assert!(
         restored.is_err(),
         "a restore that would replay one repo's data under two names must refuse"
@@ -531,7 +549,7 @@ fn a_section_that_is_a_symlink_to_another_is_refused() {
         "verify must refuse a section that is a symlink: {damages:?}"
     );
     let empty = scion_server::test_support::private_tempdir();
-    let restored = archive::restore(&out, empty.path(), None, None);
+    let restored = archive::restore(&out, empty.path(), &url_of(empty.path()), None);
     assert!(restored.is_err(), "a named damage must refuse the replay");
 }
 

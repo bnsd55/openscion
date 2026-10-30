@@ -42,6 +42,12 @@ fn run_gc(dir: &std::path::Path, metrics: &std::path::Path, dry: bool) -> Output
     Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(&collector_args)
         .env("NO_COLOR", "1")
+        // The documented line carries no URL: the operator's env gives
+        // it. The schema is the data directory's own.
+        .env(
+            "SCION_POSTGRES_URL",
+            scion_server::Backend::test_postgres_url(&data).unwrap(),
+        )
         .output()
         .unwrap()
 }

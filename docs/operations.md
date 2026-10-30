@@ -178,7 +178,7 @@ restore from backup (section 3).
 
 Proof: crates/scion-server/tests/backend_refusals.rs::a_lost_server_lock_fences_the_backend (behaviour, no command: the section's serve command is not in the test's path - the test works at the database's own session lock, and the fence it proves is what the runbook's one-server rule protects)
 Proof: crates/scion-server/tests/backend_refusals.rs::an_unreachable_database_is_not_a_takeover (behaviour, no command: the section's steps are actions on the database and its container, not scion commands; the test holds the behaviour the runbook promises - a stopped database is not a takeover)
-Proof: crates/scion-server/tests/crash.rs::every_reply_survives_a_kill_of_the_server
+Proof: crates/scion-server/tests/crash_pg.rs::a_kill_during_a_land_leaves_the_ref_old_or_new (behaviour, no command: the proof is the kill's own timing - a reply answered and the process killed mid-flight - which no guide command reproduces)
 Proof: crates/scion-server/tests/first_boot.rs::a_first_boot_serves_probes_and_reads_back
 
 #### Stopping it for real: a unit file
@@ -314,7 +314,7 @@ SCION_POSTGRES_URL='postgres://user@dbhost/scion?sslmode=require' \
 
 - `--postgres-url-file` (or `SCION_POSTGRES_URL`) names the database.
   `--postgres-url` takes the same value on the command line; it is
-  deprecated: it warns now and goes away in a later release, because
+  deprecated: it warns now and is removed in v0.2.0, because
   the process list shows its value to every local account. Off this
   machine the URL must ask for TLS (`sslmode=require`): the open
   refuses a remote URL that does not.
@@ -621,7 +621,7 @@ its value is readable by every local account through `ps`.
 | Variable | Flag | Read by | Notes |
 | --- | --- | --- | --- |
 | `SCION_DATA` | `--data` | `scion-server` | Data directory, default `scion-data`. |
-| `SCION_POSTGRES_URL` | `--postgres-url` | `scion-server` | The URL holds the database credentials; the environment keeps them out of the process list (`ps`). `--postgres-url-file` reads it from a file the owner alone may read, and the argv form is deprecated: it warns now and goes away in a later release. |
+| `SCION_POSTGRES_URL` | `--postgres-url` | `scion-server` | The URL holds the database credentials; the environment keeps them out of the process list (`ps`). `--postgres-url-file` reads it from a file the owner alone may read, and the argv form is deprecated: it warns now and is removed in v0.2.0. |
 | `SCION_POSTGRES_URL_FILE` | `--postgres-url-file` | `scion-server` | A file that holds the database URL. Only its owner may read it, and a symlink is refused. |
 | `SCION_TOKEN` | `--token` | `scion-server` (`serve`, `hash-token`), `scion-cache`, `scion-daemon`, `scn` | A secret; the environment keeps it out of the process list. The `--token-file` flag reads the token from a file the owner alone may read, and `hash-token` reads it from stdin. The argv form prints a deprecation warning and goes away in a later release. |
 | `SCION_UPSTREAM_TOKEN` | `--upstream-token` | `scion-cache`, `scion-daemon` | A secret, as `SCION_TOKEN`; `--upstream-token-file` reads it from a file, and the argv form is deprecated: it warns now and goes away in a later release. |
@@ -701,7 +701,7 @@ What an acknowledged write has survived, before you need a backup:
 
 Proof: crates/scion-server/tests/power.rs::every_reply_survives_a_power_cut (behaviour, no command: the proof is the power cut the LazyFS device delivers at the disk boundary, which no shell command reproduces)
 Proof: crates/scion-server/tests/dm_log_writes.rs::an_acknowledged_blob_survives_a_cut_at_the_last_barrier_before_its_reply (behaviour, no command: the proof is a cut at the device's last barrier before the reply, delivered by the dm-log device, which no shell command reproduces)
-Proof: crates/scion-server/tests/crash.rs::every_reply_survives_a_kill_of_the_server (behaviour, no command: the proof is the kill's own timing - a reply answered and the process killed mid-flight - which no guide command reproduces)
+Proof: crates/scion-server/tests/crash_pg.rs::a_kill_during_a_land_leaves_the_ref_old_or_new (behaviour, no command: the proof is the kill's own timing - a reply answered and the process killed mid-flight - which no guide command reproduces)
 Proof: crates/scion-server/tests/storage.rs::a_retry_after_a_failed_dir_fsync_makes_the_kept_file_durable (behaviour, no command: the proof injects the fsync failure at the directory boundary, which a shell cannot order; the retry it forces is the runbook's promise)
 
 The Postgres metadata half of the first two rules is Postgres's own
@@ -717,9 +717,7 @@ acknowledged writes, plus the write in flight while the snapshot ran.
 Writes acknowledged **before** the snapshot read back whole after a
 restore, whatever was happening in the meantime.
 
-Proof: crates/scion-server/tests/backup.rs::a_backup_taken_while_serving_restores_whole
-Proof (open, #411): the live-backup test of that PR pins what a backup taken while
-the server keeps writing may and may not hold
+Proof: crates/scion-server/tests/backup.rs::a_backup_taken_while_serving_restores_whole (behaviour, no command: the section states the durability rules in prose, and no shell command reproduces an acknowledged write; the test holds the recovery point the section promises)
 
 A data directory is `scion.db` plus `objects/`; the lock files and `tmp/`
 are process state, not data. A copy of the directory is a backup:
@@ -814,9 +812,9 @@ current numbers live in the workflow's run log on `main`, and a run
 that drifts far from them is a regression to look at, not a promise
 to restate here.
 
-Proof: crates/scion-server/tests/restore_bench.rs::a_restore_of_a_stated_store_takes_a_stated_time
+Proof: crates/scion-server/tests/restore_bench.rs::a_restore_of_a_stated_store_takes_a_stated_time (measured, no command: the number is the workflow's own run, not a shell command the guide names)
 
-Proof: crates/scion-server/tests/backup.rs::a_backup_taken_while_serving_restores_whole
+Proof: crates/scion-server/tests/backup.rs::a_backup_taken_while_serving_restores_whole (behaviour, no command: the section's sample numbers are measured by the workflow, not reproducible as one command; the test holds the backup-while-serving behaviour the section names)
 
 On Postgres, a restore's staging schema carries a `restore_staging`
 mark from its first transaction until publication, so a restore drops
@@ -918,7 +916,7 @@ backfills a whole history in steps when you want it done before the first
 query (it opens the directory as the server, so with the server stopped, and
 it is safe to repeat).
 
-Proof: crates/scion-server/tests/crash.rs::a_kill_during_a_schema_upgrade_leaves_the_old_schema_or_the_new_one (behaviour, no command: the section's upgrade steps are prose; the proof is the kill's own timing inside the migration)
+Proof: crates/scion-server/tests/crash_pg.rs::a_kill_during_a_schema_upgrade_leaves_one_whole_version (behaviour, no command: the section's upgrade steps are prose; the proof is the kill's own timing inside the migration)
 
 ### Rollback
 

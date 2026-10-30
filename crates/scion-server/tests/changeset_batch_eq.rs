@@ -97,10 +97,6 @@ const TABLES: [&str; 7] = [
 
 #[test]
 fn the_batch_writes_the_rows_the_per_commit_path_writes() {
-    if !Backend::test_is_postgres() {
-        eprintln!("skip on sqlite: this guard compares Postgres rows");
-        return;
-    }
     let git = Git::new();
     let tip = git.fast_commits(50);
     let mut rows = Vec::new();
@@ -110,8 +106,7 @@ fn the_batch_writes_the_rows_the_per_commit_path_writes() {
         scion_server::set_import_per_commit_txs(per_commit);
         import_git(&store, "main", git.path(), &opts(&tip)).unwrap();
         scion_server::set_import_per_commit_txs(false);
-        let schema = Backend::test_schema(dir.path())
-            .expect("the test backend is postgres, so the schema is named");
+        let schema = Backend::test_schema(dir.path());
         let mut client = postgres::Client::connect(
             &std::env::var("SCION_TEST_POSTGRES_URL").unwrap(),
             postgres::NoTls,

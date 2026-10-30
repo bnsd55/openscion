@@ -143,9 +143,6 @@ fn catch_up_statements(n: usize) -> u64 {
 /// The page statement returns the whole page: one call, `limit` rows.
 #[test]
 fn the_page_statement_returns_the_whole_page() {
-    if !Backend::test_is_postgres() {
-        return;
-    }
     let dir = scion_server::test_support::private_tempdir();
     let (store, repo, root) = setup(dir.path());
     let mut head = root;
@@ -164,9 +161,6 @@ fn the_page_statement_returns_the_whole_page() {
 /// not a statement per changeset.
 #[test]
 fn the_catch_up_walk_reads_first_parents_in_pages() {
-    if !Backend::test_is_postgres() {
-        return;
-    }
     let hundred = catch_up_statements(100);
     let thousand = catch_up_statements(1_000);
     assert!(

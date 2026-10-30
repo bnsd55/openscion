@@ -15,9 +15,9 @@ use std::collections::BTreeSet;
 use scion_core::{BlobId, Changeset, ChangesetId, RepoPath};
 
 use crate::backend::Backend;
-use crate::db;
 use crate::deadline::Deadline;
 use crate::error::{Error, Result};
+use crate::meta as db;
 use crate::meta::Meta as _;
 use crate::meta::{MetaTx, RepoId};
 use crate::store::{BlobStatus, Upload};
@@ -558,20 +558,11 @@ mod tests {
         // One flush for the blob before the commit, and one for the
         // commit where a plain fsync leaves it in the drive cache.
         //
-        // On Postgres the one flush before the commit is already a full
-        // flush where the drive cache needs it: pg.rs's flush calls
-        // blobs.full_flush() under FSYNC_LEAVES_DRIVE_CACHE, and the
-        // commit's own durability is Postgres's (synchronous_commit=on,
-        // checked at open). SQLite needs the second full flush because
-        // its own database file sits on the same drive.
-        if Backend::test_is_postgres() {
-            assert_eq!(store.blobs().full_flushes() - before, 1);
-        } else {
-            assert_eq!(
-                store.blobs().full_flushes() - before,
-                1 + u64::from(FSYNC_LEAVES_DRIVE_CACHE)
-            );
-        }
+        // The one flush before the commit is already a full flush where
+        // the drive cache needs it: pg.rs's flush calls blobs.full_flush()
+        // under FSYNC_LEAVES_DRIVE_CACHE, and the commit's own durability
+        // is Postgres's (synchronous_commit=on, checked at open).
+        assert_eq!(store.blobs().full_flushes() - before, 1);
     }
 
     #[test]
@@ -589,12 +580,8 @@ mod tests {
             .unwrap();
         let commits = store.commits();
         create_changeset(&store, "main", &child(tip, &[]), &later()).unwrap();
-        // Five root trees in steps, then the write. Until #682's Postgres
-        // counters land, commits() is always 0 on Postgres, so the count
-        // is a SQLite claim.
-        if !Backend::test_is_postgres() {
-            assert_eq!(store.commits() - commits, crate::derived::steps(5) + 1);
-        }
+        // Five root trees in steps, then the write.
+        assert_eq!(store.commits() - commits, crate::derived::steps(5) + 1);
     }
 
     #[test]

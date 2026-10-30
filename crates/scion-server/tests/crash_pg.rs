@@ -4,7 +4,7 @@
 //! old or new target with the metadata whole, and the schema at one
 //! version. The next start serves.
 //!
-//! Postgres only: every test skips itself when `SCION_TEST_BACKEND` does
+//! The crash suite of the database-backed store: a kill during a land.
 //! not name `postgres`; the database URL comes from
 //! `SCION_TEST_POSTGRES_URL`. The clients here build their own timeouts
 //! (a 5 s connect, a 30 s call) until a shared builder lands.
@@ -60,10 +60,6 @@ fn pg_url() -> String {
 /// sessions to end, so no session of a dead server can appear - and
 /// take a lock - after the wait said the database is clear.
 static SPAWN_SEQ: AtomicU64 = AtomicU64::new(1);
-
-fn is_pg() -> bool {
-    std::env::var("SCION_TEST_BACKEND").as_deref() == Ok("postgres")
-}
 
 /// The server's URL on the test's own schema: the same name
 /// `Backend::test_schema` derives for this data directory, in the URL's
@@ -592,10 +588,6 @@ fn warm_land(server: &PgServer, changeset: ChangesetId, key: &str) -> Duration {
 /// agreeing with what the ref says.
 #[test]
 fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
-    if !is_pg() {
-        println!("skipping: Postgres only");
-        return;
-    }
     let _one = one_server();
     let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
@@ -604,7 +596,7 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
     // The schema is the hash of the data directory's canonical path: the
     // directory exists first, so the name the test derives and the name
     // the harness derives are the same one.
-    let schema = Backend::test_schema(&data).expect("the test names a schema");
+    let schema = Backend::test_schema(&data);
     drop_schema(&schema);
     create_schema(&schema);
     seed_repo(&data);
@@ -744,10 +736,6 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
 /// version, and the next start upgrades it and serves.
 #[test]
 fn a_kill_during_a_schema_upgrade_leaves_one_whole_version() {
-    if !is_pg() {
-        println!("skipping: Postgres only");
-        return;
-    }
     let _one = one_server();
     let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
@@ -756,7 +744,7 @@ fn a_kill_during_a_schema_upgrade_leaves_one_whole_version() {
     // The schema is the hash of the data directory's canonical path: the
     // directory exists first, so the name the test derives and the name
     // the harness derives are the same one.
-    let schema = Backend::test_schema(&data).expect("the test names a schema");
+    let schema = Backend::test_schema(&data);
     drop_schema(&schema);
     create_schema(&schema);
 

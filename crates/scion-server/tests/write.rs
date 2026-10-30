@@ -4,7 +4,6 @@
 
 use std::fs;
 
-use rusqlite::{Connection, params};
 use scion_core::{
     BlobId, Changeset, ChangesetId, Entry, FileEntry, FileState, IdentityTime, RepoPath,
 };
@@ -32,17 +31,6 @@ struct Fixture {
     store: Backend,
     root: ChangesetId,
     other_root: ChangesetId,
-}
-
-/// Ends the test with one printed line when it runs on Postgres: it
-/// asserts the data directory's own mechanics, which the Postgres backend
-/// does not have. The PR body lists these tests.
-fn skip_on_postgres(why: &str) -> bool {
-    if Backend::test_is_postgres() {
-        eprintln!("skip on postgres: {why}");
-        return true;
-    }
-    false
 }
 
 fn fixture() -> Fixture {
@@ -121,31 +109,19 @@ fn change_count(parent: ChangesetId, n: usize) -> Vec<u8> {
     bytes
 }
 
-fn count_changesets(c: &Connection) -> scion_server::Result<i64> {
-    c.query_row("SELECT count(*) FROM changesets", [], |row| row.get(0))
-        .map_err(scion_server::test_support::error::from_sqlite)
-}
-
-/// The changeset rows of the store's world: the data directory's table on
-/// SQLite, the test schema's on Postgres, read through a client of the
+/// The changeset rows of the test schema, read through a client of the
 /// schema, as the refusal tests hold theirs.
-fn count_of(store: &Backend, dir: &std::path::Path) -> i64 {
-    if Backend::test_is_postgres() {
-        let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
-        let schema = Backend::test_schema(dir).unwrap();
-        let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
-        client
-            .batch_execute(&format!("SET search_path TO {schema}"))
-            .unwrap();
-        client
-            .query_one("SELECT count(*) FROM changesets", &[])
-            .unwrap()
-            .get(0)
-    } else {
-        store
-            .read(|c| count_changesets(c.sqlite().unwrap()))
-            .unwrap()
-    }
+fn count_of(dir: &std::path::Path) -> i64 {
+    let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+    let schema = Backend::test_schema(dir);
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    client
+        .batch_execute(&format!("SET search_path TO {schema}"))
+        .unwrap();
+    client
+        .query_one("SELECT count(*) FROM changesets", &[])
+        .unwrap()
+        .get(0)
 }
 
 #[test]
@@ -156,7 +132,7 @@ fn concurrent_creates_of_one_changeset_store_it_once() {
         &[("a", None), ("dir/new", Some(regular("new")))],
     )
     .encode_with_id();
-    let before = count_of(&f.store, f.dir.path());
+    let before = count_of(f.dir.path());
     let ids: Vec<ChangesetId> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..100)
             .map(|_| s.spawn(|| create_changeset(&f.store, REPO, &bytes, &later())))
@@ -172,7 +148,7 @@ fn concurrent_creates_of_one_changeset_store_it_once() {
     assert!(ids.iter().all(|id| *id == expected), "{ids:?}");
     // One create, one row, on both backends: a caller that stored a
     // second row, or lost the race and stored none, fails here.
-    assert_eq!(count_of(&f.store, f.dir.path()), before + 1);
+    assert_eq!(count_of(f.dir.path()), before + 1);
 }
 
 /// Rebuilds `cs` with the given fields, through the checked constructor: the
@@ -192,16 +168,8 @@ fn rebuilt(
 #[test]
 #[allow(clippy::too_many_lines)]
 fn bad_requests_are_rejected_and_store_nothing() {
-    // Asserts the rows of the data directory's database.
-    if skip_on_postgres("asserts the rows of the data directory's database") {
-        return;
-    }
-
     let f = fixture();
-    let before = f
-        .store
-        .read(|c| count_changesets(c.sqlite().unwrap()))
-        .unwrap();
+    let before = count_of(f.dir.path());
     // Rebuilds the base changeset with the edit's fields. The core
     // constructor enforces the format's bounds, and every edit here stays
     // inside them; the server's own limits are what these rows test.
@@ -371,12 +339,7 @@ fn bad_requests_are_rejected_and_store_nothing() {
         create_changeset(&f.store, "nope", &valid, &later()),
         Err(Error::NotFound(_))
     ));
-    assert_eq!(
-        f.store
-            .read(|c| count_changesets(c.sqlite().unwrap()))
-            .unwrap(),
-        before
-    );
+    assert_eq!(count_of(f.dir.path()), before);
 
     // The boundary the limits compare against, placed after the count
     // assert above (this one intentionally stores): a message of exactly
@@ -546,27 +509,25 @@ fn concurrent_puts_of_one_blob_leave_it_intact() {
 
 #[test]
 fn a_changeset_that_does_not_match_its_id_reads_as_corrupt() {
-    // Asserts the rows of the data directory's database.
-    if skip_on_postgres("asserts the rows of the data directory's database") {
-        return;
-    }
-
     let f = fixture();
-    // A valid encoding, but of another changeset.
+    // A valid encoding, but of another changeset: the row's body is
+    // rewritten through the test schema's own client, the way a torn
+    // write would leave it.
     let other = changeset(vec![], &[("a", Some(regular("b")))]).encode();
-    let repo = f
-        .store
-        .write(|c| {
-            c.sqlite()
-                .unwrap()
-                .execute(
-                    "UPDATE changesets SET body = ?1 WHERE id = ?2",
-                    params![other, f.root.as_bytes()],
-                )
-                .map_err(scion_server::test_support::error::from_sqlite)?;
-            c.repo_id(REPO)
-        })
+    let schema = Backend::test_schema(f.dir.path());
+    let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    client
+        .batch_execute(&format!("SET search_path TO {schema}"))
         .unwrap();
+    let id = f.root.as_bytes();
+    client
+        .execute(
+            "UPDATE changesets SET body = $1 WHERE id = $2",
+            &[&other, &id.as_slice()],
+        )
+        .unwrap();
+    let repo = f.store.read(|c| c.repo_id(REPO)).unwrap();
 
     match f.store.read(|c| c.get_changeset(repo, f.root)) {
         Err(Error::Corrupt(why)) => assert!(why.contains("does not match its ID"), "{why}"),
