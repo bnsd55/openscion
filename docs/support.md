@@ -31,20 +31,20 @@ marked supported here.
 | scion-server | Linux | x64 | ext4 | 18 | supported | `test-postgres` (ci.yml) | The metadata store; the suite runs on it. Runs nightly and on release candidates |
 | scion-server | Linux | x64 | ext4 | 15 | unsupported | — | Upstream supports 15 until November 2027, but the project does not claim it yet; one matrix line adds it when an operator asks |
 | scion-server | Linux | x64 | tmpfs | — | supported | `test` (ci.yml) | The `disk_full` step fills a real tmpfs (`SCION_DISK_REQUIRE=1`) |
-| scion-server | Linux | arm64 | ext4 | — | best effort | `test-arm64` (ci.yml) | The arm64 suite runs nightly and on release candidates, not per push; the cell is best effort until v0.8, and the Linux arm64 binaries return with the v0.8 support wave |
-| scion-server | Linux | arm64 | ext4 | 17 | best effort | `test-arm64` (ci.yml) | The arm64 suite runs nightly and on release candidates, not per push; the runner names the same test database its suite reads |
+| scion-server | Linux | arm64 | ext4 | — | best effort | `test-arm64-server` (ci.yml) | The server suite runs on arm64 nightly and on release candidates, not per push; the cell is best effort until v0.8, and the Linux arm64 binaries return with the v0.8 support wave |
+| scion-server | Linux | arm64 | ext4 | 17 | best effort | `test-arm64-server` (ci.yml) | The arm64 server suite runs on Postgres 17 when the arm64 job runs; the cell is best effort because the job itself is not per push |
 | scion-server | Linux | x64 | xfs | — | best effort | `test-xfs` (ci.yml) | Every store the server suite opens lands on a real xfs loop device (TMPDIR); the job runs nightly and on release candidates, not per push |
 | scion-server | Linux | x64 | ext4 | — | best effort | `test-restore-ceiling` (ci.yml) | The streamed restore's RSS ceiling (`archive_restore_stream`) runs release-shaped on main pushes, the nightly and dispatches — not on pull requests, where the fixture's disk cost buys nothing; the job measures the restore's own peak against the twin's baseline |
 | scion-server | macOS | arm64 | APFS | — | supported | `test-macos` (ci.yml) | Native `macos-15` runner, full workspace suite; the runner's disk is APFS |
 | scion-server | Windows | x64 | any | — | unsupported | — | No job builds or tests it; the lock files and paths assume POSIX. Unsupported until a native job exists |
 | scion-cache | Linux | x64 | memory | — | supported | `test` (ci.yml) | The suite covers the tier crate; objects live in memory |
-| scion-cache | Linux | arm64 | memory | — | best effort | `test-arm64` (ci.yml) | The suite covers the tier crate on arm64; the job runs nightly and on release candidates |
+| scion-cache | Linux | arm64 | memory | — | best effort | `test-arm64-rest` (ci.yml) | The suite covers the tier crate on arm64; the job runs nightly and on release candidates |
 | scion-cache | macOS | arm64 | memory | — | supported | `test-macos` (ci.yml) | The suite covers the tier crate |
 | scion-daemon | Linux | x64 | local disk | — | supported | `test` (ci.yml) | The suite covers the tier crate; the daemon's power-cut evidence is the `power-loss` job (LazyFS fault injection, a harness — not a filesystem promise) |
-| scion-daemon | Linux | arm64 | local disk | — | best effort | `test-arm64` (ci.yml) | The suite covers the tier crate on arm64; the job runs nightly and on release candidates; the power-cut evidence stays on x64 (`power-loss`) |
+| scion-daemon | Linux | arm64 | local disk | — | best effort | `test-arm64-rest` (ci.yml) | The suite covers the tier crate on arm64; the job runs nightly and on release candidates; the power-cut evidence stays on x64 (`power-loss`) |
 | scion-daemon | macOS | arm64 | local disk (APFS) | — | supported | `test-macos` (ci.yml) | The suite covers the tier crate |
 | scn | Linux | x64 | any | — | supported | `test` (ci.yml) | The CLI suite runs in the workspace job |
-| scn | Linux | arm64 | any | — | best effort | `test-arm64` (ci.yml) | The CLI suite runs in the arm64 job, which runs nightly and on release candidates |
+| scn | Linux | arm64 | any | — | best effort | `test-arm64-rest` (ci.yml) | The CLI suite runs in the arm64 job, which runs nightly and on release candidates |
 | scn | macOS | arm64 | any | — | supported | `test-macos` (ci.yml) | The CLI suite runs in the macOS job; the runner's disk is APFS. The mount and commit tests that fork passed 100 runs in a row on macos-15 ([the mount-reps run](https://github.com/bnsd55/openscion/actions/runs/39310255775)) |
 | scn mount | Linux | x64 | NFS | — | supported | `nfs-mount` (ci.yml) | The kernel NFS client mounts scn's server on the runner. The mounted mode is read-only; the write mode is the `unstable-writable-mount` build feature, off in every release binary |
 | scn mount | Linux | x64 | NFS, the `unstable-writable-mount` build | — | best effort | `test-writable` (ci.yml) | The feature build's from_mount suite mounts and writes on the runner; the write path stays out of every release binary |
