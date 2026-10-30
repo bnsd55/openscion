@@ -284,6 +284,19 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # A stray merge marker once sat in docs/faults.md through a whole
+      # green train: no job looked for one. This fails when the tracked
+      # tree holds a conflict marker (the open and close lines; the
+      # ======= middle line is left out because documents may hold one
+      # on purpose), and prints the lines it found. It runs in this job
+      # because this job runs on every event and for every ready pull
+      # request, docs-only ones included.
+      - name: no stray merge markers
+        run: |
+          if git grep -nE '^(<<<<<<<|>>>>>>>)( |$)'; then
+            echo '::error::a stray merge marker is in the tracked tree'
+            exit 1
+          fi
       - name: the docs tests
         run: |
           shopt -s nullglob
@@ -869,7 +882,6 @@ jobs:
       - run: cargo test --workspace --exclude open-scion-server
         env:
           PROPTEST_CASES: "256"
-          SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           SCION_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
 
