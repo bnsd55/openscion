@@ -106,14 +106,18 @@ fn an_existing_data_directory_works_as_today_and_restore_still_creates() {
     // Every spawned child reads its URL from the environment (never
     // `SCION_TEST_POSTGRES_URL`); the store under test is the test
     // database's, at this data directory's own schema.
-    let url = scion_server::Backend::test_postgres_url(&data).unwrap();
     // With the directory present, every refused command works as today.
     let out = Command::new(bin)
         .args(["--data"])
         .arg(&data)
         .arg("fsck")
         .env("NO_COLOR", "1")
-        .env("SCION_POSTGRES_URL", &url)
+        // fsck opens the store, and the store is Postgres: the URL
+        // rides the env, quietly, under this data directory's schema.
+        .env(
+            "SCION_POSTGRES_URL",
+            scion_server::Backend::test_postgres_url(&data).unwrap(),
+        )
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0), "fsck runs on the existing dir");
@@ -124,7 +128,12 @@ fn an_existing_data_directory_works_as_today_and_restore_still_creates() {
         .args(["ticket-key", "--out"])
         .arg(&key)
         .env("NO_COLOR", "1")
-        .env("SCION_POSTGRES_URL", &url)
+        // The ticket-key writes into the store's directory; the store
+        // is the same one fsck opened, so its URL rides the env too.
+        .env(
+            "SCION_POSTGRES_URL",
+            scion_server::Backend::test_postgres_url(&data).unwrap(),
+        )
         .output()
         .unwrap();
     assert!(out.status.success(), "ticket-key runs: {}", out.status);
@@ -141,7 +150,13 @@ fn an_existing_data_directory_works_as_today_and_restore_still_creates() {
         .args(["restore", "--archive"])
         .arg(&archive)
         .env("NO_COLOR", "1")
-        .env("SCION_POSTGRES_URL", &target_url)
+        // The replay lands in the target's own schema: the restore
+        // opens its store through the env, the rule every child here
+        // follows.
+        .env(
+            "SCION_POSTGRES_URL",
+            scion_server::Backend::test_postgres_url(&target).unwrap(),
+        )
         .output()
         .unwrap();
     assert!(

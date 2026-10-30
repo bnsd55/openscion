@@ -1201,7 +1201,7 @@ fn serve_flags(args: &ServeArgs) -> anyhow::Result<ServeFlags> {
     let token = match (&args.token, &args.token_file) {
         (Some(_), Some(_)) => unreachable!("clap refuses --token with --token-file"),
         (Some(_), None) => {
-            warn_argv_secret(
+            warn_argv_exposure(
                 "--token",
                 "--token-file (or SCION_TOKEN)",
                 "the argv form is deprecated and goes away in a later release",
@@ -1350,7 +1350,7 @@ async fn serve(
 /// v0.2.0 (the owner's call), the rest in a later minor; the
 /// replacement reads a file that the checked read of the access file
 /// protects.
-fn argv_secret_warning(flag: &str, replacement: &str, removal: &str) -> String {
+fn argv_exposure_warning(flag: &str, replacement: &str, removal: &str) -> String {
     format!(
         "warning: {flag} put a secret on the command line, which ps and \
          /proc/$$/cmdline show to every local account, and which lands in \
@@ -1358,8 +1358,8 @@ fn argv_secret_warning(flag: &str, replacement: &str, removal: &str) -> String {
     )
 }
 
-fn warn_argv_secret(flag: &str, replacement: &str, removal: &str) {
-    eprintln!("{}", argv_secret_warning(flag, replacement, removal));
+fn warn_argv_exposure(flag: &str, replacement: &str, removal: &str) {
+    eprintln!("{}", argv_exposure_warning(flag, replacement, removal));
 }
 
 /// A secret from a file the checked read protects, trimmed: the owner
@@ -1384,7 +1384,7 @@ fn postgres_url_of(url_file: Option<&PathBuf>, url_arg: Option<&String>) -> anyh
     let url = if let Some(file) = url_file {
         secret_file(file)?
     } else if let Some(url) = url_arg {
-        warn_argv_secret(
+        warn_argv_exposure(
             "--postgres-url",
             "--postgres-url-file (or SCION_POSTGRES_URL)",
             "--postgres-url will be removed in v0.2.0",
@@ -1562,7 +1562,7 @@ fn hash_token() -> anyhow::Result<()> {
         (Some(_), Some(_)) => unreachable!("clap refuses --token with --token-file"),
         (None, Some(file)) => secret_file(file)?,
         (Some(_), None) => {
-            warn_argv_secret(
+            warn_argv_exposure(
                 "--token",
                 "--token-file, SCION_TOKEN or stdin",
                 "the argv form is deprecated and goes away in a later release",
