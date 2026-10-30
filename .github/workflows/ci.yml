@@ -397,10 +397,11 @@ jobs:
           cache-workspace-crates: true
       - run: cargo test --workspace
         env:
-          # The fast tier: a pull request runs 64 cases, main, the
-          # nightly and a dispatch 128; the nightly's own job below
-          # still proves the full 2000 on Postgres.
-          PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '64' || '128' }}
+          # SHORTCUT: 64 cases, like the pg17 cell; some Postgres
+          # proptests grow one store across cases and turn superlinear
+          # (128 froze the runner, 2026-10-30); go back to 128 when they
+          # take a fresh store per case.
+          PROPTEST_CASES: "64"
           SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           # The backup test dumps the live metadata with the job's own
