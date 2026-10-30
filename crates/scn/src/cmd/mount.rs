@@ -599,10 +599,18 @@ fn cleanup_at(file: &Path, dir: &Path, overlay: &Path) -> Vec<String> {
     warnings
 }
 
-/// Sends `pid` the `signal`, and answers whether it was delivered.
+/// Sends `pid` the `signal`, and answers whether it was delivered. A
+/// pid below 2 is refused without running kill: 0 would signal the
+/// caller's whole process group, 1 is init, and neither can be a live
+/// server. The `--` is the same procps-ng guard the Parked drop has:
+/// without it a negative pid would be read as an option and folded to
+/// its first digit.
 fn kill_pid(pid: u32, signal: &str) -> bool {
+    if pid < 2 {
+        return false;
+    }
     std::process::Command::new("kill")
-        .args([signal, &pid.to_string()])
+        .args([signal, "--", &pid.to_string()])
         .status()
         .is_ok_and(|s| s.success())
 }
@@ -621,6 +629,12 @@ fn stop_serving_with(record: &MountRecord, dir: &Path, kill: impl Fn(u32, &str) 
     // a stale record's pid may be anyone by now.
     if !serving(record) {
         return true;
+    }
+    // A pid below 2 names no server: 0 would take the caller's whole
+    // process group and 1 is init, so a record that names one is not
+    // stopped, and the unmount keeps it instead of signaling.
+    if record.pid < 2 {
+        return false;
     }
     let signaled = kill(record.pid, "-TERM");
     let alive = kill(record.pid, "-0");
@@ -901,9 +915,14 @@ mod silent_failures {
     impl Drop for Parked {
         fn drop(&mut self) {
             // The group's id is the child's pid, so the kill takes the
-            // child and anything it left; then the reap.
+            // child and anything it left; then the reap. The `--` is
+            // load-bearing: procps-ng's kill reads a negative pid that
+            // follows the signal option as another option and keeps
+            // only its first digit (`kill -9 -123456` runs
+            // kill(-1, SIGKILL), every process of the user), while
+            // after `--` it parses the pid with strtol.
             let _ = std::process::Command::new("kill")
-                .args(["-9", &format!("-{}", self.0.id())])
+                .args(["-KILL", "--", &format!("-{}", self.0.id())])
                 .status();
             let _ = self.0.wait();
         }
@@ -965,6 +984,33 @@ mod silent_failures {
             read_sessions(&file).unwrap()[0].dir,
             PathBuf::from("/mnt/view")
         );
+    }
+
+    /// A record whose pid cannot name a server (0 or 1) is never
+    /// signaled: the injected kill panics if it is ever called, so the
+    /// refusal holds before any signal, and the record stays.
+    #[test]
+    fn a_pid_that_names_no_server_is_never_signaled() {
+        for pid in [0, 1] {
+            let home = tempfile::tempdir().unwrap();
+            let overlay = home.path().join("overlay");
+            fs::create_dir_all(&overlay).unwrap();
+            let r = MountRecord {
+                dir: PathBuf::from("/mnt/nobody"),
+                overlay: overlay.clone(),
+                rev: "main".to_owned(),
+                pid,
+                writable: false,
+            };
+            let _serial = serial();
+            // The serve lock is held, like a live server holds it, so
+            // only the pid check can refuse.
+            let _lock = hold_serve_lock(&overlay).unwrap();
+            let stop = |_pid: u32, _signal: &str| -> bool {
+                panic!("a pid below 2 must never be signaled")
+            };
+            assert!(!stop_serving_with(&r, &r.dir.clone(), stop));
+        }
     }
 
     /// A kill that cannot signal a live process keeps the record, so a
