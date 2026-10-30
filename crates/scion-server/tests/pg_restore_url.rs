@@ -205,10 +205,11 @@ fn a_postgres_ca_with_a_url_from_a_file_is_accepted() {
     );
 }
 
-/// `--postgres-ca` with NO URL from any source is refused, with the fix
-/// named: the URL can come from three places, and clap saw only one.
-/// `restore` is the command here: its URL is optional until the removal
-/// makes it required, so the refusal must come from the resolution.
+/// `--postgres-ca` with NO URL from any source is refused, with the
+/// fix named: the URL can come from three places, and clap saw only
+/// one. `restore` is the command here: its URL is optional until the
+/// removal makes it required, so the refusal comes from the resolution,
+/// which names the three sources a URL may come from.
 #[test]
 fn a_postgres_ca_without_any_url_is_refused() {
     let dir = scion_server::test_support::private_tempdir();
@@ -225,5 +226,10 @@ fn a_postgres_ca_without_any_url_is_refused() {
     ]);
     assert!(!out.status.success(), "a CA without a URL must be refused");
     let why = String::from_utf8_lossy(&out.stderr);
-    assert!(why.contains("--postgres-ca needs a Postgres URL"), "{why}");
+    assert!(
+        why.contains(
+            "no Postgres URL: give --postgres-url, --postgres-url-file or SCION_POSTGRES_URL"
+        ),
+        "{why}"
+    );
 }

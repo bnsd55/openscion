@@ -15,13 +15,19 @@
 #   - the file is not empty;
 #   - the content is plain text: no front-matter preamble (the first
 #     line is not "---"), no line that starts with a row marker ("- ")
-#     or with whitespace, which the merge would keep in the row.
+#     or with whitespace, which the merge would keep in the row;
+#   - every line ends in a newline, the last one too, and the last line
+#     is not blank: a missing final newline glues the next fragment's
+#     row onto this one, and a blank last line becomes a row line of
+#     indent only.
 #
 # Every changes/<slug>.<section>.md becomes a "- " row at the top of the
 # matching `### <Section>` under `## [<release>]`; a subsection that does
 # not exist yet is created at the end of the release's block, in the
 # changelog's section order. The fragments are deleted after they land.
-# Nothing else changes.
+# Nothing else changes. A release with no `## [<release>]` heading in the
+# changelog is refused before anything changes: its rows would land
+# nowhere, and the fragments would still be deleted.
 set -euo pipefail
 
 usage() {
@@ -82,6 +88,16 @@ if [ ! -f "$changelog" ]; then
     exit 1
 fi
 
+# The rows go under the release's heading, found as the merge below
+# finds it: a line that starts with "## [<release>]". Without one, the
+# merge would insert nothing and still delete every fragment.
+if [ -z "$check" ] &&
+    ! awk -v heading="## [$release]" 'index($0, heading) == 1 { found = 1 }
+        END { exit !found }' "$changelog"; then
+    echo "no '## [$release]' heading in $changelog; add it before merging" >&2
+    exit 1
+fi
+
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 merged=$work/merged.txt
@@ -128,6 +144,17 @@ for section in added changed fixed security; do
         # fragments write them.
         if head -n 1 "$fragment" | grep -qn '^\([[:space:]]\|- \)'; then
             echo "fragment's first line starts with whitespace or a row marker ('- '); it is plain text: $fragment" >&2
+            exit 1
+        fi
+        # The merge appends each fragment's lines to the section's rows:
+        # without a final newline, the next fragment's row continues this
+        # one's last line ("- One (#1)- Two (#2)").
+        if [ -n "$(tail -c 1 "$fragment")" ]; then
+            echo "fragment does not end in a newline: $fragment" >&2
+            exit 1
+        fi
+        if [ -z "$(tail -n 1 "$fragment" | tr -d '[:space:]')" ]; then
+            echo "fragment ends in a blank line, which the merge would keep in the row: $fragment" >&2
             exit 1
         fi
         if [ -n "$check" ]; then

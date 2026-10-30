@@ -47,6 +47,8 @@ jobs:
         with:
           tool: protoc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: run the soak
         env:
           # The nightly schedule runs 120 minutes; a dispatch names its
@@ -118,6 +120,8 @@ jobs:
         with:
           tool: protoc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: run the fault soak
         env:
           RUN_MINUTES: ${{ github.event.inputs.minutes || '120' }}
@@ -176,6 +180,8 @@ jobs:
         with:
           tool: protoc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: run the fault soak on Postgres
         env:
           RUN_MINUTES: ${{ github.event.inputs.minutes || '120' }}

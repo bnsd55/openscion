@@ -385,8 +385,12 @@ jobs:
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: protoc
+      # The test job and the pg cells build the same target (Linux
+      # x64, the same features), so one shared entry serves both, which
+      # keeps the repo under its 10 GB cache limit.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          shared-key: test-postgres
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
       - run: cargo test --workspace
@@ -428,6 +432,7 @@ jobs:
         run: cargo test -p open-scion-server --test disk_full
         env:
           SCION_DISK_REQUIRE: "1"
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
       - name: block-level power cuts (dm-log-writes)
         run: |
           # replay-log, pinned at 7b70d8a6863c5de30933d42a7672d35d01d2dc6c so the tool cannot move under the test.
@@ -438,6 +443,7 @@ jobs:
         env:
           SCION_DMW_REQUIRE: "1"
           SCION_DMW_REPLAY: ${{ runner.temp }}/replay-log
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
 
   test-restore-ceiling:
     name: test (restore rss ceiling)
@@ -512,6 +518,7 @@ jobs:
         env:
           SCION_TEST_RESTORE_BIG: "1"
           SCION_TEST_RESTORE_MUTATION: "whole_file"
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
 
   # The Postgres majors the support matrix claims (docs/support.md):
   # one native service per major, one matrix row each. The majors are
@@ -567,8 +574,11 @@ jobs:
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: protoc
+      # The matrix cells share the test job's entry: same target (Linux
+      # x64), so one entry serves all four.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          shared-key: test-postgres
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
       - run: cargo test --workspace
@@ -808,6 +818,8 @@ jobs:
         with:
           tool: protoc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test --workspace
         env:
           PROPTEST_CASES: "256"
@@ -910,6 +922,8 @@ jobs:
         with:
           tool: protoc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: an xfs loop device for the stores
         run: |
           sudo apt-get update -qq
@@ -1208,12 +1222,12 @@ jobs:
           tool: protoc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             crates/scion-core/fuzz
             crates/scion-proto/fuzz
             crates/scion-server/fuzz
             crates/scion-tier/fuzz
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-fuzz
