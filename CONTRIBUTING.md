@@ -29,8 +29,13 @@ docker run --name scion-pg -e POSTGRES_PASSWORD=scion -p 5432:5432 -d postgres:1
 
 SCION_TEST_POSTGRES_URL=postgres://postgres:scion@127.0.0.1:5432/postgres \
 SCION_TEST_PG_CONTAINER=scion-pg \
-  cargo test --workspace
+  cargo test --workspace -- --test-threads=4
 ```
+
+CI runs four test threads against a default Postgres, so four is the
+count the suite is proven to fit in the database connection limit. A
+machine with more cores runs more threads by default, which no run
+proves.
 
 To fuzz the decoders (nightly and `cargo-fuzz`): the corpus directory is not
 checked in, and cargo-fuzz refuses to start without one, so make it first.
