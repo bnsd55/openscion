@@ -1001,14 +1001,12 @@ The first release: the server, its cache tiers, and the `scn` client.
   failover: a second server is refused (the lock is the anti-split-brain
   guard, not a failover), the operator restarts the server, and nothing
   takes over by itself.
-- `scion-server restore` resolved the Postgres URL from the command
-  line alone: a URL given by `--postgres-url-file` or
-  `SCION_POSTGRES_URL` was ignored, and the restore silently built a
-  SQLite store beside the Postgres one the operator meant. Restore now
-  resolves the URL the way serve does, from every source, and
-  `--postgres-ca` without a URL from any source is refused with the
-  three sources named, instead of a clap "requires" error that cannot
-  fire for the file and environment forms.
+- `scion-server restore` resolves the Postgres URL the way serve does,
+  from every source (`--postgres-url`, `--postgres-url-file`,
+  `SCION_POSTGRES_URL`), and `--postgres-ca` without a URL from any
+  source is refused with the three sources named, instead of a clap
+  "requires" error that cannot fire for the file and environment
+  forms.
 - The metadata store is Postgres only: the SQLite store, its schema
   migrations and the rusqlite dependency are gone from the server crate
   and from `scn` (the tier keeps its own SQLite object cache). A store's
@@ -1975,12 +1973,11 @@ The first release: the server, its cache tiers, and the `scn` client.
   that share nothing kept a worker for hours, with no deadline check
   inside the diff.
 - A damaged backend marker is refused, in both directions: a marker
-  whose first line is neither `postgres` nor absent used to be read as
-  absent, so a Postgres-backed directory opened as a fresh, empty
-  SQLite store, which looks like a server with no data at all. The
-  error says what to check. The fresh-directory claim that preceded
-  the durable marker write is gone: `write_marker` writes the same
-  first line, durable, so no crash can leave a partial marker behind.
+  whose first line is neither `postgres` nor absent is refused with
+  the error saying what to check. The fresh-directory claim that
+  preceded the durable marker write is gone: `write_marker` writes the
+  same first line, durable, so no crash can leave a partial marker
+  behind.
 - The `serve` flags are all checked before the data directory opens:
   a bad flag answers with its own error, instead of taking the data
   directory's one-server lock or creating a file in an empty directory.
