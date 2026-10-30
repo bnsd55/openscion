@@ -18,7 +18,7 @@ use crate::outln;
 /// Arguments of `scn bench`.
 #[derive(clap::Args)]
 pub struct BenchArgs {
-    /// Concurrent agents.
+    /// Concurrent agents, at most one per land.
     #[arg(long, default_value_t = 200)]
     agents: usize,
     /// Total lands across all agents.
@@ -62,11 +62,11 @@ pub async fn bench(ctx: &Ctx, args: BenchArgs) -> Result<()> {
         "--agents and --lands must be positive"
     );
     let start = ctx.clone().resolve("main").await?;
-    let per_agent = lands.div_ceil(agents);
+    let counts = lands_per_agent(agents, lands);
+    let agents = counts.len();
     let started = Instant::now();
     let mut tasks = JoinSet::new();
-    for agent in 0..agents {
-        let count = per_agent.min(lands.saturating_sub(agent * per_agent));
+    for (agent, count) in counts.into_iter().enumerate() {
         tasks.spawn(run_agent(ctx.clone(), agent, count, start, base));
     }
     let mut stats = Stats::default();
@@ -199,6 +199,17 @@ fn check_landed(landed: &[ChangesetId], history: &HashSet<ChangesetId>) -> Resul
     Ok(())
 }
 
+/// How many of the `lands` each agent makes: as even as can be, the first
+/// `lands % agents` one more. No more agents than lands, so every agent
+/// lands at least once and the report names only agents that ran.
+fn lands_per_agent(agents: usize, lands: usize) -> Vec<usize> {
+    let agents = agents.min(lands);
+    let (each, extra) = (lands / agents, lands % agents);
+    (0..agents)
+        .map(|agent| each + usize::from(agent < extra))
+        .collect()
+}
+
 /// Percentiles of `sorted`, in milliseconds.
 fn percentiles_ms(sorted: &[Duration]) -> [f64; 3] {
     let at = |p: f64| {
@@ -253,6 +264,23 @@ mod tests {
 
     fn id(n: u8) -> ChangesetId {
         ChangesetId::from_bytes([n; 32])
+    }
+
+    #[test]
+    fn every_agent_lands_and_the_lands_add_up() {
+        // A share rounded up ran out early: 9 agents and 10 lands gave
+        // 2, 2, 2, 2, 2, 0, 0, 0, 0, so only 5 agents landed.
+        assert_eq!(lands_per_agent(9, 10), [2, 1, 1, 1, 1, 1, 1, 1, 1]);
+        assert_eq!(lands_per_agent(3, 10), [4, 3, 3]);
+        assert_eq!(lands_per_agent(1, 5), [5]);
+        // More agents than lands: one land each, no idle agent.
+        assert_eq!(lands_per_agent(5, 3), [1, 1, 1]);
+        for (agents, lands) in [(300, 1000), (200, 10_000), (100, 2000), (7, 7)] {
+            let counts = lands_per_agent(agents, lands);
+            assert_eq!(counts.len(), agents, "{agents} agents, {lands} lands");
+            assert_eq!(counts.iter().sum::<usize>(), lands);
+            assert!(counts.iter().all(|&n| n > 0), "an agent with no land");
+        }
     }
 
     #[test]

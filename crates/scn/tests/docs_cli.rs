@@ -149,3 +149,14 @@ fn doc_names_flag_matches_whole_names() {
     assert!(!doc_names_flag(doc, "--repor"));
     assert!(!doc_names_flag(doc, "--missing"));
 }
+
+/// docs/threat-model.md says the mount states its single-user rule at
+/// start and in `--help`: the help of `scn mount` carries it.
+#[test]
+fn the_mount_help_names_its_single_user_rule() {
+    let text = scn(&["mount", "--help"]);
+    assert!(
+        text.contains("For single-user machines only"),
+        "scn mount --help does not state the single-user rule: {text}"
+    );
+}

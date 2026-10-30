@@ -89,6 +89,9 @@ enum Command {
     Checkout(open_scion::cmd::checkout::CheckoutArgs),
     /// Serve a ref as a filesystem that reads files on demand:
     /// `scn mount ./view main`.
+    ///
+    /// For single-user machines only: any local user who can read the mount
+    /// table can reach the mounted content through the NFS port.
     Mount(open_scion::cmd::mount::MountArgs),
     /// Stop a mount of `scn mount`.
     Unmount(open_scion::cmd::mount::UnmountArgs),

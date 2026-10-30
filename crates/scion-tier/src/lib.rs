@@ -554,7 +554,7 @@ impl<S: Store> Tier<S> {
             client_tls.apply_to(upstream, endpoint)?
         } else {
             anyhow::ensure!(
-                !upstream.starts_with("https://"),
+                !scion_proto::runtime::tls::is_https(upstream),
                 "the upstream {upstream} is https, but no CA is given to trust its \
                  certificate; pass --tls-ca"
             );

@@ -100,6 +100,16 @@ pub struct ClientTls {
     identity: Option<(Vec<u8>, Vec<u8>)>,
 }
 
+/// Whether `address` names an https server. A URI scheme is
+/// case-insensitive (RFC 3986), and tonic reads `HTTPS://` as https, so
+/// the CA rule and the TLS configuration hold for it too.
+#[must_use]
+pub fn is_https(address: &str) -> bool {
+    address
+        .get(..8)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+}
+
 impl ClientTls {
     /// Loads the CA, and the client certificate and key with mTLS, from PEM
     /// files. A CA that is `None` trusts no certificate, so an https address
@@ -148,7 +158,7 @@ impl ClientTls {
         address: &str,
         endpoint: tonic::transport::Endpoint,
     ) -> anyhow::Result<tonic::transport::Endpoint> {
-        if !address.starts_with("https://") {
+        if !is_https(address) {
             return Ok(endpoint);
         }
         let Some(ca) = self.ca.as_deref() else {
@@ -292,5 +302,39 @@ mod tests {
             Err(err) => err.to_string(),
         };
         assert!(err.contains("written by group or others"), "{err}");
+    }
+
+    #[test]
+    fn an_https_address_is_https_in_any_case() {
+        for https in ["https://h:1", "HTTPS://h:1", "Https://h:1"] {
+            assert!(is_https(https), "{https}");
+        }
+        for other in [
+            "http://h:1",
+            "HTTP://h:1",
+            "unix:///s",
+            "https:/h",
+            "",
+            "https",
+        ] {
+            assert!(!is_https(other), "{other}");
+        }
+    }
+
+    /// An https address needs a CA to trust, whatever the case of its
+    /// scheme; an http one does not.
+    #[test]
+    fn an_https_address_without_a_ca_is_refused_in_any_case() {
+        let tls = ClientTls::load(None, None, None).unwrap();
+        for address in ["https://127.0.0.1:1", "HTTPS://127.0.0.1:1"] {
+            let endpoint = tonic::transport::Endpoint::from_shared(address).unwrap();
+            let err = match tls.apply_to(address, endpoint) {
+                Ok(_) => panic!("{address} was taken without a CA"),
+                Err(e) => e.to_string(),
+            };
+            assert!(err.contains("no CA is given"), "{address}: {err}");
+        }
+        let endpoint = tonic::transport::Endpoint::from_static("http://127.0.0.1:1");
+        assert!(tls.apply_to("http://127.0.0.1:1", endpoint).is_ok());
     }
 }
