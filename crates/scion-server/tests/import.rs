@@ -1131,10 +1131,35 @@ fn a_second_server_process_is_refused() {
         .into_iter()
         .chain(extra.iter().map(String::as_str))
         .collect();
-    let out =
-        common::spawn_guard::across_spawn(|| server_process(dir.path(), &args).output()).unwrap();
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let out = common::spawn_guard::across_spawn(|| {
+        // A serve child held past a bounded wait is killed, not waited
+        // on forever: the refusal exits by itself, and a server that
+        // ever serves fails here instead of hanging the cell.
+        let mut child = server_process(dir.path(), &args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                let stderr = child.stderr.take().map_or_else(String::new, |mut s| {
+                    use std::io::Read as _;
+                    let mut text = String::new();
+                    s.read_to_string(&mut text).unwrap_or(0);
+                    text
+                });
+                break (status, stderr);
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(30),
+                "the second server neither refused nor served within 30 s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    });
+    let (status, stderr) = out;
+    assert!(!status.success());
     assert!(
         stderr.contains("another server holds this store"),
         "{stderr}"

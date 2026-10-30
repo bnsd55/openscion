@@ -134,7 +134,7 @@ fn serve_refuses_a_seed_that_group_or_others_can_read() {
     let data2 = dir.path().join("data2");
     fs::create_dir_all(&data2).unwrap();
     fs::set_permissions(&data2, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_scion-server"))
+    let child = Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args([
             "--data",
             data2.to_str().unwrap(),
@@ -159,13 +159,27 @@ fn serve_refuses_a_seed_that_group_or_others_can_read() {
         .stderr(std::fs::File::create(dir.path().join("serve.log")).unwrap())
         .spawn()
         .unwrap();
-    wait_serving(&mut child, &dir.path().join("serve.log"));
+    // The guard kills and reaps on every path out of here, panics
+    // included: no wait below orphans a serving server.
+    let mut child = Guarded(child);
+    wait_serving(&mut child.0, &dir.path().join("serve.log"));
     assert!(
-        child.try_wait().unwrap().is_none(),
+        child.0.try_wait().unwrap().is_none(),
         "serve exited once it listened"
     );
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(child);
+}
+
+/// A spawned server that cannot outlive its test: `Drop` sends SIGKILL
+/// and reaps, panics and timeouts included. Every `serve` spawn in this
+/// file hands its child to this guard before any wait.
+struct Guarded(std::process::Child);
+
+impl Drop for Guarded {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 /// Waits until the spawned `serve` prints that it listens, with the log to
@@ -249,7 +263,7 @@ fn an_old_public_key_is_readable_by_anyone_but_writable_by_its_owner_alone() {
     // 0644: a public key is not a secret. Every reader on the machine may
     // hold it, so serve starts, and stays up.
     write_with_mode(&old, &hex, 0o644);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_scion-server"))
+    let child = Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args([
             "--data",
             dir.path().join("data").to_str().unwrap(),
@@ -276,13 +290,13 @@ fn an_old_public_key_is_readable_by_anyone_but_writable_by_its_owner_alone() {
         .stderr(std::fs::File::create(dir.path().join("serve.log")).unwrap())
         .spawn()
         .unwrap();
-    wait_serving(&mut child, &dir.path().join("serve.log"));
+    let mut child = Guarded(child);
+    wait_serving(&mut child.0, &dir.path().join("serve.log"));
     assert!(
-        child.try_wait().unwrap().is_none(),
+        child.0.try_wait().unwrap().is_none(),
         "serve exited once it listened"
     );
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(child);
 
     // 0666: anyone on the machine can change the key, so serve refuses it.
     write_with_mode(&old, &hex, 0o666);
