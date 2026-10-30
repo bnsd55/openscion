@@ -599,16 +599,11 @@ fn cleanup_at(file: &Path, dir: &Path, overlay: &Path) -> Vec<String> {
     warnings
 }
 
-/// Sends `pid` the `signal`, and answers whether it was delivered. A
-/// pid below 2 is refused without running kill: 0 would signal the
-/// caller's whole process group, 1 is init, and neither can be a live
-/// server. The `--` is the same procps-ng guard the Parked drop has:
-/// without it a negative pid would be read as an option and folded to
-/// its first digit.
+/// Sends `pid` the `signal`, and answers whether it was delivered.
+/// The `--` must stay, for the same procps-ng reason the Parked drop
+/// has: without it a negative pid would be read as an option and
+/// folded to its first digit.
 fn kill_pid(pid: u32, signal: &str) -> bool {
-    if pid < 2 {
-        return false;
-    }
     std::process::Command::new("kill")
         .args([signal, "--", &pid.to_string()])
         .status()
@@ -915,12 +910,12 @@ mod silent_failures {
     impl Drop for Parked {
         fn drop(&mut self) {
             // The group's id is the child's pid, so the kill takes the
-            // child and anything it left; then the reap. The `--` is
-            // load-bearing: procps-ng's kill reads a negative pid that
-            // follows the signal option as another option and keeps
-            // only its first digit (`kill -9 -123456` runs
-            // kill(-1, SIGKILL), every process of the user), while
-            // after `--` it parses the pid with strtol.
+            // child and anything it left; then the reap. The `--` must
+            // stay: procps-ng's kill reads a negative pid that follows
+            // the signal option as another option and keeps only its
+            // first digit (`kill -9 -123456` runs kill(-1, SIGKILL),
+            // every process of the user), while after `--` it parses
+            // the pid with strtol.
             let _ = std::process::Command::new("kill")
                 .args(["-KILL", "--", &format!("-{}", self.0.id())])
                 .status();
