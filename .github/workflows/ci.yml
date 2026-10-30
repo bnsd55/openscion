@@ -993,11 +993,8 @@ jobs:
           cache-workspace-crates: true
       - run: umask 002 && cargo test --workspace
         env:
-          # SHORTCUT: 64 cases, like the pg17 cell; some Postgres
-          # proptests grow one store across cases and turn superlinear
-          # (128 froze the runner, 2026-10-30); go back to 128 when they
-          # take a fresh store per case.
-          PROPTEST_CASES: "64"
+          # The nightly cadence of the pg17 cell.
+          PROPTEST_CASES: "128"
           SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           # The backup test dumps the live metadata with the job's own
