@@ -391,17 +391,20 @@ jobs:
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: protoc
+      # The test job and the pg cells build the same target (Linux
+      # x64, the same features), so one shared entry serves both, which
+      # keeps the repo under its 10 GB cache limit.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          shared-key: test-postgres
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
       - run: cargo test --workspace
         env:
-          # SHORTCUT: 64 cases, like the pg17 cell; some Postgres
-          # proptests grow one store across cases and turn superlinear
-          # (128 froze the runner, 2026-10-30); go back to 128 when they
-          # take a fresh store per case.
-          PROPTEST_CASES: "64"
+          # The fast tier: a pull request runs 64 cases, main, the
+          # nightly and a dispatch 128; the nightly's own job below
+          # still proves the full 2000 on Postgres.
+          PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '64' || '128' }}
           SCION_TEST_BACKEND: postgres
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           # The backup test dumps the live metadata with the job's own
@@ -576,8 +579,11 @@ jobs:
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: protoc
+      # The matrix cells share the test job's entry: same target (Linux
+      # x64), so one entry serves all four.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          shared-key: test-postgres
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
       - run: cargo test --workspace
@@ -823,6 +829,8 @@ jobs:
         with:
           tool: protoc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test --workspace
         env:
           PROPTEST_CASES: "256"
@@ -928,6 +936,8 @@ jobs:
         with:
           tool: protoc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: an xfs loop device for the stores
         run: |
           sudo apt-get update -qq
@@ -1230,12 +1240,12 @@ jobs:
           tool: protoc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             crates/scion-core/fuzz
             crates/scion-proto/fuzz
             crates/scion-server/fuzz
             crates/scion-tier/fuzz
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-fuzz

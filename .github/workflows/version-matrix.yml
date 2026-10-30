@@ -80,6 +80,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: steps.prev.outputs.ref != ''
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           # The auto key hashes prev/Cargo.lock, which is the lock of the
           # N-1 commit itself: a cache hit is exactly the commit built
           # before.
