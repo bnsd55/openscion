@@ -20,8 +20,8 @@ keeps every pair below working in both directions.
 - `scion-cache` and `scion-daemon`: a tier in front of a server (or of
   another tier); the daemon adds a per-node unix socket and snapshots.
 - `scn`: the client — commands, checkouts, and the mount.
-- The store on disk: a data directory (a SQLite or Postgres schema plus
-  blob files) that a server opens.
+- The store on disk: a Postgres schema (the metadata) plus the data
+  directory's blob files, which a server opens together.
 
 ## The pairs, and what "works" means
 
