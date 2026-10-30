@@ -4,7 +4,7 @@
 //! file the group or others can read is refused, and the command line
 //! prints its deprecation warning.
 
-use std::io::{BufRead as _, Write as _};
+use std::io::Write as _;
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -157,7 +157,8 @@ fn a_serve_token_file_starts_the_server() {
     let data = scion_server::test_support::private_tempdir();
     let dir = scion_server::test_support::private_tempdir();
     let file = write_secret(dir.path(), "token", 0o600, "the-token\n");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_scion-server"))
+    let log = data.path().parent().unwrap().join("stderr");
+    let child = Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .arg("--data")
         .arg(data.path())
         .args([
@@ -170,30 +171,20 @@ fn a_serve_token_file_starts_the_server() {
             "127.0.0.1:0",
         ])
         .env_remove("SCION_TOKEN")
-        .stderr(Stdio::piped())
+        .stdout(Stdio::from(
+            std::fs::File::create(data.path().parent().unwrap().join("stdout")).unwrap(),
+        ))
+        .stderr(Stdio::from(std::fs::File::create(&log).unwrap()))
         .spawn()
         .expect("the test binary runs");
-    let stderr = child.stderr.take().expect("stderr is piped");
-    // The server exits only when killed, so read until its log says it
-    // serves, then kill it: the file form loaded the access and the
-    // listener bound.
-    let mut text = String::new();
-    let mut line = String::new();
-    let mut reader = std::io::BufReader::new(stderr);
-    loop {
-        match reader.read_line(&mut line) {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {
-                text.push_str(&line);
-                if line.contains("serving") {
-                    break;
-                }
-                line.clear();
-            }
-        }
-    }
-    let _ = child.kill();
-    let _ = child.wait();
+    // The server exits only when killed: the guard kills it on every
+    // path out of here, panics included, so a never-serving server
+    // cannot outlive the test.
+    let mut guard = Guarded(child);
+    // The wait is bounded: a server that never serves names its lines
+    // here instead of blocking the cell.
+    let text = wait_listening(&mut guard.0, &log);
+    drop(guard);
     assert!(text.contains("serving"), "{text}");
     assert!(!text.contains("deprecated"), "{text}");
 }
@@ -267,8 +258,18 @@ impl Serve {
         );
         let stdout_path = data.parent().unwrap().join("stdout");
         let stderr_path = data.parent().unwrap().join("stderr");
-        let mut child = spawn_server(form, url, data, &secret, &stdout_path, &stderr_path);
-        let log = wait_listening(&mut child, &stderr_path);
+        // The guard kills and reaps on every path out of this function,
+        // panics included: no wait below is allowed to orphan a serving
+        // server.
+        let mut child = Guarded(spawn_server(
+            form,
+            url,
+            data,
+            &secret,
+            &stdout_path,
+            &stderr_path,
+        ));
+        let log = wait_listening(&mut child.0, &stderr_path);
         let metrics_addr = logged_addr(&log, |line| line.contains("serving metrics"));
         // One real upload: the call touches the database through the
         // write path, so the run covers more than the startup's queries.
@@ -284,17 +285,23 @@ impl Serve {
                 channel,
                 Bearer::new("the-token").expect("a visible token"),
             );
-            scion
-                .put_blob(tokio_stream::once(PutBlobRequest {
+            tokio::time::timeout(
+                Duration::from_secs(60),
+                scion.put_blob(tokio_stream::once(PutBlobRequest {
                     repo: "r".into(),
                     data: b"# url secret\n".to_vec(),
-                }))
-                .await
-                .expect("the upload lands");
+                })),
+            )
+            // Bounded: a server that takes the call and never replies
+            // fails here, with its log, instead of hanging the cell.
+            .await
+            .expect("the upload lands within 60 s")
+            .expect("the upload lands");
         });
+        // The scrape needs the server alive: it goes before the guard's
+        // drop, which stops it.
         let metrics = scrape(&format!("http://{metrics_addr}/metrics"));
-        let _ = child.kill();
-        let _ = child.wait();
+        drop(child);
         Self {
             stdout: std::fs::read_to_string(&stdout_path).unwrap(),
             stderr: std::fs::read_to_string(&stderr_path).unwrap(),
@@ -368,6 +375,18 @@ fn spawn_server(
     .stdout(std::fs::File::create(stdout).unwrap())
     .stderr(std::fs::File::create(stderr).unwrap());
     cmd.spawn().expect("the server starts")
+}
+
+/// A spawned server that cannot outlive its test: `Drop` sends SIGKILL
+/// and reaps, panics and timeouts included. Every `spawn` in this file
+/// hands its child to this guard before any wait.
+struct Guarded(std::process::Child);
+
+impl Drop for Guarded {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 /// The log line that names the gRPC listener: it says `serving` and
