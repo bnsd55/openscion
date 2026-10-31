@@ -17,23 +17,25 @@ You need Rust 1.88 or newer, `protoc` (the Protocol Buffers compiler, for the
 gRPC code) and `git` (the import tests build small git repositories). For fuzzing you also need a nightly toolchain and
 `cargo-fuzz`.
 
+The suite needs a Postgres database. Clone the repo, start one container,
+and run the whole suite against it. Each data directory gets its own schema
+in the database. The backup and crash tests run the Postgres tools inside
+the container, so they match the server's version:
+
 ```sh
 git clone https://github.com/bnsd55/openscion
 cd openscion
-cargo test --workspace
-```
+docker run --name scion-pg -e POSTGRES_PASSWORD=scion -p 5432:5432 -d postgres:17
 
-To run the suite on Postgres, name a test database and its Docker container.
-Each data directory gets its own schema in the database. The backup and
-crash tests run the Postgres tools inside the container, so they match the
-server's version:
-
-```sh
-SCION_TEST_BACKEND=postgres \
 SCION_TEST_POSTGRES_URL=postgres://postgres:scion@127.0.0.1:5432/postgres \
 SCION_TEST_PG_CONTAINER=scion-pg \
-  cargo test -p open-scion-server -- --test-threads=4
+  cargo test --workspace -- --test-threads=4
 ```
+
+CI runs four test threads against a default Postgres, so four is the
+count the suite is proven to fit in the database connection limit. A
+machine with more cores runs more threads by default, which no run
+proves.
 
 To fuzz the decoders (nightly and `cargo-fuzz`): the corpus directory is not
 checked in, and cargo-fuzz refuses to start without one, so make it first.

@@ -32,8 +32,7 @@ it.
 
 | | |
 |---|---|
-| Backend | <sqlite or postgres> |
-| Backend version | <the version, as the server reports it> |
+| Postgres | <the major and version, as the server reports it> |
 | Data directory | <the path, and the filesystem it sits on> |
 | Filesystem | <the filesystem name; network filesystems are out of profile> |
 
