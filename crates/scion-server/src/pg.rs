@@ -502,7 +502,6 @@ struct PgClient {
     jobs: std::sync::mpsc::Sender<Job>,
 }
 
-
 /// The worker loop's next step: run another job, or stop the thread.
 enum Flow {
     Go,
@@ -523,8 +522,7 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
 
 /// The reply a caller gets when the worker thread is gone. The log names
 /// why: the worker logs its own death, panic or shutdown.
-pub(crate) const WORKER_STOPPED: &str =
-    "the database worker stopped: its log line names why";
+pub(crate) const WORKER_STOPPED: &str = "the database worker stopped: its log line names why";
 
 /// Serves one job on the worker thread: the loop body of
 /// [`PgClient::spawn`], lifted out so its panics are caught and logged
@@ -540,114 +538,99 @@ fn run_job(
     ever_held: &mut bool,
     fence: Option<&std::sync::Arc<Fence>>,
 ) -> Flow {
-                        // A transaction the reconnect dropped fails every
-                    // statement until its caller ends it. Its COMMIT
-                    // never runs: on the fresh session it would answer
-                    // Ok about a transaction that is gone. A BEGIN may
-                    // pass: the reconnect ended the old tx, so a BEGIN
-                    // starts a fresh one on the fresh session, and a new
-                    // BEGIN comes only from a new holder of the client,
-                    // which the lost transaction cannot reach.
-                    if tx.lost()
-                        && !job.sql.starts_with("ROLLBACK")
-                        && !job.sql.starts_with("BEGIN")
-                    {
-                        // The caller may be gone, which is fine: the reply
-                        // fails, and the job's outcome is the caller's
-                        // business. The worker goes on to the next job.
-                        let _ = job.reply.send(Err(Error::Corrupt(TX_LOST.into())));
-                        return Flow::Go;
-                    }
-                    // A client the server closed, as after a restart of
-                    // the database, connects again: the caller sees one
-                    // error at most. A reconnect inside a transaction
-                    // loses the transaction.
-                    let lost_tx = tx.in_progress();
-                    let mut reconnected = false;
-                    if client.is_closed() {
-                        match reconnect(client, conn) {
-                            Ok(fresh) => {
-                                *setup = fresh;
-                                if lost_tx {
-                                    *tx = TxState::Lost;
-                                }
-                            }
-                            Err(error) => {
-                                if job.reply.send(Err(error)).is_err() {
-                                    return Flow::Stop;
-                                }
-                                return Flow::Go;
-                            }
-                        }
-                        reconnected = true;
-                        // The lock state of the fresh session is checked
-                        // here, before any lost-tx reply: a lock lost
-                        // across a wedge of dead transactions still fences
-                        // the process.
-                        if !setup.ok() {
-                            if *ever_held && matches!(setup.outcome, SetupOutcome::LockRefused) {
-                                trip_fence(fence);
-                            }
-                            // A database that cannot be reached is no
-                            // proof of a takeover: the caller retries.
-                            let _ = job.reply.send(Err(setup_error(setup, *ever_held)));
-                            return Flow::Go;
-                        }
-                    }
-                    // The setup failed on a client that still lives: a
-                    // network break left the old session of this very
-                    // connection holding the lock, and the session dies
-                    // some while after the connection did. One retry a
-                    // job, so the recovery needs no process restart.
-                    if !setup.ok() {
-                        *setup = Setup::new(conn.schema.as_deref(), conn.exclusive, client);
-                    }
-                    if !setup.ok() {
-                            if *ever_held && matches!(setup.outcome, SetupOutcome::LockRefused) {
-                            trip_fence(fence);
-                        }
-                        let _ = job.reply.send(Err(setup_error(setup, *ever_held)));
-                        return Flow::Go;
-                    }
-                    *ever_held = true;
-                    // A transaction the reconnect dropped refuses this job
-                    // too: it was asked while the old connection held the
-                    // transaction, and the new one holds none (its COMMIT
-                    // would answer Ok about a transaction that is gone).
-                    // A new BEGIN passes: the reconnect ended the old tx,
-                    // so the BEGIN opens a fresh one on the fresh session.
-                    // As above: a gone caller is fine, the worker goes on.
-                    if reconnected
-                        && lost_tx
-                        && !job.sql.starts_with("ROLLBACK")
-                        && !job.sql.starts_with("BEGIN")
-                    {
-                        let _ = job.reply.send(Err(Error::Corrupt(TX_LOST.into())));
-                        return Flow::Go;
-                    }
-                    if job.kind == Kind::Raw {
-                        let mut job = job;
-                        let f = job.raw.take().expect("a raw job carries its closure");
-                        let _ = job.reply.send(f(client).map(|(): ()| Reply::Count(0)));
-                        return Flow::Go;
-                    }
-                    let out = run_with_retry(
-                        client,
-                        setup,
-                        conn,
-                        &job,
-                        tx,
-                        *ever_held,
-                        fence,
-                    );
-                    if setup.ok() {
-                        *ever_held = true;
-                    }
-                    *tx = tx.after(&job.sql, out.is_ok());
-                    if job.reply.send(out).is_err() {
-                        return Flow::Stop;
-                    }
-                    Flow::Go
+    // A transaction the reconnect dropped fails every
+    // statement until its caller ends it. Its COMMIT
+    // never runs: on the fresh session it would answer
+    // Ok about a transaction that is gone. A BEGIN may
+    // pass: the reconnect ended the old tx, so a BEGIN
+    // starts a fresh one on the fresh session, and a new
+    // BEGIN comes only from a new holder of the client,
+    // which the lost transaction cannot reach.
+    if tx.lost() && !job.sql.starts_with("ROLLBACK") && !job.sql.starts_with("BEGIN") {
+        // The caller may be gone, which is fine: the reply
+        // fails, and the job's outcome is the caller's
+        // business. The worker goes on to the next job.
+        let _ = job.reply.send(Err(Error::Corrupt(TX_LOST.into())));
+        return Flow::Go;
+    }
+    // A client the server closed, as after a restart of
+    // the database, connects again: the caller sees one
+    // error at most. A reconnect inside a transaction
+    // loses the transaction.
+    let lost_tx = tx.in_progress();
+    let mut reconnected = false;
+    if client.is_closed() {
+        match reconnect(client, conn) {
+            Ok(fresh) => {
+                *setup = fresh;
+                if lost_tx {
+                    *tx = TxState::Lost;
+                }
+            }
+            Err(error) => {
+                if job.reply.send(Err(error)).is_err() {
+                    return Flow::Stop;
+                }
+                return Flow::Go;
+            }
+        }
+        reconnected = true;
+        // The lock state of the fresh session is checked
+        // here, before any lost-tx reply: a lock lost
+        // across a wedge of dead transactions still fences
+        // the process.
+        if !setup.ok() {
+            if *ever_held && matches!(setup.outcome, SetupOutcome::LockRefused) {
+                trip_fence(fence);
+            }
+            // A database that cannot be reached is no
+            // proof of a takeover: the caller retries.
+            let _ = job.reply.send(Err(setup_error(setup, *ever_held)));
+            return Flow::Go;
+        }
+    }
+    // The setup failed on a client that still lives: a
+    // network break left the old session of this very
+    // connection holding the lock, and the session dies
+    // some while after the connection did. One retry a
+    // job, so the recovery needs no process restart.
+    if !setup.ok() {
+        *setup = Setup::new(conn.schema.as_deref(), conn.exclusive, client);
+    }
+    if !setup.ok() {
+        if *ever_held && matches!(setup.outcome, SetupOutcome::LockRefused) {
+            trip_fence(fence);
+        }
+        let _ = job.reply.send(Err(setup_error(setup, *ever_held)));
+        return Flow::Go;
+    }
+    *ever_held = true;
+    // A transaction the reconnect dropped refuses this job
+    // too: it was asked while the old connection held the
+    // transaction, and the new one holds none (its COMMIT
+    // would answer Ok about a transaction that is gone).
+    // A new BEGIN passes: the reconnect ended the old tx,
+    // so the BEGIN opens a fresh one on the fresh session.
+    // As above: a gone caller is fine, the worker goes on.
+    if reconnected && lost_tx && !job.sql.starts_with("ROLLBACK") && !job.sql.starts_with("BEGIN") {
+        let _ = job.reply.send(Err(Error::Corrupt(TX_LOST.into())));
+        return Flow::Go;
+    }
+    if job.kind == Kind::Raw {
+        let mut job = job;
+        let f = job.raw.take().expect("a raw job carries its closure");
+        let _ = job.reply.send(f(client).map(|(): ()| Reply::Count(0)));
+        return Flow::Go;
+    }
+    let out = run_with_retry(client, setup, conn, &job, tx, *ever_held, fence);
+    if setup.ok() {
+        *ever_held = true;
+    }
+    *tx = tx.after(&job.sql, out.is_ok());
+    if job.reply.send(out).is_err() {
+        return Flow::Stop;
+    }
+    Flow::Go
 }
 
 impl PgClient {
@@ -713,9 +696,7 @@ impl PgClient {
                                  every statement of this client fails until the \
                                  process restarts"
                             );
-                            let _ = reply.send(Err(Error::Corrupt(
-                                WORKER_STOPPED.into(),
-                            )));
+                            let _ = reply.send(Err(Error::Corrupt(WORKER_STOPPED.into())));
                             break;
                         }
                     }
