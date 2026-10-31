@@ -600,11 +600,8 @@ The first release: the server, its cache tiers, and the `scn` client.
 - A mount session record could name a pid that is no server: the stop
   signaled pid 0, which takes the caller's whole process group, or pid
   1, which is init. A record whose pid is below 2 is never signaled
-  now - the unmount keeps it and says so - and every kill the mount
-  runs passes `--` before the pid, so procps-ng's kill cannot read a
-  pid that follows the signal option as another option and fold it to
-  its first digit (`kill -9 -123456` ran kill(-1, SIGKILL), every
-  process of the user).
+  now - the unmount keeps the record and fails with the cause - and
+  the kill passes `--` before the pid.
 - `scn mount` counts a file's bytes once in its in-memory cache when
   two reads fetch the file at the same time, as NFS clients do on a
   file's first read. Each racing read added the bytes again, so the
