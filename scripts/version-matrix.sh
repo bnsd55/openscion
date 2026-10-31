@@ -251,7 +251,12 @@ build_prev() {
 # schema_of SRC: the store schema version a checkout writes, from its
 # source. Pair 4's refusal can only fire when the two builds differ.
 schema_of() {
-  sed -n 's/.*SCHEMA_VERSION: u32 = \([0-9]*\).*/\1/p' "$1/crates/scion-server/src/store.rs" | head -1
+  # The server's schema lives in the Postgres layer since #716: the
+  # SQLite store's constant is gone. A source without pg.rs cannot be a
+  # Postgres N-1, and the matrix needs one.
+  [ -f "$1/crates/scion-server/src/pg.rs" ] ||
+    die "pair 'store': $1 has no crates/scion-server/src/pg.rs: a Postgres N-1 is required"
+  sed -n 's/.*PG_SCHEMA_VERSION: u32 = \([0-9]*\).*/\1/p' "$1/crates/scion-server/src/pg.rs" | head -1
 }
 
 # make_repo DIR: the small repository of release-smoke.sh: three commits
@@ -681,7 +686,7 @@ pair_4() {
   cur_schema=$(schema_of "$ROOT")
   prev_schema=$(schema_of "$PREV_SRC")
   if [ -z "$cur_schema" ] || [ -z "$prev_schema" ]; then
-    die "pair 'store': cannot read SCHEMA_VERSION from one of the two builds"
+    die "pair 'store': cannot read PG_SCHEMA_VERSION from one of the two builds"
   fi
   if [ "$cur_schema" = "$prev_schema" ]; then
     summary "pair 4: both builds write schema $cur_schema, so the N-1 refusal cannot fire on this pair"
