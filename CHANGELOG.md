@@ -23,7 +23,7 @@ The first release: the server, its cache tiers, and the `scn` client.
   support.md line), or open. An open finding is a v1.0 blocker (#315).
 - The docs' named tests are checked
   
-  Every `path.rs::fn_name` the docs and README name is now machine-
+  Every `<file>.rs::<test>` the docs and README name is now machine-
   checked (docs_links.rs): the file is in the repo, it holds the fn,
   and the fn is a test - `#[test]`, `#[tokio::test]` or one a
   `proptest!` generates - not a helper. A failure names the doc, its
