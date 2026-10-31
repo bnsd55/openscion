@@ -101,20 +101,12 @@ fn a_restore_of_a_stated_store_takes_a_stated_time() {
     let restore_started = Instant::now();
     let restored_dir = scion_server::test_support::private_tempdir();
     let restored_schema = scion_server::Backend::test_schema(restored_dir.path());
-    rename_schema(&snapshot, &restored_schema);
-    load_dump(&snapshot);
-    copy_tree(
-        &backup.path().join("objects"),
-        &restored_dir.path().join("objects"),
+    restore_the_guides_backup(
+        &snapshot,
+        backup.path(),
+        restored_dir.path(),
+        &restored_schema,
     );
-    // The marker travels with the metadata: the restore copies the data
-    // directory back, and the open pairs the marker's UUID with the
-    // database's.
-    std::fs::copy(
-        backup.path().join("backend"),
-        restored_dir.path().join("backend"),
-    )
-    .unwrap();
     // Durability inside the timer: an operator's restore is done when a
     // crash cannot lose what was restored, so the copied files and the
     // directories holding them are fsynced before the clock stops.
@@ -206,6 +198,18 @@ fn take_the_guides_backup(store_dir: &Path, backup: &Path, snapshot: &Path) {
     // metadata - it holds the store UUID the metadata holds too, and
     // the restore pairs the two.
     fs::copy(store_dir.join("backend"), backup.join("backend")).unwrap();
+}
+
+/// The restore the runbook's own steps make: the dump loads into the
+/// fresh directory's own schema, then the data directory comes back -
+/// the blob files and the `backend` marker, which travels with the
+/// metadata (it holds the store UUID the metadata holds too, and the
+/// open pairs the two).
+fn restore_the_guides_backup(snapshot: &Path, backup: &Path, restored: &Path, schema: &str) {
+    rename_schema(snapshot, schema);
+    load_dump(snapshot);
+    copy_tree(&backup.join("objects"), &restored.join("objects"));
+    std::fs::copy(backup.join("backend"), restored.join("backend")).unwrap();
 }
 
 /// Renames the schema in the dump, so it loads under the name the
