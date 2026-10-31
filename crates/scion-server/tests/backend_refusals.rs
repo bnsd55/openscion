@@ -103,10 +103,24 @@ fn a_failed_dir_fsync_of_the_marker_refuses_the_open() {
         panic!("the refusal is the disk's error, not {error:?}");
     };
     assert_eq!(io.raw_os_error(), Some(5), "EIO, not another kind: {io}");
-    // The persist itself went through, so the store recovers: the next
-    // open reads the marker it names and writes nothing.
+    // The persist itself went through: the marker is there, and it names
+    // the store the refused open would have taken, so the recovery claim
+    // is the file's, not an inference.
+    let marker = fresh.join("backend");
+    let text = std::fs::read_to_string(&marker).unwrap();
+    let mut lines = text.lines();
+    assert_eq!(lines.next(), Some("postgres"), "{text:?}");
+    let uuid = lines.next().expect("the marker names the store");
+    assert_eq!(uuid.len(), 32, "{text:?}");
+    // The next open reads the marker it names and writes nothing: the
+    // file survives the open byte for byte.
     let store = Backend::open_test(&fresh).unwrap();
     drop(store);
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap(),
+        text,
+        "the recovered open kept the marker the refused open wrote"
+    );
 }
 
 /// A marker whose first line is neither `postgres` nor absent is damage:
