@@ -15,13 +15,24 @@
 #   - the file is not empty;
 #   - the content is plain text: no front-matter preamble (the first
 #     line is not "---"), no line that starts with a row marker ("- ")
-#     or with whitespace, which the merge would keep in the row.
+#     or with whitespace, which the merge would keep in the row;
+#   - every line ends in a newline, the last one too, and the last line
+#     is not blank: a missing final newline glues the next fragment's
+#     row onto this one, and a blank last line becomes a row line of
+#     indent only.
 #
 # Every changes/<slug>.<section>.md becomes a "- " row at the top of the
 # matching `### <Section>` under `## [<release>]`; a subsection that does
 # not exist yet is created at the end of the release's block, in the
 # changelog's section order. The fragments are deleted after they land.
-# Nothing else changes.
+# A fragment whose row - the first line prefixed "- ", the rest indented
+# two spaces, exactly - the release's section already holds is skipped,
+# not folded again: a merge that brings a folded fragment back must not
+# double the row. The skip is said on stderr, and the fragment is
+# deleted like one that landed. A release with no `## [<release>]`
+# heading in the changelog is refused before anything changes: its rows
+# would land nowhere, and the fragments would still be deleted. Nothing
+# else changes.
 set -euo pipefail
 
 usage() {
@@ -82,10 +93,22 @@ if [ ! -f "$changelog" ]; then
     exit 1
 fi
 
+# The rows go under the release's heading, found as the merge below
+# finds it: a line that starts with "## [<release>]". Without one, the
+# merge would insert nothing and still delete every fragment.
+if [ -z "$check" ] &&
+    ! awk -v heading="## [$release]" 'index($0, heading) == 1 { found = 1 }
+        END { exit !found }' "$changelog"; then
+    echo "no '## [$release]' heading in $changelog; add it before merging" >&2
+    exit 1
+fi
+
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 merged=$work/merged.txt
 : >"$merged"
+skipped=$work/skipped.txt
+: >"$skipped"
 
 # The sections in the order the changelog prints them, with their
 # headings. ${section^} is not portable to the bash that ships on macOS.
@@ -102,6 +125,22 @@ for section in added changed fixed security; do
     fi
     rows=$work/rows.txt
     : >"$rows"
+    seen=$work/seen.txt
+    : >"$seen"
+    # The rows the release's section already holds, flattened to one
+    # line each (\001 in place of the row's newlines) so a fragment's
+    # whole row can be matched exactly. The rules are the merge's own
+    # normalisation: a row starts with "- ", every later line is
+    # indented two spaces.
+    awk -v SECTION="$Section" -v RELEASE="$release" '
+        BEGIN { in_release = 0; in_section = 0; have = 0 }
+        function flush_row() { if (have) { print buf; have = 0 } }
+        /^## /  { flush_row(); in_release = ($0 ~ ("^## \\[" RELEASE "\\]")); next }
+        /^### / { flush_row(); in_section = in_release && ($0 == "### " SECTION); next }
+        in_section && /^- / { flush_row(); have = 1; buf = $0; next }
+        in_section && have && /^ / { buf = buf "\001" $0; next }
+        END { flush_row() }
+    ' "$changelog" >"$seen"
     for fragment in $fragments; do
         # A fragment is plain text: no row marker, no indent, and a file
         # name with no whitespace, which the row's own text would name as
@@ -130,13 +169,38 @@ for section in added changed fixed security; do
             echo "fragment's first line starts with whitespace or a row marker ('- '); it is plain text: $fragment" >&2
             exit 1
         fi
+        # The merge appends each fragment's lines to the section's rows:
+        # without a final newline, the next fragment's row continues this
+        # one's last line ("- One (#1)- Two (#2)").
+        if [ -n "$(tail -c 1 "$fragment")" ]; then
+            echo "fragment does not end in a newline: $fragment" >&2
+            exit 1
+        fi
+        if [ -z "$(tail -n 1 "$fragment" | tr -d '[:space:]')" ]; then
+            echo "fragment ends in a blank line, which the merge would keep in the row: $fragment" >&2
+            exit 1
+        fi
         if [ -n "$check" ]; then
+            continue
+        fi
+        # A fragment whose exact row - first line prefixed "- ", the rest
+        # indented two spaces - the section already holds is skipped, not
+        # doubled: the fold says so on stderr and deletes the fragment
+        # with the folded ones. The seen file holds the section's rows
+        # and every row this fold appended, so two fragments of one fold
+        # with the same text keep one row too.
+        flat=$(sed '1s/^/- /; 2,$s/^/  /' "$fragment" |
+            awk '{ buf = (NR == 1) ? $0 : buf "\001" $0 } END { print buf }')
+        if grep -Fx -e "$flat" "$seen" >/dev/null; then
+            echo "skipped, the changelog already holds this row: $fragment" >&2
+            echo "$fragment" >>"$skipped"
             continue
         fi
         # A fragment is plain text: no row marker, no indent. The row
         # marker goes on the first line, and every later line takes the
         # row's two-space indent, as today's changelog rows read.
         sed '1s/^/- /; 2,$s/^/  /' "$fragment" >>"$rows"
+        echo "$flat" >>"$seen"
         echo "$fragment" >>"$merged"
     done
 
@@ -192,7 +256,13 @@ if [ -s "$merged" ]; then
     done <"$merged"
     echo "merged and deleted:"
     cat "$merged"
-elif [ -n "$check" ]; then
+fi
+if [ -s "$skipped" ]; then
+    while IFS= read -r fragment; do
+        rm "$fragment"
+    done <"$skipped"
+fi
+if [ -n "$check" ]; then
     # --check merged nothing by design; the fragments it checked are the
     # ones every find matched this run. Silence here would read as "no
     # fragments in changes/" and hide the work the check did.
@@ -200,6 +270,6 @@ elif [ -n "$check" ]; then
         -o -name '*.changed.md' -o -name '*.fixed.md' \
         -o -name '*.security.md' \) 2>/dev/null || true; } | wc -l | tr -d ' ')
     echo "$n fragments pass the checks"
-else
+elif [ ! -s "$merged" ] && [ ! -s "$skipped" ]; then
     echo "no fragments in $frag_dir/"
 fi

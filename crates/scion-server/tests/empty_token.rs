@@ -65,7 +65,7 @@ fn hash_token_refuses_a_whitespace_only_argv_token() {
 /// A server whose access file names the empty digest does not start.
 #[test]
 fn a_server_whose_access_file_names_the_empty_digest_does_not_start() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let access = dir.path().join("access");
     let mut file = std::fs::File::create(&access).unwrap();
     writeln!(file, "token\tci\t{}", empty_digest()).unwrap();

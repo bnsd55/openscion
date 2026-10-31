@@ -25,13 +25,30 @@ jobs:
     # The load runs 120 minutes and the step cap on it is 150; the build,
     # the checks and the teardown share the rest of the job's 165 minutes.
     timeout-minutes: 165
+    services:
+      # The soak's server keeps its metadata in Postgres, in the schema
+      # pg_url_for names for its data dir.
+      postgres:
+        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        env:
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: scion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: protoc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: run the soak
         env:
           # The nightly schedule runs 120 minutes; a dispatch names its
@@ -51,6 +68,8 @@ jobs:
           # 90 minutes of RSS after it. A run shorter than the window
           # checks no RSS bound: it cannot tell warm-up from a leak.
           SOAK_WARM_SECONDS: "1800"
+          # The database the soak's server opens its schema in.
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
         run: |
           # The soak's own cap: 150 min covers the 120 min of load, and
           # the build, the checks and the teardown live in the job's
@@ -79,13 +98,30 @@ jobs:
     # The same shape as the soak: 150 min covers 120 min of load, and
     # the build, the checks and the teardown share the rest.
     timeout-minutes: 165
+    services:
+      # The fault soak's server keeps its metadata in Postgres, in the
+      # schema pg_url_for names for its data dir.
+      postgres:
+        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        env:
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: scion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: protoc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: run the fault soak
         env:
           RUN_MINUTES: ${{ github.event.inputs.minutes || '120' }}
@@ -96,6 +132,8 @@ jobs:
           # passes to soak.sh (#365): the baseline is the first sample
           # after it, per restart segment.
           SOAK_WARM_SECONDS: "1800"
+          # The database the fault soak's server opens its schema in.
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
         run: |
           # The same cap as the soak: 150 min covers 120 min of load.
           timeout 9000 scripts/soak-fault.sh
@@ -138,10 +176,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: protoc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: run the fault soak on Postgres
         env:
           RUN_MINUTES: ${{ github.event.inputs.minutes || '120' }}
@@ -151,11 +191,11 @@ jobs:
           # The same baseline window as the SQLite fault soak (#365),
           # applied per restart segment.
           SOAK_WARM_SECONDS: "1800"
-          # The backend and its fault: the URL decides the store's
-          # backend (soak-fault.sh exports it as SCION_POSTGRES_URL),
-          # and the restart command restarts this job's own service
-          # container, the only postgres image on the runner.
-          SCION_PG_URL: postgres://postgres:scion@localhost:5432/scion
+          # The fault: the restart command restarts this job's own
+          # service container, the only postgres image on the runner.
+          # The backend itself is not optional anymore: every server the
+          # script raises opens the schema SCION_TEST_POSTGRES_URL names.
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           SCION_FAULT_PG: "1"
           SCION_FAULT_PG_CMD: docker restart ${{ job.services.postgres.id }}
           # soak-fault.sh's restart wait runs bare `pg_isready`, whose

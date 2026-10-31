@@ -120,6 +120,19 @@ pub fn seed(store: &DiskStore, path: &Path) -> io::Result<Option<Seeded>> {
     if !store.is_empty() {
         return Ok(None);
     }
+    seed_cold(store, path).map(Some)
+}
+
+/// Seeds `store` from the snapshot at `path`, whatever it holds: [`seed`]
+/// without its check of an empty store, for a caller that checked once
+/// for several files. A daemon given more than one `--seed` judges the
+/// store cold before the first, and the first file's objects must not make
+/// it skip the rest.
+///
+/// # Errors
+///
+/// As [`seed`].
+pub fn seed_cold(store: &DiskStore, path: &Path) -> io::Result<Seeded> {
     let not_snapshot = |why: &str| {
         io::Error::new(
             ErrorKind::InvalidData,
@@ -155,6 +168,8 @@ pub fn seed(store: &DiskStore, path: &Path) -> io::Result<Option<Seeded>> {
         damaged: false,
     };
     let mut record = [0; RECORD];
+    // The objects put, counted once the file is read: see below.
+    let mut put = Vec::new();
     while !file.fill_buf()?.is_empty() {
         // A size over the largest object is not a record.
         let entry = fill(&mut file, &mut record)?
@@ -177,9 +192,15 @@ pub fn seed(store: &DiskStore, path: &Path) -> io::Result<Option<Seeded>> {
             seeded.skipped += 1;
             continue;
         }
-        // A put that the store's limit refused leaves nothing: it counts
-        // as skipped, so the log line says what the store really holds.
         store.put(key, &Bytes::from(data))?;
+        put.push((key, size));
+    }
+    // A put that the store's limit refused leaves nothing, and a later put
+    // of this seed can evict an earlier object to stay under the limit:
+    // either one counts as skipped, so the log line says what the store
+    // really holds. Asked in the order of the puts, which keeps the order
+    // of use they made.
+    for (key, size) in put {
         if store.size(key)?.is_some() {
             seeded.stored += 1;
             seeded.bytes += size;
@@ -187,7 +208,7 @@ pub fn seed(store: &DiskStore, path: &Path) -> io::Result<Option<Seeded>> {
             seeded.skipped += 1;
         }
     }
-    Ok(Some(seeded))
+    Ok(seeded)
 }
 
 /// Fills `buf` from `file`. `false` if the file ends first.
@@ -213,16 +234,6 @@ mod tests {
 
     use super::*;
     use crate::{DAEMON_UPSTREAM_TIMEOUT, MemoryStore, Store, Tier};
-
-    /// A temp directory the ancestor check accepts whatever the umask of
-    /// the run: this run's own, mode 0700. A store's or a snapshot's
-    /// parent that group or others can write is refused, as it must be.
-    fn private_dir() -> tempfile::TempDir {
-        use std::os::unix::fs::PermissionsExt as _;
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        dir
-    }
 
     /// A blob's key and stored form.
     fn blob(data: &[u8]) -> (Key, Bytes) {
@@ -290,9 +301,12 @@ mod tests {
         data.extend_from_slice(b"a");
         data.extend_from_slice(&[0x8b, 0, 0, 0]);
         data.extend_from_slice(&[0u8; 43]);
-        let dir = private_dir();
+        let dir = crate::private_tempdir();
         let path = dir.path().join("r.scnsnap");
         fs::write(&path, &data).unwrap();
+        // The seed refuses a file that group or others can write; the
+        // umask of the run must not decide that.
+        fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
         let store = DiskStore::open(&dir.path().join("data"), usize::MAX).unwrap();
         let seeded = seed(&store, &path).unwrap().unwrap();
         assert_eq!(seeded.repo, "r");
@@ -303,7 +317,7 @@ mod tests {
 
     #[test]
     fn a_cold_store_starts_with_the_snapshot_and_a_warm_one_ignores_it() {
-        let dir = private_dir();
+        let dir = crate::private_tempdir();
         let (objects, path, _) = snapshot_in(dir.path());
         let size = |i: usize| objects[i].1.len();
         // Room for the last two only: the tree (the first object) is over
@@ -341,7 +355,7 @@ mod tests {
     #[test]
     fn a_large_snapshot_is_read_as_a_stream_not_held_in_memory() {
         use std::io::{Seek as _, Write as _};
-        let dir = private_dir();
+        let dir = crate::private_tempdir();
         let path = dir.path().join("r.scnsnap");
         let mut file = fs::File::create(&path).unwrap();
         file.write_all(MAGIC).unwrap();
@@ -398,7 +412,7 @@ mod tests {
     #[test]
     fn a_group_writable_snapshot_is_refused() {
         use std::os::unix::fs::PermissionsExt as _;
-        let dir = private_dir();
+        let dir = crate::private_tempdir();
         let path = dir.path().join("r.scnsnap");
         write(&path, "r", &[blob(b"aaaa")]).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).unwrap();
@@ -412,7 +426,7 @@ mod tests {
     #[test]
     fn a_symlinked_snapshot_is_refused() {
         use std::os::unix::fs::PermissionsExt as _;
-        let dir = private_dir();
+        let dir = crate::private_tempdir();
         let real = dir.path().join("real.scnsnap");
         write(&real, "r", &[blob(b"aaaa")]).unwrap();
         std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -425,7 +439,7 @@ mod tests {
 
     #[test]
     fn a_bad_object_is_skipped_and_a_torn_file_keeps_the_objects_before_the_tear() {
-        let dir = private_dir();
+        let dir = crate::private_tempdir();
         let (a, b, c) = (blob(b"aaaa"), blob(b"bbbb"), blob(b"cccc"));
         // `b`'s ID with bytes that are another blob.
         let lie = (b.0, blob(b"not b").1);
@@ -524,7 +538,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn two_repos_that_fold_to_one_name_do_not_overwrite_one_snapshot() {
-        let dir = private_dir();
+        let dir = crate::private_tempdir();
         let a = blob(b"alpha");
         let b = blob(b"beta");
         let main = dir.path().join(file_name("main"));
@@ -548,7 +562,7 @@ mod tests {
 
     #[test]
     fn an_object_over_the_store_limit_is_skipped_not_stored() {
-        let dir = private_dir();
+        let dir = crate::private_tempdir();
         let small = blob(b"aa");
         let big = blob(&vec![b'x'; 4096]);
         assert!(big.1.len() > small.1.len());
@@ -565,9 +579,29 @@ mod tests {
         assert_eq!(store.size(big.0).unwrap(), None);
     }
 
+    /// Each object fits the store's limit alone, but not both: the put of
+    /// the second evicts the first, so the report counts the first as
+    /// skipped, not stored.
+    #[test]
+    fn a_seed_that_overflows_the_limit_counts_what_the_store_keeps() {
+        let dir = crate::private_tempdir();
+        let first = blob(b"aa");
+        let second = blob(&vec![b'x'; 4096]);
+        let path = dir.path().join("r.scnsnap");
+        write(&path, "r", &[first.clone(), second.clone()]).unwrap();
+        let store = DiskStore::open(&dir.path().join("data"), second.1.len()).unwrap();
+        let seeded = seed(&store, &path).unwrap().unwrap();
+        assert_eq!(store.size(first.0).unwrap(), None, "the first was evicted");
+        assert_eq!(
+            (seeded.stored, seeded.skipped, seeded.bytes),
+            (1, 1, second.1.len()),
+            "the report counts an object the store no longer holds"
+        );
+    }
+
     #[tokio::test]
     async fn a_seeded_daemon_serves_the_snapshot_without_its_upstream() {
-        let dir = private_dir();
+        let dir = crate::private_tempdir();
         let (objects, path, root) = snapshot_in(dir.path());
         let store = DiskStore::open(&dir.path().join("data"), 1 << 20).unwrap();
         seed(&store, &path).unwrap().unwrap();

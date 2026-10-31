@@ -48,10 +48,26 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: protoc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # macOS runs no service containers, so the tests' Postgres gets a
+      # Homebrew postgresql@17; the URL the suite reads names the
+      # database this step creates. Full paths: postgresql@17 is
+      # keg-only, so a bare initdb may be another Postgres the image
+      # carries, and GITHUB_PATH only reaches later steps. The version
+      # line proves 17 in the log.
+      - name: postgres on macOS
+        run: |
+          brew install postgresql@17
+          PG=$(brew --prefix postgresql@17)/bin
+          "$PG/postgres" --version
+          "$PG/initdb" --username=postgres --auth=trust "$RUNNER_TEMP/pgdata"
+          "$PG/pg_ctl" -D "$RUNNER_TEMP/pgdata" -l "$RUNNER_TEMP/pg.log" start
+          "$PG/createdb" -U postgres -h 127.0.0.1 scion
       - name: build the scn test binary once
         # No filter here: cargo takes one positional TESTNAME, and with
         # --lib the one binary holds every lib test anyway. The two
@@ -71,6 +87,7 @@ jobs:
           # with an empty reps falls back to the same 100 the input
           # defaults to.
           REPS: ${{ github.event.inputs.reps || '100' }}
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
         run: |
           case "$REPS" in ''|*[!0-9]*|0)
             echo "reps must be a positive number, got: $REPS"; exit 1;; esac

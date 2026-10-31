@@ -79,19 +79,21 @@ Source: §1 "One server", §2 "Ticket keys", §6 "Health".
 Source: §3 "Backup and restore".
 
 0. Give the backup something to hold: import a git repository and put
-   one changeset on it (any small repo works — the README's Try-it
-   block does this in nine commands). Without this, T4's done-when has
+   one changeset on it (any small repo works — the README's quick
+   start does this). Without this, T4's done-when has
    nothing to read.
 
 1. Take the metadata snapshot first, then the blobs — never the other
    order:
 
    ```sh
-   sqlite3 /srv/scion/scion.db "VACUUM INTO '/backups/scion.db'"
+   pg_dump --no-owner --file /backups/metadata.sql <the metadata database>
    cp -R /srv/scion/objects /backups/scion-$(date +%F)/objects
+   chmod 700 /backups/scion-$(date +%F)/objects
+   cp /srv/scion/backend /backups/scion-$(date +%F)/backend
    ```
 
-   Done when: both commands exit 0. Do not run `gc` while the backup
+   Done when: every command exits 0. Do not run `gc` while the backup
    runs.
 
 2. Check what you took: `fsck` on the copy is read-only and may run
@@ -194,10 +196,12 @@ Source: §4 "Upgrades", §3 for the backup copy.
 3. Start the new binary on the same directory. Watch the log.
 
    Done when: the server listens, `fsck` after it exits 0, and you
-   recorded the schema before and after (`sqlite3 FILE "PRAGMA
-   user_version"`). The migration's own log lines are thin on SQLite:
-   only the schema-4 fill step logs anything, so the two version
-   numbers are the evidence the migration ran. A §4 sentence promises
+   recorded the schema version before and after (`psql "<the metadata
+   database>" -c 'SELECT max(version) FROM schema_migrations'`, with
+   the URL's search_path naming the store's schema). A migration logs
+   its steps: the open logs `migrating the metadata schema` with the
+   versions it moves between, so the log pairs with the two version
+   numbers as the evidence the migration ran. A §4 sentence promises
    "progress in the log" — what you actually saw goes in the run
    record.
 
@@ -207,7 +211,8 @@ Source: §4 "Upgrades", §3 for the backup copy.
    by starting the OLD binary on the upgraded directory.
 
    Done when: the old binary refuses with that shape of error, and you
-   did NOT edit `user_version` to fix it.
+   did NOT edit the schema version in the database to fix it (the
+   runbook forbids it).
 
 ## Guesses log
 

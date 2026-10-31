@@ -55,7 +55,7 @@ const WIDE_BUDGET: u64 = 56;
 
 /// A one-commit git repository, imported on `main`.
 fn git_seed() -> (TempDir, ChangesetId) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let run = |args: &[&str]| {
         let out = Command::new("git")
             .args(["-c", "gc.auto=0", "-c", "maintenance.auto=false"])
@@ -176,10 +176,6 @@ fn bearer() -> impl Interceptor {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn one_land_stays_under_the_round_trip_budget() {
-    if !Backend::test_is_postgres() {
-        println!("skipping: Postgres only");
-        return;
-    }
     let (dir, tip) = git_seed();
     let store = open_store(dir.path());
     // Two changesets on the same base: the first lands on the head (the

@@ -80,7 +80,7 @@ private key"). One file per run, in this shape.
    ```
 
 2. From a fresh clone of the tagged commit, build the workspace and
-   run the README's `Try it` flow end to end.
+   run the README's quick start end to end.
 
 3. The benchmark numbers in the release note record the commit they
    measured, the OS, the filesystem, the dataset, the command, and the

@@ -2,28 +2,18 @@
 # Builds the image and runs the whole demo: a server and a cache with TLS,
 # a repo seeded with one commit, and a checkout through the cache.
 #
-#   sh docker/demo.sh           the server keeps its metadata in SQLite
-#   sh docker/demo.sh postgres  the server keeps its metadata in Postgres
-#                               (compose.postgres.yml adds the database)
+#   sh docker/demo.sh
+#
+# The server keeps its metadata in Postgres; compose.yml carries the
+# database service.
 #
 # Every secret here is made by this script and stays in docker/certs:
 # nothing is committed, and nothing is baked into the image.
 set -eu
 cd "$(dirname "$0")"
 
-BACKEND=${1:-sqlite}
-COMPOSE_FILES=""
-case "$BACKEND" in
-    sqlite) ;;
-    postgres) COMPOSE_FILES="-f compose.yml -f compose.postgres.yml" ;;
-    *)
-        echo "usage: sh docker/demo.sh [sqlite|postgres]" >&2
-        exit 1
-        ;;
-esac
 compose() {
-    # shellcheck disable=SC2086
-    docker compose $COMPOSE_FILES "$@"
+    docker compose "$@"
 }
 
 # A failure after the services started is diagnosed from their logs, and
@@ -37,6 +27,15 @@ if ! command -v openssl >/dev/null 2>&1; then
     exit 1
 fi
 
+# --- the demo's secrets, made fresh each run ---------------------------
+# One token for the clients, one password for the demo database. Both are
+# exported for compose to interpolate: nothing about them is committed or
+# baked into the image, and a second run of the demo carries different
+# secrets than the first.
+SCION_DEMO_TOKEN="$(openssl rand -hex 24)"
+SCION_DEMO_DB_PASSWORD="$(openssl rand -hex 16)"
+export SCION_DEMO_TOKEN SCION_DEMO_DB_PASSWORD
+
 # --- certificates: one CA, one certificate per service -----------------
 rm -rf certs work
 mkdir -p certs work
@@ -45,22 +44,20 @@ openssl req -x509 -newkey ed25519 -nodes -days 30 \
     -keyout certs/ca.key -out certs/ca.pem \
     -subj "/CN=scion demo ca" >/dev/null 2>&1
 
-if [ "$BACKEND" = postgres ]; then
-    # The server reaches the database over the network, so #178's rule
-    # applies: the URL says sslmode=require, and --postgres-ca names the
-    # demo CA that signed the database's certificate.
-    for name in postgres; do
-        openssl req -newkey ed25519 -nodes \
-            -keyout "certs/$name.key" -out "certs/$name.csr" \
-            -subj "/CN=$name" >/dev/null 2>&1
-        printf "subjectAltName=DNS:%s\n" "$name" > "certs/$name.ext"
-        openssl x509 -req -days 30 \
-            -in "certs/$name.csr" -CA certs/ca.pem -CAkey certs/ca.key \
-            -CAcreateserial -extfile "certs/$name.ext" \
-            -out "certs/$name.crt" >/dev/null 2>&1
-        rm "certs/$name.csr" "certs/$name.ext"
-    done
-fi
+# The server reaches the database over the network, so #178's rule
+# applies: the URL says sslmode=require, and --postgres-ca names the
+# demo CA that signed the database's certificate.
+for name in postgres; do
+    openssl req -newkey ed25519 -nodes \
+        -keyout "certs/$name.key" -out "certs/$name.csr" \
+        -subj "/CN=$name" >/dev/null 2>&1
+    printf "subjectAltName=DNS:%s\n" "$name" > "certs/$name.ext"
+    openssl x509 -req -days 30 \
+        -in "certs/$name.csr" -CA certs/ca.pem -CAkey certs/ca.key \
+        -CAcreateserial -extfile "certs/$name.ext" \
+        -out "certs/$name.crt" >/dev/null 2>&1
+    rm "certs/$name.csr" "certs/$name.ext"
+done
 
 for name in server cache; do
     openssl req -newkey ed25519 -nodes \
@@ -91,23 +88,21 @@ compose run --rm certs-init '
     chmod 644 /certs/*.crt /certs/*.pem
     chown -R 10001:10001 /certs
 '
-PG_ARGS=""
-if [ "$BACKEND" = postgres ]; then
-    compose run --rm pg-certs-init
+compose run --rm pg-certs-init
 
-    # The server flags that name the database. The Postgres host is the
-    # network's `postgres`, which is not local, so the CA rides along.
-    PG_ARGS="--postgres-url postgres://scion:dev@postgres:5432/scion?sslmode=require --postgres-ca /certs/ca.pem"
-    compose up -d postgres
-    for _ in $(seq 1 30); do
-        if compose run --rm --entrypoint pg_isready postgres -h postgres -U scion >/dev/null 2>&1; then
-            break
-        fi
-        sleep 1
-    done
-    compose run --rm --entrypoint pg_isready postgres -h postgres -U scion \
-        || { compose logs --tail 20 postgres; echo "postgres did not come up" >&2; exit 1; }
-fi
+# The server flags that name the database. The Postgres host is the
+# network's `postgres`, which is not local, so the CA rides along, and
+# the password is the demo run's own.
+PG_ARGS="--postgres-url postgres://scion:${SCION_DEMO_DB_PASSWORD}@postgres:5432/scion?sslmode=require --postgres-ca /certs/ca.pem"
+compose up -d postgres
+for _ in $(seq 1 30); do
+    if compose run --rm --entrypoint pg_isready postgres -h postgres -U scion >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+compose run --rm --entrypoint pg_isready postgres -h postgres -U scion \
+    || { compose logs --tail 20 postgres; echo "postgres did not come up" >&2; exit 1; }
 
 # The subcommand prints the public key on its last line; the cache
 # verifies tickets against it. The key file itself lands in the server's

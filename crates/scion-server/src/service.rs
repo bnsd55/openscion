@@ -1,6 +1,6 @@
 //! The gRPC front end. Parses requests, runs the work on a blocking thread
-//! (`SQLite` and the object folder are synchronous), and maps errors to status
-//! codes.
+//! (the database and the object folder are synchronous), and maps errors
+//! to status codes.
 
 // Every pub item of this module is re-exported by the test seam
 // (`test_support` in lib.rs), and unreachable_pub does not see
@@ -100,7 +100,7 @@ const TX_AGE_PERIOD: Duration = Duration::from_secs(5);
 
 /// Keeps the `scion_pg_tx_age_seconds` gauge current: the age of the
 /// oldest open Postgres read transaction, sampled every [`TX_AGE_PERIOD`]
-/// until `stop` resolves. On SQLite the sample is always zero.
+/// until `stop` resolves.
 async fn pg_tx_age_sample(store: Backend, metrics: Arc<Metrics>, mut stop: watch::Receiver<()>) {
     let mut tick = tokio::time::interval(TX_AGE_PERIOD);
     loop {
@@ -273,22 +273,21 @@ pub async fn serve(
     } = options;
     let access = Arc::new(access.into());
     let auth = access.auth();
-    let fence = store.fence_flag();
     // The backend records into the registry: the Postgres pool's wait,
     // busy readers and tx age (which this task keeps fresh), and on both
     // backends the blob full flushes, the derive-walk gauges and the
     // collector-key wait.
     store.set_metrics(Arc::clone(&metrics));
+    let fence = store.fence_flag();
     let worker = Worker::new(store);
     let lands = Arc::new(Lands::new(pending_lands, Some(Arc::clone(&metrics))));
     let (stop_tx, stop_rx) = watch::channel(());
-    // The fence of a Postgres server that lost its database to another
-    // process: it resolves the same shutdown the operator's signal does,
-    // so the health service answers NOT_SERVING and tonic finishes the
-    // open calls; a short grace later the process exits, and a supervisor
-    // restart either takes the lock back or is refused at open. SQLite
-    // has no fence (None), so this task never runs.
-    let fence_stop = fence.clone().map(|fence| (fence, stop_tx.clone()));
+    let stop_fence = stop_tx.clone();
+    // The fence of a server that lost its database to another process:
+    // it resolves the same shutdown the operator's signal does, so the
+    // health service answers NOT_SERVING and tonic finishes the open
+    // calls; a short grace later the process exits, and a supervisor
+    // restart either takes the lock back or is refused at open.
     tokio::spawn(async move {
         shutdown.await;
         let _ = stop_tx.send(());
@@ -316,7 +315,8 @@ pub async fn serve(
             let _ = stopped.changed().await;
         }
     };
-    if let Some((fence, stop_tx)) = fence_stop {
+    {
+        let stop_tx = stop_fence;
         tokio::spawn(async move {
             while !fence.load(std::sync::atomic::Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2276,8 +2276,7 @@ fn file_state(state: FileState) -> v1::FileState {
 #[cfg(test)]
 mod tests {
     use crate::backend::Backend;
-    use crate::db;
-    use crate::store::Store;
+    use crate::meta::testing;
     use std::time::Instant;
 
     use scion_core::{Changeset, FileState, IdentityTime};
@@ -2386,8 +2385,8 @@ mod tests {
     }
 
     fn file_store(content: &[u8]) -> (tempfile::TempDir, Backend, ChangesetId, BlobId) {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
         let blob = store.blobs().put(content).unwrap();
         let state = FileState::Regular {
             content: blob,
@@ -2747,8 +2746,8 @@ mod tests {
     /// changeset on root, below the floor of a new path index at B, so
     /// the land's plan walks back.
     fn dropped_call_fixture() -> (tempfile::TempDir, Backend, ChangesetId, ChangesetId) {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
         let blob = store.blobs().put(b"x").unwrap();
         let put = |parents, path: &str| {
             Changeset::new(
@@ -2876,16 +2875,19 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(10), "the job ends");
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
-        let sql = "SELECT state FROM lands WHERE request_key = 'claim-wait'";
-        let state: String = store
-            .read(|c| {
-                c.sqlite()
-                    .unwrap()
-                    .query_row(sql, [], |row| row.get(0))
-                    .map_err(crate::error::from_sqlite)
-            })
-            .unwrap();
-        assert_eq!(state, "pending");
+        // The land is pending: its row answers `pending_lands`, the
+        // metadata trait both backends serve.
+        assert!(
+            store
+                .read(|c| {
+                    let repo = c.repo_id("r")?;
+                    Ok(c.pending_lands(repo)?
+                        .iter()
+                        .any(|l| l.request_key == "claim-wait"))
+                })
+                .unwrap(),
+            "the land row is not pending"
+        );
         let main = store.read(|c| {
             let repo = c.repo_id("r")?;
             c.get_ref(repo, "main")
@@ -2999,18 +3001,17 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
 
-        let sql = "SELECT state FROM lands WHERE request_key = 'k'";
-        let row = store
-            .read(|c| {
-                c.sqlite()
-                    .unwrap()
-                    .query_row(sql, [], |row| row.get::<_, String>(0))
-                    .map_err(crate::error::from_sqlite)
-            })
-            .unwrap_err();
+        // No land was recorded: no pending row answers for the key. (The
+        // metadata trait reads pending lands; a row in a final state would
+        // have shown in the audit, whose failed line is asserted below.)
         assert!(
-            format!("{row:?}").contains("QueryReturnedNoRows"),
-            "no land was recorded: {row:?}"
+            !store
+                .read(|c| {
+                    let repo = c.repo_id("r")?;
+                    Ok(c.pending_lands(repo)?.iter().any(|l| l.request_key == "k"))
+                })
+                .unwrap(),
+            "a land row was recorded"
         );
         let text = std::fs::read_to_string(&audit_path).unwrap();
         assert_eq!(
@@ -3125,8 +3126,8 @@ mod tests {
         Vec<u8>,
         scion_core::BlobId,
     ) {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
         let one = store.blobs().put(b"one\n").unwrap();
         let two = store.blobs().put(b"two\n").unwrap();
         let state = |blob| {
@@ -3200,8 +3201,8 @@ mod tests {
     async fn a_land_whose_call_failed_moves_its_counter() {
         // main moved past the changeset's parent, so the land's plan has
         // a walk to make: the spent deadline stops it at its first check.
-        let dir = tempfile::tempdir().unwrap();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
         let blob = store.blobs().put(b"x").unwrap();
         let put = |parents, path: &str| {
             Changeset::new(
@@ -3251,81 +3252,6 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("outcome=\"landed\""), "{text}");
-    }
-
-    /// A land whose call fails on a full disk moves the land counter for
-    /// the class the caller read: the server is out of space, so the
-    /// reply is `resource_exhausted`, and the operator sees the failed
-    /// land.
-    #[tokio::test]
-    async fn a_land_that_hits_a_full_disk_moves_its_counter() {
-        let (_dir, store, cs) = landed_store();
-        if Backend::test_is_postgres() {
-            // The page cap is a data-directory hook; the Postgres disk
-            // full is the SQLSTATE 53100 arm of the pg mapping, a unit
-            // test of pg.rs, and it feeds the same counter code.
-            return;
-        }
-        let store = store
-            .as_sqlite()
-            .expect("the page cap is a data-directory test");
-        // The land's own changeset must grow the file past its cap: two
-        // thousand files, far past any space the setup left free.
-        store.cap_database_pages(0);
-        let metrics = Arc::new(Metrics::default());
-        let service = counting_service(&Backend::sqlite(store.clone()), &metrics);
-        let request = as_default(scion_proto::v1::LandRequest {
-            repo: "r".into(),
-            changeset_id: cs.as_bytes().to_vec(),
-            target_ref: "main".into(),
-            request_key: "k".into(),
-        });
-        let status = service.land(request).await.expect_err("out of space");
-        assert_eq!(status.code(), Code::ResourceExhausted);
-        let text = metrics.render();
-        assert!(
-            text.contains("scion_lands_total{outcome=\"resource_exhausted\"} 1\n"),
-            "{text}"
-        );
-    }
-
-    /// A repo with a root changeset under `main`, and a child changeset
-    /// ready to land: two thousand files, so its landed changeset must
-    /// grow the metadata file.
-    fn landed_store() -> (tempfile::TempDir, Backend, ChangesetId) {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
-        let blob = store.blobs().put(b"x").unwrap();
-        let mut files = Vec::new();
-        for i in 0..2000 {
-            files.push((
-                RepoPath::new(format!("f{i:04}").into_bytes()).unwrap(),
-                Some(FileState::Regular {
-                    content: blob,
-                    executable: false,
-                }),
-            ));
-        }
-        let changeset = |parents, changes| {
-            Changeset::new(
-                parents,
-                IdentityTime::new(b"t".to_vec(), b"t@x".to_vec(), 0, 0)
-                    .expect("identity fits the format"),
-                None,
-                vec![],
-                changes,
-            )
-            .expect("changeset fits the format")
-        };
-        let cs = store
-            .write(|c| {
-                let repo = c.create_repo("r")?;
-                let root = c.insert_changeset(repo, &changeset(vec![], [].into()))?;
-                assert!(c.cas_ref(repo, "main", None, root)?);
-                c.insert_changeset(repo, &changeset(vec![root], files.into_iter().collect()))
-            })
-            .unwrap();
-        (dir, store, cs)
     }
 
     #[tokio::test]
@@ -3400,14 +3326,24 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    // The guard is the suite's gate: it must span the whole test, awaits
+    // included, or two backends run at once and the database runs out
+    // of connections (E53300).
+    #[allow(clippy::await_holding_lock)]
     async fn at_most_max_graph_queries_run_at_once() {
-        // root ─ a, and root ─ b.
-        let dir = tempfile::tempdir().unwrap();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        // root ─ a, and root ─ b. The pool is the server's size: the test
+        // holds every read connection, so the cap's wait is visible. The
+        // gate keeps it alone among the suite's backends, or the database
+        // runs out of connections (E53300).
+        let _pool = crate::pg::pool_tests::SERVER_SIZED_POOL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test_with_readers(dir.path(), crate::store::READERS).unwrap();
         let ids = store
             .write(|c| {
                 let repo = c.create_repo("r")?;
-                db::testing::insert_graph(c.sqlite().unwrap(), repo, &[vec![], vec![0], vec![0]])
+                testing::insert_graph(c, repo, &[vec![], vec![0], vec![0]])
             })
             .unwrap();
         let bytes = |i: usize| ids[i].as_bytes().to_vec();
@@ -3508,8 +3444,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_worker_panic_does_not_reach_the_client() {
-        let dir = tempfile::tempdir().unwrap();
-        let worker = Worker::new(Backend::sqlite(Store::open(dir.path()).unwrap()));
+        let dir = crate::test_support::private_tempdir();
+        let worker = Worker::new(Backend::open_test(dir.path()).unwrap());
         let status = worker
             .run(|_| -> Result<()> { panic!("secret detail") })
             .await

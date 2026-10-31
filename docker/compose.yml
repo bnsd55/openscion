@@ -1,13 +1,14 @@
 # An example that runs a scion-server and a scion-cache, both with TLS, and
 # checks a repo out through the cache. One image carries all three binaries;
-# each service picks its own entrypoint.
+# each service picks its own entrypoint. The server keeps its metadata in a
+# Postgres database this file also runs.
 #
-# Secrets are made by docker/demo.sh and are never committed
-# or baked into the image. See docker/README.md.
-#
-# The server's ticket public key arrives as an environment variable that
-# docker/demo.sh exports before it starts the services; without it the
-# cache refuses to serve.
+# Every secret is made by docker/demo.sh and reaches the services as an
+# environment variable, never committed and never baked into the image:
+# SCION_DEMO_TOKEN (the clients' token), SCION_DEMO_DB_PASSWORD (the demo
+# database's), and SCION_TICKET_PUB (the ticket public key, which is not a
+# secret but is made the same way). compose refuses to start without
+# them. See docker/README.md.
 
 name: scion-demo
 
@@ -18,24 +19,81 @@ services:
       dockerfile: Dockerfile
     image: open-scion-demo
     entrypoint: scion-server
+    # One panic in the demo's server died without a place: name the
+    # frames while the demo is new.
+    environment:
+      RUST_BACKTRACE: full
+    # The server reaches the database over the network, so #178's rule
+    # applies: the URL says sslmode=require, and --postgres-ca names the
+    # demo CA that signed the database's certificate.
     command:
       - --data
       - /data
+      - --postgres-url
+      - postgres://scion:${SCION_DEMO_DB_PASSWORD:?set by docker/demo.sh}@postgres:5432/scion?sslmode=require
+      - --postgres-ca
+      - /certs/ca.pem
       - serve
       - --listen
       - 0.0.0.0:7878
       - --token
-      - dev
+      - ${SCION_DEMO_TOKEN:?set by docker/demo.sh}
       - --tls-cert
       - /certs/server.crt
       - --tls-key
       - /certs/server.key
       - --ticket-key
       - /data/ticket.key
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       - server-data:/data
       - demo-certs:/certs:ro
       - ./work:/host-work:ro
+
+  # The database the server's metadata lives in. Its traffic leaves the
+  # server's container, so the URL names sslmode=require and the demo CA
+  # signs the database's certificate, the way it signs the server's and
+  # the cache's.
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: scion
+      POSTGRES_PASSWORD: ${SCION_DEMO_DB_PASSWORD:?set by docker/demo.sh}
+      POSTGRES_DB: scion
+    command:
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/pg-certs/postgres.crt
+      - -c
+      - ssl_key_file=/pg-certs/postgres.key
+    volumes:
+      - pg-certs:/pg-certs:ro
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scion -d scion"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+
+  # Postgres refuses to start when its key is group- or world-readable,
+  # and a read-only mount cannot be chmod-ed, so the demo copies the
+  # host's certificate into a volume the postgres user owns - the way
+  # certs-init does for the scion services.
+  pg-certs-init:
+    image: open-scion-demo
+    user: root
+    entrypoint: ["sh", "-c"]
+    command:
+      - cp /host-certs/postgres.crt /host-certs/postgres.key /pg-certs/
+        && chmod 600 /pg-certs/postgres.key
+        && chmod 644 /pg-certs/postgres.crt
+        && chown 999:999 /pg-certs/*
+    volumes:
+      - ./certs:/host-certs:ro
+      - pg-certs:/pg-certs
 
   cache:
     image: open-scion-demo
@@ -44,7 +102,7 @@ services:
       - --listen
       - 0.0.0.0:7879
       - --token
-      - dev
+      - ${SCION_DEMO_TOKEN:?set by docker/demo.sh}
       - --tls-cert
       - /certs/cache.crt
       - --tls-key
@@ -52,7 +110,7 @@ services:
       - --upstream
       - https://server:7878
       - --upstream-token
-      - dev
+      - ${SCION_DEMO_TOKEN:?set by docker/demo.sh}
       - --tls-ca
       - /certs/ca.pem
       - --ticket-public-key
@@ -75,7 +133,7 @@ services:
       SCION_SERVER: https://server:7878
       SCION_OBJECTS: https://cache:7879
       SCION_TLS_CA: /certs/ca.pem
-      SCION_TOKEN: dev
+      SCION_TOKEN: ${SCION_DEMO_TOKEN:?set by docker/demo.sh}
       SCION_REPO: demo
     volumes:
       - demo-certs:/certs:ro
@@ -94,6 +152,8 @@ services:
 volumes:
   server-data:
   demo-work:
+  postgres-data:
+  pg-certs:
   # A one-shot with `--user root` copies the host's ./certs into this
   # volume, so the keys inside are 0600 and owned by the containers' user,
   # while the host copies stay with the developer.

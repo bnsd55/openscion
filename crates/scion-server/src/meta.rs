@@ -1,12 +1,13 @@
-//! The metadata storage that a server needs, as one trait, with SQLite
-//! behind it ([#47](https://github.com/bnsd55/openscion/issues/47)).
+//! The metadata storage that a server needs, as one trait, with Postgres
+//! behind it.
 //!
-//! [`Store`] is the SQLite implementation: one data directory, one write
-//! connection, readers around it, and the group flush that makes a reply
-//! wait for durability. Its queries are [`MetaTx`] methods, split by table
-//! owner: the shared tables in `db.rs`, the tables of lands in `land.rs`,
-//! and so on. A backend that many servers share implements the same traits
-//! with its own transaction type, and the callers do not change.
+//! [`Pg`] is the implementation: one shared database, one write
+//! connection per server, readers around it, and the group flush that
+//! makes a reply wait for durability. Its queries are [`MetaTx`] methods,
+//! split by table owner: the shared tables in `pg.rs`, the tables of
+//! lands in `land.rs`, and so on. Callers match behavior through the
+//! methods, never the engine, so the engine is a private change of the
+//! server crate.
 //!
 //! The seven methods of [`Meta`] keep today's semantics, because the
 //! durability rules of protocol section 4 must hold in every backend:
@@ -36,11 +37,9 @@ use scion_core::{BlobId, Changeset, ChangesetId, Entry, Tree, TreeId};
 use gix::ObjectId;
 
 use crate::auth::Caller;
-use crate::db::SqliteTx;
 use crate::error::{Error, Result};
 use crate::history::NodeId;
 use crate::land::{LandOutcome, LandRequest, LandState};
-use crate::store::Store;
 
 /// One pending land the stale-land sweep found, with everything the
 /// answer to its intent line names: the repo (by ID for the ref's lock,
@@ -470,9 +469,6 @@ pub trait MetaTx {
         conflict_paths: Vec<RepoPath>,
     ) -> Result<LandOutcome>;
 
-    /// Records that a git commit became the changeset. Safe to repeat.
-    fn put_git_import(&mut self, repo: RepoId, oid: ObjectId, cs: ChangesetId) -> Result<()>;
-
     /// Records that the git commits became the changesets, all of the
     /// pairs, in one statement where the backend can. Safe to repeat.
     fn put_git_imports(&mut self, repo: RepoId, pairs: &[(ObjectId, ChangesetId)]) -> Result<()>;
@@ -555,9 +551,6 @@ pub trait MetaTx {
     ///
     /// A database error.
     fn restore_ref(&mut self, repo: RepoId, name: &str, target: &[u8], version: i64) -> Result<()>;
-
-    /// Removes the row that names `blob` for `repo`.
-    fn delete_repo_blob(&mut self, repo: RepoId, blob: &[u8]) -> Result<()>;
 
     /// Removes the rows that name any of `blobs` for `repo`, all of
     /// them, in one statement where the backend can.
@@ -665,37 +658,151 @@ pub struct RefState {
     pub version: i64,
 }
 
-impl Meta for Store {
-    type Tx<'a>
-        = SqliteTx<'a>
-    where
-        Self: 'a;
+/// The error of a repo that does not exist. A caller that may not read a
+/// repo gets it too (`access::Access::check_read`).
+pub(crate) fn no_repo(name: &str) -> Error {
+    Error::NotFound(format!("repo {name:?}"))
+}
 
-    fn read<T>(&self, f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>) -> Result<T> {
-        Store::read(self, |c| f(&mut SqliteTx(c)))
+/// The puts of a changeset's changes: each path and its blob, in path
+/// order, with repeats. A gitlink names no blob, whatever its bytes.
+pub(crate) fn puts(cs: &Changeset) -> impl Iterator<Item = (&RepoPath, BlobId)> + '_ {
+    cs.changes()
+        .iter()
+        .filter_map(|(path, state)| Some((path, state.as_ref()?.blob()?)))
+}
+
+/// Commit graphs for tests.
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::collections::BTreeMap;
+
+    use proptest::prelude::{Strategy, any};
+    use proptest::sample::Index;
+    use scion_core::{BlobId, FileState, RepoPath};
+
+    use crate::error::Result;
+    use crate::meta::MetaTx;
+    use crate::meta::{Changeset, ChangesetId, RepoId};
+
+    /// Stores a graph of changesets in `repo`, so with no derived rows.
+    /// Changeset `i` has the parents `parents[i]`, in order, each an
+    /// earlier changeset, and puts the file `f{i}`. Returns the IDs.
+    pub(crate) fn insert_graph(
+        c: &mut dyn MetaTx,
+        repo: RepoId,
+        parents: &[Vec<usize>],
+    ) -> Result<Vec<ChangesetId>> {
+        insert_each(c, repo, parents, |i| {
+            let path = format!("f{i}");
+            let state = FileState::Regular {
+                content: BlobId::of(path.as_bytes()),
+                executable: false,
+            };
+            let message = path.clone().into_bytes();
+            (
+                message,
+                [(RepoPath::new(path).unwrap(), Some(state))].into(),
+            )
+        })
     }
 
-    fn read_counted<T>(&self, f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>) -> (Result<T>, u64) {
-        Store::read_counted(self, |c| f(&mut SqliteTx(c)))
+    /// Stores a graph as [`insert_graph`] does, where changeset `i` has the
+    /// message and the changes that `make(i)` returns.
+    fn insert_each(
+        c: &mut dyn MetaTx,
+        repo: RepoId,
+        parents: &[Vec<usize>],
+        make: impl Fn(usize) -> (Vec<u8>, BTreeMap<RepoPath, Option<FileState>>),
+    ) -> Result<Vec<ChangesetId>> {
+        let mut ids: Vec<ChangesetId> = Vec::new();
+        for (i, of) in parents.iter().enumerate() {
+            let (message, changes) = make(i);
+            let cs = Changeset::new(
+                of.iter().map(|&p| ids[p]).collect(),
+                scion_core::IdentityTime::new(b"a".to_vec(), b"a@x".to_vec(), 0, 0)
+                    .expect("identity fits the format"),
+                None,
+                message,
+                changes,
+            )
+            .expect("changeset fits the format");
+            ids.push(c.insert_changeset(repo, &cs)?);
+        }
+        Ok(ids)
     }
 
-    fn wait_durable(&self, seen: u64) -> Result<()> {
-        Store::wait_durable(self, seen)
+    /// Paths that [`histories`] change. Some are files and directories of
+    /// others, so a path is a file at one time and a directory at another,
+    /// or both in one changeset.
+    pub(crate) const PATHS: [&str; 8] = ["a", "b", "a/b", "a/c", "b/a", "a/b/c", "a/b/d", "c/a/b"];
+
+    /// The changes of one changeset of [`histories`]: an index in
+    /// [`PATHS`], and whether it puts the file there or deletes it.
+    pub(crate) type Edits = Vec<(usize, bool)>;
+
+    /// Graphs as [`graphs`] makes them, with random puts and deletes of
+    /// [`PATHS`] in each changeset, or none. A change need not apply to a
+    /// tree, for example a delete of a missing file, so only kinds that read
+    /// the changes and not the trees can derive these histories.
+    pub(crate) fn histories(max: usize) -> impl Strategy<Value = (Vec<Vec<usize>>, Vec<Edits>)> {
+        graphs(max).prop_flat_map(|parents| {
+            let edit = (0..PATHS.len(), any::<bool>());
+            let edits =
+                proptest::collection::vec(proptest::collection::vec(edit, 0..4), parents.len());
+            (proptest::strategy::Just(parents), edits)
+        })
     }
 
-    fn read_unflushed<T>(&self, f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>) -> Result<T> {
-        Store::read_unflushed(self, |c| f(&mut SqliteTx(c)))
+    /// Stores a history of [`histories`] as [`insert_graph`] does, where
+    /// changeset `i` makes the changes `edits[i]`. Returns the IDs.
+    pub(crate) fn insert_history(
+        c: &mut dyn MetaTx,
+        repo: RepoId,
+        parents: &[Vec<usize>],
+        edits: &[Edits],
+    ) -> Result<Vec<ChangesetId>> {
+        insert_each(c, repo, parents, |i| {
+            let changes = edits[i]
+                .iter()
+                .map(|&(path, put)| {
+                    let state = put.then(|| FileState::Regular {
+                        content: BlobId::of(i.to_string().as_bytes()),
+                        executable: false,
+                    });
+                    (RepoPath::new(PATHS[path]).unwrap(), state)
+                })
+                .collect();
+            (i.to_string().into_bytes(), changes)
+        })
     }
 
-    fn commit<T>(&self, f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>) -> Result<T> {
-        Store::commit(self, |c| f(&mut SqliteTx(c)))
-    }
-
-    fn write<T>(&self, f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>) -> Result<T> {
-        Store::write(self, |c| f(&mut SqliteTx(c)))
-    }
-
-    fn flush(&self) -> Result<()> {
-        Store::flush(self)
+    /// Graphs of 1 to `max` changesets for [`insert_graph`]. Most have a
+    /// first parent a few changesets back, so first-parent histories are
+    /// long. Some have no parent, and some have up to two more parents
+    /// anywhere before them, so there are several roots, merges and
+    /// criss-crosses.
+    pub(crate) fn graphs(max: usize) -> impl Strategy<Value = Vec<Vec<usize>>> {
+        let node = (
+            proptest::option::weighted(0.9, 1..4_usize),
+            proptest::collection::vec(any::<Index>(), 0..3),
+        );
+        proptest::collection::vec(node, 1..=max).prop_map(|nodes| {
+            (0..)
+                .zip(nodes)
+                .map(|(i, (back, others))| {
+                    let mut parents: Vec<usize> = Vec::new();
+                    if i > 0 {
+                        let first = back.map(|back| i - back.min(i));
+                        for p in first.into_iter().chain(others.iter().map(|o| o.index(i))) {
+                            if !parents.contains(&p) {
+                                parents.push(p);
+                            }
+                        }
+                    }
+                    parents
+                })
+                .collect()
+        })
     }
 }

@@ -17,8 +17,10 @@ use scion_proto::v1::scion_client::ScionClient;
 use scion_proto::v1::{
     GetObjectsRequest, GetRootTreeRequest, ObjectKind, ObjectRef, PutBlobRequest,
 };
+use scion_server::Backend;
+use scion_server::test_support::meta::Meta as _;
 use scion_server::test_support::meta::MetaTx as _;
-use scion_server::test_support::{backend::from_store, service, store::Store};
+use scion_server::test_support::service;
 use scion_server::{Access, Keys, Metrics};
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -67,8 +69,8 @@ struct Runbook {
 }
 
 async fn runbook() -> Runbook {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let dir = scion_server::test_support::private_tempdir();
+    let store = Backend::open_test(dir.path()).unwrap();
     let hello = store.blobs().put(b"pub fn main() {}\n").unwrap();
     let links = store.blobs().put(b"# links\n").unwrap();
     let changeset = Changeset::new(
@@ -116,7 +118,7 @@ async fn runbook() -> Runbook {
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let keys = Keys::generate();
     tokio::spawn(service::serve(
-        from_store(store),
+        store,
         listener,
         access(),
         service::ServeOptions {

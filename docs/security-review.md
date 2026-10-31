@@ -14,7 +14,7 @@ In scope, in the supported profile
 ([threat-model.md](threat-model.md), section 1):
 
 - `scion-server` — the active server: the RPC surface, the metadata
-  stores (SQLite and Postgres), the blob store, the archive verify and
+  (Postgres), the blob store, the archive verify and
   restore, the audit log.
 - `scion-cache` and `scion-daemon` — the tiers in front of it, and
   what they trust.
@@ -93,9 +93,10 @@ git clone --depth 1 https://github.com/tokio-rs/tokio /tmp/tokio
 ```
 
 Attack it: `scn` is the client (`./target/release/scn ls main:src` and
-the rest of the README's [Try it](../README.md#try-it) steps run as
+the rest of the README's [quick start](../README.md#quick-start) steps run as
 written); the gRPC surface is behind `SCION_TOKEN=dev` on port 7878;
-the data directory `/tmp/scion` is SQLite plus blobs. The file-mode
+the data directory `/tmp/scion` is a marker plus blobs (the metadata
+lives in Postgres). The file-mode
 rules refuse a directory other accounts can write — make one and watch
 the open refuse it. The archive round trip is the fastest path to the
 archive attacks: `scion-server --data /tmp/scion export --all --out
@@ -112,7 +113,7 @@ cargo test -p open-scion-server --test access --test tickets \
 ```
 
 Postgres lanes need a scratch instance:
-`SCION_TEST_BACKEND=postgres SCION_TEST_POSTGRES_URL=postgres://...`.
+`SCION_TEST_POSTGRES_URL=postgres://...`.
 
 ## 5. The fuzz targets and their corpora
 

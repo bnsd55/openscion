@@ -133,7 +133,7 @@ fn read_lines(path: &std::path::Path) -> Vec<serde_json::Value> {
 
 #[tokio::test]
 async fn refused_authentication_is_one_counted_line_per_peer_and_names_no_token() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = store(dir.path());
     let audit_path = dir.path().join("audit.log");
     let audit = Audit::open(&audit_path).unwrap();
@@ -277,7 +277,7 @@ async fn a_write_changeset_and_land_record_intent_and_result_pairs() {
     use scion_proto::v1::{CreateChangesetRequest, LandRequest, PutBlobRequest};
     use tokio_stream::once;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = store(dir.path());
     let audit_path = dir.path().join("audit.log");
     let audit = Audit::open(&audit_path).unwrap();
@@ -376,7 +376,7 @@ async fn a_write_whose_intent_fails_is_refused() {
     use scion_proto::v1::{PutBlobRequest, ResolveRefRequest};
     use tokio_stream::once;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = store(dir.path());
     let audit_path = dir.path().join("audit.log");
     let audit = Audit::open(&audit_path).unwrap();
@@ -463,7 +463,7 @@ async fn concurrent_lands_ref_lines_tell_one_true_history() {
     use scion_proto::v1::LandRequest;
     use std::fmt::Write as _;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = store(dir.path());
     let audit_path = dir.path().join("audit.log");
     let audit = Audit::open(&audit_path).unwrap();
@@ -702,7 +702,7 @@ async fn wait_for_lines(path: &std::path::Path, n: usize) {
 async fn a_land_whose_call_is_cut_still_writes_its_result_and_ref_lines() {
     use scion_proto::v1::{CreateChangesetRequest, LandRequest, PutBlobRequest};
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = store(dir.path());
     let audit_path = dir.path().join("audit.log");
     let audit = Audit::open(&audit_path).unwrap();
@@ -862,7 +862,7 @@ fn assert_cancelled_lines(store: &Backend, land_line: &serde_json::Value, root: 
 async fn a_call_without_a_request_id_gets_one_from_the_server() {
     use scion_proto::v1::PutBlobRequest;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = store(dir.path());
     let audit_path = dir.path().join("audit.log");
     let audit = Audit::open(&audit_path).unwrap();
@@ -965,7 +965,7 @@ async fn a_land_cut_at_its_deadline_gets_exactly_one_answer() {
     use scion_proto::v1::LandRequest;
     use std::time::Duration;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = store(dir.path());
     let audit_path = dir.path().join("audit.log");
     let audit = Audit::open(&audit_path).unwrap();
@@ -1084,7 +1084,7 @@ async fn a_land_dropped_around_its_jobs_start_gets_one_answer() {
     use scion_proto::v1::LandRequest;
     use std::time::Duration;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = store(dir.path());
     let audit_path = dir.path().join("audit.log");
     let audit = Audit::open(&audit_path).unwrap();
@@ -1175,7 +1175,7 @@ async fn a_land_dropped_around_its_jobs_start_gets_one_answer() {
 async fn a_land_without_write_access_gets_one_failed_line() {
     use scion_proto::v1::LandRequest;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = store(dir.path());
     let audit_path = dir.path().join("audit.log");
     let audit = Audit::open(&audit_path).unwrap();
@@ -1227,7 +1227,7 @@ async fn a_land_without_write_access_gets_one_failed_line() {
 async fn a_land_with_a_bad_changeset_id_records_nothing() {
     use scion_proto::v1::LandRequest;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = store(dir.path());
     let audit_path = dir.path().join("audit.log");
     let audit = Audit::open(&audit_path).unwrap();
@@ -1300,7 +1300,7 @@ async fn a_land_with_a_bad_changeset_id_records_nothing() {
 async fn a_land_whose_intent_fails_leaves_no_answer_line() {
     use scion_proto::v1::LandRequest;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = store(dir.path());
     let audit_path = dir.path().join("audit.log");
     let audit = Audit::open(&audit_path).unwrap();

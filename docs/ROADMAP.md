@@ -16,7 +16,7 @@ immutable GitHub release, nothing published anywhere else.
 
 Make the project safe to install anywhere it claims to work.
 
-- A clean install and the [quick start](../README.md#try-it) pass on
+- A clean install and the [quick start](../README.md#quick-start) pass on
   every supported platform (Linux and macOS), under umask 002 and umask
   022: done, [#317](https://github.com/bnsd55/openscion/issues/317)
   landed the release smoke, and its CI job runs on every push, in a
@@ -94,9 +94,7 @@ Make the pieces trustworthy together, and the data safe to lose.
 - The fault and recovery matrix: disk full, EIO, a Postgres restart,
   mismatched restores: [#238](https://github.com/bnsd55/openscion/issues/238)
   closed with a row per case in [faults](faults.md), each naming its
-  test. The Postgres rows reopen: until #412 their evidence ran on
-  SQLite, and the Postgres fault cells are best effort until their
-  scheduled runs carry them.
+  test.
 
 ## v0.3.0 - a single-node operational beta
 
@@ -128,12 +126,10 @@ Prove the one-machine server under real load.
 
 Say exactly what v1.0 will support.
 
-- One active `scion-server` is the production topology. SQLite holds
-  metadata: it is the only production backend of this gate. A named
-  Postgres major holds metadata too, but Postgres is experimental —
-  tested in CI, not relied on for data-safety evidence — and its
-  promotion to production moves after v0.5's durability evidence. One
-  blob store holds content. Cache tiers may sit in front.
+- One active `scion-server` is the production topology. Postgres
+  holds metadata: a named Postgres major is the only production
+  backend of this gate. One blob store holds content. Cache tiers may
+  sit in front.
 - The server host, its administrators and the data directories are
   trusted. Network peers, tokens and principals are not.
 - A shared data directory, a server data directory on a network
@@ -193,7 +189,7 @@ Freeze the surfaces users need, not the implementation.
   the contract test ([#560](https://github.com/bnsd55/openscion/issues/560))
   passes on Postgres 17, the real Postgres fault rows pass, backup and
   restore pass on Postgres 17, and the release-candidate trial runs on
-  Postgres 17 as well as on SQLite. The durability evidence of v0.5 is
+  Postgres 17. The durability evidence of v0.5 is
   the floor this stands on. The per-requirement gap list with the
   evidence behind each verdict is `docs/pg17-qualification.md`.
 - No crate publishes to crates.io at v1.0. A narrow client crate
@@ -292,8 +288,8 @@ Cut the tested release. Add no new surface.
 - `README.md`, `SECURITY.md`, `docs/stability.md`,
   `docs/compatibility.md`, `docs/operations.md` and
   `docs/RELEASING.md` state the supported deployment, support window
-  and 1.x promises. The supported deployment names SQLite and Postgres
-  17: one server each, per the production topology.
+  and 1.x promises. The supported deployment names Postgres 17: one
+  server, per the production topology.
 - The release notes link the gate evidence.
 
 ## Out until v1.0.0 passes

@@ -268,6 +268,12 @@ impl Vfs {
     /// is the read ticket that minted for `root`; a ticket that does not
     /// parse is stored as expired, so the first read mints a fresh one.
     /// Changes go to `overlay`.
+    ///
+    /// # Errors
+    ///
+    /// The mount secret, when the system's source of random bytes is
+    /// unreadable.
+    //
     // The test seam re-exports the Vfs surface (test_support.vfs), and
     // unreachable_pub does not see through a re-export.
     #[allow(unreachable_pub)]
@@ -279,9 +285,9 @@ impl Vfs {
         root: TreeId,
         ticket: &[u8],
         overlay: PathBuf,
-    ) -> Self {
+    ) -> std::io::Result<Self> {
         let grant = Grant::of(ticket);
-        Self {
+        Ok(Self {
             objects,
             roots,
             repo,
@@ -306,14 +312,14 @@ impl Vfs {
                 deleted: HashSet::new(),
             }),
             blobs: tokio::sync::Mutex::new((LinkedHashMap::new(), 0)),
-            secret: secret_from_urandom(),
+            secret: secret_from_urandom()?,
             started: SystemTime::now(),
             uid: rustix::process::geteuid().as_raw(),
             gid: rustix::process::getegid().as_raw(),
             overlay,
             #[cfg(feature = "unstable-writable-mount")]
             writable: false,
-        }
+        })
     }
 
     /// Takes writes on this mount, or not: `scn mount --unstable-writable`
@@ -566,11 +572,17 @@ impl Vfs {
         let data = Arc::new(raw);
         let mut blobs = self.blobs.lock().await;
         blobs.1 += data.len();
-        blobs.0.insert(id, Arc::clone(&data));
+        // A racing call may have inserted the same blob while this one
+        // fetched: the insert replaces that copy, so its bytes leave the
+        // count, or the count drifts above what the map holds.
+        if let Some(old) = blobs.0.insert(id, Arc::clone(&data)) {
+            blobs.1 -= old.len();
+        }
         while blobs.1 > BLOB_CACHE_BYTES {
-            let bytes = blobs.0.front().map_or(0, |(_, data)| data.len());
-            blobs.0.pop_front();
-            blobs.1 = blobs.1.saturating_sub(bytes);
+            let Some((_, gone)) = blobs.0.pop_front() else {
+                break;
+            };
+            blobs.1 -= gone.len();
         }
         Ok(data)
     }
@@ -1624,13 +1636,13 @@ fn symlink_bytes(target: &[u8], file: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(target), file)
 }
 
-/// The mount secret, from the system's source of random bytes.
-fn secret_from_urandom() -> [u8; 16] {
+/// The mount secret, from the system's source of random bytes. A system
+/// without `/dev/urandom` is refused here, with the cause, not met with
+/// a panic.
+fn secret_from_urandom() -> std::io::Result<[u8; 16]> {
     let mut secret = [0u8; 16];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut secret))
-        .expect("cannot read /dev/urandom");
-    secret
+    std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut secret))?;
+    Ok(secret)
 }
 
 impl Vfs {
@@ -1812,7 +1824,7 @@ mod tests {
     /// A file is `Some(exec)` for a regular file, `None` for a symlink
     /// whose blob holds the target bytes.
     async fn start(files: &[(&str, &[u8], Option<bool>)]) -> Test {
-        let data = tempfile::tempdir().unwrap();
+        let data = scion_server::test_support::private_tempdir();
         let overlay = tempfile::tempdir().unwrap();
         let store = Backend::open_test(&data.path().join("store")).unwrap();
         let mut contents = Vec::new();
@@ -1899,7 +1911,8 @@ mod tests {
             root,
             &reply.ticket,
             overlay.path().to_path_buf(),
-        );
+        )
+        .expect("the vfs is made");
         // The unit tests of the VFS carry writes: a `--unstable-writable`
         // mount is what they exercise. A build without the feature has no
         // write path; its tests here are the read-side ones.
@@ -2489,6 +2502,52 @@ mod tests {
         }
     }
 
+    /// Two reads that miss the cache for one blob both fetch it and both
+    /// insert it; the cache must count its bytes once. Counted twice, the
+    /// count drifts above what the map holds, and once the drift passes
+    /// `BLOB_CACHE_BYTES` the eviction loop spins on an empty map forever.
+    #[tokio::test]
+    async fn a_blob_fetched_twice_at_once_is_counted_once() {
+        let fake = Expiring::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(
+            Server::builder()
+                .add_service(ObjectsServer::new(fake))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        let objects = crate::client::test_objects(&url, TOKEN).await;
+        let roots = crate::client::test_objects(&url, TOKEN).await;
+        let reply = objects
+            .clone()
+            .get_root_tree(Ask {
+                repo: REPO.to_owned(),
+                changeset_id: [7u8; 32].to_vec(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        let root = id_from(&reply.tree_id).unwrap();
+        let overlay = tempfile::tempdir().unwrap();
+        let vfs = Vfs::new(
+            objects,
+            roots,
+            REPO.to_owned(),
+            ChangesetId::from_bytes([7u8; 32]),
+            root,
+            &reply.ticket,
+            overlay.path().to_path_buf(),
+        )
+        .unwrap();
+        let blob = BlobId::of(b"x\n");
+        let (a, b) = tokio::join!(vfs.fetch_blob(blob, None, 2), vfs.fetch_blob(blob, None, 2));
+        assert_eq!(*a.unwrap(), b"x\n");
+        assert_eq!(*b.unwrap(), b"x\n");
+        let blobs = vfs.blobs.lock().await;
+        assert_eq!(blobs.0.len(), 1);
+        assert_eq!(blobs.1, 2, "the cache counts bytes it does not hold");
+    }
+
     /// A mount that lives past the life of its first ticket keeps reading:
     /// the refusal mints a fresh ticket over the mounted changeset, once,
     /// and the read is asked again with it. The next read mints no more.
@@ -2524,7 +2583,8 @@ mod tests {
             root,
             &reply.ticket,
             overlay.path().to_path_buf(),
-        );
+        )
+        .expect("the vfs is made");
         // The first read: the ticket it was minted is refused, so the
         // mount mints again and reads with the fresh one.
         let id = vfs

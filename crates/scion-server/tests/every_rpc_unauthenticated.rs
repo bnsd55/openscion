@@ -19,7 +19,6 @@ use scion_proto::v1::{
 use scion_server::Access;
 use scion_server::Keys;
 use scion_server::Metrics;
-use scion_server::test_support::backend::BackendExt;
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use scion_server::{Backend, test_support::service};
 use std::future::Future;
@@ -59,7 +58,7 @@ fn access() -> Access {
 /// A store whose repo `main` has one root changeset that puts `README`,
 /// and its blob.
 async fn store() -> (tempfile::TempDir, Backend, scion_core::ChangesetId) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = {
         let path = dir.path().to_path_buf();
         tokio::task::spawn_blocking(move || Backend::open_test(&path).unwrap())
@@ -385,69 +384,38 @@ async fn state_of(store: &Backend, dir: &Path) -> (i64, Vec<i64>) {
 }
 
 fn state_of_blocking(store: &Backend, dir: &Path) -> (i64, Vec<i64>) {
-    if Backend::test_is_postgres() {
-        let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
-        let schema = Backend::test_schema(dir).expect("the tests run on Postgres");
-        let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
-        client
-            .batch_execute(&format!("SET search_path TO {schema}"))
-            .unwrap();
-        let tables = client
-            .query(
-                "SELECT tablename FROM pg_tables
-                 WHERE schemaname = current_schema()
-                 ORDER BY tablename",
-                &[],
-            )
-            .unwrap();
-        let counts = tables
-            .iter()
-            .map(|row| {
-                let table: String = row.get(0);
-                client
-                    .query_one(&format!("SELECT COUNT(*) FROM {table}"), &[])
-                    .unwrap()
-                    .get(0)
-            })
-            .collect();
-        let version = client
-            .query_one("SELECT version FROM refs WHERE name = 'main'", &[])
+    let url = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL names the test database");
+    let schema = Backend::test_schema(dir);
+    let mut client =
+        postgres::Client::connect(&url, postgres::NoTls).expect("the test database connects");
+    client
+        .batch_execute(&format!("SET search_path TO {schema}"))
+        .unwrap();
+    // Every metadata table's row count, straight from the store's own
+    // catalog, so a new table joins the check on its own.
+    let tables = client
+        .query(
+            "SELECT tablename FROM pg_tables
+             WHERE schemaname = $1
+             ORDER BY tablename",
+            &[&schema],
+        )
+        .unwrap();
+    let mut counts = Vec::new();
+    for row in &tables {
+        let table: String = row.get(0);
+        let count = client
+            .query_one(&format!("SELECT COUNT(*) FROM \"{table}\""), &[])
             .unwrap()
             .get(0);
-        return (version, counts);
+        counts.push(count);
     }
-    let store = store.sqlite().expect("the test backend is SQLite");
-    let counts = store
-        .read(|c| {
-            let mut names = c
-                .prepare(
-                    "SELECT name FROM sqlite_master
-                     WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-                     ORDER BY name",
-                )
-                .map_err(scion_server::test_support::error::from_sqlite)?;
-            let names = names
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(scion_server::test_support::error::from_sqlite)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(scion_server::test_support::error::from_sqlite)?;
-            names
-                .iter()
-                .map(|name| {
-                    c.query_row::<i64, _, _>(&format!("SELECT COUNT(*) FROM {name}"), [], |row| {
-                        row.get(0)
-                    })
-                    .map_err(scion_server::test_support::error::from_sqlite)
-                })
-                .collect()
-        })
-        .expect("the row counts read");
-    let version = store
-        .read(|c| {
-            let repo = c.repo_id(REPO)?;
-            Ok(c.get_ref(repo, "main")?.expect("main exists").version)
-        })
-        .expect("main reads");
+    let version = client
+        .query_one("SELECT version FROM refs WHERE name = $1", &[&REPO])
+        .unwrap()
+        .get(0);
+    let _ = store;
     (version, counts)
 }
 

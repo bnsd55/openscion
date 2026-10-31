@@ -100,6 +100,16 @@ pub struct ClientTls {
     identity: Option<(Vec<u8>, Vec<u8>)>,
 }
 
+/// Whether `address` names an https server. A URI scheme is
+/// case-insensitive (RFC 3986), and tonic reads `HTTPS://` as https, so
+/// the CA rule and the TLS configuration hold for it too.
+#[must_use]
+pub fn is_https(address: &str) -> bool {
+    address
+        .get(..8)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+}
+
 impl ClientTls {
     /// Loads the CA, and the client certificate and key with mTLS, from PEM
     /// files. A CA that is `None` trusts no certificate, so an https address
@@ -148,7 +158,7 @@ impl ClientTls {
         address: &str,
         endpoint: tonic::transport::Endpoint,
     ) -> anyhow::Result<tonic::transport::Endpoint> {
-        if !address.starts_with("https://") {
+        if !is_https(address) {
             return Ok(endpoint);
         }
         let Some(ca) = self.ca.as_deref() else {
@@ -193,7 +203,7 @@ mod tests {
 
     #[test]
     fn a_tls_key_the_group_or_others_can_read_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let (cert, key) = pem_files(&dir);
         std::fs::set_permissions(&key, fs::Permissions::from_mode(0o640)).unwrap();
         let err = match ServerTls::load(&cert, &key, None) {
@@ -205,7 +215,7 @@ mod tests {
 
     #[test]
     fn a_private_tls_key_loads_and_a_plain_certificate_loads() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let (cert, key) = pem_files(&dir);
         std::fs::set_permissions(&cert, fs::Permissions::from_mode(0o644)).unwrap();
         ServerTls::load(&cert, &key, None).unwrap();
@@ -213,7 +223,7 @@ mod tests {
 
     #[test]
     fn a_symlinked_tls_key_is_refused_with_a_perfect_target() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let (cert, key) = pem_files(&dir);
         let link = dir.path().join("link.key");
         std::os::unix::fs::symlink(&key, &link).unwrap();
@@ -226,7 +236,7 @@ mod tests {
 
     #[test]
     fn a_client_key_the_group_can_read_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let (cert, key) = pem_files(&dir);
         std::fs::set_permissions(&key, fs::Permissions::from_mode(0o640)).unwrap();
         let err = match ClientTls::load(None, Some(&cert), Some(&key)) {
@@ -240,7 +250,7 @@ mod tests {
     /// certificate lets someone else be the server.
     #[test]
     fn a_certificate_the_group_or_others_can_write_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let (cert, key) = pem_files(&dir);
         std::fs::set_permissions(&cert, fs::Permissions::from_mode(0o664)).unwrap();
         let err = match ServerTls::load(&cert, &key, None) {
@@ -254,7 +264,7 @@ mod tests {
     /// target has a perfect mode and owner.
     #[test]
     fn a_symlinked_certificate_is_refused_with_a_perfect_target() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let (cert, key) = pem_files(&dir);
         let link = dir.path().join("link.pem");
         std::os::unix::fs::symlink(&cert, &link).unwrap();
@@ -269,7 +279,7 @@ mod tests {
     /// CA changes whose client certificates the server accepts.
     #[test]
     fn a_client_ca_the_group_or_others_can_write_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let (cert, key) = pem_files(&dir);
         let (ca, _) = pem_files(&dir);
         std::fs::set_permissions(&ca, fs::Permissions::from_mode(0o662)).unwrap();
@@ -284,7 +294,7 @@ mod tests {
     /// whom the client believes it is talking to.
     #[test]
     fn a_client_tls_ca_the_group_or_others_can_write_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::runtime::private_tempdir();
         let (ca, _) = pem_files(&dir);
         std::fs::set_permissions(&ca, fs::Permissions::from_mode(0o662)).unwrap();
         let err = match ClientTls::load(Some(&ca), None, None) {
@@ -292,5 +302,39 @@ mod tests {
             Err(err) => err.to_string(),
         };
         assert!(err.contains("written by group or others"), "{err}");
+    }
+
+    #[test]
+    fn an_https_address_is_https_in_any_case() {
+        for https in ["https://h:1", "HTTPS://h:1", "Https://h:1"] {
+            assert!(is_https(https), "{https}");
+        }
+        for other in [
+            "http://h:1",
+            "HTTP://h:1",
+            "unix:///s",
+            "https:/h",
+            "",
+            "https",
+        ] {
+            assert!(!is_https(other), "{other}");
+        }
+    }
+
+    /// An https address needs a CA to trust, whatever the case of its
+    /// scheme; an http one does not.
+    #[test]
+    fn an_https_address_without_a_ca_is_refused_in_any_case() {
+        let tls = ClientTls::load(None, None, None).unwrap();
+        for address in ["https://127.0.0.1:1", "HTTPS://127.0.0.1:1"] {
+            let endpoint = tonic::transport::Endpoint::from_shared(address).unwrap();
+            let err = match tls.apply_to(address, endpoint) {
+                Ok(_) => panic!("{address} was taken without a CA"),
+                Err(e) => e.to_string(),
+            };
+            assert!(err.contains("no CA is given"), "{address}: {err}");
+        }
+        let endpoint = tonic::transport::Endpoint::from_static("http://127.0.0.1:1");
+        assert!(tls.apply_to("http://127.0.0.1:1", endpoint).is_ok());
     }
 }

@@ -806,16 +806,15 @@ fn take<'a>(bytes: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
 
 #[cfg(test)]
 mod tests {
-    use crate::db;
+    use crate::pg::CHANGESET_READS;
     use scion_core::{BlobId, FileState, IdentityTime};
 
     use super::*;
     use crate::backend::Backend;
-    use crate::db::testing;
     use crate::meta::Meta as _;
     use crate::meta::RepoId;
+    use crate::meta::testing;
     use crate::read;
-    use crate::store::Store;
     use crate::write;
 
     fn path(p: &str) -> RepoPath {
@@ -848,10 +847,10 @@ mod tests {
         .expect("changeset fits the format")
     }
 
-    /// A new store with repo `r`.
+    /// A new test store with repo `r`.
     fn open() -> (tempfile::TempDir, Backend, RepoId) {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Backend::sqlite(Store::open(dir.path()).unwrap());
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
         let repo = store.write(|c| c.create_repo("r")).unwrap();
         (dir, store, repo)
     }
@@ -923,7 +922,7 @@ mod tests {
             // time.
             let ids = store
                 .write(|c| {
-                    let ids = testing::insert_history(c.sqlite().unwrap(), repo, &parents, &edits)?;
+                    let ids = testing::insert_history(c, repo, &parents, &edits)?;
                     for &tip in &ids {
                         derived::derive::<PathHistory>(c, repo, tip, &mut crate::tree::lens_none())?;
                     }
@@ -1155,7 +1154,7 @@ mod tests {
         let tip = *ids.last().unwrap();
         let changed: Vec<ChangesetId> = ids.iter().copied().step_by(3).rev().collect();
 
-        db::CHANGESET_READS.set(0);
+        CHANGESET_READS.set(0);
         NODE_READS.set(0);
         let page = read::log_page(&store, "r", tip, Some(&path("d/f")), usize::MAX, &later());
         let page = page.unwrap();
@@ -1164,7 +1163,7 @@ mod tests {
         assert_eq!(found, changed[..read::MAX_SCAN]);
         assert_eq!(page.next, Some(ids[2]), "the parent of the last entry");
         // One changeset per entry, and one node per part of the path.
-        assert_eq!(db::CHANGESET_READS.get(), read::MAX_SCAN);
+        assert_eq!(CHANGESET_READS.get(), read::MAX_SCAN);
         assert_eq!(NODE_READS.get(), 2 * read::MAX_SCAN);
 
         let rest = read::log_page(

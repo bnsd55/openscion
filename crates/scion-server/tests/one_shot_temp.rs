@@ -21,6 +21,12 @@ fn fsck(data: &std::path::Path) -> (bool, String) {
         .arg(data)
         .arg("fsck")
         .env("NO_COLOR", "1")
+        // fsck opens the store: the URL rides the env, quietly, and the
+        // schema is the data directory's own.
+        .env(
+            "SCION_POSTGRES_URL",
+            scion_server::Backend::test_postgres_url(data).unwrap(),
+        )
         .output()
         .expect("the fsck runs");
     (
@@ -41,7 +47,7 @@ fn staging(data: &std::path::Path) -> Vec<String> {
 
 #[test]
 fn a_one_shot_command_leaves_no_staging_folder_behind() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let data = data_dir(dir.path());
 
     // A fresh store: fsck opens it (its first open creates the schema),

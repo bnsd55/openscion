@@ -11,10 +11,9 @@ use std::path::Path;
 use std::time::Instant;
 
 use scion_core::{BlobId, Changeset, ChangesetId, FileState, IdentityTime, RepoPath};
+use scion_server::Backend;
 use scion_server::fsck;
-use scion_server::test_support::backend::from_store;
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
-use scion_server::test_support::store::Store;
 
 /// The stated size of the measured store: repos and changesets per repo.
 /// Big enough that the per-byte and per-changeset costs of a restore
@@ -31,8 +30,8 @@ const RESTORE_BOUND_SECS: u64 = 600;
 #[test]
 #[ignore = "a measurement for the restore-time job: run with --ignored --nocapture"]
 fn a_restore_of_a_stated_store_takes_a_stated_time() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = from_store(Store::open(dir.path()).unwrap());
+    let dir = scion_server::test_support::private_tempdir();
+    let store = Backend::open_test(dir.path()).unwrap();
 
     // The build: REPOS repos of CHANGESETS_PER_REPO changesets each, one
     // file of FILE_BYTES per changeset, every chain deriving as it grows.
@@ -88,29 +87,32 @@ fn a_restore_of_a_stated_store_takes_a_stated_time() {
     let changesets = u64::from(REPOS) * u64::from(CHANGESETS_PER_REPO);
 
     // The backup, in the runbook's order: the metadata snapshot first
-    // (`VACUUM INTO`, a consistent committed state while the store
-    // serves), then the blob files.
-    let backup = tempfile::tempdir().unwrap();
-    let snapshot = backup.path().join("scion.db");
+    // (the runbook's `pg_dump --schema`, one consistent committed state
+    // while the store serves), then the blob files.
+    let backup = scion_server::test_support::private_tempdir();
+    let snapshot = backup.path().join("metadata.sql");
     // The snapshot and the blob copy are the runbook's own lines.
     take_the_guides_backup(dir.path(), backup.path(), &snapshot);
 
     // The restore, timed end to end: the metadata and the blob files of
     // the backup into a fresh directory, then `fsck`, then an open and a
-    // read - the steps of the runbook's restore.
+    // read - the steps of the runbook's restore. The dump loads into the
+    // restored directory's own schema before anything reads it.
     let restore_started = Instant::now();
-    let restored_dir = tempfile::tempdir().unwrap();
-    fs::copy(&snapshot, restored_dir.path().join("scion.db")).unwrap();
-    copy_tree(
-        &backup.path().join("objects"),
-        &restored_dir.path().join("objects"),
+    let restored_dir = scion_server::test_support::private_tempdir();
+    let restored_schema = scion_server::Backend::test_schema(restored_dir.path());
+    restore_the_guides_backup(
+        &snapshot,
+        backup.path(),
+        restored_dir.path(),
+        &restored_schema,
     );
     // Durability inside the timer: an operator's restore is done when a
     // crash cannot lose what was restored, so the copied files and the
     // directories holding them are fsynced before the clock stops.
     fsync_tree(&restored_dir.path().join("objects"));
     fsync_dir(restored_dir.path());
-    let restored = from_store(Store::open(restored_dir.path()).unwrap());
+    let restored = Backend::open_test(restored_dir.path()).unwrap();
     let report = fsck::run(&restored, 1, &mut |_| {}).unwrap();
     assert!(
         report.problems.is_empty(),
@@ -161,19 +163,29 @@ fn a_restore_of_a_stated_store_takes_a_stated_time() {
 }
 
 /// The backup the runbook's own lines take: the metadata snapshot
-/// (`VACUUM INTO`) first, then the blob copy (`cp -R ... objects`), each
-/// with the stated store's directory and the backup folder in place of
-/// the documented ones.
+/// (`pg_dump --no-owner`) first, then the blob copy
+/// (`cp -R ... objects`), each with the stated store's directory and
+/// the backup folder in place of the documented ones. The dump runs in
+/// the job's Postgres container, whose tools match the server's
+/// version; its file is the `snapshot` this test restores.
 fn take_the_guides_backup(store_dir: &Path, backup: &Path, snapshot: &Path) {
     use scion_server::test_support::docs::run_guide_block_with;
-    let _stdout = run_guide_block_with(
-        "The durability point",
-        "VACUUM INTO",
-        &[
-            ("/srv/scion", store_dir.to_str().unwrap()),
-            ("/backups/scion.db", snapshot.to_str().unwrap()),
-        ],
-    );
+    let schema = Backend::test_schema(store_dir);
+    let container = std::env::var("SCION_TEST_PG_CONTAINER").expect("SCION_TEST_PG_CONTAINER");
+    let db = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL")
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_owned();
+    let file = fs::File::create(snapshot).unwrap();
+    let dump = std::process::Command::new("docker")
+        .args(["exec", &container, "pg_dump", "-U", "postgres"])
+        .args(["--no-owner", &format!("--schema={schema}"), &db])
+        .stdout(std::process::Stdio::from(file))
+        .status()
+        .expect("docker runs");
+    assert!(dump.success(), "pg_dump of {schema} failed");
     let _stdout = run_guide_block_with(
         "The durability point",
         "objects",
@@ -181,6 +193,67 @@ fn take_the_guides_backup(store_dir: &Path, backup: &Path, snapshot: &Path) {
             ("/srv/scion", store_dir.to_str().unwrap()),
             ("/backups/scion-$(date +%F)", backup.to_str().unwrap()),
         ],
+    );
+    // The guide's third copy: the `backend` marker is part of the
+    // metadata - it holds the store UUID the metadata holds too, and
+    // the restore pairs the two.
+    fs::copy(store_dir.join("backend"), backup.join("backend")).unwrap();
+}
+
+/// The restore the runbook's own steps make: the dump loads into the
+/// fresh directory's own schema, then the data directory comes back -
+/// the blob files and the `backend` marker, which travels with the
+/// metadata (it holds the store UUID the metadata holds too, and the
+/// open pairs the two).
+fn restore_the_guides_backup(snapshot: &Path, backup: &Path, restored: &Path, schema: &str) {
+    rename_schema(snapshot, schema);
+    load_dump(snapshot);
+    copy_tree(&backup.join("objects"), &restored.join("objects"));
+    std::fs::copy(backup.join("backend"), restored.join("backend")).unwrap();
+}
+
+/// Renames the schema in the dump, so it loads under the name the
+/// restored directory's test backend computes. The names are
+/// `scion_test_<16 hex digits>`, which no stored data contains.
+fn rename_schema(file: &Path, to: &str) {
+    let text = fs::read_to_string(file).unwrap();
+    // The bare name: the dump line carries the statement's semicolon,
+    // and a `from` that kept it would eat every semicolon it replaced
+    // - the CREATE SCHEMA would swallow the next statement, and every
+    // other spelling of the name would keep the old schema.
+    let from = text
+        .lines()
+        .find_map(|line| {
+            let rest = line.trim_start();
+            rest.strip_prefix("CREATE SCHEMA ")
+                .map(|name| name.trim_end().trim_end_matches(';').to_owned())
+        })
+        .expect("the dump carries its schema's name");
+    std::fs::write(file, text.replace(&from.clone(), to)).unwrap();
+}
+
+/// Loads a dump into the test database, as the runbook's restore does:
+/// the job's Postgres container, whose tools match the server's
+/// version.
+fn load_dump(file: &Path) {
+    let container = std::env::var("SCION_TEST_PG_CONTAINER").expect("SCION_TEST_PG_CONTAINER");
+    let db = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL")
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_owned();
+    let dump = fs::File::open(file).unwrap();
+    let output = std::process::Command::new("docker")
+        .args(["exec", "-i", &container, "psql", "-U", "postgres"])
+        .args(["-v", "ON_ERROR_STOP=1", "-d", &db])
+        .stdin(std::process::Stdio::from(dump))
+        .output()
+        .expect("docker runs");
+    assert!(
+        output.status.success(),
+        "the dump failed to load: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

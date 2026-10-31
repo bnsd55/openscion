@@ -10,9 +10,11 @@ use scion_proto::runtime::auth::Bearer;
 use scion_proto::runtime::listen::Limits;
 use scion_proto::v1::scion_client::ScionClient;
 use scion_proto::v1::{BlameRequest, CreateChangesetRequest, LandRequest, ReadFileRequest};
+use scion_server::Backend;
 use scion_server::Metrics;
+use scion_server::test_support::meta::Meta as _;
 use scion_server::test_support::meta::MetaTx as _;
-use scion_server::test_support::{backend::from_store, service, store::Store};
+use scion_server::test_support::service;
 use tokio::net::TcpListener;
 use tokio_stream::StreamExt;
 use tonic::service::interceptor::InterceptedService;
@@ -76,14 +78,14 @@ fn changeset(parents: Vec<ChangesetId>, path: &str, state: Option<FileState>) ->
 async fn setup() -> (
     tempfile::TempDir,
     tokio::sync::oneshot::Sender<()>,
-    Store,
+    Backend,
     Arc<Metrics>,
     Client,
     ChangesetId,
     std::net::SocketAddr,
 ) {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
+    let dir = scion_server::test_support::private_tempdir();
+    let store = Backend::open_test(dir.path()).unwrap();
     store.blobs().put(CONTENT).unwrap();
     let root = changeset(
         vec![],
@@ -108,7 +110,7 @@ async fn setup() -> (
     let addr = listener.local_addr().unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(service::serve(
-        from_store(store.clone()),
+        store.clone(),
         listener,
         TOKEN,
         service::ServeOptions {
@@ -134,7 +136,7 @@ async fn setup() -> (
 
 /// Puts `content` into the store and names it in a changeset on top of
 /// `parent`. Returns the changeset's id.
-fn on_top(store: &Store, parent: ChangesetId, path: &str, content: &[u8]) -> ChangesetId {
+fn on_top(store: &Backend, parent: ChangesetId, path: &str, content: &[u8]) -> ChangesetId {
     store.blobs().put(content).unwrap();
     store
         .write(|c| {

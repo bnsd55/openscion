@@ -27,16 +27,8 @@ const REPO: &str = "r";
 /// Ends the test with one printed line when it runs on Postgres: it
 /// asserts the data directory's own mechanics, which the Postgres backend
 /// does not have. The PR body lists these tests.
-fn skip_on_postgres(why: &str) -> bool {
-    if Backend::test_is_postgres() {
-        eprintln!("skip on postgres: {why}");
-        return true;
-    }
-    false
-}
-
 fn open_store() -> (TempDir, Backend) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     (dir, store)
 }
@@ -147,7 +139,7 @@ fn graph_fixture(dir: &Path) {
 
 #[test]
 fn merge_base_and_is_ancestor_match_git() {
-    let git_dir = tempfile::tempdir().unwrap();
+    let git_dir = scion_server::test_support::private_tempdir();
     let dir = git_dir.path();
     graph_fixture(dir);
     let (_data, store) = open_store();
@@ -520,7 +512,7 @@ fn diff_fixture(dir: &Path) -> (String, String) {
 
 #[test]
 fn diff_matches_git_name_status_and_resumes_after_any_path() {
-    let git_dir = tempfile::tempdir().unwrap();
+    let git_dir = scion_server::test_support::private_tempdir();
     let dir = git_dir.path();
     let (old_commit, new_commit) = diff_fixture(dir);
     let (_data, store) = open_store();
@@ -608,12 +600,7 @@ fn diff_matches_git_name_status_and_resumes_after_any_path() {
 
 #[test]
 fn diff_skips_a_subtree_with_the_same_id_on_both_sides() {
-    // Asserts the rows of the data directory's database.
-    if skip_on_postgres("asserts the rows of the data directory's database") {
-        return;
-    }
-
-    let (_data, store) = open_store();
+    let (data, store) = open_store();
     let state = |data: &[u8]| {
         Some(FileState::Regular {
             content: BlobId::of(data),
@@ -627,20 +614,33 @@ fn diff_skips_a_subtree_with_the_same_id_on_both_sides() {
             BTreeMap::from([(path("f"), state(b"2"))]),
         ],
     );
-    // Delete the shared subtree: a walk that reads it fails.
+    // The tree the walk will read, and the subtree whose row goes away:
+    // the damage the walk must answer, not a walk that never starts.
     let root = read::root_tree(&store, REPO, ids[0], &later()).unwrap();
-    store
-        .write(|c| {
-            let Some(scion_core::Entry::Dir(keep)) = tree::lookup(c, root, &path("keep"))? else {
-                panic!("keep is a directory");
-            };
-            c.sqlite()
-                .unwrap()
-                .execute("DELETE FROM trees WHERE id = ?1", [keep.as_bytes()])
-                .map_err(scion_server::test_support::error::from_sqlite)?;
-            Ok(())
+    let keep = store
+        .read(|c| match tree::lookup(c, root, &path("keep")) {
+            Ok(Some(scion_core::Entry::Dir(keep))) => Ok(keep),
+            Ok(_) => panic!("keep is a directory"),
+            Err(e) => Err(e),
         })
         .unwrap();
+    // Delete the shared subtree row: the walk that reads it must fail
+    // the diff, on the engine's own rows.
+    {
+        let schema = Backend::test_schema(data.path());
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").expect("the test database's URL");
+        std::thread::spawn(move || {
+            let mut db = postgres::Client::connect(&url, postgres::NoTls)
+                .expect("the test database connects");
+            db.batch_execute(&format!("SET search_path TO {schema}"))
+                .expect("the schema is reachable");
+            let id = keep.as_bytes().to_vec();
+            db.execute("DELETE FROM trees WHERE id = $1", &[&id])
+                .expect("the tree row is deleted");
+        })
+        .join()
+        .unwrap();
+    }
     let entries = diff_all(&store, ids[0], ids[1], None, None);
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path, path("f"));
@@ -936,7 +936,7 @@ fn rename_fixture(dir: &Path) -> (String, String) {
 
 #[test]
 fn diff_finds_renames_as_git_diff_does() {
-    let git_dir = tempfile::tempdir().unwrap();
+    let git_dir = scion_server::test_support::private_tempdir();
     let dir = git_dir.path();
     let (old_commit, new_commit) = rename_fixture(dir);
     let (_data, store) = open_store();
@@ -1218,7 +1218,7 @@ fn the_search_for_similar_files_stops_at_its_budget() {
 
 #[test]
 fn similar_files_are_not_searched_past_git_rename_limit() {
-    let git_dir = tempfile::tempdir().unwrap();
+    let git_dir = scion_server::test_support::private_tempdir();
     let dir = git_dir.path();
     git(dir, &["init", "-q", "-b", "main"]);
     // `old.txt` becomes `new.txt` with an edit. Symlinks with targets of

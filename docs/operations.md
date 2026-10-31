@@ -13,9 +13,10 @@ when the drills of docs/drills/ lose their template.
 The pieces:
 
 - `scion-server` — the one process that stores and lands. One data directory
-  holds everything: `scion.db` (metadata and trees, SQLite), `objects/` (one
-  zstd file per blob), `tmp/` (staging), and three lock files. A second
-  server on the same directory refuses to start.
+  holds the blob files and the marker: `objects/` (one zstd file per blob),
+  `tmp/` (staging), and three lock files; the metadata (changesets, trees,
+  refs) sits in Postgres, at the schema the URL names. A second server on
+  the same directory refuses to start.
 - `scion-cache` — a regional tier in front of the server. Keeps objects in
   memory and answers object reads only: a client resolves refs and gets its
   read tickets from the server, which the tier refuses to serve itself.
@@ -82,8 +83,9 @@ the umask is - under umask 002 (Ubuntu's user private groups) a plain `mkdir`
 makes a group-writable directory, and the server refuses it; the error names
 the chmod that fixes it. The data directory holds every blob and every row, so keep it
 mode 0700 and owned by the user the server runs as: the server refuses one
-that group or others can write, or that sits under a directory another user
-can change. Without `--ticket-key` no object is readable, so a real server
+that group or others can write, one they can read, or that sits under a
+directory another user can change; the error names the directory, and
+`chmod 700 <dir>` fixes it. Without `--ticket-key` no object is readable, so a real server
 adds a ticket key (section 2):
 
 ```sh
@@ -177,7 +179,7 @@ restore from backup (section 3).
 
 Proof: crates/scion-server/tests/backend_refusals.rs::a_lost_server_lock_fences_the_backend (behaviour, no command: the section's serve command is not in the test's path - the test works at the database's own session lock, and the fence it proves is what the runbook's one-server rule protects)
 Proof: crates/scion-server/tests/backend_refusals.rs::an_unreachable_database_is_not_a_takeover (behaviour, no command: the section's steps are actions on the database and its container, not scion commands; the test holds the behaviour the runbook promises - a stopped database is not a takeover)
-Proof: crates/scion-server/tests/crash.rs::every_reply_survives_a_kill_of_the_server
+Proof: crates/scion-server/tests/crash_pg.rs::a_kill_during_a_land_leaves_the_ref_old_or_new (behaviour, no command: the proof is the kill's own timing - a reply answered and the process killed mid-flight - which no guide command reproduces)
 Proof: crates/scion-server/tests/first_boot.rs::a_first_boot_serves_probes_and_reads_back
 
 #### Stopping it for real: a unit file
@@ -238,7 +240,7 @@ example gives the cache the same caller token the server holds.
 ### Server, cache, and a daemon per user
 
 ```sh
-mkdir -p ~/.scion-daemon
+install -d -m 0700 ~/.scion-daemon
 SCION_TOKEN=<USER_TOKEN> SCION_UPSTREAM_TOKEN=<CACHE_TOKEN> \
   ./scion-daemon --data ~/.scion-daemon --upstream http://CACHE:7879
 ```
@@ -273,12 +275,12 @@ every user of this node may read the repo whole; snapshot only such repos.
 
 ### The metadata in Postgres
 
-By default the data directory keeps its metadata in its own SQLite file. With
-`--postgres-url`, the server keeps it in a Postgres database instead, so it
-can be administered and replicated with the Postgres tooling you already
-run, and outlives one machine. The blob files stay in the data directory in
-every backend: they are the big majority of the bytes, and the database
-never stores them.
+The server keeps its metadata in a Postgres database, so it can be
+administered and replicated with the Postgres tooling you already run, and
+outlives one machine. The blob files stay in the data directory: they are
+the big majority of the bytes, and the database never stores them. A SQLite
+data directory is not opened - there are no users, so there is no
+migration.
 
 The URL carries the database's credentials, so give it as a file the
 owner alone may read, not on the command line: a value on the command
@@ -313,7 +315,7 @@ SCION_POSTGRES_URL='postgres://user@dbhost/scion?sslmode=require' \
 
 - `--postgres-url-file` (or `SCION_POSTGRES_URL`) names the database.
   `--postgres-url` takes the same value on the command line; it is
-  deprecated: it warns now and goes away in a later release, because
+  deprecated: it warns now and is removed in v0.2.0, because
   the process list shows its value to every local account. Off this
   machine the URL must ask for TLS (`sslmode=require`): the open
   refuses a remote URL that does not.
@@ -353,17 +355,12 @@ SCION_POSTGRES_URL='postgres://user@dbhost/scion?sslmode=require' \
   key alone after 60 s. An `advisory` row in `pg_locks` is one of
   these, held by this server by design, not a stuck client to kill.
 - A write that waits for another writer's lock gives up after 5 s and
-  answers unavailable, like the SQLite store past its busy timeout; the
-  client retries.
-- `fsck` and `gc` serve every backend: on a Postgres-backed server they
-  run against the database through the same metadata interface, and the
-  blob files stay in the data directory either way. The directory's own
-  marker still refuses an open whose `--postgres-url` names another
-  backend.
-- The choice is recorded in the data directory's `backend` file: a
-  `--postgres-url` open refuses a directory that holds SQLite metadata, and
-  a plain open refuses a directory it names, so a second, empty store
-  cannot grow beside the database. The first open also mints a store UUID
+  answers unavailable; the client retries.
+- `fsck` and `gc` run against the database through the same metadata
+  interface, and the blob files stay in the data directory.
+- The choice is recorded in the data directory's `backend` file: a plain
+  open refuses a directory whose marker names a database, so a second,
+  empty store cannot grow beside the database. The first open also mints a store UUID
   and writes it in the database and the marker's second line: an open of
   the database against a directory that names another store is refused
   with both UUIDs, so a restore that mixes a database with the wrong
@@ -397,9 +394,6 @@ SCION_POSTGRES_URL='postgres://user@dbhost/scion?sslmode=require' \
   connections carry the tighter bounds (`keepalives_idle` 30 s, a 30 s
   TCP user timeout), so the reverse - this server noticing a dead
   database - is bounded by the server, not the database.
-- The SQLite store has none of this: one file is opened by one process at
-  the kernel level, so there is no lock to lose and no fence. The notes
-  above that name the one-server lock and the fence are Postgres only.
 - Re-pairing a lost marker: if an open refuses with "this database names
   the store ..., but the data directory carries no marker of it" and the
   directory IS the one this database was served with — its blob files
@@ -620,7 +614,7 @@ its value is readable by every local account through `ps`.
 | Variable | Flag | Read by | Notes |
 | --- | --- | --- | --- |
 | `SCION_DATA` | `--data` | `scion-server` | Data directory, default `scion-data`. |
-| `SCION_POSTGRES_URL` | `--postgres-url` | `scion-server` | The URL holds the database credentials; the environment keeps them out of the process list (`ps`). `--postgres-url-file` reads it from a file the owner alone may read, and the argv form is deprecated: it warns now and goes away in a later release. |
+| `SCION_POSTGRES_URL` | `--postgres-url` | `scion-server` | The URL holds the database credentials; the environment keeps them out of the process list (`ps`). `--postgres-url-file` reads it from a file the owner alone may read, and the argv form is deprecated: it warns now and is removed in v0.2.0. |
 | `SCION_POSTGRES_URL_FILE` | `--postgres-url-file` | `scion-server` | A file that holds the database URL. Only its owner may read it, and a symlink is refused. |
 | `SCION_TOKEN` | `--token` | `scion-server` (`serve`, `hash-token`), `scion-cache`, `scion-daemon`, `scn` | A secret; the environment keeps it out of the process list. The `--token-file` flag reads the token from a file the owner alone may read, and `hash-token` reads it from stdin. The argv form prints a deprecation warning and goes away in a later release. |
 | `SCION_UPSTREAM_TOKEN` | `--upstream-token` | `scion-cache`, `scion-daemon` | A secret, as `SCION_TOKEN`; `--upstream-token-file` reads it from a file, and the argv form is deprecated: it warns now and goes away in a later release. |
@@ -632,7 +626,7 @@ its value is readable by every local account through `ps`.
 | `SCION_REPO` | `--repo` | `scn` | Default `main`. |
 
 Two more names exist for the test suite only, never for an operator:
-`SCION_TEST_BACKEND` and `SCION_TEST_POSTGRES_URL`.
+`SCION_TEST_POSTGRES_URL` and `SCION_TEST_PG_CONTAINER`.
 
 ## 2. Ticket keys
 
@@ -686,11 +680,9 @@ What an acknowledged write has survived, before you need a backup:
   file was renamed into `objects/`, the directories of every new file were
   fsynced, and the drive's write cache was flushed. The server does not
   answer from its page cache: a power cut after the reply can lose nothing
-  the caller was told was stored, on either backend — the blob path is the
-  data directory's in both.
+  the caller was told was stored — the blob path is the data directory's.
 - A **land** is answered after its blobs were synced as above and its
-  metadata commit was made durable. On SQLite, the commit fsyncs the WAL
-  (`synchronous = FULL`); on Postgres, every connection runs
+  metadata commit was made durable. Every connection runs
   `synchronous_commit = on`, and the server refuses to open a database
   that turned it off. A land's reply therefore names a commit the
   database will not lose, and the database's own durability rules carry
@@ -700,7 +692,7 @@ What an acknowledged write has survived, before you need a backup:
 
 Proof: crates/scion-server/tests/power.rs::every_reply_survives_a_power_cut (behaviour, no command: the proof is the power cut the LazyFS device delivers at the disk boundary, which no shell command reproduces)
 Proof: crates/scion-server/tests/dm_log_writes.rs::an_acknowledged_blob_survives_a_cut_at_the_last_barrier_before_its_reply (behaviour, no command: the proof is a cut at the device's last barrier before the reply, delivered by the dm-log device, which no shell command reproduces)
-Proof: crates/scion-server/tests/crash.rs::every_reply_survives_a_kill_of_the_server (behaviour, no command: the proof is the kill's own timing - a reply answered and the process killed mid-flight - which no guide command reproduces)
+Proof: crates/scion-server/tests/crash_pg.rs::a_kill_during_a_land_leaves_the_ref_old_or_new (behaviour, no command: the proof is the kill's own timing - a reply answered and the process killed mid-flight - which no guide command reproduces)
 Proof: crates/scion-server/tests/storage.rs::a_retry_after_a_failed_dir_fsync_makes_the_kept_file_durable (behaviour, no command: the proof injects the fsync failure at the directory boundary, which a shell cannot order; the retry it forces is the runbook's promise)
 
 The Postgres metadata half of the first two rules is Postgres's own
@@ -716,54 +708,40 @@ acknowledged writes, plus the write in flight while the snapshot ran.
 Writes acknowledged **before** the snapshot read back whole after a
 restore, whatever was happening in the meantime.
 
-Proof: crates/scion-server/tests/backup.rs::a_backup_taken_while_serving_restores_whole
-Proof (open, #411): the live-backup test of that PR pins what a backup taken while
-the server keeps writing may and may not hold
+Proof: crates/scion-server/tests/backup.rs::a_backup_taken_while_serving_restores_whole (behaviour, no command: the section states the durability rules in prose, and no shell command reproduces an acknowledged write; the test holds the recovery point the section promises)
 
-A data directory is `scion.db` plus `objects/`; the lock files and `tmp/`
-are process state, not data. A copy of the directory is a backup:
+A data directory is the blob files in `objects/` plus the `backend`
+marker; the lock files and `tmp/` are process state, not data, and the
+metadata itself lives in the database, not in the directory. A backup is
+the metadata's dump plus the blob files plus the marker.
 
-```sh
-cp -R /srv/scion /backups/scion-$(date +%F)
-```
+With the server stopped, `pg_dump` the database and copy the directory:
+the copy is exact. While the server runs, take the backup in an order
+that keeps it whole: the metadata first, the blob files second. A blob
+file is written once and is durable before the row that names it
+commits, so a metadata snapshot never names a blob that a later copy of
+`objects/` misses; a backup that takes the blobs first can miss a blob
+that a row of its own metadata names.
 
-With the server stopped, the copy is exact. While the server runs, take
-the backup in an order that keeps it whole: the metadata first, the blob
-files second. A blob file is written once and is durable before the row
-that names it commits, so a metadata snapshot never names a blob that a
-later copy of `objects/` misses; a backup that takes the blobs first can
-miss a blob that a row of its own metadata names.
-
-On SQLite, the snapshot is `VACUUM INTO`, which reads a consistent
-committed state and does not stop the server:
-
-```sh
-sqlite3 /srv/scion/scion.db "VACUUM INTO '/backups/scion.db'"
-```
-
-On Postgres, the metadata lives in the database, so the snapshot is a
-dump:
+The metadata snapshot is a dump, which reads a consistent committed
+state and does not stop the server:
 
 ```sh
 pg_dump --no-owner --file /backups/metadata.sql <the metadata database>
 ```
 
-Then copy the blob files into the backup:
+Then copy the blob files and the marker into the backup:
 
 ```sh
 cp -R /srv/scion/objects /backups/scion-$(date +%F)/objects
+chmod 700 /backups/scion-$(date +%F)/objects
+cp /srv/scion/backend /backups/scion-$(date +%F)/backend
 ```
 
 The `backend` marker is part of the metadata: it holds the store's UUID,
 which the metadata holds too, and together they bind the database to its
 data directory. An open refuses a database whose UUID differs from the
-marker's, so the marker and the metadata always travel together. Copy
-the marker when the directory has one (a Postgres deployment writes it;
-a SQLite directory keeps its UUID in `scion.db` itself):
-
-```sh
-cp /srv/scion/backend /backups/scion-$(date +%F)/backend
-```
+marker's, so the marker and the metadata always travel together.
 
 A copy taken this way never tears a file that a commit is writing, and
 `fsck` tells you what state a backup holds. `fsck` changes nothing and
@@ -811,9 +789,9 @@ current numbers live in the workflow's run log on `main`, and a run
 that drifts far from them is a regression to look at, not a promise
 to restate here.
 
-Proof: crates/scion-server/tests/restore_bench.rs::a_restore_of_a_stated_store_takes_a_stated_time
+Proof: crates/scion-server/tests/restore_bench.rs::a_restore_of_a_stated_store_takes_a_stated_time (measured, no command: the number is the workflow's own run, not a shell command the guide names)
 
-Proof: crates/scion-server/tests/backup.rs::a_backup_taken_while_serving_restores_whole
+Proof: crates/scion-server/tests/backup.rs::a_backup_taken_while_serving_restores_whole (behaviour, no command: the section's sample numbers are measured by the workflow, not reproducible as one command; the test holds the backup-while-serving behaviour the section names)
 
 On Postgres, a restore's staging schema carries a `restore_staging`
 mark from its first transaction until publication, so a restore drops
@@ -839,18 +817,15 @@ Proof: crates/scion-server/tests/archive_attacks.rs::a_restored_store_does_not_c
 
 The schema version lives in the database. On open, a server migrates an
 older schema forward, one migration per released version, each in one
-transaction, with its progress in the log (a migration can take a while:
-schema 4 walks every repo's changesets; on Postgres, schema 5 renumbers
-the changeset parents from one to zero, the numbering SQLite always
-wrote). Two rules:
+transaction (the released Postgres migrations are table creations and
+a parent numbering; none rewrites data, so none takes long). Two rules:
 
 - A database with a **newer** schema than the binary refuses to open:
   `corrupt data: database schema version 7 is newer than this build (6)`.
-  Run the old binary until you can upgrade, or restore a backup. Never edit
-  `user_version` by hand.
-- If other processes (an `import`, a `fsck`) share the directory, a
-  migration waits for them to stop: the error says `stop the other processes
-  that use ...`. One process at a time migrates.
+  Run the old binary until you can upgrade, or restore a backup.
+- Other servers take the schema's advisory lock: one process migrates at
+  a time, and an open that waits longer than 5 s answers busy, and the
+  caller retries.
 
 ### A failed migration
 
@@ -860,12 +835,13 @@ is the rule that names the case:
 
 1. The open refuses with `schema version N is newer than this build`:
    the data ran on a newer build than this binary. The fix is the old
-   binary, or the restore of section 3. Never edit `user_version` by
-   hand: the version is the migration's bookmark, and a hand-moved one
-   leaves the database half-migrated in a way no migration can finish.
-2. The start waits with `stop the other processes that use ...`: another
-   process holds the directory. Stop it; the migration runs on the next
-   start.
+   binary, or the restore of section 3. Never edit the schema version
+   in the database by hand: the version is the migration's bookmark,
+   and a hand-moved one leaves the database half-migrated in a way no
+   migration can finish.
+2. The open answers busy (the 5 s clock above): another server holds
+   the schema's migration lock. It finishes its migration; this one
+   retries and serves.
 
 After the fix, the server starts and serves; `fsck` says the store is
 whole.
@@ -915,7 +891,7 @@ backfills a whole history in steps when you want it done before the first
 query (it opens the directory as the server, so with the server stopped, and
 it is safe to repeat).
 
-Proof: crates/scion-server/tests/crash.rs::a_kill_during_a_schema_upgrade_leaves_the_old_schema_or_the_new_one (behaviour, no command: the section's upgrade steps are prose; the proof is the kill's own timing inside the migration)
+Proof: crates/scion-server/tests/crash_pg.rs::a_kill_during_a_schema_upgrade_leaves_one_whole_version (behaviour, no command: the section's upgrade steps are prose; the proof is the kill's own timing inside the migration)
 
 ### Rollback
 
@@ -924,9 +900,10 @@ the old binary on the data as it is; if it did, restore the pre-upgrade
 backup (section 3) and run the old binary on the copy. After a
 migration, rollback means restoring the backup taken before the
 upgrade: the old binary refuses the new schema - that refusal is the
-stop, and the backup is the recovery. Never edit `user_version` by
-hand - the version is the migration's bookmark, and a hand-moved one
-leaves the database half-migrated in a way no migration can finish.
+stop, and the backup is the recovery. Never edit the schema version in
+the database by hand - the version is the migration's bookmark, and a
+hand-moved one leaves the database half-migrated in a way no migration
+can finish.
 The run-the-old-binary arm is the version matrix's drill, #431: the
 pre-upgrade backup restores and serves under the N-1 binary. The
 restore arm is the failed-migration section's Proof: the test forges a
@@ -1166,8 +1143,9 @@ log.
 - `a connection waits: the most connections are open` — the server is at
   `--max-connections` and new clients queue. Raise the cap or add caches.
 - `the database stayed busy` / `the database stayed busy; the batch
-  retries` — SQLite contention, usually an import beside a live server.
-  Rare bursts are fine; constant ones mean the disk is too slow.
+  retries` — a lock or connection the caller could not get inside the
+  clock, usually an import beside a live server. Rare bursts are fine;
+  constant ones mean the database is under-provisioned.
 - `stored blob is corrupt` / `rewriting a corrupt blob file` — the store
   found damage on disk. Run `fsck`, then restore the named blobs from a
   backup.
@@ -1363,41 +1341,32 @@ a bottom. The table below is the published envelope
 ([#387](https://github.com/bnsd55/openscion/issues/387)): every cell is a
 run of [`scripts/capacity.sh`](../scripts/capacity.sh) on a GitHub-hosted
 runner of the class named in the caption, with the dataset of
-[benchmarks.md](benchmarks.md) (tokio at a pinned commit), SQLite or
-Postgres behind the server, `scn bench` landing through it and readers
+[benchmarks.md](benchmarks.md) (tokio at a pinned commit), Postgres
+behind the server, `scn bench` landing through it and readers
 checking out through a cache and a daemon beside it.
 
 | | |
 |---|---|
-| Commit | 07198dd728c754ad7a79ba526cb2227e620490b0 the main commit the run measured (the run's own HEAD, `62fb2183`, fixes the throughput column's sum only), at [run 40212691905](https://github.com/bnsd55/openscion/actions/runs/40212691905) |
-| Runner | GitHub-hosted `ubuntu-24.04`: 4 vCPU, 16 GiB RAM, ext4 on a ~144 GiB SSD, runner image `ubuntu24 20261023.334.3`, kernel `6.17.0-1022-azure` (the run's `machine.txt` artifact) |
+| Commit | f4d62b595f94f86903225629a936f8ac221942cb the main commit the run measured (the run's own HEAD), at [run 40864498937](https://github.com/bnsd55/openscion/actions/runs/40864498937) |
+| Runner | GitHub-hosted `ubuntu-24.04`: 4 vCPU, 16 GiB RAM, ext4 on a ~144 GiB SSD, runner image `ubuntu24 20261026.354.1`, kernel `7.0.0-1017-azure` (the run's `machine.txt` artifact) |
 | Filesystem | the filesystem the run measured, from the run's `machine.txt` artifact (`df -T` on the work directory); the `ubuntu-24.04` class's root disk is ext4 ([support.md](support.md)) |
 | Repetitions | 2 per cell; the table reports the cell's whole run, and the run's raw samples are the workflow run's `capacity.csv` artifact |
 
 | backend | writers | readers | land p99 ms | checkout p50 ms | checkout p99 ms | timeouts | errors | server RSS MiB | landed | lands per second | blob store KiB per 1k lands | database KiB per 1k lands |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| sqlite | 2 | 0 | 12.6 | - | - | 0 | 0 | 27 | 2000 | 185.5 | 112344 | - |
-| sqlite | 2 | 5 | 28.0 | 170 | 233 | 0 | 0 | 30 | 2000 | 78.4 | 112372 | - |
-| sqlite | 2 | 20 | 91.4 | 671 | 813 | 0 | 0 | 31 | 2000 | 28.7 | 112256 | - |
-| sqlite | 50 | 0 | 216 | - | - | 0 | 0 | 42 | 2000 | 249.8 | 58896 | - |
-| sqlite | 50 | 5 | 461 | 171 | 243 | 0 | 0 | 48 | 2000 | 115.4 | 58864 | - |
-| sqlite | 50 | 20 | 1507 | 678 | 839 | 0 | 0 | 50 | 2000 | 39.6 | 58844 | - |
-| sqlite | 200 | 0 | 906 | - | - | 0 | 0 | 57 | 2000 | 234.4 | 78296 | - |
-| sqlite | 200 | 5 | 1967 | 172 | 246 | 0 | 0 | 74 | 2000 | 106.9 | 78328 | - |
-| sqlite | 200 | 20 | 8751 | 669 | 825 | 0 | 0 | 76 | 2000 | 38.8 | 78388 | - |
-| postgres | 2 | 0 | 59.9 | - | - | 0 | 0 | 20 | 2000 | 21.1 | 5666 | 85454 |
-| postgres | 2 | 5 | 126 | 248 | 290 | 0 | 0 | 23 | 2000 | 11.2 | 5670 | 85078 |
-| postgres | 2 | 20 | 256 | 844 | 1033 | 0 | 0 | 25 | 2000 | 8.0 | 5674 | 87506 |
-| postgres | 50 | 0 | 2233 | - | - | 0 | 0 | 32 | 2000 | 22.4 | 5668 | 34520 |
-| postgres | 50 | 5 | 4478 | 253 | 296 | 0 | 0 | 37 | 2000 | 12.2 | 5668 | 34458 |
-| postgres | 50 | 20 | 7857 | 870 | 1083 | 0 | 0 | 39 | 2000 | 8.3 | 5668 | 34578 |
-| postgres | 200 | 0 | 9249 | - | - | 0 | 0 | 44 | 2000 | 21.8 | 5664 | 62298 |
-| postgres | 200 | 5 | 17017 | 253 | 299 | 0 | 0 | 63 | 2000 | 12.1 | 5668 | 62318 |
-| postgres | 200 | 20 | 29960 | 874 | 1085 | 0 | 0 | 64 | 2000 | 8.3 | 5670 | 62270 |
+| postgres | 2 | 0 | 57.8 | - | - | 0 | 0 | 20 | 2000 | 23.2 | 5668 | 85012 |
+| postgres | 2 | 5 | 123.4 | 248 | 291 | 0 | 0 | 24 | 2000 | 11.4 | 5668 | 87506 |
+| postgres | 2 | 20 | 245.3 | 861 | 1038 | 0 | 0 | 27 | 2000 | 8.2 | 5668 | 87298 |
+| postgres | 50 | 0 | 2034.1 | - | - | 0 | 0 | 34 | 2000 | 25.5 | 5672 | 34494 |
+| postgres | 50 | 5 | 4232.0 | 246 | 288 | 0 | 0 | 38 | 2000 | 12.7 | 5674 | 34510 |
+| postgres | 50 | 20 | 7708.9 | 867 | 1063 | 0 | 0 | 40 | 2000 | 8.4 | 5670 | 34534 |
+| postgres | 200 | 0 | 8081.3 | - | - | 0 | 0 | 45 | 2000 | 24.9 | 5670 | 62376 |
+| postgres | 200 | 5 | 16945.7 | 248 | 292 | 0 | 0 | 64 | 2000 | 12.5 | 5668 | 62234 |
+| postgres | 200 | 20 | 29120.7 | 873 | 1061 | 0 | 0 | 66 | 2000 | 8.3 | 5668 | 62340 |
 
-Every cell runs on a store the cell's own import made: on SQLite a data directory
-the cell created, on Postgres a database the cell dropped and
-recreated, so a cell's numbers are the store's at its own size, and
+Every cell runs on a store the cell's own import made: a database the
+cell dropped and recreated, so a cell's numbers are the store's at its
+own size, and
 the growth column is the cell's own lands' bytes. The timeouts column
 counts reader attempts the 60-second checkout timeout killed; it is
 its own column because a hang is a finding, not noise. The errors
@@ -1416,10 +1385,9 @@ The growth splits into two columns, both divided by the lands the
 server's counter measured - a cell that lost lands reports its own
 bytes over its own lands, never the plan's. The blob store column
 measures the cell's data directory; the database column measures the
-database the cell reset (`pg_database_size`), so a Postgres row cannot
-look complete while the rows it grew sit unmeasured in the service
-container. SQLite has no separate database, so its database column is
-"-". RSS is the server's
+database the cell reset (`pg_database_size`), so a row cannot look
+complete while the rows it grew sit unmeasured in the service
+container. RSS is the server's
 at the end of the cell: a capacity cell is minutes long, not the hours a
 warm-up would need, so it is a level, not a leak bound - the leak bound
 is the soak's.

@@ -20,7 +20,7 @@ struct Git(tempfile::TempDir);
 
 impl Git {
     fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = scion_server::test_support::private_tempdir();
         let out = Command::new("git")
             .args(["init", "-q", "-b", "main"])
             .current_dir(dir.path())
@@ -89,16 +89,12 @@ fn opts(rev: &str) -> ImportOptions {
 
 #[test]
 fn the_imports_changeset_family_costs_one_statement_per_commit_plus_the_batchs() {
-    if !Backend::test_is_postgres() {
-        eprintln!("skip on sqlite: the statement count is a Postgres seam");
-        return;
-    }
     let mut counts: Vec<u64> = Vec::new();
     let mut flushes: Vec<u64> = Vec::new();
     for n in [100, 1000] {
         let git = Git::new();
         let tip = git.fast_commits(n);
-        let dir = tempfile::tempdir().unwrap();
+        let dir = scion_server::test_support::private_tempdir();
         let store = Backend::open_test(dir.path()).unwrap();
         Backend::test_reset_statement_count();
         import_git(&store, "main", git.path(), &opts(&tip)).unwrap();

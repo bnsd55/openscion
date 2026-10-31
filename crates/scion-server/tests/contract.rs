@@ -62,7 +62,7 @@ struct Git(tempfile::TempDir);
 
 impl Git {
     fn new() -> Self {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = scion_server::test_support::private_tempdir();
         let out = Command::new("git")
             .args(["init", "-q", "-b", "main"])
             .current_dir(dir.path())
@@ -274,10 +274,6 @@ impl Manifest {
     }
 }
 
-fn is_pg() -> bool {
-    Backend::test_is_postgres()
-}
-
 /// Whether a porcelain line is a commit header: a 40-hex first token
 /// followed by line numbers. `boundary` and the rest start with other
 /// shapes.
@@ -290,58 +286,35 @@ fn is_sha_header(line: &str) -> bool {
         && line[first.len()..].starts_with(' ')
 }
 
-/// The backend identity, the #412 lesson: the env's choice and the
-/// store's actual kind must agree, and the on-disk shape must match.
+/// The backend identity, the #412 lesson: the on-disk shape must match
+/// the build: the data directory carries the Postgres marker and no
+/// SQLite database.
 fn assert_identity(dir: &std::path::Path, _store: &Backend) {
-    if is_pg() {
-        assert!(
-            dir.join("backend").exists(),
-            "a Postgres data directory carries its backend marker"
-        );
-        assert!(
-            !dir.join("scion.db").exists(),
-            "a Postgres data directory holds no scion.db"
-        );
-    } else {
-        assert!(
-            !dir.join("backend").exists(),
-            "a SQLite data directory carries no Postgres marker"
-        );
-        assert!(
-            dir.join("scion.db").exists(),
-            "a SQLite data directory keeps its metadata in scion.db"
-        );
-    }
+    assert!(
+        dir.join("backend").exists(),
+        "a Postgres data directory carries its backend marker"
+    );
+    assert!(
+        !dir.join("scion.db").exists(),
+        "a Postgres data directory holds no scion.db"
+    );
 }
 
 /// Non-zero row counts in the main tables, read by raw SQL, so an import
 /// that wrote nothing cannot pass vacuously.
 fn assert_row_counts(dir: &std::path::Path, want_changesets: i64) {
-    if is_pg() {
-        let schema = Backend::test_schema(dir).unwrap();
-        let url = std::env::var("SCION_TEST_POSTGRES_URL").expect("SCION_TEST_POSTGRES_URL");
-        let mut db = postgres::Client::connect(url.trim_end_matches('/'), postgres::NoTls)
-            .expect("the test database is up");
-        db.batch_execute(&format!("SET search_path TO {schema}"))
-            .expect("the schema selects");
-        let mut count = |sql: &str| db.query_one(sql, &[]).unwrap().get::<_, i64>(0);
-        assert!(count("SELECT count(*) FROM changesets") >= want_changesets);
-        assert!(count("SELECT count(*) FROM changeset_parents") >= want_changesets - 1);
-        assert!(count("SELECT count(*) FROM history_nodes") > 0);
-        assert!(count("SELECT count(*) FROM refs") > 0);
-        assert!(count("SELECT count(*) FROM trees") > 0);
-    } else {
-        let db = rusqlite::Connection::open(dir.join("scion.db")).unwrap();
-        let count = |sql: &str| {
-            db.query_row(sql, [], |row| row.get::<_, i64>(0))
-                .expect("the count reads")
-        };
-        assert!(count("SELECT count(*) FROM changesets") >= want_changesets);
-        assert!(count("SELECT count(*) FROM changeset_parents") >= want_changesets - 1);
-        assert!(count("SELECT count(*) FROM history_nodes") > 0);
-        assert!(count("SELECT count(*) FROM refs") > 0);
-        assert!(count("SELECT count(*) FROM trees") > 0);
-    }
+    let schema = Backend::test_schema(dir);
+    let url = std::env::var("SCION_TEST_POSTGRES_URL").expect("SCION_TEST_POSTGRES_URL");
+    let mut db = postgres::Client::connect(url.trim_end_matches('/'), postgres::NoTls)
+        .expect("the test database is up");
+    db.batch_execute(&format!("SET search_path TO {schema}"))
+        .expect("the schema selects");
+    let mut count = |sql: &str| db.query_one(sql, &[]).unwrap().get::<_, i64>(0);
+    assert!(count("SELECT count(*) FROM changesets") >= want_changesets);
+    assert!(count("SELECT count(*) FROM changeset_parents") >= want_changesets - 1);
+    assert!(count("SELECT count(*) FROM history_nodes") > 0);
+    assert!(count("SELECT count(*) FROM refs") > 0);
+    assert!(count("SELECT count(*) FROM trees") > 0);
 }
 
 /// fsck, through the binary, with the URL the schema follows on
@@ -349,9 +322,7 @@ fn assert_row_counts(dir: &std::path::Path, want_changesets: i64) {
 fn fsck_clean(dir: &std::path::Path) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_scion-server"));
     cmd.arg("--data").arg(dir);
-    if is_pg() {
-        cmd.env("SCION_POSTGRES_URL", common::postgres_url(dir));
-    }
+    cmd.env("SCION_POSTGRES_URL", common::postgres_url(dir));
     let out = cmd.arg("fsck").output().unwrap();
     assert!(
         out.status.success(),
@@ -530,7 +501,7 @@ async fn the_public_reads_match_an_independent_manifest() {
     git.build();
     let manifest = git.manifest();
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test_shared(dir.path()).unwrap();
     assert_identity(dir.path(), &store);
 
@@ -596,9 +567,7 @@ async fn the_public_reads_match_an_independent_manifest() {
     // fsck sees no damage, and gc ran beside the server.
     let mut gc = Command::new(env!("CARGO_BIN_EXE_scion-server"));
     gc.arg("--data").arg(dir.path());
-    if is_pg() {
-        gc.env("SCION_POSTGRES_URL", common::postgres_url(dir.path()));
-    }
+    gc.env("SCION_POSTGRES_URL", common::postgres_url(dir.path()));
     let gc_out = gc.args(["gc", "--grace-secs", "0"]).output().unwrap();
     assert!(
         gc_out.status.success(),

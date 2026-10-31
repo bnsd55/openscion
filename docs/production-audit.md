@@ -22,7 +22,7 @@ document landed on.
 
 | Finding | Evidence | Status |
 | --- | --- | --- |
-| `scn mount --unstable-writable`: a planted parent symlink can redirect an overlay write outside the mount (final-name-only check). the maintainer's decision: the writable mount leaves the v1 release binary — the write path becomes a build feature, off in release | `crates/scn/src/vfs.rs:1469`, `docs/cli.md:57`, `changes/313.fixed.md` | open, closed when the write path left the release builds (#640) |
+| `scn mount --unstable-writable`: a planted parent symlink can redirect an overlay write outside the mount (final-name-only check). the maintainer's decision: the writable mount leaves the v1 release binary — the write path becomes a build feature, off in release | `crates/scn/src/vfs.rs:1469`, `docs/cli.md:57`, `changes/313.fixed.md` | fixed (#640: the write path is a build feature, off in release; the build flag names it) |
 | Env aliases `SCION_DATA`, `SCION_TOKEN`, `SCION_POSTGRES_URL`, `SCION_POSTGRES_URL_FILE` exist beside their flags | `crates/scion-server/src/main.rs:30,36-44,1290` | fixed by design (each alias is the documented spelling of a flag in `docs/cli.md`; the flag list is the release surface, and the URL env exists so secrets stay off argv) |
 | Test hooks in release binaries: the store fault hooks and the derive test pool build only with `--features test-hooks` | `crates/scion-server/Cargo.toml:61`, `crates/scion-server/src/store.rs:920` | fixed by design (the feature is off in every release build; `release.yml` builds plain `--release`) |
 
@@ -54,7 +54,7 @@ document landed on.
 | Finding | Evidence | Status |
 | --- | --- | --- |
 | The Postgres writer pings the database with an autocommit `SELECT 1` while holding the writer mutex | `crates/scion-server/src/pg.rs:905` | bounded — ceiling: 1 statement per writer-idle probe (not per call); the probe's role is stated in `operations.md`'s connection-cap paragraph (the server holds 9 connections). Untested: the probe is a timer with no seam (the 60 s interval is a literal in the spawned thread), so no test pins its cadence |
-| The sweep below ran over both backends. No production site pays a statement per repository item over the wire: Postgres chunks every multi-row write (1,000 rows per `unnest` insert) or answers one `ANY($1)` statement per list, every paged read is a keyset page with a matching `ORDER BY`, and SQLite's per-item loops are local prepared statements on its one connection (no round trips), which the code names as its batch at `db.rs:276,876,1181,1372` | `db.rs:228,278,875,1193,1346,1384,1518`; `pg.rs:1330,2401,2573,2634,2979,3313,3599,3710-3910`; `fsck.rs:240,300`; `land.rs:1170`; `import.rs:236` | fixed by design (chunked or local; no REPO-SIZED site) |
+| No production site pays a statement per repository item over the wire: Postgres chunks every multi-row write (1,000 rows per `unnest` insert) or answers one `ANY($1)` statement per list, and every paged read is a keyset page with a matching `ORDER BY` | `pg.rs:1330,2401,2573,2634,2979,3313,3599,3710-3910`; `fsck.rs:240,300`; `land.rs:1170`; `import.rs:236` | fixed by design (chunked; no REPO-SIZED site) |
 
 ### The sweep, per site
 
@@ -92,8 +92,7 @@ each caller answers per row and the reply is a set:
 | --- | --- | --- | --- |
 | Writes (`pg.rs:1355`, plain `BEGIN`) | READ COMMITTED (Postgres's default) — one in-process writer mutex, and every write transaction of the schema holds the schema's one advisory key until it commits, so two writers serialize even across processes | `cas_ref` keeps its version predicate inside the UPDATE; `record_land`'s count-then-insert runs under the advisory key (`pg.rs:3407`); `settle` re-reads the ref and writes only under the version it read (`land.rs:810`); `put_derived`'s agree-check reads and writes in one writer-serialized transaction | No — `two_lands_that_record_together_respect_the_pending_cap` (`pg.rs:4735`) proves the count, `a_conflict_recorded_while_an_import_moved_the_ref_is_not_final` (`land.rs:1982`, run on both backends) proves the verdict's CAS window |
 | Reads (`pg.rs:1389`) | REPEATABLE READ, READ ONLY — one snapshot per read, with `SET LOCAL` statement and idle timeouts | none (read-only) | No |
-| SQLite | one writer; plain reads run per-statement autocommit on pooled readers, `read_snapshot` holds one explicit read transaction (`store.rs:494`) | the same CAS and quota shapes, one writer | No |
-| A server asked for Postgres refuses rather than falling back to SQLite (a mismatched data directory is refused at the open) | `crates/scion-server/src/backend.rs:128,183` | fixed by design (refusal, not fallback) |
+| A server refuses a data directory whose marker names another backend at the open | `crates/scion-server/src/backend.rs:128,183` | fixed by design (refusal, not fallback) |
 
 ## 5. Failure paths
 
@@ -157,10 +156,6 @@ leaves behind, and whether the next holder checks it.
 
 | Lock | Guards | A panicking holder leaves | Verdict |
 | --- | --- | --- | --- |
-| `store.rs:131` `db: Mutex<Connection>` (the SQLite write connection) | every commit and unflushed read | an open transaction — `SqliteTx`'s Drop rolls it back on unwind, so the connection is usable and the store keeps every committed byte | SAFE — the invariant is stated at `store.rs:649-651` and holds at every panic point inside `commit` (the txn guard drops before any code sees the poison) |
-| `store.rs:172` `writers: Mutex<usize>` + `write_woken` | the writer count for the handoff | a stale count | SAFE — the count is repaired by `WriteWaiter`'s Drop, which runs on unwind |
-| `store.rs:2021` the flush-state lock | the flush bookkeeping | a stale marker | SAFE — the holder holds it only across counter reads and `fetch_max`es; no panic point inside leaves an inconsistent value (counters are monotonic) |
-| `store.rs:2062,2114` `SPAWNS: RwLock` | the spawn-serialization guard | — | SAFE — it fails loud (`.expect("not poisoned")`), which is fail-closed |
 | `derived.rs:178` `flights: Mutex<HashMap<FlightKey, Arc<Flight>>>` | which repo/kind walks are live | a live flight whose walk never retires: every later joiner waits for a walk counter that never moves — a caller with no deadline waits forever. Two exit paths leaked it: the panic unwind past `retire`, and the permit wait's early `?` on the owner's deadline | UNSAFE — fixed in the panic-fix PR: one drop guard (`RetireOnDrop`), created the moment the join makes the caller an owner, retires the flight on every exit; the panic still propagates. Tests: a panicking derive (the next caller owns a fresh walk) and a permit timeout (red before: the next caller hung to its DeadlineExceeded; green: it finishes the chain) |
 | `derived.rs:180` `in_flight: Mutex<usize>` | the walk-permit count | a stale permit count | SAFE — `Permit`'s Drop runs on unwind and decrements |
 | `derived.rs` `flight.walks` per-flight counter + `woken` | the walk-end signal for waiters | a counter that never advances | covered by the `flights` fix above: with `retire` on every owner exit the waiters wake and take over a fresh walk |
@@ -184,6 +179,9 @@ in-process; stated in the PR).
 | Ticket and seed files are 0600; the access file refuses group/other writable and symlinks | `crates/scion-server/src/main.rs:1333,1433,1493` | bounded — ceiling: 0600 on every secret file, the access file refuses go-w and symlinks at the open; `operations.md` "The open checks" states the refusal |
 | Listeners default to loopback | `crates/scion-server/src/main.rs:60` (`default_value = "127.0.0.1:7878"`) | bounded — ceiling: the default bind is 127.0.0.1:7878; `docs/operations.md`'s serve examples restate it |
 | Production state in temp dirs: the server never writes store state outside `--data`; every temp-dir user is a harness script | `crates/scion-server/src/main.rs:29` (the only store path) | fixed by design (the data dir is the only durable state; `TMPDIR` appears in no serve path) |
+| Paths the process creates with the process umask inherit the gap: `export --out` (a new archive world-readable under a permissive umask) and the restore's staging directory (0755 members under a 0700 store) | `archive.rs` `make_dir` (the `--out` root, archive.rs:128,1458); the restore staging create | the restore row: fixed (#669, 4d5187f1 - the staging is created 0700 with a red proof); the export row: open, PR #666 (export: `--out` created 0700) - HIGH until it merges |
+| A data directory whose mode lets other users read it is refused at every open of the store | `refuse_bad_dir`, store.rs:258 (serve, import, fsck, gc, derive) | open, PR #670 |
+| `checkout` accepted the hostile-tree names (`..`, NUL, `..`-prefixed members) a crafted changeset can carry | the checkout name check | fixed (#662): `..`, NUL and `..`-prefixed members are refused; the mutation run found the guard unbound - no test failed a mutant that removed it - and #662's tests name that gap |
 
 ## 7. Compatibility
 
@@ -200,7 +198,15 @@ in-process; stated in the PR).
 | Archive (`docs/archive-format.md`) | `crates/scion-server/tests/archive_golden.rs` + `archive_v1.golden`: one export's files and normalized manifest, byte-for-byte, on both backends | a manifest with an unknown version or format is refused with the named error before any write (`an_archive_of_an_unknown_version_or_format_is_refused`); red-proven: a reader that accepts version 2 restores the archive and fails the test | the lint watches `archive_v1.golden` and `archive_golden.rs` |
 
 The pairing is enforced on the diff: `scripts/check-golden-pairing.sh`
-(the CI lint job, on the pull request's own `HEAD^1..HEAD`). Pinned
+(the CI lint job, on the pull request's own `HEAD^1..HEAD`). The gate
+itself had gaps found on 2026-10-26 (all being fixed in #668, open):
+two table rows (`crates/scion-server/tests/archive_v1.golden` and
+`archive_golden.rs`) carry no rule word, so the `rule` field read the
+golden's path and the row always took the "describe" branch; and the
+rows whose pattern starts with `^` (`^# Scion object format v` at
+check-golden-pairing.sh:48, `^Version [0-9]+ is this document` at
+:53-54) can never match a diff line, which always begins with `+`, `-`
+or a header prefix. Pinned
 bytes (the wire golden, the store pins, the archive golden) fail
 without their format document's version line in the same pull request.
 `proto/scion.proto` and the surface golden are additive - they need no
@@ -235,6 +241,25 @@ section; its fixes landed as #561. Highlights, with that audit's verdicts:
 | Every third-party action is pinned to a commit SHA with the version in a comment | `.github/workflows/ci.yml:24` and every workflow | fixed (pinned at introduction; the scorecard workflow watches for drift) |
 | Service containers carry version tags, not mutable `latest` | `ci.yml` (the matrix `postgres:16.15/17.11/18.6`, each `@sha256:`-pinned in its include entry), `ci.yml` and `bench.yml` (`postgres:17.11@sha256:...`) | fixed — every services image pins its tag's multi-arch index; `scripts/lint-workflows.sh` fails a services `image:` line without `@sha256:` |
 | Artifacts are built from the protected release tag only | `docs/RELEASING.md`, `docs/verify.md`, `docs/slsa.md` | fixed by design (the release workflow builds on the tag; the provenance doc states the SLSA level) |
+
+## 10. Test strength (mutation testing)
+
+A mutation-testing pass per module: each run flips one comparison or
+guard at a time, and a surviving mutant names a check whose loss no
+test would notice. The table lists the modules run so far, the mutant
+count, what survived, and the pull request whose tests killed each real
+gap.
+
+| Module (the mutants' run) | Mutants | What survived, and what killed it |
+| --- | --- | --- |
+| `gc.rs` (#650) | 94 | 7 shapes: the grace report, the batch walk's end, three blob-root guards, a gone file's age, a corrupt changeset's naming - one test each, linked in #650 |
+| `write.rs` (#649) | 2 shapes | the author-NAME limit (only the email arm was tested) and the message boundary (no test pinned the exact limit) - both bound with red proofs in #649 |
+| the land path (#652) | 3 shapes | the empty name/ref arm, the name limit's boundary, the replan attempt cap - one test each, with the expected mutant outcomes named in #652 |
+| `fsck.rs` (#655, #660) | 55 (the full sweep: 39 assertion-caught, 10 timeout-caught, 6 missed) | the 6 missed shapes, one killing test each in #660: the tree, history-node and repo-blob walks stop at a full page, a land whose changeset is gone reads clean, an unknown derived kind reads as damage instead of old; #655's four operator-view tests (an unreadable blob root, a lying tree size, a page-boundary early stop, a missing blob root) complete the run; the restore's staging pin (#659) adds the late-truncation layer |
+| `ticket.rs` (#648) | 2 shapes | the walk's tree-id content-hash guard (a crafted tree reached a file the real tree does not name) and the ticket lifetime (no test pinned the 15 minutes) - both bound in #648. HIGH while it lasted: the tree-id check was unbound |
+| the cache's signature check (#647) | 1 shape | the tier cache accepted `parse_unverified`: a signature check with no tier-level test. #647 drives a real cache with an unsigned ticket, an unknown key, and a flipped byte - each refused, the upstream untouched. HIGH while it lasted |
+| the restore path (#659, #669) | 1 pin + 1 shape | the stream cut: the restore fails naming the torn stream, the target holds no store, the staging scratch is gone (#659); the staging directory made under the process umask left a 0700 parent store with 0755 members - the staging is created 0700 explicitly, whatever the umask, with a red proof (#669, 4d5187f1) |
+| the auth paths | - | the run is paused at 20 of 44 mutants, no gap found so far; this table grows when it reports |
 
 ## The open list (the v1.0 blockers this audit leaves)
 

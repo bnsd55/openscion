@@ -25,6 +25,15 @@ fn snapshot_of(dir: &Path) -> std::path::PathBuf {
     path
 }
 
+/// A temp directory the run owns outright: mode 0700, whatever the
+/// umask. The daemon refuses a seed or a store under a directory that
+/// group or others can write.
+fn private_dir() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    dir
+}
+
 /// A data directory that exists and is private, as an operator makes
 /// before the daemon starts: the daemon refuses a missing one (that is
 /// `refuse_data_dir`'s business), and the seed tests exercise the seed,
@@ -60,7 +69,7 @@ fn daemon(data: &Path, snapshot: &Path, flag: bool) -> std::process::Output {
 
 #[test]
 fn seeding_without_the_flag_is_refused() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let snapshot = snapshot_of(dir.path());
     let out = daemon(&real_data(dir.path()), &snapshot, false);
     assert!(!out.status.success(), "{out:?}");
@@ -110,7 +119,7 @@ fn the_flag_without_a_seed_is_refused() {
 /// reports it, then serves. The process is killed by its own PID.
 #[test]
 fn the_flag_lets_a_seed_through() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let snapshot = snapshot_of(dir.path());
     let data = real_data(dir.path());
     let mut child = Command::new(env!("CARGO_BIN_EXE_scion-daemon"))
@@ -158,4 +167,71 @@ fn the_flag_lets_a_seed_through() {
     let _ = child.kill();
     let _ = child.wait();
     assert!(seeded, "the daemon never reported the seed");
+}
+
+/// `--seed` is repeatable: a cold daemon reads each file, not only the
+/// first, though the first one's objects make the store hold some.
+#[test]
+fn every_seed_file_goes_into_a_cold_store() {
+    let dir = TempDir::new().unwrap();
+    // The daemon refuses a seed under a directory group or others can
+    // write; the umask of the run must not decide that.
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut seeds = Vec::new();
+    for (repo, data) in [("r", b"seed one\n".as_slice()), ("s", b"seed two\n")] {
+        let objects = [(
+            Key::Blob(BlobId::of(data)),
+            Bytes::from(object::pack(data).unwrap()),
+        )];
+        let path = dir.path().join(format!("{repo}.scnsnap"));
+        snapshot::write(&path, repo, &objects).unwrap();
+        seeds.push(path);
+    }
+    let data = real_data(dir.path());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scion-daemon"))
+        .arg("--data")
+        .arg(&data)
+        .arg("--upstream")
+        .arg("http://127.0.0.1:1")
+        .arg("--token")
+        .arg("t")
+        .arg("--upstream-token")
+        .arg("t")
+        .arg("--seed")
+        .arg(&seeds[0])
+        .arg("--seed")
+        .arg(&seeds[1])
+        .arg("--seed-full-repo")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("scion-daemon runs");
+    let stderr = child.stderr.take().expect("the stderr is piped");
+    let (sender, report) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let started = std::time::Instant::now();
+    let limit = std::time::Duration::from_secs(30);
+    let (mut seeded, mut ignored) = (0, 0);
+    while let Ok(line) = report.recv_timeout(limit.saturating_sub(started.elapsed())) {
+        seeded += usize::from(line.contains("seeded the store from a snapshot"));
+        ignored += usize::from(line.contains("the snapshot is not read"));
+        if line.contains("serving") {
+            break;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(
+        (seeded, ignored),
+        (2, 0),
+        "each --seed file must be imported"
+    );
 }

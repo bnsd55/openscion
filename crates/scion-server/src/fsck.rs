@@ -1,7 +1,7 @@
-//! `scion-server fsck <data>`: checks a SQLite data directory and reports
+//! `scion-server fsck <data>`: checks a data directory and reports
 //! what it finds. It changes nothing: it reads, and leaves every repair to
-//! you. It belongs to the SQLite backend: its SQL lives in `db.rs`, and
-//! another backend brings its own check.
+//! you. It reads the store's own tables and the blob folder, so it works
+//! on the Postgres metadata with the same checks.
 //!
 //! It reads in short batches, so it runs beside a live server. Each check
 //! looks at the state at the moment it looks: a row's blob file is checked
@@ -26,10 +26,10 @@ use std::str::FromStr as _;
 use scion_core::{BlobId, Changeset, ChangesetId, Tree, TreeId};
 
 use crate::backend::Backend;
-use crate::db;
 use crate::derived::Kind as _;
 use crate::graph::CommitGraph;
 use crate::history::{self, NodeId, PathHistory};
+use crate::meta as db;
 use crate::meta::{FsckDerivedRow, Meta as _, MetaTx as _, RepoId};
 use crate::store::BlobStatus;
 use crate::tree::RootTree;
@@ -594,8 +594,7 @@ fn id_string(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::backend::Backend;
-    use crate::db::SqliteTx;
-    use crate::store::Store;
+    use crate::pg::damage;
     use scion_core::{FileState, IdentityTime, RepoPath};
     use std::time::Duration;
     use tempfile::TempDir;
@@ -624,26 +623,24 @@ mod tests {
     }
 
     /// Stores `cs` in the repo and moves `main` to it, as a land does.
-    fn land(store: &Store, cs: &Changeset) -> ChangesetId {
+    fn land(store: &Backend, cs: &Changeset) -> ChangesetId {
+        // The walk's lens reads the blob store of the same backend: a
+        // clone, so the lens borrows while the write transaction runs.
+        let lens = store.clone();
         store
             .write(|c| {
-                let mut tx = SqliteTx(c);
-                let repo = tx.create_repo(REPO)?;
-                let (id, _) = crate::tree::store_changeset(
-                    &mut tx,
-                    repo,
-                    cs,
-                    &mut crate::tree::lens_of(&Backend::sqlite(store.clone())),
-                )?;
-                let version = tx.get_ref(repo, "main")?.map(|r| r.version);
-                assert!(tx.cas_ref(repo, "main", version, id)?);
+                let repo = c.create_repo(REPO)?;
+                let (id, _) =
+                    crate::tree::store_changeset(c, repo, cs, &mut crate::tree::lens_of(&lens))?;
+                let version = c.get_ref(repo, "main")?.map(|r| r.version);
+                assert!(c.cas_ref(repo, "main", version, id)?);
                 Ok(id)
             })
             .unwrap()
     }
 
     /// A file state whose content is `text`, stored as a blob.
-    fn file(store: &Store, text: &[u8]) -> FileState {
+    fn file(store: &Backend, text: &[u8]) -> FileState {
         FileState::Regular {
             content: store.blobs().batch().put(text).unwrap(),
             executable: false,
@@ -651,9 +648,9 @@ mod tests {
     }
 
     /// A store with one changeset on `main`.
-    fn store() -> (TempDir, Store, ChangesetId) {
-        let dir = TempDir::new().unwrap();
-        let store = Store::open(dir.path()).unwrap();
+    fn store() -> (TempDir, Backend, ChangesetId) {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
         let id = land(
             &store,
             &cs(None, &[("a.txt", Some(file(&store, b"one\n")))]),
@@ -688,10 +685,11 @@ mod tests {
     /// operator sees the damage, and `fsck` still answers at all.
     #[test]
     fn a_missing_blob_root_still_reports_the_rows_that_name_blobs() {
+        let _slot = damage::slot();
         let (_dir, store, id) = store();
         let blob = first_put(&store, id);
         std::fs::remove_dir_all(store.blobs().root()).unwrap();
-        let report = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap();
+        let report = run(&store, 1, &mut |_| {}).unwrap();
         assert!(
             has(&report, "blob-missing", &blob.to_string()),
             "{:?}",
@@ -713,6 +711,8 @@ mod tests {
             }
         }
 
+        let _slot = damage::slot();
+
         if rustix::process::geteuid().as_raw() == 0 {
             eprintln!("skipped: root reads through any mode, the check would mean nothing");
             return;
@@ -723,7 +723,7 @@ mod tests {
         let mode = std::fs::metadata(&root).unwrap().permissions();
         let _restore = Restore(root.clone(), mode);
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let err = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap_err();
+        let err = run(&store, 1, &mut |_| {}).unwrap_err();
         let text = err.to_string();
         let shown = root.to_string_lossy().into_owned();
         assert!(
@@ -736,6 +736,7 @@ mod tests {
     /// file of that entry would lie, so the check names the tree.
     #[test]
     fn a_tree_whose_entry_size_lies_is_tree_size() {
+        let _slot = damage::slot();
         let (_dir, store, id) = store();
         let blob = first_put(&store, id);
         let entry = scion_core::Entry::File(scion_core::FileEntry::new(
@@ -752,17 +753,8 @@ mod tests {
         )
         .unwrap();
         let (body, tree_id) = tree.encode_with_id();
-        store
-            .write(|c| {
-                c.execute(
-                    "INSERT INTO trees (id, body) VALUES (?1, ?2)",
-                    rusqlite::params![tree_id.as_bytes(), &body],
-                )
-                .map_err(crate::error::from_sqlite)?;
-                Ok(())
-            })
-            .unwrap();
-        let report = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap();
+        damage::insert_tree_row(&store, tree_id.as_bytes(), &body).unwrap();
+        let report = run(&store, 1, &mut |_| {}).unwrap();
         assert!(
             has(&report, "tree-size", &tree_id.to_string()),
             "{:?}",
@@ -775,6 +767,7 @@ mod tests {
     /// hides the damage of the second.
     #[test]
     fn a_changeset_past_a_full_page_is_still_checked() {
+        let _slot = damage::slot();
         let (_dir, store, _) = store();
         // A second changeset, independent of the first: two rows, two
         // pages at a batch of one.
@@ -796,26 +789,8 @@ mod tests {
         assert_eq!(ids.len(), 2, "{ids:?}");
         // The page-two row is whichever id sorts second; corrupt its body.
         let victim = ids[1];
-        store
-            .write(|c| {
-                let mut body: Vec<u8> = c
-                    .query_row(
-                        "SELECT body FROM changesets WHERE id = ?1",
-                        [victim.as_bytes()],
-                        |row| row.get(0),
-                    )
-                    .map_err(crate::error::from_sqlite)?;
-                let n = body.len();
-                body[n - 1] ^= 1;
-                c.execute(
-                    "UPDATE changesets SET body = ?1 WHERE id = ?2",
-                    rusqlite::params![body, victim.as_bytes()],
-                )
-                .map_err(crate::error::from_sqlite)?;
-                Ok(())
-            })
-            .unwrap();
-        let report = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap();
+        damage::corrupt_changeset_body(&store, &victim).unwrap();
+        let report = run(&store, 1, &mut |_| {}).unwrap();
         assert!(
             has(&report, "changeset-bad", &victim.to_string()),
             "{:?}",
@@ -823,10 +798,130 @@ mod tests {
         );
     }
 
+    /// A tree past a full page of the walk is still checked: a full
+    /// first page never hides the damage of the second.
+    #[test]
+    fn a_tree_past_a_full_page_is_still_checked() {
+        let _slot = damage::slot();
+        let (_dir, store, _) = store();
+        let _second = land(
+            &store,
+            &cs(None, &[("b.txt", Some(file(&store, b"two\n")))]),
+        );
+        let trees = store
+            .read(|c| c.tree_bodies_after(Vec::new().as_slice(), 1000))
+            .unwrap();
+        assert!(trees.len() >= 2, "{} trees", trees.len());
+        let victim = trees
+            .iter()
+            .map(|(id, _)| id.clone())
+            .max()
+            .expect("the page-two row is whichever id sorts last");
+        let victim_id: [u8; 32] = victim.clone().try_into().unwrap();
+        damage::corrupt_tree_body(&store, &victim_id, b"not a tree").unwrap();
+        let report = run(&store, 1, &mut |_| {}).unwrap();
+        assert!(
+            has(&report, "tree-bad", &id_string(&victim)),
+            "{:?}",
+            kinds(&report)
+        );
+    }
+
+    /// A history node past a full page of the walk is still checked.
+    #[test]
+    fn a_history_node_past_a_full_page_is_still_checked() {
+        let _slot = damage::slot();
+        let (_dir, store, _) = store();
+        let _second = land(
+            &store,
+            &cs(None, &[("b.txt", Some(file(&store, b"two\n")))]),
+        );
+        let nodes: Vec<Vec<u8>> = store
+            .read(|c| {
+                Ok(c.history_node_bodies_after(Vec::new().as_slice(), 1000)?
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect())
+            })
+            .unwrap();
+        assert!(nodes.len() >= 2, "{} nodes", nodes.len());
+        let victim = nodes.into_iter().max().unwrap();
+        damage::corrupt_history_node_body(
+            &store,
+            victim.as_slice().try_into().unwrap(),
+            b"not a node",
+        )
+        .unwrap();
+        let report = run(&store, 1, &mut |_| {}).unwrap();
+        assert!(
+            has(&report, "history-node-bad", &id_string(&victim)),
+            "{:?}",
+            kinds(&report)
+        );
+    }
+
+    /// A `repo_blobs` row past a full page of the walk is still checked:
+    /// the blob its row names is gone, and the check must say so.
+    #[test]
+    fn a_repo_blob_past_a_full_page_is_still_checked() {
+        let _slot = damage::slot();
+        let (_dir, store, id) = store();
+        let real = first_put(&store, id);
+        let fake = [0xff_u8; 32];
+        assert!(real.as_bytes() < &fake, "the fake row must sort second");
+        store
+            .write(|c| {
+                let repo = c.repo_id(REPO)?;
+                c.add_repo_blob(repo, BlobId::from_bytes(fake))
+            })
+            .unwrap();
+        let report = run(&store, 1, &mut |_| {}).unwrap();
+        assert!(
+            has(
+                &report,
+                "blob-missing",
+                &BlobId::from_bytes(fake).to_string()
+            ),
+            "{:?}",
+            kinds(&report)
+        );
+    }
+
+    /// A land row whose changeset is gone: the check names it, so an
+    /// operator hears about the hole instead of reading a clean report.
+    #[test]
+    fn a_land_whose_changeset_is_gone_is_missing() {
+        let _slot = damage::slot();
+        let (_dir, store, _) = store();
+        let repo = store.read(|c| c.repo_id(REPO)).unwrap();
+        damage::insert_land_row(&store, repo, "k1", "main", &[7_u8; 32]).unwrap();
+        let report = run(&store, 1, &mut |_| {}).unwrap();
+        assert!(
+            has(&report, "changeset-missing", "named by lands"),
+            "{:?}",
+            kinds(&report)
+        );
+    }
+
+    /// A derived row of a kind this build does not know is old, not
+    /// damage: the report says `old`, and no problem fires, whatever
+    /// the version matches.
+    #[test]
+    fn a_derived_row_of_an_unknown_kind_is_old_not_damage() {
+        let _slot = damage::slot();
+        let (_dir, store, id) = store();
+        damage::insert_derived_row(&store, "made_up_kind", 1, id.as_bytes(), id.as_bytes())
+            .unwrap();
+        let report = run(&store, 1, &mut |_| {}).unwrap();
+        assert!(report.problems.is_empty(), "{:?}", kinds(&report));
+        assert_eq!(report.old, BTreeSet::from([("made_up_kind".to_owned(), 1)]));
+    }
+
     #[test]
     fn a_clean_store_reports_nothing() {
+        let _slot = damage::slot();
         let (_dir, store, _) = store();
-        let report = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap();
+        let report = run(&store, 1, &mut |_| {}).unwrap();
         assert!(report.is_clean(), "{:?}", kinds(&report));
         assert!(report.old.is_empty());
     }
@@ -836,57 +931,59 @@ mod tests {
     /// and owns the files no row names.
     #[test]
     fn a_missing_file_no_row_names_is_the_collectors_orphan_not_damage() {
+        let _slot = damage::slot();
         let (_dir, store, _) = store();
         let id = store.blobs().put(b"orphan\n").unwrap();
         let (_, path) = store.blobs().location(id);
         std::fs::remove_file(&path).unwrap();
-        assert!(!missing_is_damage(&Backend::sqlite(store.clone()), id));
+        assert!(!missing_is_damage(&store, id));
     }
 
     #[test]
     fn a_missing_file_a_row_names_is_damage() {
+        let _slot = damage::slot();
         let (_dir, store, _) = store();
         let id = store.blobs().put(b"kept\n").unwrap();
         store
             .write(|c| {
-                let mut tx = SqliteTx(c);
-                let repo = tx.repo_id(REPO)?;
-                tx.add_repo_blob(repo, id)
+                let repo = c.repo_id(REPO)?;
+                c.add_repo_blob(repo, id)
             })
             .unwrap();
         let (_, path) = store.blobs().location(id);
         std::fs::remove_file(&path).unwrap();
-        assert!(missing_is_damage(&Backend::sqlite(store.clone()), id));
+        assert!(missing_is_damage(&store, id));
     }
 
     /// A file that is back between the two looks of the check was
     /// rewritten by a racing put: not damage.
     #[test]
     fn a_file_back_between_the_two_looks_is_not_damage() {
+        let _slot = damage::slot();
         let (_dir, store, _) = store();
         let id = store.blobs().put(b"again\n").unwrap();
-        assert!(!missing_is_damage(&Backend::sqlite(store.clone()), id));
+        assert!(!missing_is_damage(&store, id));
     }
 
     /// The blob of the first put of the changeset `id`.
-    fn first_put(store: &Store, id: ChangesetId) -> BlobId {
+    fn first_put(store: &Backend, id: ChangesetId) -> BlobId {
         store
             .read(|c| {
-                let mut tx = SqliteTx(c);
-                let repo = tx.repo_id(REPO)?;
-                Ok(db::puts(&tx.get_changeset(repo, id)?).next().unwrap().1)
+                let repo = c.repo_id(REPO)?;
+                Ok(db::puts(&c.get_changeset(repo, id)?).next().unwrap().1)
             })
             .unwrap()
     }
 
     #[test]
     fn a_truncated_blob_file_is_corrupt() {
+        let _slot = damage::slot();
         let (_dir, store, id) = store();
         let blob = first_put(&store, id);
         let path = store.blobs().location(blob).1;
         let bytes = std::fs::read(&path).unwrap();
         std::fs::write(&path, &bytes[..bytes.len() / 2]).unwrap();
-        let report = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap();
+        let report = run(&store, 1, &mut |_| {}).unwrap();
         assert!(
             has(&report, "blob-corrupt", &blob.to_string()),
             "{:?}",
@@ -896,10 +993,11 @@ mod tests {
 
     #[test]
     fn a_missing_blob_file_that_a_row_names_is_missing() {
+        let _slot = damage::slot();
         let (_dir, store, id) = store();
         let blob = first_put(&store, id);
         std::fs::remove_file(store.blobs().location(blob).1).unwrap();
-        let report = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap();
+        let report = run(&store, 1, &mut |_| {}).unwrap();
         assert!(
             has(&report, "blob-missing", &blob.to_string()),
             "{:?}",
@@ -910,27 +1008,10 @@ mod tests {
 
     #[test]
     fn a_broken_changeset_body_is_bad() {
+        let _slot = damage::slot();
         let (_dir, store, id) = store();
-        store
-            .write(|c| {
-                let mut body: Vec<u8> = c
-                    .query_row(
-                        "SELECT body FROM changesets WHERE id = ?1",
-                        [id.as_bytes()],
-                        |row| row.get(0),
-                    )
-                    .map_err(crate::error::from_sqlite)?;
-                let n = body.len();
-                body[n - 1] ^= 1;
-                c.execute(
-                    "UPDATE changesets SET body = ?1 WHERE id = ?2",
-                    rusqlite::params![body, id.as_bytes()],
-                )
-                .map_err(crate::error::from_sqlite)?;
-                Ok(())
-            })
-            .unwrap();
-        let report = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap();
+        damage::corrupt_changeset_body(&store, &id).unwrap();
+        let report = run(&store, 1, &mut |_| {}).unwrap();
         assert!(
             has(&report, "changeset-bad", &id.to_string()),
             "{:?}",
@@ -940,34 +1021,16 @@ mod tests {
 
     #[test]
     fn a_broken_tree_body_is_bad() {
+        let _slot = damage::slot();
         let (_dir, store, id) = store();
         let repo = store.write(|c| c.repo_id(REPO)).unwrap();
         let tree =
             // The fsck command has no request deadline: it derives the root
             // tree in steps, so writes run beside it, and reports damage
             // instead of failing a call.
-            crate::tree::root_tree_unbounded(&crate::backend::Backend::sqlite(store.clone()), repo, id)
-                .unwrap();
-        store
-            .write(|c| {
-                let mut body: Vec<u8> = c
-                    .query_row(
-                        "SELECT body FROM trees WHERE id = ?1",
-                        [tree.as_bytes()],
-                        |row| row.get(0),
-                    )
-                    .map_err(crate::error::from_sqlite)?;
-                let n = body.len();
-                body[n - 1] ^= 1;
-                c.execute(
-                    "UPDATE trees SET body = ?1 WHERE id = ?2",
-                    rusqlite::params![body, tree.as_bytes()],
-                )
-                .map_err(crate::error::from_sqlite)?;
-                Ok(())
-            })
-            .unwrap();
-        let report = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap();
+            crate::tree::root_tree_unbounded(&store, repo, id).unwrap();
+        damage::corrupt_tree_body(&store, tree.as_bytes(), b"not a tree").unwrap();
+        let report = run(&store, 1, &mut |_| {}).unwrap();
         assert!(
             has(&report, "tree-bad", &tree.to_string()),
             "{:?}",
@@ -977,37 +1040,24 @@ mod tests {
 
     #[test]
     fn a_ref_to_a_changeset_no_repo_may_read_dangles() {
-        let (dir, store, id) = store();
-        // The damage: the schema forbids it with its keys on, so a raw
-        // connection makes it, as an older build may have.
-        let raw = rusqlite::Connection::open(dir.path().join("scion.db")).unwrap();
-        raw.pragma_update(None, "foreign_keys", false).unwrap();
-        raw.execute("DELETE FROM repo_changesets WHERE cs = ?1", [id.as_bytes()])
-            .unwrap();
-        drop(raw);
-        let report = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap();
+        let _slot = damage::slot();
+        let (_dir, store, id) = store();
+        // The damage: the schema forbids it with its keys on, so the
+        // raw helper makes it, as an older build may have.
+        damage::delete_repo_membership(&store, &id).unwrap();
+        let report = run(&store, 1, &mut |_| {}).unwrap();
         assert!(has(&report, "ref-dangling", "main"), "{:?}", kinds(&report));
     }
 
     #[test]
     fn a_broken_history_node_body_is_bad() {
-        let (dir, store, _) = store();
-        let raw = rusqlite::Connection::open(dir.path().join("scion.db")).unwrap();
-        let rows: Vec<(Vec<u8>, Vec<u8>)> = raw
-            .prepare("SELECT id, body FROM history_nodes")
+        let _slot = damage::slot();
+        let (_dir, store, _) = store();
+        let id = damage::first_history_node_id(&store)
             .unwrap()
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
-        let (id, _) = rows.first().expect("a land stores history nodes").clone();
-        raw.execute(
-            "UPDATE history_nodes SET body = ?1 WHERE id = ?2",
-            rusqlite::params![&b"not a node"[..], &id[..]],
-        )
-        .unwrap();
-        drop(raw);
-        let report = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap();
+            .expect("a land stores history nodes");
+        damage::corrupt_history_node_body(&store, &id, b"not a node").unwrap();
+        let report = run(&store, 1, &mut |_| {}).unwrap();
         assert!(
             has(&report, "history-node-bad", "does not decode"),
             "{:?}",
@@ -1017,19 +1067,13 @@ mod tests {
 
     #[test]
     fn a_derived_row_for_a_missing_changeset_is_missing() {
-        let (dir, store, _) = store();
+        let _slot = damage::slot();
+        let (_dir, store, _) = store();
         let missing = [7_u8; 32];
-        // The damage: the schema forbids it with its keys on, so a raw
-        // connection makes it, as an older build may have.
-        let raw = rusqlite::Connection::open(dir.path().join("scion.db")).unwrap();
-        raw.pragma_update(None, "foreign_keys", false).unwrap();
-        raw.execute(
-            "INSERT INTO derived (kind, version, cs, value) VALUES ('root_tree', 1, ?1, ?2)",
-            rusqlite::params![&missing[..], &missing[..]],
-        )
-        .unwrap();
-        drop(raw);
-        let report = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap();
+        // The damage: the schema forbids it with its keys on, so the
+        // raw helper makes it, as an older build may have.
+        damage::insert_derived_row(&store, "root_tree", 1, &missing, &missing).unwrap();
+        let report = run(&store, 1, &mut |_| {}).unwrap();
         assert!(
             has(&report, "changeset-missing", "named by derived"),
             "{:?}",
@@ -1039,18 +1083,10 @@ mod tests {
 
     #[test]
     fn a_derived_value_that_does_not_decode_is_bad() {
+        let _slot = damage::slot();
         let (_dir, store, _) = store();
-        store
-            .write(|c| {
-                c.execute(
-                    "UPDATE derived SET value = ?1 WHERE kind = 'commit_graph'",
-                    rusqlite::params![&[0_u8; 32][..]],
-                )
-                .map_err(crate::error::from_sqlite)?;
-                Ok(())
-            })
-            .unwrap();
-        let report = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap();
+        damage::set_derived_value(&store, "commit_graph", &[0_u8; 32]).unwrap();
+        let report = run(&store, 1, &mut |_| {}).unwrap();
         assert!(
             has(&report, "derived-bad", "commit_graph"),
             "{:?}",
@@ -1060,25 +1096,19 @@ mod tests {
 
     #[test]
     fn a_derived_row_of_an_unknown_version_is_old_not_damage() {
+        let _slot = damage::slot();
         let (_dir, store, id) = store();
-        store
-            .write(|c| {
-                c.execute(
-                    "INSERT INTO derived (kind, version, cs, value) VALUES ('root_tree', 9, ?1, ?2)",
-                    rusqlite::params![id.as_bytes(), id.as_bytes()],
-                ).map_err(crate::error::from_sqlite)?;
-                Ok(())
-            })
-            .unwrap();
-        let report = run(&Backend::sqlite(store.clone()), 1, &mut |_| {}).unwrap();
+        damage::insert_derived_row(&store, "root_tree", 9, id.as_bytes(), id.as_bytes()).unwrap();
+        let report = run(&store, 1, &mut |_| {}).unwrap();
         assert!(report.is_clean(), "{:?}", kinds(&report));
         assert_eq!(report.old, BTreeSet::from([("root_tree".to_owned(), 9)]));
     }
 
     #[test]
     fn fsck_beside_a_live_server_sees_no_damage() {
-        let dir = TempDir::new().unwrap();
-        let store = Store::open(dir.path()).unwrap();
+        let _slot = damage::slot();
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
         let mut id = land(
             &store,
             &cs(None, &[("a.txt", Some(file(&store, b"one\n")))]),
@@ -1095,7 +1125,7 @@ mod tests {
         // One row per batch, and a land between two of them: the writes of
         // a live server must not look like damage.
         let mut landed = false;
-        let report = run(&Backend::sqlite(store.clone()), 1, &mut |stage| {
+        let report = run(&store, 1, &mut |stage| {
             if stage == Stage::RepoBlobs && !landed {
                 landed = true;
                 land(

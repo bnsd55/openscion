@@ -72,6 +72,9 @@ fn the_golden_seeds_back_the_same_objects() {
     std::fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let file = dir.path().join("seed.scnsnap");
     fs::write(&file, fs::read(GOLDEN).unwrap()).unwrap();
+    // The seed refuses a file that group or others can write; the umask
+    // of the run must not decide that.
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
     let store = DiskStore::open(&dir.path().join("store"), usize::MAX).unwrap();
     let seeded = snapshot::seed(&store, &file)
         .unwrap()

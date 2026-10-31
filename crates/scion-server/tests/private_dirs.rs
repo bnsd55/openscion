@@ -10,19 +10,48 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+use scion_server::Backend;
 use std::time::{Duration, Instant};
+
+/// The URL a store on `dir` opens with: the test database, under the
+/// directory's own schema, created first.
+fn url_of(dir: &std::path::Path) -> String {
+    scion_server::Backend::test_postgres_url(dir).unwrap()
+}
+
+/// A spawned server that cannot outlive its test: `Drop` sends SIGKILL
+/// and reaps, panics and timeouts included. Every `serve` spawn in this
+/// file hands its child to this guard before any wait.
+struct Guarded(std::process::Child);
+
+impl Drop for Guarded {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
 
 /// `scion-server` with `args`, run by a shell that first sets umask `umask`,
 /// as a login shell or a service manager does. The process's own umask
 /// cannot be changed for one test: it is the whole test process's.
+/// The spawned child reads its URL from the environment (never
+/// `SCION_TEST_POSTGRES_URL`), so the helper hands it the store's own
+/// URL, taken from the `--data` argument's schema.
 fn server(umask: &str, args: &[&OsStr]) -> Command {
+    let data = args
+        .windows(2)
+        .find(|pair| pair[0] == "--data")
+        .map(|pair| std::path::PathBuf::from(pair[1]))
+        .expect("the spawned scion-server names its --data");
     let mut command = Command::new("/bin/sh");
     command
         .arg("-c")
         .arg(format!("umask {umask} && exec \"$0\" \"$@\""))
         .arg(env!("CARGO_BIN_EXE_scion-server"))
         .args(args)
-        .env("NO_COLOR", "1");
+        .env("NO_COLOR", "1")
+        .env("SCION_POSTGRES_URL", url_of(&data));
     command
 }
 
@@ -102,7 +131,7 @@ fn every_directory_of_a_new_data_directory_is_private_whatever_the_umask() {
         // the import still makes everything inside it - the database,
         // the blob folders and this process's staging folder - private
         // whatever the umask.
-        fs::create_dir_all(&data).unwrap();
+        scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
         for made in [top.join("project"), data.clone()] {
             fs::set_permissions(made, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
@@ -137,7 +166,7 @@ fn serve_starts_with_its_ticket_key_in_a_data_directory_that_it_made() {
     // The operator makes the data directory - 0700 even under the
     // most open umask, where a plain mkdir would give 0777, which no
     // check of the key's directory accepts.
-    fs::create_dir_all(&data).unwrap();
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
     fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
     run(server(
         "000",
@@ -156,7 +185,7 @@ fn serve_starts_with_its_ticket_key_in_a_data_directory_that_it_made() {
     assert_eq!(mode_of(&key), 0o600);
 
     let log = tmp.path().join("serve.log");
-    let mut child = server(
+    let child = server(
         "000",
         &[
             "--data".as_ref(),
@@ -174,6 +203,9 @@ fn serve_starts_with_its_ticket_key_in_a_data_directory_that_it_made() {
     .stderr(fs::File::create(&log).unwrap())
     .spawn()
     .unwrap();
+    // The guard kills and reaps on every path out of here, panics
+    // included: no wait below orphans a serving server.
+    let mut child = Guarded(child);
     // A refused key or data directory exits at once; a good start logs
     // "serving" once the server listens. Wait for one of the two.
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -181,16 +213,128 @@ fn serve_starts_with_its_ticket_key_in_a_data_directory_that_it_made() {
         if fs::read_to_string(&log).unwrap().contains("serving") {
             break true;
         }
-        if child.try_wait().unwrap().is_some() || Instant::now() > deadline {
+        if child.0.try_wait().unwrap().is_some() || Instant::now() > deadline {
             break false;
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(child);
     assert!(
         served,
         "serve did not start: {}",
         fs::read_to_string(&log).unwrap()
+    );
+}
+
+/// The export's root is the archive's whole body - every repo's blobs,
+/// changesets and refs - so a new `--out` directory is made private
+/// (0700) whatever the umask, as the data directory is.
+#[test]
+fn an_export_into_a_new_out_makes_it_private_whatever_the_umask() {
+    let tmp = private_tempdir();
+    let git = tmp.path().join("git");
+    git_repo(&git);
+    let data = tmp.path().join("data");
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
+    run(server(
+        "022",
+        &[
+            "--data".as_ref(),
+            data.as_os_str(),
+            "import".as_ref(),
+            "--repo".as_ref(),
+            "main".as_ref(),
+            git.as_os_str(),
+        ],
+    ));
+
+    // A new --out under umask 022: the root comes out 0700.
+    let out = tmp.path().join("fresh-archive");
+    run(server(
+        "022",
+        &[
+            "--data".as_ref(),
+            data.as_os_str(),
+            "export".as_ref(),
+            "--all".as_ref(),
+            "--out".as_ref(),
+            out.as_os_str(),
+        ],
+    ));
+    assert_eq!(mode_of(&out), 0o700, "a new export root");
+}
+
+/// A restore publishes the staging directory by one rename, so the
+/// restored data directory carries the staging's mode. The staging must
+/// therefore be private: a restore under umask 022 (a plain `create_dir_all`
+/// would give 0755) leaves the target 0700, every directory below it 0700,
+/// so no other user reaches the store files whatever their own modes are.
+#[test]
+fn a_restore_under_umask_022_publishes_a_private_data_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let git = tmp.path().join("git");
+    git_repo(&git);
+    let data = tmp.path().join("data");
+    // The operator makes the data directory itself, private: the point
+    // under test is the directory the RESTORE publishes.
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
+    run(server(
+        "022",
+        &[
+            "--data".as_ref(),
+            data.as_os_str(),
+            "import".as_ref(),
+            "--repo".as_ref(),
+            "main".as_ref(),
+            git.as_os_str(),
+        ],
+    ));
+    let out = tmp.path().join("archive");
+    run(server(
+        "022",
+        &[
+            "--data".as_ref(),
+            data.as_os_str(),
+            "export".as_ref(),
+            "--all".as_ref(),
+            "--out".as_ref(),
+            out.as_os_str(),
+        ],
+    ));
+
+    let target = tmp.path().join("restored");
+    run(server(
+        "022",
+        &[
+            "--data".as_ref(),
+            target.as_os_str(),
+            "restore".as_ref(),
+            "--archive".as_ref(),
+            out.as_os_str(),
+        ],
+    ));
+    assert_eq!(mode_of(&target), 0o700, "the restored data directory");
+    for (path, mode) in directories(&target) {
+        assert_eq!(mode, 0o700, "{}", path.display());
+    }
+}
+
+/// The server refuses a data directory that group or others can READ, as
+/// the daemon refuses a socket directory: readable means reachable, and a
+/// store directory must be mode 0700.
+#[test]
+fn an_open_refuses_a_data_directory_that_group_or_others_can_read() {
+    let dir = scion_server::test_support::private_tempdir();
+    let path = dir.path().join("data");
+    fs::create_dir(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    let Err(err) = Backend::open(&path, &url_of(&path), None) else {
+        panic!("the open of a readable data directory must fail");
+    };
+    assert!(
+        err.to_string()
+            .contains("can be read or written by group or others (fix: chmod 700"),
+        "{err}"
     );
 }

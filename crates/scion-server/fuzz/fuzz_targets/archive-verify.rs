@@ -22,7 +22,7 @@ enum Sink {
 }
 
 fuzz_target!(|data: &[u8]| {
-    let dir = tempfile::tempdir().expect("a temp archive");
+    let dir = scion_server::test_support::private_tempdir();
     let archive = dir.path().join("scion-archive-1");
     let repo = archive.join("repos").join("r");
     std::fs::create_dir_all(&repo).expect("the repo directory");
@@ -56,9 +56,10 @@ fuzz_target!(|data: &[u8]| {
 
     // verify answers damages or refuses; it must never panic. A damaged
     // archive must refuse a restore: run it when the data dir stays empty.
+    // The URL never resolves: the check precedes the contact.
     if let Ok(damages) = archive::verify(&archive) {
-        let target = tempfile::tempdir().expect("a temp data dir");
-        match archive::restore(&archive, target.path(), None, None) {
+        let target = scion_server::test_support::private_tempdir();
+        match archive::restore(&archive, target.path(), "postgres://127.0.0.1:5/scion", None) {
             Ok(_) => assert!(
                 damages.is_empty(),
                 "a restore ran on an archive verify names: {damages:?}"

@@ -64,7 +64,7 @@ only on Linux is marked **(Linux)**.
    ```
 
    Done when: a client can put and read an object (§1's `scion` client,
-   or the walkthrough in the README).
+   or the README's quick start).
 
    Notes: ___
 
@@ -94,18 +94,18 @@ only on Linux is marked **(Linux)**.
 1. The metadata snapshot first, then the blobs - never the other order:
 
    ```sh
-   sqlite3 /srv/scion/scion.db "VACUUM INTO '/backups/scion.db'"
+   pg_dump --no-owner --file /backups/metadata.sql <the metadata database>
    cp -R /srv/scion/objects /backups/scion-$(date +%F)/objects
+   chmod 700 /backups/scion-$(date +%F)/objects
+   cp /srv/scion/backend /backups/scion-$(date +%F)/backend
    ```
 
-   Done when: both commands exit 0. Do not run `gc` while the backup
+   Done when: every command exits 0. Do not run `gc` while the backup
    runs (§3 says why).
 
    Notes: ___
 
-2. Copy the backend marker, when the directory has one (a Postgres
-   deployment writes it; a SQLite directory keeps its UUID in
-   `scion.db` itself):
+2. Copy the backend marker (a Postgres deployment writes one):
 
    ```sh
    cp /srv/scion/backend /backups/scion-$(date +%F)/backend
@@ -172,7 +172,8 @@ only on Linux is marked **(Linux)**.
    by starting the OLD binary on the upgraded directory.
 
    Done when: the old binary refuses with that shape of error, and you
-   did NOT edit `user_version` to fix it (the runbook forbids it).
+   did NOT edit the schema version in the database to fix it (the
+   runbook forbids it).
 
    Notes: ___
 

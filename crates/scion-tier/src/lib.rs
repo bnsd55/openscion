@@ -554,7 +554,7 @@ impl<S: Store> Tier<S> {
             client_tls.apply_to(upstream, endpoint)?
         } else {
             anyhow::ensure!(
-                !upstream.starts_with("https://"),
+                !scion_proto::runtime::tls::is_https(upstream),
                 "the upstream {upstream} is https, but no CA is given to trust its \
                  certificate; pass --tls-ca"
             );
@@ -1492,6 +1492,17 @@ impl<S: Store> Objects for Tier<S> {
         );
         Ok(Response::new(stream))
     }
+}
+
+/// A temp directory the ancestor check accepts whatever the umask of the
+/// run: this run's own, mode 0700. A store's or a snapshot's parent that
+/// group or others can write is refused, as it must be.
+#[cfg(test)]
+fn private_tempdir() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    dir
 }
 
 #[cfg(test)]

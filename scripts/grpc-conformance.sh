@@ -23,6 +23,14 @@ die() { printf '%s %s\n' "grpc-conformance:" "$*" >&2; exit 1; }
 BIN=${SCION_SERVER:-target/release/scion-server}
 [ -x "$BIN" ] || die "no server at $BIN (build it first, or set SCION_SERVER)"
 
+# The server's metadata is Postgres: its URL reaches every command of
+# this run through the env, which the server reads quietly (the argv
+# form would warn). The job gives the test URL; the server takes the
+# same database, and derives each data directory's schema itself.
+[ -n "${SCION_TEST_POSTGRES_URL:-}" ] \
+  || die "no SCION_TEST_POSTGRES_URL: the server's metadata is Postgres"
+export SCION_POSTGRES_URL="$SCION_TEST_POSTGRES_URL"
+
 # A pinned grpcurl, downloaded only if the PATH has none.
 GRPCURL=$(command -v grpcurl || true)
 if [ -z "$GRPCURL" ]; then

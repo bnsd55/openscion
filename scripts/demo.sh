@@ -26,6 +26,9 @@ need
 make_work demo
 build
 fetch_dataset
+# The demo's server keeps its metadata in Postgres: one schema for this
+# run's data directory, made if missing.
+PG_URL=$(pg_url_for "$WORK/server")
 import_dataset
 start_scion
 note "landing: $AGENTS agents, $LANDS lands"

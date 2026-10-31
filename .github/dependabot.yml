@@ -4,6 +4,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # rusqlite 0.41 needs Rust 1.89, above the 1.88 MSRV; lift this
+      # when the MSRV rises (stability.md moves the floor on purpose).
+      - dependency-name: rusqlite
+        versions: [">= 0.41"]
     groups:
       cargo:
         patterns: ["*"]
@@ -15,6 +20,12 @@ updates:
     directory: /crates/scion-core/fuzz
     schedule:
       interval: weekly
+    ignore:
+      # rusqlite 0.41 needs Rust 1.89, above the 1.88 MSRV; lift this
+      # when the MSRV rises. (Core's own lock carries no rusqlite; the
+      # ignore keeps the entry correct if one ever lands.)
+      - dependency-name: rusqlite
+        versions: [">= 0.41"]
     groups:
       cargo:
         patterns: ["*"]
@@ -22,6 +33,9 @@ updates:
     directory: /crates/scion-proto/fuzz
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: rusqlite
+        versions: [">= 0.41"]
     groups:
       cargo:
         patterns: ["*"]
@@ -29,6 +43,11 @@ updates:
     directory: /crates/scion-server/fuzz
     schedule:
       interval: weekly
+    ignore:
+      # rusqlite 0.41 needs Rust 1.89, above the 1.88 MSRV; lift this
+      # when the MSRV rises. Its lock holds 0.40.2 through the tier.
+      - dependency-name: rusqlite
+        versions: [">= 0.41"]
     groups:
       cargo:
         patterns: ["*"]
@@ -36,6 +55,11 @@ updates:
     directory: /crates/scion-tier/fuzz
     schedule:
       interval: weekly
+    ignore:
+      # rusqlite 0.41 needs Rust 1.89, above the 1.88 MSRV; lift this
+      # when the MSRV rises.
+      - dependency-name: rusqlite
+        versions: [">= 0.41"]
     groups:
       cargo:
         patterns: ["*"]

@@ -1,6 +1,7 @@
 //! `commit`.
 
 use anyhow::{Context, Result, bail, ensure};
+use clap::builder::{OsStringValueParser, TypedValueParser as _};
 use scion_core::{Changeset, FileState, IdentityTime, RepoPath};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -20,7 +21,11 @@ pub struct CommitArgs {
     #[arg(short, long)]
     message: String,
     /// `PATH=FILE`: put the content of local FILE at PATH. Repeatable.
-    #[arg(long = "put", value_name = "PATH=FILE", value_parser = parse_put)]
+    #[arg(
+        long = "put",
+        value_name = "PATH=FILE",
+        value_parser = OsStringValueParser::new().try_map(|spec| parse_put(&spec))
+    )]
     puts: Vec<(String, PathBuf)>,
     /// Mark the put files executable.
     #[arg(long)]
@@ -47,11 +52,22 @@ impl CommitArgs {
     }
 }
 
-fn parse_put(spec: &str) -> Result<(String, PathBuf), String> {
-    let (path, file) = spec
-        .split_once('=')
-        .ok_or_else(|| format!("{spec:?}: expected PATH=FILE"))?;
-    Ok((path.to_owned(), PathBuf::from(file)))
+/// Splits `PATH=FILE` at its first `=`. FILE is a local file name, so its
+/// bytes are taken as they are, as `checkout --into` takes a directory's;
+/// PATH is a repo path, UTF-8 as on the rest of the command line.
+fn parse_put(spec: &OsStr) -> Result<(String, PathBuf), String> {
+    let bytes = spec.as_bytes();
+    let shown = spec.to_string_lossy();
+    let at = bytes
+        .iter()
+        .position(|&b| b == b'=')
+        .ok_or_else(|| format!("{shown:?}: expected PATH=FILE"))?;
+    let path =
+        std::str::from_utf8(&bytes[..at]).map_err(|_| format!("{shown:?}: PATH is not UTF-8"))?;
+    Ok((
+        path.to_owned(),
+        PathBuf::from(OsStr::from_bytes(&bytes[at + 1..])),
+    ))
 }
 
 /// What to commit for one path: a file, a symlink, or a deletion.
@@ -138,8 +154,8 @@ pub async fn commit(ctx: &mut Ctx, args: CommitArgs) -> Result<()> {
     }
     // SHORTCUT: always UTC, since std cannot read the local time zone.
     // Upgrade: a time zone crate.
-    let author =
-        IdentityTime::new(name, email, now_unix_secs()?, 0).expect("identity fits the format");
+    let author = IdentityTime::new(name, email, now_unix_secs()?, 0)
+        .context("the author identity does not fit a changeset field")?;
     let changeset = Changeset::new(
         vec![parent],
         author,
@@ -147,7 +163,7 @@ pub async fn commit(ctx: &mut Ctx, args: CommitArgs) -> Result<()> {
         args.message.into_bytes(),
         changes,
     )
-    .expect("changeset fields fit the format");
+    .context("the changeset fields do not fit the format")?;
     let id = ctx.create_changeset(&changeset).await?;
     if ctx.json {
         outln!("{}", serde_json::json!({ "changeset": id.to_string() }));
@@ -246,6 +262,48 @@ mod tests {
             err.contains("repo paths are relative") && err.contains("/tmp/hello.txt"),
             "{err}"
         );
+    }
+
+    /// A local file name is raw bytes, as `checkout --into` takes it: a
+    /// `--put` FILE that is not UTF-8 names its own file.
+    #[test]
+    fn a_put_file_whose_name_is_not_utf8_is_taken() {
+        use clap::Parser as _;
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt as _;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            commit: CommitArgs,
+        }
+        let put = OsString::from_vec(b"x=caf\xe9.txt".to_vec());
+        let cli = Cli::try_parse_from([
+            OsString::from("scn-commit"),
+            "-m".into(),
+            "m".into(),
+            "--put".into(),
+            put,
+        ])
+        .unwrap_or_else(|e| panic!("a non-UTF-8 FILE was refused: {e}"));
+        assert_eq!(cli.commit.puts.len(), 1);
+        assert_eq!(cli.commit.puts[0].0, "x");
+        assert_eq!(cli.commit.puts[0].1.as_os_str().as_bytes(), b"caf\xe9.txt");
+        // PATH stays UTF-8, and a spec with no `=` is refused as before.
+        for (spec, why) in [
+            (b"caf\xe9=x".as_slice(), "PATH is not UTF-8"),
+            (b"x", "expected PATH=FILE"),
+        ] {
+            let err = Cli::try_parse_from([
+                OsString::from("scn-commit"),
+                "-m".into(),
+                "m".into(),
+                "--put".into(),
+                OsString::from_vec(spec.to_vec()),
+            ])
+            .err()
+            .unwrap_or_else(|| panic!("{spec:?} was accepted"));
+            assert!(err.to_string().contains(why), "{err}");
+        }
     }
 
     #[test]

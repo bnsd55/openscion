@@ -34,7 +34,7 @@ async fn health(url: &str, service: &str) -> ServingStatus {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_first_boot_serves_probes_and_reads_back() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let (data, log) = (dir.path().join("data"), dir.path().join("server.log"));
 
     // Command 1: the first boot refuses a directory that does not
@@ -77,8 +77,13 @@ async fn a_first_boot_serves_probes_and_reads_back() {
 
     // Command 1b: the operator makes the directory (0700, the store's
     // own rule), and the first boot serves. The runbook's umask 077
-    // makes the mkdir private.
+    // makes the mkdir private; the test sets the mode directly, so the
+    // run's own umask cannot leak into it.
     std::fs::create_dir(&data).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let server = Server::start_on("First boot", &data, &log);
     // The one-server section's command is the same command: the guide's
     // own serve line, in both sections' words, is this spawn's argv.
@@ -114,11 +119,9 @@ async fn a_first_boot_serves_probes_and_reads_back() {
         // import needs the same URL the server got (common's rule), or
         // the open refuses it.
         let mut import = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"));
-        if scion_server::Backend::test_is_postgres() {
-            import
-                .arg("--postgres-url")
-                .arg(common::postgres_url(&data));
-        }
+        import
+            .arg("--postgres-url")
+            .arg(common::postgres_url(&data));
         import
             // `--repo` names the harness's repo (the runbook's
             // default is `main`).
