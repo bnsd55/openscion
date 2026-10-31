@@ -1560,13 +1560,14 @@ async fn start_daemon(
 }
 
 /// The daemon is up when a connect to its socket succeeds. The socket
-/// file exists from `bind()` - and a killed run leaves the file behind,
-/// so on a restart the file's presence says nothing about the new
-/// process: the readiness this replaces connected to the dead socket of
-/// the run the test had just killed, and the refusal panicked the test.
-/// A refused connect is retryable, an answered one is the daemon
-/// serving; the 10 s ceiling stands, and the failure names the last
-/// cause the poll saw.
+/// file exists from `bind()`, but a connect between the bind and the
+/// listen - two syscalls inside the bind - is refused, and a daemon
+/// thread descheduled between them on a loaded runner leaves that
+/// window open for as long as the scheduler pleases: the readiness
+/// this replaced connected the moment it saw the file, and its refusal
+/// panicked the test. A refused connect is retryable, an answered one
+/// is the daemon serving; the 10 s ceiling stands, and the failure
+/// names the last cause the poll saw.
 async fn wait_serving(socket: &std::path::Path) {
     use std::time::Instant;
 
