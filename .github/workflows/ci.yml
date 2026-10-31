@@ -376,7 +376,12 @@ jobs:
     runs-on: ubuntu-24.04
     # Every suite runs on Postgres, and a cold cache adds the build: a
     # cap covers both, the way the fuzz smoke's does.
-    timeout-minutes: 40
+    # SHORTCUT: 50 min fits the whole-workspace Postgres suite (22-37
+    # min on main, Oct 2026) with margin; its cost is per-statement
+    # round trips: the log and path-log pages read one changeset per
+    # entry, and the big graph tests seed thousands of changesets.
+    # Bring it back toward 30 when the batched log reads land.
+    timeout-minutes: 50
     services:
       # The scripts' servers keep their metadata in Postgres: the smoke
       # below (start-scion-smoke) opens the database this service names.
@@ -547,7 +552,12 @@ jobs:
     if: >-
       ${{ !cancelled() && (github.event_name != 'pull_request' || (needs.tier.result == 'success' && !github.event.pull_request.draft && needs.tier.outputs.docs_only != 'true')) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # SHORTCUT: 45 min fits the Postgres suite (17-30 min on main, Oct
+    # 2026) with margin; its cost is per-statement round trips: the log
+    # and path-log pages read one changeset per entry, and the big graph
+    # tests seed thousands of changesets. Bring it back toward 30 when
+    # the batched log reads land.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
