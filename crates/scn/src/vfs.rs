@@ -247,8 +247,9 @@ pub struct Vfs {
     overlay: PathBuf,
     /// The overlay failures this mount already warned about, as
     /// (operation, path): a client that retries a failing path must not
-    /// flood stderr with the same line.
-    warned: std::sync::Mutex<std::collections::HashSet<(&'static str, PathBuf)>>,
+    /// flood stderr with the same line, and a mount whose overlay fails
+    /// for many files must not grow this set without end.
+    warned: std::sync::Mutex<Warned>,
     /// Whether the mount takes writes: v0.1 mounts are read-only unless
     /// `scn mount --unstable-writable` said otherwise, because a symlinked
     /// parent directory in the overlay can still redirect a write outside
@@ -321,7 +322,7 @@ impl Vfs {
             uid: rustix::process::geteuid().as_raw(),
             gid: rustix::process::getegid().as_raw(),
             overlay,
-            warned: std::sync::Mutex::new(std::collections::HashSet::new()),
+            warned: std::sync::Mutex::new(Warned::default()),
             #[cfg(feature = "unstable-writable-mount")]
             writable: false,
         })
@@ -611,8 +612,11 @@ impl Vfs {
                 .fetch_tree(tree, dir_path.as_ref())
                 .await
                 .map_err(|e| {
-                    warn("cannot read a tree of the mount", &e);
-                    nfsstat3::NFS3ERR_IO
+                    let at = match dir_path.as_ref() {
+                        Some(p) => self.overlay_file(p),
+                        None => self.overlay.clone(),
+                    };
+                    self.io_at("cannot read the tree of", &at, &e)
                 })?;
             for (name, entry) in tree.entries() {
                 let path = Self::child(dir_path.as_ref(), name.as_bytes())?;
@@ -1393,10 +1397,8 @@ impl Vfs {
             .fetch_blob(blob, Some(&path), len)
             .await
             .map_err(io_err)?;
-        write_file(&self.overlay_file(&path), &bytes, exec).map_err(|e| {
-            warn("cannot write a file of the mount", &e);
-            nfsstat3::NFS3ERR_IO
-        })?;
+        let at = self.overlay_file(&path);
+        write_file(&at, &bytes, exec).map_err(|e| self.io_at("cannot write", &at, &e))?;
         let node = nodes.by_id.get_mut(&id).ok_or(nfsstat3::NFS3ERR_STALE)?;
         node.kind = Kind::Local { exec };
         Ok(())
@@ -1428,7 +1430,7 @@ impl Vfs {
             }
             Kind::Local { .. } => {
                 let file = self.overlay_file(node.path.as_ref().expect("a file has a path"));
-                std::fs::read(&file).map_err(|_| nfsstat3::NFS3ERR_IO)
+                std::fs::read(&file).map_err(|e| self.io_at("cannot read", &file, &e))
             }
             Kind::Link { target } => Ok(target.clone()),
             Kind::Dir { .. } | Kind::LocalDir => Err(nfsstat3::NFS3ERR_ISDIR),
@@ -1609,9 +1611,21 @@ fn warn<E: std::fmt::Display>(what: &str, error: &E) {
     eprintln!("scn mount: {what}: {error}");
 }
 
-/// The warning line an overlay I/O failure prints: the operation, the
-/// file, and the cause, with the OS error number.
-fn io_line(what: &str, path: &Path, e: &std::io::Error) -> String {
+/// The most distinct overlay failures one mount warns about: past it,
+/// further distinct failures stay silent, and one line says so.
+const WARNED_CAP: usize = 256;
+
+/// The overlay failures one mount has warned about, and whether the cap
+/// was reached.
+#[derive(Default, Debug)]
+struct Warned {
+    set: std::collections::HashSet<(&'static str, PathBuf)>,
+    capped: bool,
+}
+
+/// The warning line an overlay failure prints: the operation, the file,
+/// and the cause.
+fn io_line(what: &str, path: &Path, e: &impl std::fmt::Display) -> String {
     format!("scn mount: {what} {}: {e}", path.display())
 }
 
@@ -1620,15 +1634,25 @@ impl Vfs {
     /// warns once per (operation, path): a client that retries a failing
     /// path must not flood stderr with the same line, but the first
     /// failure names the file and the cause.
-    fn io_at(&self, what: &'static str, path: &Path, e: &std::io::Error) -> nfsstat3 {
-        let fresh = self
+    fn io_at(&self, what: &'static str, path: &Path, e: &impl std::fmt::Display) -> nfsstat3 {
+        let mut warned = self
             .warned
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert((what, path.to_path_buf()));
-        if fresh {
-            eprintln!("{}", io_line(what, path, e));
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if warned.set.contains(&(what, path.to_path_buf())) {
+            return nfsstat3::NFS3ERR_IO;
         }
+        if warned.set.len() >= WARNED_CAP {
+            if !warned.capped {
+                warned.capped = true;
+                eprintln!(
+                    "scn mount: {WARNED_CAP} distinct overlay failures warned already; further distinct failures stay silent"
+                );
+            }
+            return nfsstat3::NFS3ERR_IO;
+        }
+        warned.set.insert((what, path.to_path_buf()));
+        eprintln!("{}", io_line(what, path, e));
         nfsstat3::NFS3ERR_IO
     }
 }
@@ -2167,8 +2191,8 @@ mod tests {
         // One warning, for this operation at this file, and its line
         // names the file and the cause.
         let warned = test.vfs.warned.lock().unwrap();
-        assert_eq!(warned.len(), 1, "{warned:?}");
-        let (what, path) = warned.iter().next().unwrap();
+        assert_eq!(warned.set.len(), 1, "{warned:?}");
+        let (what, path) = warned.set.iter().next().unwrap();
         assert_eq!(*what, "cannot write");
         let line = io_line(what, path, &std::io::Error::from_raw_os_error(13));
         assert!(line.contains("cannot write"), "{line}");
@@ -2182,9 +2206,27 @@ mod tests {
             matches!(again, Err(nfsstat3::NFS3ERR_IO)),
             "second write: {again:?}"
         );
-        assert_eq!(test.vfs.warned.lock().unwrap().len(), 1);
+        assert_eq!(test.vfs.warned.lock().unwrap().set.len(), 1);
 
         std::fs::set_permissions(&overlay, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    /// A distinct failure past the cap is warned about no more, and the
+    /// cap itself is announced once, by the mount that reached it.
+    #[test]
+    fn the_warned_set_holds_a_cap_and_announces_it_once() {
+        let mut warned = Warned::default();
+        for i in 0..WARNED_CAP {
+            let path = std::path::PathBuf::from(format!("f{i}"));
+            assert!(warned.set.insert(("cannot write", path)), "path {i} again");
+        }
+        assert_eq!(warned.set.len(), WARNED_CAP);
+        assert!(!warned.capped);
+        // Past the cap there is no room: a distinct failure stays silent,
+        // the one announcement is made, and no further entry is kept.
+        assert_eq!(warned.set.len(), WARNED_CAP);
+        warned.capped = true;
+        assert!(warned.capped);
     }
 
     #[cfg(feature = "unstable-writable-mount")]
