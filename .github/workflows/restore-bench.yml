@@ -50,3 +50,8 @@ jobs:
       - run: cargo test -p open-scion-server --test restore_bench -- --ignored --nocapture
         env:
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+          # The bench dumps the live metadata with the job's own
+          # Postgres, so its tools match the server: the container name
+          # points at the service container above, and the test never
+          # stops it.
+          SCION_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}

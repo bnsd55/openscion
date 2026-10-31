@@ -101,11 +101,11 @@ fn a_restore_of_a_stated_store_takes_a_stated_time() {
     let restore_started = Instant::now();
     let restored_dir = scion_server::test_support::private_tempdir();
     let restored_schema = scion_server::Backend::test_schema(restored_dir.path());
-    rename_schema(&snapshot, &restored_schema);
-    load_dump(&snapshot);
-    copy_tree(
-        &backup.path().join("objects"),
-        &restored_dir.path().join("objects"),
+    restore_the_guides_backup(
+        &snapshot,
+        backup.path(),
+        restored_dir.path(),
+        &restored_schema,
     );
     // Durability inside the timer: an operator's restore is done when a
     // crash cannot lose what was restored, so the copied files and the
@@ -194,6 +194,22 @@ fn take_the_guides_backup(store_dir: &Path, backup: &Path, snapshot: &Path) {
             ("/backups/scion-$(date +%F)", backup.to_str().unwrap()),
         ],
     );
+    // The guide's third copy: the `backend` marker is part of the
+    // metadata - it holds the store UUID the metadata holds too, and
+    // the restore pairs the two.
+    fs::copy(store_dir.join("backend"), backup.join("backend")).unwrap();
+}
+
+/// The restore the runbook's own steps make: the dump loads into the
+/// fresh directory's own schema, then the data directory comes back -
+/// the blob files and the `backend` marker, which travels with the
+/// metadata (it holds the store UUID the metadata holds too, and the
+/// open pairs the two).
+fn restore_the_guides_backup(snapshot: &Path, backup: &Path, restored: &Path, schema: &str) {
+    rename_schema(snapshot, schema);
+    load_dump(snapshot);
+    copy_tree(&backup.join("objects"), &restored.join("objects"));
+    std::fs::copy(backup.join("backend"), restored.join("backend")).unwrap();
 }
 
 /// Renames the schema in the dump, so it loads under the name the
@@ -201,12 +217,16 @@ fn take_the_guides_backup(store_dir: &Path, backup: &Path, snapshot: &Path) {
 /// `scion_test_<16 hex digits>`, which no stored data contains.
 fn rename_schema(file: &Path, to: &str) {
     let text = fs::read_to_string(file).unwrap();
+    // The bare name: the dump line carries the statement's semicolon,
+    // and a `from` that kept it would eat every semicolon it replaced
+    // - the CREATE SCHEMA would swallow the next statement, and every
+    // other spelling of the name would keep the old schema.
     let from = text
         .lines()
         .find_map(|line| {
             let rest = line.trim_start();
             rest.strip_prefix("CREATE SCHEMA ")
-                .map(|name| name.trim_end().to_owned())
+                .map(|name| name.trim_end().trim_end_matches(';').to_owned())
         })
         .expect("the dump carries its schema's name");
     std::fs::write(file, text.replace(&from.clone(), to)).unwrap();
