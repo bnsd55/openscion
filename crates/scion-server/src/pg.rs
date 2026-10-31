@@ -2883,8 +2883,9 @@ impl MetaTx for PgTx<'_> {
                 // from the table honest instead of panicking a request.
                 let id = BlobId::try_from(bytes.as_slice()).map_err(|_| {
                     Error::Corrupt(format!(
-                        "repo {}: a repo_blobs row's blob column holds \
-                         {} bytes, not a 32-byte id",
+                        "repo {}: the missing-blob statement read back a \
+                         blob id of {} bytes, not 32 - the id is the \
+                         statement's own parameter array, not a stored row",
                         repo.0,
                         bytes.len()
                     ))
