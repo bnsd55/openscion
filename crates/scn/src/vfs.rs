@@ -1367,7 +1367,8 @@ impl Vfs {
         if nodes.deleted.remove(path)
             && let Err(e) = write_deletes(&self.overlay, &nodes.deleted)
         {
-            warn("cannot rewrite the note of deletions", &e);
+            let note = self.overlay.join(DELETES);
+            self.io_at("cannot rewrite the note of deletions", &note, &e);
         }
     }
 
@@ -1443,7 +1444,8 @@ impl Vfs {
         if nodes.deleted.insert(path.clone())
             && let Err(e) = write_deletes(&self.overlay, &nodes.deleted)
         {
-            warn("cannot record a deletion", &e);
+            let note = self.overlay.join(DELETES);
+            self.io_at("cannot record a deletion", &note, &e);
         }
     }
 }
