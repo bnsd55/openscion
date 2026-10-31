@@ -185,8 +185,7 @@ fn check_row(row: &[String]) {
     }
     // The throughput column parses as a number, or a "-" where the
     // bench named no report. The growth columns parse as numbers, or
-    // say why they do not: a "-" in the database column is SQLite (it
-    // has no separate database), and a "-" in a growth column is a
+    // say why they do not: a "-" in a growth column is a
     // cell whose counter grew by no lands at all.
     if row[10] != "-" {
         row[10]

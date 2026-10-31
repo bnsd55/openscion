@@ -355,8 +355,7 @@ async fn land_loop() {
 
 /// The pending lands the crash left, counted straight from the meta
 /// store while no server holds it: the reader the common module keeps
-/// engine-neutral (the file beside the server on SQLite, the schema on
-/// Postgres).
+/// for the server's schema.
 fn pending_lands(data: &std::path::Path) -> u64 {
     let (_, pending) = common::LandsReader::open(data).counts();
     pending.unsigned_abs()
