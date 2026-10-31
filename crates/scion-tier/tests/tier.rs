@@ -1538,8 +1538,6 @@ async fn start_daemon(
     upstream: &str,
     limit: usize,
 ) -> (Kill, String) {
-    use std::time::Instant;
-
     use std::process::Command;
     let child = Command::new(env!("CARGO_BIN_EXE_scion-daemon"))
         .arg("--data")
@@ -1557,16 +1555,35 @@ async fn start_daemon(
         .spawn()
         .map(Kill)
         .unwrap();
-    // The child is up when its socket file is there (10 s ceiling).
+    wait_serving(socket).await;
+    (child, format!("unix://{}", socket.display()))
+}
+
+/// The daemon is up when a connect to its socket succeeds. The socket
+/// file exists from `bind()`, but a connect between the bind and the
+/// listen - two syscalls inside the bind - is refused, and a daemon
+/// thread descheduled between them on a loaded runner leaves that
+/// window open for as long as the scheduler pleases: the readiness
+/// this replaced connected the moment it saw the file, and its refusal
+/// panicked the test. A refused connect is retryable, an answered one
+/// is the daemon serving; the 10 s ceiling stands, and the failure
+/// names the last cause the poll saw.
+async fn wait_serving(socket: &std::path::Path) {
+    use std::time::Instant;
+
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !socket.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "the daemon never opened its socket"
-        );
+    let mut last = String::from("the 10 s ceiling passed before a try");
+    while Instant::now() < deadline {
+        match tokio::net::UnixStream::connect(socket).await {
+            Ok(stream) => {
+                drop(stream);
+                return;
+            }
+            Err(error) => last = error.to_string(),
+        }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    (child, format!("unix://{}", socket.display()))
+    panic!("the daemon never answered on {}: {last}", socket.display());
 }
 
 /// Kills the daemon when the test ends, however it ends: a leftover child
@@ -1794,7 +1811,6 @@ fn agrees(store: &DiskStore, file: &(String, Vec<u8>, std::path::PathBuf, u64)) 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_daemons_stderr_stays_quiet_and_colorless_across_gets() {
     use std::process::Command;
-    use std::time::Instant;
 
     let object = blob(b"once per request is not a log level\n");
     let fake = Fake::new(&[&object], Duration::ZERO);
@@ -1831,15 +1847,7 @@ async fn a_daemons_stderr_stays_quiet_and_colorless_across_gets() {
         .spawn()
         .map(Kill)
         .unwrap();
-    // The child is up when its socket file is there (10 s ceiling).
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !socket.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "the daemon never opened its socket"
-        );
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    wait_serving(&socket).await;
     let mut client = connect(&format!("unix://{}", socket.display()), Some(TOKEN)).await;
 
     // One read, then measure what the daemon has logged.
