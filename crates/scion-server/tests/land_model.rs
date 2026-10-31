@@ -745,14 +745,11 @@ async fn the_model_holds_across_lands_retries_and_restarts() {
         // named a hold that never happened).
         tokio::time::sleep(Duration::from_millis(150)).await;
         if round % 3 != 0 {
-            // The read of the server's own lands table (SQLite's file, or
-            // the server's schema), so the poll sees the same rows on
-            // both backends. The per-round counts name what the check
-            // sees, so a wrong-database read cannot hide as a flake.
-            // The read of the server's own lands table: the per-round
-            // print names what the check sees, so a wrong-database read
-            // cannot hide as a flake. The reader sits in a RefCell
-            // because the wait's closure runs as `Fn`.
+            // The read of the server's own lands table, in the schema
+            // the server serves: the per-round print names what the
+            // check sees, so a wrong-database read cannot hide as a
+            // flake. The reader sits in a RefCell because the wait's
+            // closure runs as `Fn`.
             let lands = std::cell::RefCell::new(common::LandsReader::open(&data));
             let (total, pending) = lands.borrow_mut().counts();
             println!("round {round}: the lands table holds {total} rows, {pending} pending");

@@ -97,9 +97,9 @@ pub enum Error {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StorageClass {
-    /// The engine's write lock stayed busy past `busy_timeout`, or the
-    /// connection to it was cut: the transaction rolled back and wrote
-    /// nothing, so the same work may run again.
+    /// The engine's write lock stayed busy past the writers' lock clock,
+    /// or the connection to it was cut: the transaction rolled back and
+    /// wrote nothing, so the same work may run again.
     Busy,
     /// The engine is out of space.
     DiskFull,

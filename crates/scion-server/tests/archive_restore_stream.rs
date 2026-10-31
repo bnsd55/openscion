@@ -327,10 +327,9 @@ fn measure_ceiling(store: &Backend, out: &std::path::Path, tx_kb: u64, slack_kb:
     assert!(problems.problems.is_empty(), "{problems:?}");
 }
 
-/// A restore killed mid-replay leaves its committed batches behind: in
-/// the staging directory on SQLite, in the database the URL names on
-/// Postgres. The next restore cleans both at its START - a kill runs no
-/// failure path - and lands whole.
+/// A restore killed mid-replay leaves its committed batches behind, in
+/// the database the URL names. The next restore cleans them at its
+/// START - a kill runs no failure path - and lands whole.
 #[test]
 fn a_killed_restore_leaves_the_next_one_clean() {
     let data = scion_server::test_support::private_tempdir();

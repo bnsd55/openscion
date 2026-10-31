@@ -263,13 +263,11 @@ impl Server {
     /// opens of `schema_source` filled: the power suite reopens a store
     /// from the backing directory, whose path names another schema, and
     /// the store it must serve is the one the first open filled. The
-    /// schema follows the store, not the path; SQLite ignores the
-    /// source, because the metadata is the directory either way. It
-    /// waits until the server listens, and proves the backend it was
-    /// asked for before it returns: the data directory carries the
-    /// Postgres marker and no SQLite database, so a run whose spawn lost
-    /// its `--postgres-url` fails here, not vacuously as a second
-    /// SQLite run.
+    /// schema follows the store, not the path. It waits until the server
+    /// listens, and proves the backend it was asked for before it
+    /// returns: the data directory carries the Postgres marker and no
+    /// SQLite database, so a run whose spawn lost its `--postgres-url`
+    /// fails here instead of serving the wrong database.
     pub(crate) fn start_reopened(data: &Path, schema_source: &Path, log: &Path) -> Self {
         // The reopen follows a cut or a kill, whose store lock can
         // outlive the dead process by a moment (run 40178327848: the
@@ -475,8 +473,7 @@ impl Drop for Server {
 /// Starts a server on `data` right after a kill. The killed server's
 /// store lock outlives the SIGKILL by a moment: on Postgres the
 /// advisory lock dies with the killed server's session, when the
-/// database gets around to ending that backend, and on SQLite the
-/// flock tears down when the kernel reaps the process. The wait takes
+/// database gets around to ending that backend. The wait takes
 /// the real condition, bounded at 10 s, and retries ONLY the holder
 /// refusal, one line per try with the elapsed time; any other exit
 /// fails at once. Returns the server and the number of holder refusals
@@ -490,8 +487,7 @@ pub(crate) fn start_after_kill(data: &Path, log: &Path) -> (Server, u64) {
 /// listens, retrying, bounded at 10 s, ONLY the store-lock holder
 /// refusal a killed server's lock can name for a moment: on Postgres
 /// the advisory lock dies with the killed server's session, when the
-/// database gets around to ending that backend, and on SQLite the
-/// flock tears down when the kernel reaps the process. Any other exit
+/// database gets around to ending that backend. Any other exit
 /// fails at once with the server's own lines. Returns the listening
 /// server and the number of holder refusals it retried: a test that
 /// must prove the wait happened asserts on the count.
@@ -517,7 +513,7 @@ pub(crate) fn spawn_until_lock_free(
                 let text = fs::read_to_string(log).unwrap_or_default();
                 let fresh = &text[mark..];
                 // Postgres refuses with the holder message of the
-                // advisory lock; SQLite with the one of the flock.
+                // advisory lock.
                 let holder = fresh.contains("another server holds this store")
                     || fresh.contains("is in use by another server");
                 assert!(
