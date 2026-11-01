@@ -905,6 +905,8 @@ jobs:
     name: test (proptest full)
     if: github.event_name == 'schedule'
     runs-on: ubuntu-24.04
+    # SHORTCUT: one job. Split it in two, each with its own Postgres
+    # service and the same 2000 cases, when it passes 80 minutes.
     timeout-minutes: 120
     services:
       # The suite's Postgres tests read this database: the backend they
