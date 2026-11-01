@@ -929,14 +929,27 @@ mod tests {
                     Ok(ids)
                 })
                 .unwrap();
+            // The oracle's changesets, one read: the walk below runs in
+            // memory, so the case's round trips stay in the product (the
+            // path log) and not in the oracle. A read per step here would
+            // be about four thousand transactions a case, all test cost.
+            let mut stored: HashMap<ChangesetId, Changeset> = HashMap::with_capacity(ids.len());
+            store
+                .read(|c| {
+                    for &id in &ids {
+                        stored.insert(id, c.get_changeset(repo, id)?);
+                    }
+                    Ok(())
+                })
+                .unwrap();
             let queried = testing::PATHS.into_iter().chain(["c", "c/a", "a/b/c/d", "z"]);
             for p in queried {
                 for &tip in &ids {
                     let mut walked = Vec::new();
                     let mut next = Some(tip);
                     while let Some(id) = next {
-                        let cs = store.read(|c| c.get_changeset(repo, id)).unwrap();
-                        if read::changes_path(&cs, &path(p)) {
+                        let cs = &stored[&id];
+                        if read::changes_path(cs, &path(p)) {
                             walked.push(id);
                         }
                         next = cs.parents().first().copied();
