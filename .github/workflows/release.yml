@@ -250,8 +250,11 @@ jobs:
           [ "$(wc -l < "out/$CELL-checksums.txt" | tr -d ' ')" \
             = "${#payload[@]}" ] || {
             echo "the checksums file does not cover the payload"; exit 1; }
-          grep -q "release-environment" "out/$CELL-checksums.txt" && {
-            echo "the checksums file holds the environment record"; exit 1; }
+          # An if, not a && fail-list: the clean case must not be the
+          # command whose status the step returns.
+          if grep -q "release-environment" "out/$CELL-checksums.txt"; then
+            echo "the checksums file holds the environment record"; exit 1;
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.name }}
