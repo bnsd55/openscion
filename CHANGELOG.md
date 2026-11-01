@@ -1349,6 +1349,15 @@ The first release: the server, its cache tiers, and the `scn` client.
 
 ### Fixed
 
+- The release workflow's publish step could not run: verify-tag read the
+  verify script from a checkout it never made, `gh release create` took
+  a flag gh does not have, and the changelog was read from a tag name
+  the checkout does not fetch. The publish now creates the release as a
+  draft - the repository's immutable-releases setting forbids adding
+  assets after publication - uploads the payload, counts the assets,
+  and publishes with the flip to `--draft=false`; the changelog is read
+  from HEAD; the dry run runs the same publish path against a scratch-
+  named draft it deletes, so the next tag is not the first run of it.
 - A mount session record could name a pid that is no server: the stop
   signaled pid 0, which takes the caller's whole process group, or pid
   1, which is init. A record whose pid is below 2 is never signaled

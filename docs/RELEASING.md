@@ -54,11 +54,18 @@ A release is cut through one PR from a branch named
    the first release nothing is bumped: the five already say 0.1.0,
    and the step is the check that they are equal. A later release
    bumps all five in one commit.
-4. **Notes regenerated from the tagged commit.** The GitHub release
-   notes come from the version's `CHANGELOG.md` section read at the
-   tagged commit (`git show v0.1.0:CHANGELOG.md`), never from a local
-   working tree or an edited copy. The command prints the whole file;
-   the version's section alone comes out of
+4. **Notes regenerated from the tagged commit.** The release body is
+   the notes file (`docs/release-notes/<version>.md`) read at the
+   tagged commit — never from a local working tree or an edited copy —
+   followed by one line pointing at the full change list: the
+   version's section of `CHANGELOG.md` at the tag. The workflow fails
+   without the file: every release ships its notes, so the file is
+   written before the tag. The release body is not the changelog
+   section itself (a section can be past the 125000-character body
+   limit the release API enforces), but the workflow still proves the
+   section was folded for this version: it reads the version's
+   section at the tagged commit and fails unless it exists and holds
+   at least one row. The section alone comes out of
 
    ```sh
    git show v0.1.0:CHANGELOG.md | awk \
