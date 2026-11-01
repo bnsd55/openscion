@@ -374,6 +374,19 @@ impl Meta for Backend {
         self.pg.read(f)
     }
 
+    fn read_long<T>(
+        &self,
+        idle: std::time::Duration,
+        f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>,
+    ) -> Result<T> {
+        self.pg.read_bounded(
+            f,
+            crate::pg::READ_STATEMENT_TIMEOUT,
+            idle,
+            crate::pg::READER_WAIT,
+        )
+    }
+
     fn read_counted<T>(&self, f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>) -> (Result<T>, u64) {
         self.pg.read_counted(f)
     }

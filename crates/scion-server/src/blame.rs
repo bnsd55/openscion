@@ -38,6 +38,15 @@ use crate::tree;
 // Upgrade: blame as derived data, kept per file version.
 pub const MAX_BLAME_VERSIONS: usize = 100;
 
+// A call holds one read transaction for its whole walk: every version's
+// reads ride it, instead of a transaction per read. The transaction holds
+// one pool reader, and holds back vacuum (Postgres's xmin horizon) for as
+// long as the call runs; the bound is the call's own deadline, which stops
+// the walk first - 600 s for a fresh call ([`crate::deadline::CALL_LIMIT`],
+// also the transaction's idle bound, so a long diff between two reads
+// cannot lose the reader). A dead call's transaction rolls back with its
+// error, and the reader goes back to the pool.
+
 /// Most lines one call diffs, counting both sides of each diff. A diff of
 /// many repeated lines can take seconds, so this bounds the time of a call.
 /// A line counts once per 64 bytes (`diff_cost`), a rename search counts
@@ -295,7 +304,19 @@ pub fn blame(
     // the first one has no progress, and a cursor here would send the
     // client round the same step for ever.
     let mut progressed = false;
-    for _ in 0..MAX_BLAME_VERSIONS {
+    // One read transaction for the whole walk: every version's meta reads
+    // - the chain window, the node lookups, the changeset, the root tree,
+    // the diff's tree reads - ride it, instead of three transactions per
+    // version. The transaction holds the pool's reader, and holds back
+    // vacuum for as long; the bound is the call's own deadline, which
+    // stops the walk first, and the transaction's idle bound is that same
+    // deadline, so a long diff between two reads cannot lose the reader
+    // mid-walk. A derived value that is missing fills in the fill's own
+    // transactions, as every fill does; the held snapshot cannot see the
+    // fill's rows and never needs to, because a walk reads each value
+    // once and takes it from the fill's return.
+    store.read_long(CALL_LIMIT, |c| {
+        for _ in 0..MAX_BLAME_VERSIONS {
         // Each step diffs two whole versions: the walk stops at the
         // deadline before it starts the next one, the first diff too.
         walk_until.check()?;
@@ -308,37 +329,31 @@ pub fn blame(
         // The next version to explain: the newest changeset at or below
         // `next`, on its first-parent history, that changes the path.
         let Some(at) = next else { break };
-        let step = store.read(|c| {
-            // The value at `at` comes from the window the walk holds, or
-            // from a fresh window from `at` when the walk starts, or
-            // jumped past the window on a version deeper than it held.
-            if pos >= chain.len() || chain[pos].0 != at {
-                chain = history::chain_values(c, at, crate::meta::DERIVED_BATCH + 1)?;
-                pos = 0;
-            }
-            let Some(root) = chain[pos].1 else {
-                return Err(Error::Corrupt(format!("path history: no value for {at}")));
-            };
-            let Some(id) = history::newest_change_at(c, &mut nodes, root, &path)? else {
-                return Ok(None);
-            };
-            let changeset = c.get_changeset(repo, id)?;
-            // The walk goes on at the parent of the version it found. In
-            // the window, that is the link at its side; past the window,
-            // the next step starts a fresh window there.
-            if let Some(off) = chain[pos..].iter().position(|(seen, _)| *seen == id) {
-                pos += off + 1;
-            } else {
-                pos = chain.len();
-            }
-            Ok(Some((id, changeset)))
-        })?;
-        let Some((id, changeset)) = step else {
+        // The value at `at` comes from the window the walk holds, or
+        // from a fresh window from `at` when the walk starts, or
+        // jumped past the window on a version deeper than it held.
+        if pos >= chain.len() || chain[pos].0 != at {
+            chain = history::chain_values(c, at, crate::meta::DERIVED_BATCH + 1)?;
+            pos = 0;
+        }
+        let Some(root) = chain[pos].1 else {
+            return Err(Error::Corrupt(format!("path history: no value for {at}")));
+        };
+        let Some(id) = history::newest_change_at(c, &mut nodes, root, &path)? else {
             // No version below: the walk reached the change that made the
             // file.
             next = None;
             break;
         };
+        let changeset = c.get_changeset(repo, id)?;
+        // The walk goes on at the parent of the version it found. In
+        // the window, that is the link at its side; past the window,
+        // the next step starts a fresh window there.
+        if let Some(off) = chain[pos..].iter().position(|(seen, _)| *seen == id) {
+            pos += off + 1;
+        } else {
+            pos = chain.len();
+        }
         // The next version, if the walk goes on, is the newest one at or
         // below this version's parent.
         next = changeset.parents().first().copied();
@@ -390,13 +405,13 @@ pub fn blame(
         let mut cost = 0;
         let found = match next {
             Some(parent) => {
-                let root = tree::root_tree(store, repo, parent, &walk_until)?;
+                let root = tree::root_tree_held(store, c, repo, parent, &walk_until)?;
                 let budget = Budget {
                     cost: &mut cost,
                     cap: left,
                     progress: always,
                 };
-                older_version(store, root, &changeset, newer, budget, &search, memory)?
+                older_version(store, c, root, &changeset, newer, budget, &search, memory)?
             }
             None => Older::Found(None, RenameSearch::default()),
         };
@@ -458,26 +473,27 @@ pub fn blame(
                 text = new_text;
             }
         }
-    }
-    // The reply covers the window's lines only. The changesets named
-    // outside it are not in the reply.
-    let window_ranges = ranges(&lines[resume.after_line..window_end], resume.after_line);
-    let named: Vec<ChangesetId> = window_ranges.iter().filter_map(|r| r.changeset).collect();
-    changesets.retain(|(id, _, _)| named.contains(id));
-    let resume = next_resume(
-        resume,
-        &lines,
-        counted,
-        window_end,
-        next,
-        &path,
-        next_search,
-        start,
-    )?;
-    Ok(Blame {
-        ranges: window_ranges,
-        changesets,
-        resume,
+        }
+        // The reply covers the window's lines only. The changesets named
+        // outside it are not in the reply.
+        let window_ranges = ranges(&lines[resume.after_line..window_end], resume.after_line);
+        let named: Vec<ChangesetId> = window_ranges.iter().filter_map(|r| r.changeset).collect();
+        changesets.retain(|(id, _, _)| named.contains(id));
+        let resume = next_resume(
+            resume,
+            &lines,
+            counted,
+            window_end,
+            next,
+            &path,
+            next_search,
+            start,
+        )?;
+        Ok(Blame {
+            ranges: window_ranges,
+            changesets,
+            resume,
+        })
     })
 }
 
@@ -637,8 +653,10 @@ fn diff_cost(text: &[u8]) -> usize {
 /// The bytes of the text it reads stay taken from `memory`: the second
 /// return value holds them, and pairs with the text. A version whose bytes
 /// do not fit the whole budget counts as absent, so the walk goes on.
+#[allow(clippy::too_many_arguments)] // the walk's one tx, and the step's knobs
 fn older_version(
     store: &Backend,
+    c: &mut dyn MetaTx,
     root: TreeId,
     changeset: &Changeset,
     newer: Newer<'_>,
@@ -646,7 +664,9 @@ fn older_version(
     search: &RenameSearch,
     memory: &Bytes,
 ) -> Result<Older> {
-    let entry = store.read(|c| tree::lookup(c, root, newer.path))?;
+    // The walk's held transaction: the lookup rides it, like every other
+    // read of the walk.
+    let entry = tree::lookup(c, root, newer.path)?;
     if *search != RenameSearch::default() && matches!(entry, Some(Entry::File(_))) {
         return Err(Error::InvalidArgument(format!(
             "{:?} was there before, so it has no rename search",
@@ -670,7 +690,7 @@ fn older_version(
         // As in git, only a path with no file before can be a rename. A
         // symlink or submodule that becomes a regular file is not one.
         None | Some(Entry::Dir(_)) => {
-            return renamed_from(store, root, changeset, newer, budget, search, memory);
+            return renamed_from(store, c, root, changeset, newer, budget, search, memory);
         }
     };
     Ok(Older::Found(older, RenameSearch::default()))
@@ -697,8 +717,10 @@ fn older_version(
 ///
 /// [`Error::InvalidArgument`] if `search` is not where this search can
 /// stop.
+#[allow(clippy::too_many_arguments)] // the walk's one tx, and the step's knobs
 fn renamed_from(
     store: &Backend,
+    c: &mut dyn MetaTx,
     root: TreeId,
     changeset: &Changeset,
     newer: Newer<'_>,
@@ -711,7 +733,7 @@ fn renamed_from(
         cap,
         progress,
     } = budget;
-    let deleted = deleted_files(store, root, changeset)?;
+    let deleted = deleted_files(c, root, changeset)?;
     let bad = |why: &str| Error::InvalidArgument(format!("bad rename search: {why}"));
     if search.searched > deleted.len() {
         return Err(bad("past the deleted files"));
@@ -804,26 +826,25 @@ fn renamed_from(
 }
 
 /// Each file that `changeset` deletes, in path order, as it was in `root`,
-/// the tree of its first parent.
-fn deleted_files<'c>(
-    store: &Backend,
+/// the tree of its first parent. The walk's held transaction: the tree
+/// reads ride it, like every other read of the walk.
+fn deleted_files<'a>(
+    c: &mut dyn MetaTx,
     root: TreeId,
-    changeset: &'c Changeset,
-) -> Result<Vec<(&'c RepoPath, FileState)>> {
-    store.read(|c| {
-        let mut trees = HashMap::new();
-        let mut deleted = Vec::new();
-        for (other, _) in changeset
-            .changes()
-            .iter()
-            .filter(|(_, state)| state.is_none())
-        {
-            if let Some(Entry::File(file)) = lookup_cached(c, &mut trees, root, other)? {
-                deleted.push((other, file.state()));
-            }
+    changeset: &'a Changeset,
+) -> Result<Vec<(&'a RepoPath, FileState)>> {
+    let mut trees = HashMap::new();
+    let mut deleted = Vec::new();
+    for (other, _) in changeset
+        .changes()
+        .iter()
+        .filter(|(_, state)| state.is_none())
+    {
+        if let Some(Entry::File(file)) = lookup_cached(c, &mut trees, root, other)? {
+            deleted.push((other, file.state()));
         }
-        Ok(deleted)
-    })
+    }
+    Ok(deleted)
 }
 
 /// [`tree::lookup`] that loads each tree at most once across calls.
