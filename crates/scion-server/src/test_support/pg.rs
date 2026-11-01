@@ -16,7 +16,10 @@ impl PgClient {
     /// keeps true for the few setup statements a caller needs. Only the
     /// test schema's preparation calls it.
     #[cfg(any(test, feature = "test-hooks"))]
-    fn as_raw(&self, f: impl FnOnce(&mut Client) -> Result<()> + Send + 'static) -> Result<()> {
+    pub(super) fn as_raw(
+        &self,
+        f: impl FnOnce(&mut Client) -> Result<()> + Send + 'static,
+    ) -> Result<()> {
         let (reply, rx) = std::sync::mpsc::channel();
         self.jobs
             .send(Job {
@@ -26,12 +29,12 @@ impl PgClient {
                 reply,
                 raw: Some(Box::new(f)),
             })
-            .map_err(|_| Error::Corrupt("the database worker stopped".into()))?;
+            .map_err(|_| Error::Corrupt(super::WORKER_STOPPED.into()))?;
         match rx.recv() {
             Ok(Ok(Reply::Count(_))) => Ok(()),
             Ok(Ok(_)) => unreachable!("a raw job replies with a count"),
             Ok(Err(error)) => Err(error),
-            Err(_) => Err(Error::Corrupt("the database worker stopped".into())),
+            Err(_) => Err(Error::Corrupt(super::WORKER_STOPPED.into())),
         }
     }
 }
@@ -96,7 +99,7 @@ const CLEAN_LOCK: i64 = 0x5343_494F_4E53_5445;
 
 /// A plain connection. Only the test schema's preparation calls it.
 #[cfg(any(test, feature = "test-hooks"))]
-fn connect(url: &str, ca: Option<&Path>) -> Result<PgClient> {
+pub(super) fn connect(url: &str, ca: Option<&Path>) -> Result<PgClient> {
     connect_with(url, ca, "", None)
 }
 
