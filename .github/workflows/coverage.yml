@@ -74,10 +74,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: protoc
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: cargo-nextest
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -245,10 +245,6 @@ jobs:
           # its job ran 635 tests green - the split's artifact, not
           # missing tests). The run set is the whole workspace: the one
           # measure is what the gate checks, so every crate's tests run.
-          # SHORTCUT: one graph walk runs longer than eight minutes
-          # under postgres plus instrumentation, because the ancestry
-          # walk issues one query per node link. Remove this exclusion
-          # when the batched ancestry walk lands.
           LLVM_PROFILE_FILE=/dev/null nice -n 19 cargo nextest run \
             --workspace --no-run
           # The measure runs in its own process group (setsid): the
@@ -257,14 +253,14 @@ jobs:
           # else - no name pattern, nothing of the step or the watcher.
           sum="${GITHUB_STEP_SUMMARY:-/dev/null}"
           echo "postgres measure starts at $(date -u +%T)" >> "$sum" || true
-          if nice -n 19 cargo nextest run --no-run --workspace -E "not test(graph_queries_across_many_merges_answer)" > build-postgres.log 2>&1; then
+          if nice -n 19 cargo nextest run --no-run --workspace > build-postgres.log 2>&1; then
             echo "postgres build ends at $(date -u +%T)" >> "$sum" || true
           else
             echo "the postgres build failed:"
             tail -40 build-postgres.log
             exit 1
           fi
-          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 env PROPTEST_CASES=16 cargo nextest run --profile coverage --workspace --no-fail-fast -E "not test(graph_queries_across_many_merges_answer)"; echo $? > measure.rc' \
+          setsid bash -c 'echo $$ > measure.pgid; nice -n 19 env PROPTEST_CASES=16 cargo nextest run --profile coverage --workspace --no-fail-fast; echo $? > measure.rc' \
             | tee measure.log
           # The same end-of-step rules the measure always had.
           # One wait only: a second wait on the reaped job re-fires

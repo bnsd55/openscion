@@ -187,6 +187,27 @@ pub(crate) fn corrupt_history_node_body(
     )
 }
 
+/// Corrupts the store's UUID row: the marker still names its store, the
+/// database no longer names one of the right shape. The schema's check
+/// forbids the short row, an older build may have made it: one
+/// transaction drops the check, makes the row, and adds the check back
+/// `NOT VALID`, the way every damage of a guarded row runs.
+pub(crate) fn corrupt_store_uuid(backend: &Backend) -> Result<()> {
+    let data = data_dir(backend);
+    exec(
+        data,
+        &format!(
+            "BEGIN;
+             ALTER TABLE store_uuid DROP CONSTRAINT store_uuid_uuid_check;
+             UPDATE store_uuid SET uuid = {} WHERE one = 1;
+             ALTER TABLE store_uuid ADD CONSTRAINT store_uuid_uuid_check
+                 CHECK (octet_length(uuid) = 16) NOT VALID;
+             COMMIT;",
+            pg_bytes(&[0x01])
+        ),
+    )
+}
+
 /// Inserts a tree row: the id stays the tree's own hash, the body is
 /// whatever the test crafted (an entry whose size lies, for one).
 pub(crate) fn insert_tree_row(backend: &Backend, id: &[u8], body: &[u8]) -> Result<()> {

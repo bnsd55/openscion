@@ -236,6 +236,18 @@ pub mod test_support {
             /// The Postgres schema's version, for the tests that pin it.
             pub const POSTGRES: u32 = crate::pg::PG_SCHEMA_VERSION;
         }
+
+        use std::path::Path;
+
+        /// Arms the marker write's directory fsync of `data` to fail
+        /// with EIO, once: the next open that writes `data`'s marker
+        /// must refuse with the disk's error. The store's fsync gate
+        /// cannot carry this hook, because the marker writes before any
+        /// store exists to arm.
+        #[allow(unreachable_pub)]
+        pub fn fail_marker_dir_fsync(data: &Path) {
+            crate::backend::test_hooks::fail_marker_dir_fsync(data);
+        }
     }
     /// The error a changeset apply can end in, and the conversion the
     /// tests share with the crate, for the write tests.

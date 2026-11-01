@@ -2798,17 +2798,37 @@ mod tests {
                     Ok(())
                 })
                 .unwrap();
+            // The oracle's changesets and generations, one read: the chains
+            // below build in memory from the stored first parents. The
+            // oracle shares no code with the walk it checks - a bug in the
+            // walk's own chain reader cannot hide in both.
+            let mut oracle: HashMap<ChangesetId, (Changeset, i64)> =
+                HashMap::with_capacity(ids.len());
+            store
+                .read(|c| {
+                    for &id in &ids {
+                        let generation = c.generation(repo, id)?;
+                        let cs = c.get_changeset(repo, id)?;
+                        oracle.insert(id, (cs, generation));
+                    }
+                    Ok(())
+                })
+                .unwrap();
             for &tip in &ids {
                 store.read(|c| {
-                    let tip_gen = c.generation(repo, tip)?;
-                    // The first-parent history of the tip, newest first.
-                    let mut chain: Vec<(ChangesetId, i64, Changeset)> = Vec::new();
-                    let mut next = Some(tip);
-                    while let Some(id) = next {
-                        let cs = c.get_changeset(repo, id)?;
-                        next = cs.parents().first().copied();
-                        chain.push((id, c.generation(repo, id)?, cs));
-                    }
+                    let tip_gen = oracle[&tip].1;
+                    // The first-parent history of the tip, newest first,
+                    // from the stored changesets alone.
+                    let chain: Vec<(ChangesetId, i64, Changeset)> = {
+                        let mut chain = Vec::new();
+                        let mut next = Some(tip);
+                        while let Some(id) = next {
+                            let (cs, generation) = &oracle[&id];
+                            next = cs.parents().first().copied();
+                            chain.push((id, *generation, cs.clone()));
+                        }
+                        chain
+                    };
                     // One index for all bases, as a ref's index serves its lands.
                     let mut index = PathIndex::new(c, repo, tip, &tight.used)?;
                     // Bases on the history, newest first. The model holds the

@@ -245,6 +245,11 @@ pub struct Vfs {
     blobs: Blobs,
     /// Where the changes of this mount live.
     overlay: PathBuf,
+    /// The overlay failures this mount already warned about, as
+    /// (operation, path): a client that retries a failing path must not
+    /// flood stderr with the same line, and a mount whose overlay fails
+    /// for many files must not grow this set without end.
+    warned: std::sync::Mutex<Warned>,
     /// Whether the mount takes writes: v0.1 mounts are read-only unless
     /// `scn mount --unstable-writable` said otherwise, because a symlinked
     /// parent directory in the overlay can still redirect a write outside
@@ -317,6 +322,7 @@ impl Vfs {
             uid: rustix::process::geteuid().as_raw(),
             gid: rustix::process::getegid().as_raw(),
             overlay,
+            warned: std::sync::Mutex::new(Warned::default()),
             #[cfg(feature = "unstable-writable-mount")]
             writable: false,
         })
@@ -606,8 +612,11 @@ impl Vfs {
                 .fetch_tree(tree, dir_path.as_ref())
                 .await
                 .map_err(|e| {
-                    warn("cannot read a tree of the mount", &e);
-                    nfsstat3::NFS3ERR_IO
+                    let at = match dir_path.as_ref() {
+                        Some(p) => self.overlay_file(p),
+                        None => self.overlay.clone(),
+                    };
+                    self.io_at("cannot read the tree of", &at, &e)
                 })?;
             for (name, entry) in tree.entries() {
                 let path = Self::child(dir_path.as_ref(), name.as_bytes())?;
@@ -770,12 +779,14 @@ impl NFSFileSystem for Vfs {
         let file = self.overlay_file(nodes.by_id.get(&id).unwrap().path.as_ref().unwrap());
         if let set_mode3::mode(m) = setattr.mode {
             let exec = m & 0o111 != 0;
-            let handle = open_overlay_chmod(&file).map_err(|_| nfsstat3::NFS3ERR_IO)?;
+            let handle =
+                open_overlay_chmod(&file).map_err(|e| self.io_at("cannot chmod", &file, &e))?;
             // RawMode is u32 on Linux and u16 on macOS, so the conversion
             // is real only on macOS.
             #[allow(clippy::useless_conversion)]
             let mode = Mode::from_raw_mode(file_mode(0o644, exec).try_into().unwrap());
-            rustix::fs::fchmod(&handle, mode).map_err(|_| nfsstat3::NFS3ERR_IO)?;
+            rustix::fs::fchmod(&handle, mode)
+                .map_err(|e| self.io_at("cannot chmod", &file, &std::io::Error::from(e)))?;
             if let Some(Node {
                 kind: Kind::Local { exec: slot },
                 ..
@@ -785,8 +796,10 @@ impl NFSFileSystem for Vfs {
             }
         }
         if let set_size3::size(bytes) = setattr.size {
-            let f = open_overlay_write(&file, true).map_err(|_| nfsstat3::NFS3ERR_IO)?;
-            f.set_len(bytes).map_err(|_| nfsstat3::NFS3ERR_IO)?;
+            let f = open_overlay_write(&file, true)
+                .map_err(|e| self.io_at("cannot set the size of", &file, &e))?;
+            f.set_len(bytes)
+                .map_err(|e| self.io_at("cannot set the size of", &file, &e))?;
         }
         self.attr_of(&nodes, id)
     }
@@ -833,18 +846,22 @@ impl NFSFileSystem for Vfs {
                 use std::io::SeekFrom;
                 use std::io::{Read as _, Seek as _};
 
-                let file = self.overlay_file(node.path.as_ref().expect("a file has a path"));
-                let mut file = std::fs::File::open(&file).map_err(|_| nfsstat3::NFS3ERR_IO)?;
-                let len = file.metadata().map_err(|_| nfsstat3::NFS3ERR_IO)?.len();
+                let path = self.overlay_file(node.path.as_ref().expect("a file has a path"));
+                let mut file =
+                    std::fs::File::open(&path).map_err(|e| self.io_at("cannot read", &path, &e))?;
+                let len = file
+                    .metadata()
+                    .map_err(|e| self.io_at("cannot read", &path, &e))?
+                    .len();
                 let from = offset.min(len);
                 file.seek(SeekFrom::Start(from))
-                    .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                    .map_err(|e| self.io_at("cannot read", &path, &e))?;
                 let want = usize::try_from(count).unwrap_or(usize::MAX);
                 let mut data = Vec::new();
                 let taken = file
                     .take(u64::try_from(want).unwrap_or(u64::MAX))
                     .read_to_end(&mut data)
-                    .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                    .map_err(|e| self.io_at("cannot read", &path, &e))?;
                 let eof = from + taken as u64 >= len;
                 Ok((data, eof))
             }
@@ -877,11 +894,15 @@ impl NFSFileSystem for Vfs {
             _ => {}
         }
         self.materialize(&mut nodes, id).await?;
-        let mut file = open_overlay_write(&file, false).map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        let path = file;
+        let mut file =
+            open_overlay_write(&path, false).map_err(|e| self.io_at("cannot write", &path, &e))?;
         file.seek(std::io::SeekFrom::Start(offset))
             .and_then(|_| file.write_all(data))
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-        let meta = file.metadata().map_err(|_| nfsstat3::NFS3ERR_IO)?;
+            .map_err(|e| self.io_at("cannot write", &path, &e))?;
+        let meta = file
+            .metadata()
+            .map_err(|e| self.io_at("cannot write", &path, &e))?;
         let exec = meta.permissions().mode() & 0o111 != 0;
         Ok(self.attr(ftype3::NF3REG, file_mode(0o644, exec), meta.len(), id))
     }
@@ -912,7 +933,7 @@ impl NFSFileSystem for Vfs {
             set_mode3::mode(m) => m & 0o111 != 0,
             set_mode3::Void => false,
         };
-        write_file(&file, &[], exec).map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        write_file(&file, &[], exec).map_err(|e| self.io_at("cannot create", &file, &e))?;
         let id = nodes.add(Some(path.clone()), Kind::Local { exec }, false);
         self.forget_delete(&mut nodes, &path);
         note_child(&mut nodes, dirid, filename.as_ref(), id);
@@ -942,7 +963,7 @@ impl NFSFileSystem for Vfs {
             return Err(nfsstat3::NFS3ERR_EXIST);
         }
         let file = self.overlay_file(&path);
-        write_file(&file, &[], false).map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        write_file(&file, &[], false).map_err(|e| self.io_at("cannot create", &file, &e))?;
         let id = nodes.add(Some(path.clone()), Kind::Local { exec: false }, false);
         self.forget_delete(&mut nodes, &path);
         note_child(&mut nodes, dirid, filename.as_ref(), id);
@@ -972,7 +993,8 @@ impl NFSFileSystem for Vfs {
             return Err(nfsstat3::NFS3ERR_EXIST);
         }
         let file = self.overlay_file(&path);
-        std::fs::create_dir_all(&file).map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        std::fs::create_dir_all(&file)
+            .map_err(|e| self.io_at("cannot create the directory", &file, &e))?;
         let id = nodes.add(Some(path.clone()), Kind::LocalDir, false);
         self.forget_delete(&mut nodes, &path);
         note_child(&mut nodes, dirid, dirname.as_ref(), id);
@@ -1018,13 +1040,15 @@ impl NFSFileSystem for Vfs {
                 // files instead.
                 return Err(nfsstat3::NFS3ERR_ROFS);
             }
-            std::fs::remove_dir(self.overlay_file(&path)).map_err(|_| nfsstat3::NFS3ERR_IO)?;
+            std::fs::remove_dir(self.overlay_file(&path))
+                .map_err(|e| self.io_at("cannot remove", &self.overlay_file(&path), &e))?;
         } else {
             if matches!(
                 nodes.by_id[&id].kind,
                 Kind::Local { .. } | Kind::Link { .. }
             ) {
-                std::fs::remove_file(self.overlay_file(&path)).map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                std::fs::remove_file(self.overlay_file(&path))
+                    .map_err(|e| self.io_at("cannot remove", &self.overlay_file(&path), &e))?;
             }
             if from_ref {
                 self.note_delete(&mut nodes, &path);
@@ -1123,7 +1147,7 @@ impl NFSFileSystem for Vfs {
                 Kind::Local { .. } | Kind::Link { .. }
             ) {
                 std::fs::remove_file(self.overlay_file(&to_path))
-                    .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                    .map_err(|e| self.io_at("cannot remove", &self.overlay_file(&to_path), &e))?;
             }
             if nodes.by_id[&to_id].from_ref {
                 self.note_delete(&mut nodes, &to_path);
@@ -1139,13 +1163,15 @@ impl NFSFileSystem for Vfs {
             Kind::Link { .. } | Kind::StoreLink { .. }
         );
         if is_link {
-            symlink_bytes(&bytes, &to_file).map_err(|_| nfsstat3::NFS3ERR_IO)?;
+            symlink_bytes(&bytes, &to_file)
+                .map_err(|e| self.io_at("cannot make the symlink", &to_file, &e))?;
         } else {
             let exec = match &nodes.by_id[&from_id].kind {
                 Kind::Store { exec, .. } | Kind::Local { exec } => *exec,
                 _ => false,
             };
-            write_file(&to_file, &bytes, exec).map_err(|_| nfsstat3::NFS3ERR_IO)?;
+            write_file(&to_file, &bytes, exec)
+                .map_err(|e| self.io_at("cannot write", &to_file, &e))?;
         }
         if nodes.by_id[&from_id].from_ref {
             self.note_delete(&mut nodes, &from_path);
@@ -1155,7 +1181,7 @@ impl NFSFileSystem for Vfs {
             Kind::Local { .. } | Kind::Link { .. }
         ) {
             std::fs::remove_file(self.overlay_file(&from_path))
-                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                .map_err(|e| self.io_at("cannot remove", &self.overlay_file(&from_path), &e))?;
         }
         drop_listed(&mut nodes, from_dirid, from_filename.as_ref());
         nodes.drop_node(from_id);
@@ -1226,7 +1252,10 @@ impl NFSFileSystem for Vfs {
         let dir_path = self.ensure_listed(&mut nodes, dirid).await?;
         let path = Self::child(dir_path.as_ref(), linkname.as_ref())?;
         let target = symlink.as_ref().to_vec();
-        symlink_bytes(&target, &self.overlay_file(&path)).map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        symlink_bytes(&target, &self.overlay_file(&path)).map_err(|e| {
+            let at = self.overlay_file(&path);
+            self.io_at("cannot make the symlink", &at, &e)
+        })?;
         let id = nodes.add(Some(path.clone()), Kind::Link { target }, false);
         self.forget_delete(&mut nodes, &path);
         note_child(&mut nodes, dirid, linkname.as_ref(), id);
@@ -1289,7 +1318,8 @@ impl Vfs {
             Kind::Local { .. } => {
                 // The file may have been chmodded: take the real mode.
                 let file = self.overlay_file(node.path.as_ref().expect("a file has a path"));
-                let meta = std::fs::metadata(&file).map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                let meta =
+                    std::fs::metadata(&file).map_err(|e| self.io_at("cannot read", &file, &e))?;
                 let exec = meta.permissions().mode() & 0o111 != 0;
                 Ok(self.attr(ftype3::NF3REG, file_mode(0o644, exec), meta.len(), id))
             }
@@ -1337,7 +1367,8 @@ impl Vfs {
         if nodes.deleted.remove(path)
             && let Err(e) = write_deletes(&self.overlay, &nodes.deleted)
         {
-            warn("cannot rewrite the note of deletions", &e);
+            let note = self.overlay.join(DELETES);
+            self.io_at("cannot rewrite the note of deletions", &note, &e);
         }
     }
 
@@ -1367,10 +1398,8 @@ impl Vfs {
             .fetch_blob(blob, Some(&path), len)
             .await
             .map_err(io_err)?;
-        write_file(&self.overlay_file(&path), &bytes, exec).map_err(|e| {
-            warn("cannot write a file of the mount", &e);
-            nfsstat3::NFS3ERR_IO
-        })?;
+        let at = self.overlay_file(&path);
+        write_file(&at, &bytes, exec).map_err(|e| self.io_at("cannot write", &at, &e))?;
         let node = nodes.by_id.get_mut(&id).ok_or(nfsstat3::NFS3ERR_STALE)?;
         node.kind = Kind::Local { exec };
         Ok(())
@@ -1402,7 +1431,7 @@ impl Vfs {
             }
             Kind::Local { .. } => {
                 let file = self.overlay_file(node.path.as_ref().expect("a file has a path"));
-                std::fs::read(&file).map_err(|_| nfsstat3::NFS3ERR_IO)
+                std::fs::read(&file).map_err(|e| self.io_at("cannot read", &file, &e))
             }
             Kind::Link { target } => Ok(target.clone()),
             Kind::Dir { .. } | Kind::LocalDir => Err(nfsstat3::NFS3ERR_ISDIR),
@@ -1415,7 +1444,8 @@ impl Vfs {
         if nodes.deleted.insert(path.clone())
             && let Err(e) = write_deletes(&self.overlay, &nodes.deleted)
         {
-            warn("cannot record a deletion", &e);
+            let note = self.overlay.join(DELETES);
+            self.io_at("cannot record a deletion", &note, &e);
         }
     }
 }
@@ -1583,6 +1613,52 @@ fn warn<E: std::fmt::Display>(what: &str, error: &E) {
     eprintln!("scn mount: {what}: {error}");
 }
 
+/// The most distinct overlay failures one mount warns about: past it,
+/// further distinct failures stay silent, and one line says so.
+const WARNED_CAP: usize = 256;
+
+/// The overlay failures one mount has warned about, and whether the cap
+/// was reached.
+#[derive(Default, Debug)]
+struct Warned {
+    set: std::collections::HashSet<(&'static str, PathBuf)>,
+    capped: bool,
+}
+
+/// The warning line an overlay failure prints: the operation, the file,
+/// and the cause.
+fn io_line(what: &str, path: &Path, e: &impl std::fmt::Display) -> String {
+    format!("scn mount: {what} {}: {e}", path.display())
+}
+
+impl Vfs {
+    /// Answers `NFS3ERR_IO` for an overlay I/O failure at `path`, and
+    /// warns once per (operation, path): a client that retries a failing
+    /// path must not flood stderr with the same line, but the first
+    /// failure names the file and the cause.
+    fn io_at(&self, what: &'static str, path: &Path, e: &impl std::fmt::Display) -> nfsstat3 {
+        let mut warned = self
+            .warned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if warned.set.contains(&(what, path.to_path_buf())) {
+            return nfsstat3::NFS3ERR_IO;
+        }
+        if warned.set.len() >= WARNED_CAP {
+            if !warned.capped {
+                warned.capped = true;
+                eprintln!(
+                    "scn mount: {WARNED_CAP} distinct overlay failures warned already; further distinct failures stay silent"
+                );
+            }
+            return nfsstat3::NFS3ERR_IO;
+        }
+        warned.set.insert((what, path.to_path_buf()));
+        eprintln!("{}", io_line(what, path, e));
+        nfsstat3::NFS3ERR_IO
+    }
+}
+
 #[cfg(feature = "unstable-writable-mount")]
 /// Writes `bytes` to `file` under the overlay, with the mode of `exec`.
 fn write_file(file: &Path, bytes: &[u8], exec: bool) -> std::io::Result<()> {
@@ -1747,15 +1823,19 @@ impl Vfs {
                     Kind::Link { .. } | Kind::StoreLink { .. }
                 );
                 if is_link {
-                    symlink_bytes(&bytes, &self.overlay_file(&child_to))
-                        .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                    symlink_bytes(&bytes, &self.overlay_file(&child_to)).map_err(|e| {
+                        let to = self.overlay_file(&child_to);
+                        self.io_at("cannot make the symlink", &to, &e)
+                    })?;
                 } else {
                     let exec = match &nodes.by_id[&id].kind {
                         Kind::Store { exec, .. } | Kind::Local { exec } => *exec,
                         _ => false,
                     };
-                    write_file(&self.overlay_file(&child_to), &bytes, exec)
-                        .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                    write_file(&self.overlay_file(&child_to), &bytes, exec).map_err(|e| {
+                        let to = self.overlay_file(&child_to);
+                        self.io_at("cannot write", &to, &e)
+                    })?;
                 }
                 if nodes.by_id[&id].from_ref {
                     self.note_delete(nodes, &child_from);
@@ -2081,6 +2161,76 @@ mod tests {
 
     /// A symlink planted at an overlay path redirects nothing: the mount
     /// is reachable by anyone who can read the mount table, so the VFS
+    #[cfg(feature = "unstable-writable-mount")]
+    #[tokio::test]
+    async fn a_failing_overlay_write_warns_once_and_names_the_cause() {
+        let test = start(&[("README.md", b"hello\n", Some(false))]).await;
+        let id = find(&test.vfs, "README.md").await.unwrap();
+        // Materialize the file, then take the write permission of the
+        // overlay away: every further write of this mount fails.
+        test.vfs
+            .setattr(
+                id,
+                sattr3 {
+                    mode: set_mode3::mode(0o644),
+                    ..sattr3::default()
+                },
+            )
+            .await
+            .unwrap();
+        let overlay = test.vfs.overlay.clone();
+        // The file's own directory loses its write permission, and the
+        // materialized file goes away: the next write must create it, and
+        // the create fails with EACCES.
+        std::fs::remove_file(overlay.join("README.md")).unwrap();
+        std::fs::set_permissions(&overlay, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let first = test.vfs.write(id, 0, b"again\n").await;
+        assert!(
+            matches!(first, Err(nfsstat3::NFS3ERR_IO)),
+            "first: {first:?}"
+        );
+        // One warning, for this operation at this file, and its line
+        // names the file and the cause.
+        let warned = test.vfs.warned.lock().unwrap();
+        assert_eq!(warned.set.len(), 1, "{warned:?}");
+        let (what, path) = warned.set.iter().next().unwrap();
+        assert_eq!(*what, "cannot write");
+        let line = io_line(what, path, &std::io::Error::from_raw_os_error(13));
+        assert!(line.contains("cannot write"), "{line}");
+        assert!(line.contains(&path.display().to_string()), "{line}");
+        assert!(line.contains("Permission denied"), "{line}");
+        drop(warned);
+
+        // A retry of the same failing write adds no second warning.
+        let again = test.vfs.write(id, 0, b"again\n").await;
+        assert!(
+            matches!(again, Err(nfsstat3::NFS3ERR_IO)),
+            "second write: {again:?}"
+        );
+        assert_eq!(test.vfs.warned.lock().unwrap().set.len(), 1);
+
+        std::fs::set_permissions(&overlay, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    /// A distinct failure past the cap is warned about no more, and the
+    /// cap itself is announced once, by the mount that reached it.
+    #[test]
+    fn the_warned_set_holds_a_cap_and_announces_it_once() {
+        let mut warned = Warned::default();
+        for i in 0..WARNED_CAP {
+            let path = std::path::PathBuf::from(format!("f{i}"));
+            assert!(warned.set.insert(("cannot write", path)), "path {i} again");
+        }
+        assert_eq!(warned.set.len(), WARNED_CAP);
+        assert!(!warned.capped);
+        // Past the cap there is no room: a distinct failure stays silent,
+        // the one announcement is made, and no further entry is kept.
+        assert_eq!(warned.set.len(), WARNED_CAP);
+        warned.capped = true;
+        assert!(warned.capped);
+    }
+
     #[cfg(feature = "unstable-writable-mount")]
     #[tokio::test]
     async fn a_planted_symlink_is_never_written_through() {

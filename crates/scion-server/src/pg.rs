@@ -502,6 +502,137 @@ struct PgClient {
     jobs: std::sync::mpsc::Sender<Job>,
 }
 
+/// The worker loop's next step: run another job, or stop the thread.
+enum Flow {
+    Go,
+    Stop,
+}
+
+/// The panic's message, for the log: a panic payload is `&str`, `String`,
+/// or anything else.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_owned()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "a panic with no message".to_owned()
+    }
+}
+
+/// The reply a caller gets when the worker thread is gone. The log names
+/// why: the worker logs its own death, panic or shutdown.
+pub(crate) const WORKER_STOPPED: &str = "the database worker stopped: its log line names why";
+
+/// Serves one job on the worker thread: the loop body of
+/// [`PgClient::spawn`], lifted out so its panics are caught and logged
+/// instead of ending the thread in silence. `continue` is
+/// [`Flow::Go`], `break` is [`Flow::Stop`].
+#[allow(clippy::too_many_arguments)]
+fn run_job(
+    job: Job,
+    client: &mut Client,
+    setup: &mut Setup,
+    conn: &Conn,
+    tx: &mut TxState,
+    ever_held: &mut bool,
+    fence: Option<&std::sync::Arc<Fence>>,
+) -> Flow {
+    // A transaction the reconnect dropped fails every
+    // statement until its caller ends it. Its COMMIT
+    // never runs: on the fresh session it would answer
+    // Ok about a transaction that is gone. A BEGIN may
+    // pass: the reconnect ended the old tx, so a BEGIN
+    // starts a fresh one on the fresh session, and a new
+    // BEGIN comes only from a new holder of the client,
+    // which the lost transaction cannot reach.
+    if tx.lost() && !job.sql.starts_with("ROLLBACK") && !job.sql.starts_with("BEGIN") {
+        // The caller may be gone, which is fine: the reply
+        // fails, and the job's outcome is the caller's
+        // business. The worker goes on to the next job.
+        let _ = job.reply.send(Err(Error::Corrupt(TX_LOST.into())));
+        return Flow::Go;
+    }
+    // A client the server closed, as after a restart of
+    // the database, connects again: the caller sees one
+    // error at most. A reconnect inside a transaction
+    // loses the transaction.
+    let lost_tx = tx.in_progress();
+    let mut reconnected = false;
+    if client.is_closed() {
+        match reconnect(client, conn) {
+            Ok(fresh) => {
+                *setup = fresh;
+                if lost_tx {
+                    *tx = TxState::Lost;
+                }
+            }
+            Err(error) => {
+                if job.reply.send(Err(error)).is_err() {
+                    return Flow::Stop;
+                }
+                return Flow::Go;
+            }
+        }
+        reconnected = true;
+        // The lock state of the fresh session is checked
+        // here, before any lost-tx reply: a lock lost
+        // across a wedge of dead transactions still fences
+        // the process.
+        if !setup.ok() {
+            if *ever_held && matches!(setup.outcome, SetupOutcome::LockRefused) {
+                trip_fence(fence);
+            }
+            // A database that cannot be reached is no
+            // proof of a takeover: the caller retries.
+            let _ = job.reply.send(Err(setup_error(setup, *ever_held)));
+            return Flow::Go;
+        }
+    }
+    // The setup failed on a client that still lives: a
+    // network break left the old session of this very
+    // connection holding the lock, and the session dies
+    // some while after the connection did. One retry a
+    // job, so the recovery needs no process restart.
+    if !setup.ok() {
+        *setup = Setup::new(conn.schema.as_deref(), conn.exclusive, client);
+    }
+    if !setup.ok() {
+        if *ever_held && matches!(setup.outcome, SetupOutcome::LockRefused) {
+            trip_fence(fence);
+        }
+        let _ = job.reply.send(Err(setup_error(setup, *ever_held)));
+        return Flow::Go;
+    }
+    *ever_held = true;
+    // A transaction the reconnect dropped refuses this job
+    // too: it was asked while the old connection held the
+    // transaction, and the new one holds none (its COMMIT
+    // would answer Ok about a transaction that is gone).
+    // A new BEGIN passes: the reconnect ended the old tx,
+    // so the BEGIN opens a fresh one on the fresh session.
+    // As above: a gone caller is fine, the worker goes on.
+    if reconnected && lost_tx && !job.sql.starts_with("ROLLBACK") && !job.sql.starts_with("BEGIN") {
+        let _ = job.reply.send(Err(Error::Corrupt(TX_LOST.into())));
+        return Flow::Go;
+    }
+    if job.kind == Kind::Raw {
+        let mut job = job;
+        let f = job.raw.take().expect("a raw job carries its closure");
+        let _ = job.reply.send(f(client).map(|(): ()| Reply::Count(0)));
+        return Flow::Go;
+    }
+    let out = run_with_retry(client, setup, conn, &job, tx, *ever_held, fence);
+    if setup.ok() {
+        *ever_held = true;
+    }
+    *tx = tx.after(&job.sql, out.is_ok());
+    if job.reply.send(out).is_err() {
+        return Flow::Stop;
+    }
+    Flow::Go
+}
+
 impl PgClient {
     /// Puts `client` on its own worker thread.
     ///
@@ -537,112 +668,37 @@ impl PgClient {
                 // cannot hide a takeover from the fence.
                 let mut ever_held = setup.ok();
                 for job in rx {
-                    // A transaction the reconnect dropped fails every
-                    // statement until its caller ends it. Its COMMIT
-                    // never runs: on the fresh session it would answer
-                    // Ok about a transaction that is gone. A BEGIN may
-                    // pass: the reconnect ended the old tx, so a BEGIN
-                    // starts a fresh one on the fresh session, and a new
-                    // BEGIN comes only from a new holder of the client,
-                    // which the lost transaction cannot reach.
-                    if tx.lost()
-                        && !job.sql.starts_with("ROLLBACK")
-                        && !job.sql.starts_with("BEGIN")
-                    {
-                        // The caller may be gone, which is fine: the reply
-                        // fails, and the job's outcome is the caller's
-                        // business. The worker goes on to the next job.
-                        let _ = job.reply.send(Err(Error::Corrupt(TX_LOST.into())));
-                        continue;
-                    }
-                    // A client the server closed, as after a restart of
-                    // the database, connects again: the caller sees one
-                    // error at most. A reconnect inside a transaction
-                    // loses the transaction.
-                    let lost_tx = tx.in_progress();
-                    let mut reconnected = false;
-                    if client.is_closed() {
-                        match reconnect(&mut client, &conn) {
-                            Ok(fresh) => {
-                                setup = fresh;
-                                if lost_tx {
-                                    tx = TxState::Lost;
-                                }
-                            }
-                            Err(error) => {
-                                if job.reply.send(Err(error)).is_err() {
-                                    break;
-                                }
-                                continue;
-                            }
+                    // A panic in this body must not end the thread in
+                    // silence: the caller's only answer would be "the
+                    // worker stopped", with nothing in the log. The body
+                    // runs under the catch, its panic lands in the log,
+                    // and the thread still stops: a panic leaves the
+                    // transaction and the setup state undefined.
+                    let reply = job.reply.clone();
+                    let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run_job(
+                            job,
+                            &mut client,
+                            &mut setup,
+                            &conn,
+                            &mut tx,
+                            &mut ever_held,
+                            fence.as_ref(),
+                        )
+                    }));
+                    match done {
+                        Ok(Flow::Go) => {}
+                        Ok(Flow::Stop) => break,
+                        Err(payload) => {
+                            tracing::error!(
+                                panic = panic_text(payload.as_ref()),
+                                "the postgres worker thread panicked and stopped; \
+                                 every statement of this client fails until the \
+                                 process restarts"
+                            );
+                            let _ = reply.send(Err(Error::Corrupt(WORKER_STOPPED.into())));
+                            break;
                         }
-                        reconnected = true;
-                        // The lock state of the fresh session is checked
-                        // here, before any lost-tx reply: a lock lost
-                        // across a wedge of dead transactions still fences
-                        // the process.
-                        if !setup.ok() {
-                            if ever_held && matches!(setup.outcome, SetupOutcome::LockRefused) {
-                                trip_fence(fence.as_ref());
-                            }
-                            // A database that cannot be reached is no
-                            // proof of a takeover: the caller retries.
-                            let _ = job.reply.send(Err(setup_error(&setup, ever_held)));
-                            continue;
-                        }
-                    }
-                    // The setup failed on a client that still lives: a
-                    // network break left the old session of this very
-                    // connection holding the lock, and the session dies
-                    // some while after the connection did. One retry a
-                    // job, so the recovery needs no process restart.
-                    if !setup.ok() {
-                        setup = Setup::new(conn.schema.as_deref(), conn.exclusive, &mut client);
-                    }
-                    if !setup.ok() {
-                        if ever_held && matches!(setup.outcome, SetupOutcome::LockRefused) {
-                            trip_fence(fence.as_ref());
-                        }
-                        let _ = job.reply.send(Err(setup_error(&setup, ever_held)));
-                        continue;
-                    }
-                    ever_held = true;
-                    // A transaction the reconnect dropped refuses this job
-                    // too: it was asked while the old connection held the
-                    // transaction, and the new one holds none (its COMMIT
-                    // would answer Ok about a transaction that is gone).
-                    // A new BEGIN passes: the reconnect ended the old tx,
-                    // so the BEGIN opens a fresh one on the fresh session.
-                    // As above: a gone caller is fine, the worker goes on.
-                    if reconnected
-                        && lost_tx
-                        && !job.sql.starts_with("ROLLBACK")
-                        && !job.sql.starts_with("BEGIN")
-                    {
-                        let _ = job.reply.send(Err(Error::Corrupt(TX_LOST.into())));
-                        continue;
-                    }
-                    if job.kind == Kind::Raw {
-                        let mut job = job;
-                        let f = job.raw.take().expect("a raw job carries its closure");
-                        let _ = job.reply.send(f(&mut client).map(|(): ()| Reply::Count(0)));
-                        continue;
-                    }
-                    let out = run_with_retry(
-                        &mut client,
-                        &mut setup,
-                        &conn,
-                        &job,
-                        &mut tx,
-                        ever_held,
-                        fence.as_ref(),
-                    );
-                    if setup.ok() {
-                        ever_held = true;
-                    }
-                    tx = tx.after(&job.sql, out.is_ok());
-                    if job.reply.send(out).is_err() {
-                        break;
                     }
                 }
             })
@@ -665,9 +721,9 @@ impl PgClient {
                 reply,
                 raw: None,
             })
-            .map_err(|_| Error::Corrupt("the database worker stopped".into()))?;
+            .map_err(|_| Error::Corrupt(WORKER_STOPPED.into()))?;
         rx.recv()
-            .map_err(|_| Error::Corrupt("the database worker stopped".into()))?
+            .map_err(|_| Error::Corrupt(WORKER_STOPPED.into()))?
     }
 
     /// The rows of one query.
@@ -740,7 +796,7 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
         // another store, both refuse here. A database restored on the
         // directory of another store would serve metadata whose blobs
         // are not on this disk.
-        let uuid = uuid_of(row.get::<_, Vec<u8>>("uuid"));
+        let uuid = uuid_of(row.get::<_, Vec<u8>>("uuid"))?;
         match marker.uuid {
             None => {
                 // A first open cut between its store's UUID row and
@@ -817,7 +873,7 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
         Ok(uuid_of(
             writer.query("SELECT uuid FROM store_uuid WHERE one = 1", &[])?[0]
                 .get::<_, Vec<u8>>("uuid"),
-        ))
+        )?)
     }
 }
 
@@ -943,8 +999,21 @@ impl Pg {
                         };
                         // A dead connection or a fenced store both fail
                         // here and are seen on the next real call; the
-                        // probe exists to trip the fence on time.
-                        let _ = inner.writer.lock().unwrap().query_opt("SELECT 1", &[]);
+                        // probe exists to trip the fence on time. The
+                        // lock is taken the way lock_writer takes it: a
+                        // poisoned lock must not kill the probe, whose
+                        // death would end the fence's clock in silence.
+                        let probed = inner
+                            .writer
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .query_opt("SELECT 1", &[]);
+                        if let Err(error) = probed {
+                            tracing::warn!(
+                                error = %error,
+                                "the write client's keepalive probe failed"
+                            );
+                        }
                     }
                 })
                 .map_err(crate::error::Error::Io)?;
@@ -1655,10 +1724,14 @@ fn uuid_new() -> [u8; 16] {
 
 /// The 16 bytes of a UUID row, checked: a row of another length is a
 /// database that is not this backend's.
-fn uuid_of(raw: Vec<u8>) -> [u8; 16] {
+fn uuid_of(raw: Vec<u8>) -> Result<[u8; 16]> {
     let len = raw.len();
-    raw.try_into()
-        .unwrap_or_else(|_| panic!("a store UUID row holds 16 bytes, got {len}"))
+    raw.try_into().map_err(|_| {
+        Error::Corrupt(format!(
+            "the store_uuid row holds {len} bytes, not 16: this \
+             database is not this backend's store"
+        ))
+    })
 }
 
 /// The statement's parameters as the trait objects `postgres` binds.
@@ -2804,11 +2877,20 @@ impl MetaTx for PgTx<'_> {
             )?;
             for row in rows {
                 let bytes: Vec<u8> = row.get(0);
-                missing.push(BlobId::from_bytes(
-                    bytes
-                        .try_into()
-                        .expect("the stored blob column holds 32-byte ids"),
-                ));
+                // The bytes come back from the statement's own array (the
+                // SELECT reads unnest($2), not the table), so today they
+                // are always 32 bytes; the guard keeps a future SELECT
+                // from the table honest instead of panicking a request.
+                let id = BlobId::try_from(bytes.as_slice()).map_err(|_| {
+                    Error::Corrupt(format!(
+                        "repo {}: the missing-blob statement read back a \
+                         blob id of {} bytes, not 32 - the id is the \
+                         statement's own parameter array, not a stored row",
+                        repo.0,
+                        bytes.len()
+                    ))
+                })?;
+                missing.push(id);
             }
         }
         Ok(missing)
@@ -4513,6 +4595,53 @@ mod tests {
     use super::{Client, NoTls, merged_options};
     use crate::pg::Pg;
     use std::sync::Arc;
+
+    #[test]
+    fn a_worker_panic_logs_its_payload_and_the_error_names_the_log() {
+        // The shared subscriber is one and global, so the line the
+        // worker thread logs lands where this test reads it.
+        crate::service::test_init_log();
+        let url = crate::backend::test_hooks::test_url().unwrap();
+        let client = super::test_hooks::connect(&url, None).unwrap();
+        let error = client
+            .as_raw(|_| -> crate::error::Result<()> {
+                panic!("the worker's test panic");
+            })
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("its log line names why"),
+            "{error}"
+        );
+        let text = crate::service::test_log_text();
+        assert!(
+            text.contains("the worker's test panic"),
+            "the log holds the panic payload: {text}"
+        );
+        assert!(
+            text.contains("the postgres worker thread panicked and stopped"),
+            "the log says the worker stopped: {text}"
+        );
+    }
+
+    /// A `store_uuid` row that is not 16 bytes refuses the reopen with the
+    /// row's length, instead of panicking it: a database of another
+    /// backend's shape is corrupt data, and corrupt data is refused.
+    #[test]
+    fn a_store_uuid_row_of_the_wrong_length_refuses_the_open() {
+        let _slot = super::damage::slot();
+        let dir = crate::test_support::private_tempdir();
+        let store = crate::Backend::open_test(dir.path()).unwrap();
+        super::damage::corrupt_store_uuid(&store).unwrap();
+        drop(store);
+        let Err(error) = crate::Backend::open_test(dir.path()) else {
+            panic!("a store_uuid row of 1 byte refuses the open");
+        };
+        assert!(
+            matches!(&error, crate::error::Error::Corrupt(message)
+                if message.contains("the store_uuid row holds 1 bytes, not 16")),
+            "{error:?}"
+        );
+    }
 
     const OWN: &str = "-csynchronous_commit=on -cstatement_timeout=600000 -clock_timeout=5000";
 

@@ -2274,6 +2274,8 @@ fn file_state(state: FileState) -> v1::FileState {
 }
 
 #[cfg(test)]
+pub(crate) use tests::{test_init_log, test_log_text};
+#[cfg(test)]
 mod tests {
     use crate::backend::Backend;
     use crate::meta::testing;
@@ -2316,6 +2318,18 @@ mod tests {
                 .finish();
             tracing::subscriber::set_global_default(subscriber).unwrap();
         });
+    }
+
+    /// The shared log's text, for a test module whose line a worker
+    /// thread logs: the subscriber is one and global, so the readers
+    /// share it.
+    pub(crate) fn test_log_text() -> String {
+        log_text()
+    }
+
+    /// Sets the shared subscriber once.
+    pub(crate) fn test_init_log() {
+        init_log();
     }
 
     /// A service whose one principal may do everything.

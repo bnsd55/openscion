@@ -356,3 +356,13 @@ pub(crate) fn test_schema(data: &Path) -> String {
     std::hash::Hash::hash(&path, &mut hasher);
     format!("scion_test_{:016x}", std::hash::Hasher::finish(&hasher))
 }
+
+/// Arms the marker write's directory fsync of `data` to fail with EIO,
+/// once: the next open that writes `data`'s marker must refuse with the
+/// disk's error. The store's own fsync gate cannot carry this hook: the
+/// marker writes before any store exists to arm.
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) fn fail_marker_dir_fsync(data: &Path) {
+    super::arm_marker_dir_fsync_failure(data);
+}
