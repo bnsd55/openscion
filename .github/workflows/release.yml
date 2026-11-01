@@ -399,13 +399,20 @@ jobs:
           else
             heading="$TAG"
           fi
-          # The awk stops reading at the next section heading, and the
-          # producer then dies of SIGPIPE; pipefail would take that as
-          # the pipeline's answer, so it is off for this read only.
-          set +o pipefail
-          notes="$(git show HEAD:CHANGELOG.md |
-            awk '/^## \['"$heading"']/{f=1} f && /^## \[/{if(++n==2) exit} f')"
-          set -o pipefail
+          # The awk stops at the next heading; it reads a file, so no
+          # producer is left holding a pipe it can die writing.
+          git show HEAD:CHANGELOG.md > changelog.md
+          notes="$(awk '/^## \['"$heading"']/{f=1} f && /^## \[/{if(++n==2) exit} f' changelog.md)"
+          if [ "$DRY_RUN" = true ]; then
+            [ -n "$notes" ] || {
+              echo "the changelog's first section is empty"; exit 1; }
+          else
+            [ -n "$notes" ] || {
+              echo "the changelog holds no $TAG section"; exit 1; }
+            case "$notes" in "## [$TAG]"*) ;; *)
+              echo "the notes do not start with the $TAG section"; exit 1 ;;
+            esac
+          fi
           # The -b payloads are the diff's witnesses, not release
           # files: upload only the -a set of each cell.
           upload_assets() {
