@@ -208,10 +208,11 @@ pub trait MetaTx {
 
     /// `start` and up to `limit - 1` of its first-parent ancestors, as
     /// (id, generation, body), newest first, in walk order: the page one
-    /// statement fetches where the backend can. Every row is an ancestor
-    /// of `start`, so the repo check rides the start row alone, as
-    /// [`MetaTx::get_changeset`] checks it. The page is short at the root
-    /// of the history.
+    /// statement fetches where the backend can. Every row is a member of
+    /// `repo`: the chain follows only the rows the repo may see, so a
+    /// tampered first-parent row that names another repo's changeset
+    /// ends the page instead of serving that changeset. The page is
+    /// short at the root of the history.
     ///
     /// # Errors
     ///

@@ -2895,10 +2895,14 @@ impl MetaTx for PgTx<'_> {
     }
 
     /// One page of the first-parent chain, one statement: the recursive
-    /// term follows the indexed first-parent rows (cs, n = 0), so every
-    /// hop is one index lookup, and the join carries the generation and
-    /// the body. Every fetched changeset is an ancestor of `start`, so
-    /// the repo check rides the start row, as `get_changeset` checks it.
+    /// term follows the indexed first-parent rows (cs, n = 0) that the
+    /// repo may see, so every hop is one index lookup plus one membership
+    /// probe, and the join carries the generation and the body. The chain
+    /// stops at a link the repo may not see: a tampered first-parent row
+    /// that names another repo's changeset shortens the page instead of
+    /// serving that changeset. Every fetched changeset is a member of
+    /// `repo` and an ancestor of `start`. The start row is checked for
+    /// existence by the anchor, as `get_changeset` checks it.
     fn first_parent_page(
         &mut self,
         repo: RepoId,
@@ -2913,6 +2917,7 @@ impl MetaTx for PgTx<'_> {
                      SELECT cp.parent, w.depth + 1
                      FROM walk w
                      JOIN changeset_parents cp ON cp.cs = w.id AND cp.n = 0
+                     JOIN repo_changesets rc ON rc.repo_id = $1 AND rc.cs = cp.parent
                      WHERE w.depth < $3
                  )
                  SELECT c.id, c.gen, c.body FROM walk
