@@ -3,9 +3,11 @@ name: release
 # The release pipeline (#389, #390). On a pushed v* tag it builds every
 # artifact from the tag twice per cell (two runners), fails on any byte
 # difference, attests the artifacts and their SBOMs, and publishes. A
-# dry-run (workflow_dispatch) runs everything but the publish, on an
-# unsigned tag name, so the whole pipeline is provable before the first
-# real tag. It never runs on pull_request, and nothing goes to
+# dry-run (workflow_dispatch) runs the whole pipeline against a plain
+# commit of main's history: the publish path runs against a scratch-
+# named draft the run deletes afterwards, so only the tag's signature
+# and the final publication flip wait for the first real tag. It never
+# runs on pull_request, and nothing goes to
 # crates.io (releases are source-only by the owner's decision).
 
 on:
@@ -58,6 +60,13 @@ jobs:
       DRY_RUN_COMMIT: ${{ inputs.commit }}
       RELEASE_TAG: ${{ github.ref_name }}
     steps:
+      # The job reads the verify script and nothing else; its verdicts
+      # come from the API, not from the working tree.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/release-verify-tag.sh
+          sparse-checkout-cone-mode: false
       - id: tag
         run: |
           set -euo pipefail
@@ -65,8 +74,10 @@ jobs:
           if [ "$dry" = true ]; then
             # SHORTCUT: the dry-run skips the tag-object read and the
             # signature check entirely — verify-tag's signature path
-            # first runs on the real tag. Upgrade: a scratch signed tag
-            # in a fork, if that ever breaks.
+            # first runs on the real tag, and the publication flip is
+            # skipped with it (the dry run proves the publish path
+            # against a scratch draft instead). Upgrade: a scratch
+            # signed tag in a fork, if that ever breaks.
             case "${DRY_RUN_COMMIT}" in
               [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
               *) echo "the commit must be a full 40-hex SHA"; exit 1 ;;
@@ -341,18 +352,26 @@ jobs:
             ! -name '*.cdx.json' ! -name 'release-environment.txt')
           echo "$count attestations verified in total"
 
-  # The release step: only on a real tag, never in a dry-run, and only
-  # after the diff and the attestations passed. The release is created
-  # immutable; the repository-wide setting is on Ben's list.
+  # The release step: only after the diff and the attestations passed.
+  # The repository's immutable-releases setting forbids adding assets
+  # after publication, so the release is created as a draft, the -a
+  # payload is uploaded to the draft, the asset count is checked, and
+  # the flip to --draft=false — the one act a run cannot undo — is the
+  # last. On a dry run the same path runs against a draft under a
+  # scratch name (a draft creates no tag): the step deletes it however
+  # the run ends, and only the flip is skipped, so the publish path is
+  # provable before the first real tag.
   release:
     needs: [verify-tag, verify]
-    if: ${{ !cancelled() && needs.verify.result == 'success' && !(inputs.dry_run || false) }}
+    if: ${{ !cancelled() && needs.verify.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ needs.verify-tag.outputs.tag }}
+      PEELED: ${{ needs.verify-tag.outputs.peeled }}
+      DRY_RUN: ${{ inputs.dry_run || false }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -368,16 +387,52 @@ jobs:
             while read -r file; do
               gh attestation verify "$file" --repo "$GITHUB_REPOSITORY"
             done
-      - name: Publish
+      - name: Publish, or prove the publish path on a scratch draft
         run: |
           set -euo pipefail
-          notes="$(git show "$TAG":CHANGELOG.md |
-            awk '/^## \['"$TAG"']/{f=1} f && /^## \[/{if(++n==2) exit} f')"
-          gh release create "$TAG" --verify-tag --immutable \
-            --title "$TAG" --notes "$notes"
-          # The -b payloads are the diff's witnesses, not release files:
-          # upload only the -a set of each cell.
-          jq -r '.[].cell' .github/release-cells.json |
-            while read -r cell; do
-              gh release upload "$TAG" "artifacts/$cell-a"/*
-            done
+          # The checkout sits on the peeled commit and fetches no tags,
+          # so the changelog is read from HEAD. On a dry run the tag
+          # name is a commit SHA no heading holds, and the section read
+          # is the first one.
+          if [ "$DRY_RUN" = true ]; then
+            heading='[^]]*'
+          else
+            heading="$TAG"
+          fi
+          notes="$(git show HEAD:CHANGELOG.md |
+            awk '/^## \['"$heading"']/{f=1} f && /^## \[/{if(++n==2) exit} f')"
+          # The -b payloads are the diff's witnesses, not release
+          # files: upload only the -a set of each cell.
+          upload_assets() {
+            jq -r '.[].cell' .github/release-cells.json |
+              while read -r cell; do
+                gh release upload "$1" "artifacts/$cell-a"/*
+              done
+          }
+          check_assets() {
+            expected="$(find artifacts -type f -path '*-a/*' | wc -l | tr -d ' ')"
+            actual="$(gh release view "$1" --json assets --jq '.assets | length')"
+            [ "$actual" = "$expected" ] || {
+              echo "the release holds $actual assets, expected $expected";
+              exit 1;
+            }
+            echo "$actual assets uploaded"
+          }
+          if [ "$DRY_RUN" = true ]; then
+            # A draft names no tag: --verify-tag has nothing to check,
+            # and --target names the commit the build came from. The
+            # scratch draft is deleted however the step ends; only the
+            # publication flip is skipped.
+            name="dry-run-$GITHUB_RUN_ID"
+            gh release create "$name" --draft --target "$PEELED" \
+              --title "$name" --notes "$notes"
+            trap 'gh release delete "$name" --yes --cleanup-tag=false || true' EXIT
+            upload_assets "$name"
+            check_assets "$name"
+          else
+            gh release create "$TAG" --verify-tag --draft \
+              --title "$TAG" --notes "$notes"
+            upload_assets "$TAG"
+            check_assets "$TAG"
+            gh release edit "$TAG" --draft=false
+          fi
