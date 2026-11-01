@@ -399,8 +399,13 @@ jobs:
           else
             heading="$TAG"
           fi
+          # The awk stops reading at the next section heading, and the
+          # producer then dies of SIGPIPE; pipefail would take that as
+          # the pipeline's answer, so it is off for this read only.
+          set +o pipefail
           notes="$(git show HEAD:CHANGELOG.md |
             awk '/^## \['"$heading"']/{f=1} f && /^## \[/{if(++n==2) exit} f')"
+          set -o pipefail
           # The -b payloads are the diff's witnesses, not release
           # files: upload only the -a set of each cell.
           upload_assets() {
