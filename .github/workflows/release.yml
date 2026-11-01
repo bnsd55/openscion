@@ -445,7 +445,18 @@ jobs:
           grep -q '^- ' <<<"$notes" || {
             echo "the section holds no row"; exit 1; }
           # A section can be far past what an argument list carries:
-          # the notes travel as a file.
+          # the notes travel as a file. The API also caps a release
+          # body at 125000 characters, and a section of this changelog
+          # can be longer (the v0.1.0 section is 145123 bytes): the
+          # body carries the section down to the cap, on whole lines,
+          # with a pointer to the full text at the tag.
+          limit=122000
+          if [ "$(wc -c <<<"$notes" | tr -d ' ')" -gt "$limit" ]; then
+            notes="$(head -c "$limit" <<<"$notes" | sed '$d')
+
+          The section is longer than a release body holds; the full text
+          is CHANGELOG.md at the tag, and in the source tarball."
+          fi
           printf '%s\n' "$notes" > "$RUNNER_TEMP/release-notes.md"
           # The -b payloads are the diff's witnesses, not release
           # files: upload only the -a set of each cell.
