@@ -533,8 +533,56 @@ pub(crate) fn newest_change(
 ) -> Result<Option<ChangesetId>> {
     let root = derived::load::<PathHistory>(c, from)?
         .ok_or_else(|| Error::Corrupt(format!("path history: no value for {from}")))?;
+    newest_change_at(c, nodes, root, path)
+}
+
+/// The newest changeset the history `root` names for `path`, given the
+/// value already in hand: the id part of [`newest_change`]'s answer. The
+/// walk of a log page calls this per link it visits, with the values a
+/// chain fetch brought, so the values cost no statement of their own.
+///
+/// # Errors
+///
+/// [`Error::Corrupt`] if a node is missing.
+pub(crate) fn newest_change_at(
+    c: &mut dyn MetaTx,
+    nodes: &mut Nodes,
+    root: NodeId,
+    path: &RepoPath,
+) -> Result<Option<ChangesetId>> {
     let hit = lookup(c, nodes, root, path)?;
     Ok(hit.last.map(|last| last.id))
+}
+
+/// The first-parent chain of path-history values that starts at `start`:
+/// up to `limit` links, newest first, each with its value or `None` where
+/// no value is stored. One statement per window. A value that does not
+/// decode is corruption, as [`derived::load`] would report.
+pub(crate) fn chain_values(
+    c: &mut dyn MetaTx,
+    start: ChangesetId,
+    limit: usize,
+) -> Result<Vec<(ChangesetId, Option<NodeId>)>> {
+    // A window is at most the page's MAX_SCAN, far from any wrap.
+    #[allow(clippy::cast_possible_wrap)]
+    let limit = limit as i64;
+    c.get_derived_chain_links(PathHistory::NAME, PathHistory::VERSION, start, limit)?
+        .into_iter()
+        .map(|(cs, value)| {
+            let value = value
+                .map(|bytes| {
+                    PathHistory::decode(&bytes).ok_or_else(|| {
+                        Error::Corrupt(format!(
+                            "derived {} v{} for {cs}",
+                            PathHistory::NAME,
+                            PathHistory::VERSION
+                        ))
+                    })
+                })
+                .transpose();
+            Ok((cs, value?))
+        })
+        .collect()
 }
 
 /// The paths of `paths` that a changeset newer than `base_gen` touched, on
@@ -1010,10 +1058,11 @@ mod tests {
         assert!(matches!(page, Err(Error::DeadlineExceeded(_))), "{page:?}");
     }
 
-    /// A `Log` page checks its deadline before its first entry and then
-    /// once per [`read::DEADLINE_EVERY`] entries, with a path and without:
-    /// a check reads the clock, a system call on a host whose clocksource
-    /// has no user-space read.
+    /// A `Log` page with a path checks its deadline before its first
+    /// entry and then once per [`read::DEADLINE_EVERY`] entries: a check
+    /// reads the clock, a system call on a host whose clocksource has no
+    /// user-space read. A page without a path is one statement, so it
+    /// reads the clock once, before that statement.
     #[test]
     fn a_log_page_reads_the_clock_once_per_few_entries() {
         let (_dir, store, repo) = open();
@@ -1021,11 +1070,11 @@ mod tests {
         let ids = store_chain(&store, repo, None, &[steps; 40], true);
         let tip = *ids.last().unwrap();
         let checks = 40_usize.div_ceil(read::DEADLINE_EVERY);
-        for p in [None, Some(path("d/f"))] {
+        for (p, want) in [(None, 1), (Some(path("d/f")), checks)] {
             crate::deadline::CHECKS.set(0);
             let page = read::log_page(&store, "r", tip, p.as_ref(), 40, &later()).unwrap();
             assert_eq!(page.entries.len(), 40, "{p:?}");
-            assert_eq!(crate::deadline::CHECKS.get(), checks, "{p:?}");
+            assert_eq!(crate::deadline::CHECKS.get(), want, "{p:?}");
         }
     }
 

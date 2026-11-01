@@ -2853,6 +2853,47 @@ impl MetaTx for PgTx<'_> {
             .is_some())
     }
 
+    /// The changesets of `repo` that the ids name, in the order asked,
+    /// one statement: the ids travel as one bytea array, the reply has at
+    /// most one row per id, and each body is checked against its ID, as
+    /// `get_changeset` checks one.
+    fn get_changeset_many(&mut self, repo: RepoId, ids: &[ChangesetId]) -> Result<Vec<Changeset>> {
+        let cs = ids
+            .iter()
+            .map(|id| id_bytes(id.as_bytes()))
+            .collect::<Vec<_>>();
+        let rows = self.c.query(
+            "SELECT c.id, c.body FROM changesets c
+             JOIN repo_changesets rc ON rc.repo_id = $1 AND rc.cs = c.id
+             WHERE c.id = ANY($2)",
+            &[P::i64(repo.0), P::bytea_array(cs)],
+        )?;
+        let bodies = rows
+            .into_iter()
+            .map(|row| {
+                let cs: Vec<u8> = row.get(0);
+                Ok((to_id(&cs)?, row.get::<_, Vec<u8>>(1)))
+            })
+            .collect::<Result<std::collections::HashMap<_, _>>>()?;
+        ids.iter()
+            .map(|id| {
+                #[cfg(test)]
+                CHANGESET_READS.set(CHANGESET_READS.get() + 1);
+                let body = bodies
+                    .get(id)
+                    .ok_or_else(|| Error::NotFound(format!("changeset {id}")))?;
+                let (cs, actual) = Changeset::decode_with_id(body)
+                    .map_err(|e| Error::Corrupt(format!("changeset {id}: {e}")))?;
+                if actual != *id {
+                    return Err(Error::Corrupt(format!(
+                        "changeset {id} does not match its ID"
+                    )));
+                }
+                Ok(cs)
+            })
+            .collect()
+    }
+
     /// One page of the first-parent chain, one statement: the recursive
     /// term follows the indexed first-parent rows (cs, n = 0), so every
     /// hop is one index lookup, and the join carries the generation and
@@ -3239,6 +3280,48 @@ impl MetaTx for PgTx<'_> {
             .map(|row| {
                 let cs: Vec<u8> = row.get(0);
                 Ok((to_id(&cs)?, row.get(1)))
+            })
+            .collect()
+    }
+
+    /// Every link of the first-parent chain that starts at `start`, up to
+    /// `limit` of them, newest first, each with its stored value or `None`
+    /// where none is stored. One statement: the recursive term follows the
+    /// indexed first-parent rows, as `get_derived_chain` follows them, and
+    /// the left join keeps every link. The caller decides what a missing
+    /// value means.
+    fn get_derived_chain_links(
+        &mut self,
+        kind: &str,
+        version: u32,
+        start: ChangesetId,
+        limit: i64,
+    ) -> Result<Vec<(ChangesetId, Option<Vec<u8>>)>> {
+        let version = i64::from(version);
+        let rows = self.c.query(
+            "WITH RECURSIVE walk(id, depth) AS (
+                 SELECT $1::bytea, 0::bigint
+                 UNION ALL
+                 SELECT cp.parent, w.depth + 1
+                 FROM walk w
+                 JOIN changeset_parents cp ON cp.cs = w.id AND cp.n = 0
+                 WHERE w.depth < $2
+             )
+             SELECT walk.id, d.value FROM walk
+             LEFT JOIN derived d ON d.cs = walk.id
+                 AND d.kind = $3 AND d.version = $4
+             ORDER BY walk.depth",
+            &[
+                P::bytes(id_bytes(start.as_bytes()).as_slice()),
+                P::i64(limit),
+                P::text(kind),
+                P::i64(version),
+            ],
+        )?;
+        rows.into_iter()
+            .map(|row| {
+                let cs: Vec<u8> = row.get(0);
+                Ok((to_id(&cs)?, row.get::<_, Option<Vec<u8>>>(1)))
             })
             .collect()
     }
