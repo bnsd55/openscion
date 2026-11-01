@@ -235,16 +235,23 @@ jobs:
             echo "rustflags=$RUSTFLAGS"
             echo "flags=--locked --release"
           } > "out/$CELL-release-environment.txt"
-          # The checksums cover the payload; the environment record is
-          # metadata about the build (the runner image rolls weekly, so
-          # the two builds of one run can name different images). Bare
-          # filenames, so the filter matches shasum's output. The temp
-          # file sits outside out/, so the glob it reads cannot see the
-          # file it is being written to, whichever way this shell
-          # orders the redirect and the expansion.
-          (cd out && sum -- * | grep -v -- "-$CELL-release-environment.txt$") \
-            > checksums.txt.tmp \
-            && mv checksums.txt.tmp "out/$CELL-checksums.txt"
+          # The checksums cover the payload by name; the environment
+          # record is metadata about the build (the runner image rolls
+          # weekly, so the two builds of one run can name different
+          # images) and stays out, which the step asserts. The sum's
+          # temp file lives outside out/ and outside the checkout.
+          payload=("$CELL-scion-server" "$CELL-scion-cache" \
+            "$CELL-scion-daemon" "$CELL-scn" \
+            "$CELL-openscion-$version-source.tar.gz" \
+            "$CELL-open-scion-server.cdx.json" \
+            "$CELL-open-scion-tier.cdx.json" "$CELL-open-scion.cdx.json")
+          (cd out && sum -- "${payload[@]}") > "$RUNNER_TEMP/checksums.txt.tmp"
+          mv "$RUNNER_TEMP/checksums.txt.tmp" "out/$CELL-checksums.txt"
+          [ "$(wc -l < "out/$CELL-checksums.txt" | tr -d ' ')" \
+            = "${#payload[@]}" ] || {
+            echo "the checksums file does not cover the payload"; exit 1; }
+          grep -q "release-environment" "out/$CELL-checksums.txt" && {
+            echo "the checksums file holds the environment record"; exit 1; }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.name }}
@@ -410,20 +417,30 @@ jobs:
           else
             heading="$TAG"
           fi
-          # The awk stops at the next heading; it reads a file, so no
-          # producer is left holding a pipe it can die writing.
-          git show HEAD:CHANGELOG.md > changelog.md
-          notes="$(awk '/^## \['"$heading"']/{f=1} f && /^## \[/{if(++n==2) exit} f' changelog.md)"
-          if [ "$DRY_RUN" = true ]; then
-            [ -n "$notes" ] || {
-              echo "the changelog's first section is empty"; exit 1; }
-          else
-            [ -n "$notes" ] || {
-              echo "the changelog holds no $TAG section"; exit 1; }
+          # The awk stops at the next heading; it reads a file outside
+          # the checkout, so no producer is left holding a pipe it can
+          # die writing, and no checkout file is touched — the temp
+          # name must not collide with CHANGELOG.md on a filesystem
+          # that folds case. The [Unreleased] section is skipped: on a
+          # dry run the tag name is a SHA no heading holds, and the
+          # section read is the first one that is not [Unreleased].
+          git show HEAD:CHANGELOG.md > "$RUNNER_TEMP/changelog-at-head.md"
+          notes="$(awk '
+            /^## \[Unreleased]/ { skip = 1; next }
+            /^## \[/ { skip = 0 }
+            !skip && /^## \['"$heading"']/{f=1}
+            f && /^## \[/{if(++n==2) exit}
+            f
+          ' "$RUNNER_TEMP/changelog-at-head.md")"
+          [ -n "$notes" ] || {
+            echo "the changelog holds no $heading section"; exit 1; }
+          if [ "$DRY_RUN" != true ]; then
             case "$notes" in "## [$TAG]"*) ;; *)
               echo "the notes do not start with the $TAG section"; exit 1 ;;
             esac
           fi
+          grep -q '^- ' <<<"$notes" || {
+            echo "the section holds no row"; exit 1; }
           # The -b payloads are the diff's witnesses, not release
           # files: upload only the -a set of each cell.
           upload_assets() {
