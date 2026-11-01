@@ -9,15 +9,18 @@ release.
 
 What a release ships: one SSH-signed annotated git tag, and one
 immutable GitHub release. The release carries, per platform cell
-(`linux-x86_64` and `macos-aarch64`):
+(`linux-x86_64` and `macos-aarch64`), that cell's files, each name
+prefixed with the cell so the two cells' payloads cannot collide:
 
-- four binaries: `scion-server`, `scion-cache`, `scion-daemon`, `scn`
-- the source tarball `openscion-<version>-source.tar.gz`
-- `checksums.txt`, a SHA-256 line per file above
-- `release-environment.txt`, the record of how the build ran
+- four binaries: `linux-x86_64-scion-server` (macOS:
+  `macos-aarch64-scion-server`), likewise `scion-cache`,
+  `scion-daemon`, `scn`
+- the source tarball `<cell>-openscion-<version>-source.tar.gz`
+- `<cell>-checksums.txt`, a SHA-256 line per file of the cell above
+- `<cell>-release-environment.txt`, the record of how the build ran
   (runner image, `rustc`, `protoc`, `SOURCE_DATE_EPOCH`)
-- one CycloneDX SBOM per shipped crate: `open-scion-server.cdx.json`,
-  `open-scion-tier.cdx.json`, `open-scion.cdx.json`
+- one CycloneDX SBOM per shipped crate: `<cell>-open-scion-server.cdx.json`,
+  `<cell>-open-scion-tier.cdx.json`, `<cell>-open-scion.cdx.json`
 
 Every one of these was built twice on different runners from the tag's
 commit, and the build failed unless both copies agreed byte for byte.
@@ -68,36 +71,40 @@ that fails the signature check, or a tag whose commit is not on
 ## 2. The checksums match the files
 
 ```sh
-sha256sum -c checksums.txt          # Linux
-shasum -a 256 -c checksums.txt      # macOS
+sha256sum -c linux-x86_64-checksums.txt        # Linux
+shasum -a 256 -c macos-aarch64-checksums.txt   # macOS
 ```
 
-Every payload file must answer `OK`. `release-environment.txt` has no
-line in `checksums.txt` on purpose: it describes the build instead of
-being part of it, and the attestations below cover what ships.
+Every payload file must answer `OK`. The `<cell>-release-environment.txt`
+file has no line in its cell's `checksums.txt` on purpose: it describes
+the build instead of being part of it, and the attestations below cover
+what ships.
 
 ## 3. Each artifact carries a build attestation
 
-Each binary, the source tarball and `checksums.txt` carry a GitHub
-artifact attestation: a signed statement from GitHub's hosted builder
-that this repository's workflow produced exactly this file (this
+Each binary, the source tarball and the cell's `checksums.txt` carry a
+GitHub artifact attestation: a signed statement from GitHub's hosted
+builder that this repository's workflow produced exactly this file (this
 digest) at this run. The pipeline itself verifies every artifact the
 same way before it publishes, so the commands below are the ones the
-release run already proved.
+release run already proved. The names below are the Linux cell's; the
+macOS cell's files carry `macos-aarch64-` instead.
 
 ```sh
-gh attestation verify scion-server --repo bnsd55/openscion
-gh attestation verify scion-cache   --repo bnsd55/openscion
-gh attestation verify scion-daemon  --repo bnsd55/openscion
-gh attestation verify scn           --repo bnsd55/openscion
-gh attestation verify openscion-<version>-source.tar.gz --repo bnsd55/openscion
-gh attestation verify checksums.txt --repo bnsd55/openscion
+gh attestation verify linux-x86_64-scion-server --repo bnsd55/openscion
+gh attestation verify linux-x86_64-scion-cache   --repo bnsd55/openscion
+gh attestation verify linux-x86_64-scion-daemon  --repo bnsd55/openscion
+gh attestation verify linux-x86_64-scn           --repo bnsd55/openscion
+gh attestation verify linux-x86_64-openscion-<version>-source.tar.gz --repo bnsd55/openscion
+gh attestation verify linux-x86_64-checksums.txt --repo bnsd55/openscion
 ```
 
-Each must end in `Verified, ... attestations were verified`. This needs
-the `gh` CLI, installed and signed in (`gh auth login`). `--owner
-bnsd55` is the equivalent form; the examples use `--repo` because that
-is the exact flag the release pipeline runs.
+Each must exit 0. Recent gh prints nothing on success - the exit
+status is the verdict: 0 means the signature chain verified for that
+exact file, anything else means refuse the file. This needs the `gh`
+CLI, installed and signed in (`gh auth login`). `--owner bnsd55` is
+the equivalent form; the examples use `--repo` because that is the
+exact flag the release pipeline runs.
 
 The `*.cdx.json` SBOM files are not attested as subjects — they are
 the payloads of the SBOM attestations. You verify an SBOM through the
