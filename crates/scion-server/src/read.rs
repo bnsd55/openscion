@@ -216,20 +216,34 @@ pub fn log_page(
             // corruption a tampered link is, by the statement itself.
             let more = rows.len() > hops;
             let keep = rows.len().min(limit);
+            // The statement returns one row past a full page, and a history
+            // of k*limit + 1 ends on that very row: its last page comes
+            // back with `limit + 1` rows, the page's own `limit` and the
+            // root as the row it looked ahead to. The root is a real
+            // entry; the page stops short of it because the page is full,
+            // not because the walk is over. The statement's own probe has
+            // proved the row ends the walk, or refused it as corruption.
+            let tail = if !more && rows.len() > keep {
+                Some(rows[keep].0)
+            } else {
+                None
+            };
             let mut entries = Vec::with_capacity(keep);
             for (id, _, body) in rows.into_iter().take(keep) {
                 entries.push((id, decode_entry(id, &body)?));
             }
             // A page short of its `limit + 1` links ended the walk: the
             // last entry has no parent. A full one has more to read, and
-            // the cursor rides the last entry's own first parent.
+            // the cursor rides the last entry's own first parent. A full
+            // page whose lookahead row ends the history continues on that
+            // row, and the next page serves it and ends.
             let next = if more {
                 entries
                     .last()
                     .and_then(|(_, cs)| cs.parents().first().copied())
                     .or(Some(cs))
             } else {
-                None
+                tail
             };
             Ok(LogPage { entries, next })
         });

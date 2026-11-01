@@ -24,7 +24,10 @@ use tonic::transport::Channel;
 const REPO: &str = "main";
 const TOKEN: &str = "secret";
 /// Longer than one internal page of the reply's producer
-/// (`read::MAX_SCAN` = 1,000), so one call fetches page after page.
+/// (`read::MAX_SCAN` = 1,000), so one call fetches page after page, and
+/// one past a whole number of pages, so the history ends on a full
+/// page's lookahead row: the root rides one row behind a full page, and
+/// a walk that drops it serves 3,000 of 3,001.
 const HISTORY: usize = 3 * 1000 + 1;
 
 type Scion = ScionClient<InterceptedService<Channel, Bearer>>;
