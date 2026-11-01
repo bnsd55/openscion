@@ -181,11 +181,52 @@ fn write_marker(marker: &Path, uuid: [u8; 16]) -> Result<()> {
         tmp.as_file().sync_all()?;
         tmp.persist(marker).map_err(|e| e.error)?;
         if let Some(dir) = marker.parent() {
-            let _ = crate::store::fsync_dir(dir);
+            marker_dir_fsync(dir)?;
         }
         Ok(())
     })()
     .map_err(crate::error::Error::Io)
+}
+
+/// The directory fsync of the marker write, durable at once: the persist
+/// above is only as durable as the directory entry it made, so its
+/// failure must refuse the open, the way every other fsync's does.
+#[cfg(not(any(test, feature = "test-hooks")))]
+fn marker_dir_fsync(dir: &Path) -> std::io::Result<()> {
+    crate::store::fsync_dir(dir)
+}
+
+/// The directory the armed hook fails the next marker write's fsync of.
+/// A path, not a bare flag: the suite's tests run on threads in one
+/// process, and a bare flag would fail whichever open reaches the
+/// marker first, not the armed one.
+#[cfg(any(test, feature = "test-hooks"))]
+static MARKER_DIR_FSYNC_FAIL: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(any(test, feature = "test-hooks"))]
+fn marker_dir_fsync(dir: &Path) -> std::io::Result<()> {
+    let mut armed = MARKER_DIR_FSYNC_FAIL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if armed.as_deref() == Some(dir) {
+        *armed = None;
+        // EIO, the disk's answer: the drive did not take the entry.
+        return Err(std::io::Error::from_raw_os_error(5));
+    }
+    drop(armed);
+    crate::store::fsync_dir(dir)
+}
+
+/// Armed by [`crate::backend::test_hooks::fail_marker_dir_fsync`]: the
+/// next marker write whose data directory is the armed path fails its
+/// fsync with EIO, once. The marker writes before any store exists, so
+/// the store's fsync gate cannot carry this hook.
+#[cfg(any(test, feature = "test-hooks"))]
+fn arm_marker_dir_fsync_failure(dir: &Path) {
+    *MARKER_DIR_FSYNC_FAIL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(dir.to_path_buf());
 }
 
 /// 16 bytes as 32 lowercase hex digits.
