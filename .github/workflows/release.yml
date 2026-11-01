@@ -412,52 +412,64 @@ jobs:
         run: |
           set -euo pipefail
           # The checkout sits on the peeled commit and fetches no tags,
-          # so the changelog is read from HEAD. On a dry run the tag
-          # name is a commit SHA no heading holds, and the section read
-          # is the first one.
-          if [ "$DRY_RUN" = true ]; then
-            heading='[^]]*'
-          else
-            heading="$TAG"
-          fi
+          # so the changelog and the notes file are read from HEAD. On
+          # a dry run the tag name is a commit SHA no heading holds,
+          # and the version is the changelog's first section that is
+          # not [Unreleased] - the same file the tag will read.
           # The awk stops at the next heading; it reads a file outside
           # the checkout, so no producer is left holding a pipe it can
-          # die writing, and no checkout file is touched — the temp
+          # die writing, and no checkout file is touched - the temp
           # name must not collide with CHANGELOG.md on a filesystem
-          # that folds case. The [Unreleased] section is skipped: on a
-          # dry run the tag name is a SHA no heading holds, and the
-          # section read is the first one that is not [Unreleased].
+          # that folds case.
           git show HEAD:CHANGELOG.md > "$RUNNER_TEMP/changelog-at-head.md"
-          notes="$(awk '
+          if [ "$DRY_RUN" = true ]; then
+            heading='[^]]*'
+            version="$(awk '
+              /^## \[Unreleased]/ { next }
+              /^## \[/ { v = $0; sub(/^## \[/, "", v); sub(/\].*$/, "", v);
+                          print v; exit }
+            ' "$RUNNER_TEMP/changelog-at-head.md")"
+          else
+            heading="$TAG"
+            version="$TAG"
+          fi
+          # The changelog must have folded this version's section:
+          # it exists, and it holds at least one row.
+          section="$(awk '
             /^## \[Unreleased]/ { skip = 1; next }
             /^## \[/ { skip = 0 }
             !skip && /^## \['"$heading"']/{f=1}
             f && /^## \[/{if(++n==2) exit}
             f
           ' "$RUNNER_TEMP/changelog-at-head.md")"
-          [ -n "$notes" ] || {
+          [ -n "$section" ] || {
             echo "the changelog holds no $heading section"; exit 1; }
           if [ "$DRY_RUN" != true ]; then
-            case "$notes" in "## [$TAG]"*) ;; *)
-              echo "the notes do not start with the $TAG section"; exit 1 ;;
+            case "$section" in "## [$TAG]"*) ;; *)
+              echo "the section does not start with the $TAG heading"; exit 1 ;;
             esac
           fi
-          grep -q '^- ' <<<"$notes" || {
+          grep -q '^- ' <<<"$section" || {
             echo "the section holds no row"; exit 1; }
-          # A section can be far past what an argument list carries:
-          # the notes travel as a file. The API also caps a release
-          # body at 125000 characters, and a section of this changelog
-          # can be longer (the v0.1.0 section is 145123 bytes): the
-          # body carries the section down to the cap, on whole lines,
-          # with a pointer to the full text at the tag.
-          limit=122000
-          if [ "$(wc -c <<<"$notes" | tr -d ' ')" -gt "$limit" ]; then
-            notes="$(head -c "$limit" <<<"$notes" | sed '$d')
-
-          The section is longer than a release body holds; the full text
-          is CHANGELOG.md at the tag, and in the source tarball."
+          # The release body is the release notes file, written before
+          # the tag; the full change list is the changelog's section at
+          # the tag. The API caps a release body at 125000 characters;
+          # a notes file past it is a bug, so the step fails instead of
+          # cutting.
+          notes_file="docs/release-notes/$version.md"
+          [ -s "$notes_file" ] || {
+            echo "every release ships its notes: $notes_file is missing or empty";
+            exit 1;
+          }
+          pointer="The full change list is the [$version] section of CHANGELOG.md at the tag, and in the source tarball."
+          {
+            cat "$notes_file"
+            printf '\n%s\n' "$pointer"
+          } > "$RUNNER_TEMP/release-notes.md"
+          if [ "$(wc -c < "$RUNNER_TEMP/release-notes.md" | tr -d ' ')" -gt 125000 ]; then
+            echo "$notes_file is past the release body's 125000-character cap";
+            exit 1;
           fi
-          printf '%s\n' "$notes" > "$RUNNER_TEMP/release-notes.md"
           # The -b payloads are the diff's witnesses, not release
           # files: upload only the -a set of each cell.
           upload_assets() {
