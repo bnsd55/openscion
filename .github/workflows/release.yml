@@ -444,6 +444,9 @@ jobs:
           fi
           grep -q '^- ' <<<"$notes" || {
             echo "the section holds no row"; exit 1; }
+          # A section can be far past what an argument list carries:
+          # the notes travel as a file.
+          printf '%s\n' "$notes" > "$RUNNER_TEMP/release-notes.md"
           # The -b payloads are the diff's witnesses, not release
           # files: upload only the -a set of each cell.
           upload_assets() {
@@ -468,13 +471,13 @@ jobs:
             # publication flip is skipped.
             name="dry-run-$GITHUB_RUN_ID"
             gh release create "$name" --draft --target "$PEELED" \
-              --title "$name" --notes "$notes"
+              --title "$name" --notes-file "$RUNNER_TEMP/release-notes.md"
             trap 'gh release delete "$name" --yes --cleanup-tag=false || true' EXIT
             upload_assets "$name"
             check_assets "$name"
           else
             gh release create "$TAG" --verify-tag --draft \
-              --title "$TAG" --notes "$notes"
+              --title "$TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
             upload_assets "$TAG"
             check_assets "$TAG"
             gh release edit "$TAG" --draft=false

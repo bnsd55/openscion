@@ -99,10 +99,12 @@ gh attestation verify linux-x86_64-openscion-<version>-source.tar.gz --repo bnsd
 gh attestation verify linux-x86_64-checksums.txt --repo bnsd55/openscion
 ```
 
-Each must end in `Verified, ... attestations were verified`. This needs
-the `gh` CLI, installed and signed in (`gh auth login`). `--owner
-bnsd55` is the equivalent form; the examples use `--repo` because that
-is the exact flag the release pipeline runs.
+Each must exit 0. Recent gh prints nothing on success - the exit
+status is the verdict: 0 means the signature chain verified for that
+exact file, anything else means refuse the file. This needs the `gh`
+CLI, installed and signed in (`gh auth login`). `--owner bnsd55` is
+the equivalent form; the examples use `--repo` because that is the
+exact flag the release pipeline runs.
 
 The `*.cdx.json` SBOM files are not attested as subjects — they are
 the payloads of the SBOM attestations. You verify an SBOM through the
