@@ -333,12 +333,133 @@ fn a_blame_rides_windows_between_its_node_reads() {
     assert!(out.resume.is_some(), "121 versions, 100 explained");
     // One window of path histories covers the whole walk here, and the
     // window's one statement replaces the per-version read the walk used
-    // to pay. The rest is the per-version changeset, the node reads, the
-    // tree reads of the diffs, and the framing of the walk's reads.
+    // to pay; the walk itself runs in one read transaction, so the
+    // framing of the per-version reads is gone. What is left is the per
+    // -version changeset, the node reads, and the tree reads of the
+    // diffs.
     assert!(
-        statements <= 1_800,
+        statements <= 650,
         "a 100-version blame costs {statements} statements: the path \
          histories must ride one window, not one read per version"
+    );
+}
+
+/// A cold walk fills its missing values mid-transaction, in the fills'
+/// own transactions, and its answer is the warm one: what a fill stores
+/// is what the held snapshot reads, whatever order the two happen in.
+#[test]
+fn a_cold_blame_answers_like_a_warm_one() {
+    let _counted = COUNT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (_dir, store) = appended();
+    let at = tip(&store);
+    let file = path("file.txt");
+
+    let cold = blame::blame(
+        &store,
+        REPO,
+        at,
+        &file,
+        &blame::Resume::default(),
+        &Bytes::new(1 << 30),
+        None,
+    )
+    .unwrap();
+    let warm = blame::blame(
+        &store,
+        REPO,
+        at,
+        &file,
+        &blame::Resume::default(),
+        &Bytes::new(1 << 30),
+        None,
+    )
+    .unwrap();
+    assert_eq!(cold.ranges.len(), warm.ranges.len(), "the same line map");
+    assert_eq!(cold.ranges, warm.ranges, "every range names the same lines");
+    assert_eq!(
+        cold.changesets, warm.changesets,
+        "every range names the same changesets"
+    );
+    assert_eq!(cold.resume, warm.resume, "the same walk-on point");
+}
+
+/// A blame call holds one read transaction for its whole walk: it takes
+/// one reader for the walk whatever it steps, beside the call's few
+/// setup reads, and a deadline that has passed leaves the pool whole -
+/// the transaction's snapshot holdback does not outlive the call.
+#[test]
+fn a_blame_call_holds_one_reader_and_returns_it() {
+    // The whole test, its seed included, holds the lock: the reader
+    // counts are one process-global number, and another test's reads
+    // must not land in the walk's count.
+    let _counted = COUNT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (_dir, store) = appended();
+    let at = tip(&store);
+    let file = path("file.txt");
+
+    // Warm: every value the walk reads is stored, so the counted call
+    // fills nothing and its takes are the call's own.
+    let warm = blame::blame(
+        &store,
+        REPO,
+        at,
+        &file,
+        &blame::Resume::default(),
+        &Bytes::new(1 << 30),
+        None,
+    )
+    .unwrap();
+    assert!(warm.resume.is_some(), "121 versions, 100 explained");
+
+    Backend::test_reset_reader_takes();
+    let out = blame::blame(
+        &store,
+        REPO,
+        at,
+        &file,
+        &blame::Resume::default(),
+        &Bytes::new(1 << 30),
+        None,
+    )
+    .unwrap();
+    assert_eq!(out.changesets.len(), 100, "the walk ran to its version cap");
+    // One reader for the walk's one transaction, beside the call's few
+    // setup reads. A walk that reads per version takes a reader per
+    // read: about three hundred here.
+    assert_eq!(
+        store.test_reader_takes(),
+        5,
+        "a 100-version blame took {} readers: the walk must hold one \
+         transaction, not one per read",
+        store.test_reader_takes()
+    );
+
+    // A deadline that has passed: the walk refuses at its first check,
+    // and the reader its transaction held is back in the pool - the
+    // snapshot holdback of a failed call does not outlive the call.
+    let err = blame::blame(
+        &store,
+        REPO,
+        at,
+        &file,
+        &blame::Resume::default(),
+        &Bytes::new(1 << 30),
+        Some(Instant::now()),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, scion_server::Error::DeadlineExceeded(_)),
+        "a passed deadline is the caller's retryable signal, not {err:?}"
+    );
+    assert_eq!(
+        store.test_idle_readers(),
+        2,
+        "the pool sits at its full two readers, not {}",
+        store.test_idle_readers()
     );
 }
 

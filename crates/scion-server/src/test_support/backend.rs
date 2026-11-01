@@ -246,6 +246,31 @@ impl Backend {
     pub fn test_statement_log() -> Vec<String> {
         crate::pg::test_statement_log()
     }
+
+    /// The readers this backend has taken since the last reset. A walk
+    /// that holds one transaction takes one reader, whatever it steps.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[must_use]
+    pub fn test_reader_takes(&self) -> u64 {
+        crate::pg::test_reader_takes()
+    }
+
+    /// Sets the reader-take count back to zero.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn test_reset_reader_takes() {
+        crate::pg::test_reset_reader_takes();
+    }
+
+    /// How many of this backend's readers sit idle in its pool. A walk
+    /// that leaked its transaction leaves the pool short.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[must_use]
+    pub fn test_idle_readers(&self) -> usize {
+        crate::pg::test_idle_readers(&self.pg)
+    }
     /// The schema that [`Backend::open_test`] gave this data directory:
     /// a test that counts rows through its own Postgres client names it
     /// the same way. A test holds a lock in it from a connection of its
