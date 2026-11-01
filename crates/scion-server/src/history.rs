@@ -20,9 +20,11 @@
 //!
 //! Two queries read it, each one node per path part:
 //!
-//! - `Log` with a path (`newest_change`): the newest change of a path
-//!   from a changeset is `last` at the path in that changeset's tree. The
-//!   change before it is `last` in the tree of that change's first parent.
+//! - The log pages with a path, and a blame: the newest change of a
+//!   path from a changeset is `last` at the path in that changeset's
+//!   tree. The change before it is `last` in the tree of that change's
+//!   first parent. Both walk the chain of path histories in windows, one
+//!   statement per [`crate::meta::DERIVED_BATCH`] links.
 //! - The conflict check of a land on an old base (`touched_after`).
 //!   Generations strictly increase along first parents, so on that history
 //!   a path changed after the base exactly when a generation in its entry is
@@ -36,7 +38,7 @@ use scion_core::{Changeset, ChangesetId, FileState, PathElem, RepoPath};
 
 use crate::backend::Backend;
 use crate::deadline::Deadline;
-use crate::derived::{self, Kind};
+use crate::derived::Kind;
 use crate::error::{Error, Result};
 use crate::meta::MetaTx;
 use crate::tree;
@@ -516,30 +518,11 @@ fn lookup(c: &mut dyn MetaTx, nodes: &mut Nodes, root: NodeId, path: &RepoPath) 
     Ok(hit)
 }
 
-/// The newest changeset at or below `from`, on its first-parent history,
-/// that changes `path`: the file, or anything below it if it is a
-/// directory. This is the rule of [`crate::read::changes_path`]. `from` has
-/// a value of [`PathHistory`]. Reads at most one node per part of `path`,
-/// and none that `nodes` holds.
-///
-/// # Errors
-///
-/// [`Error::Corrupt`] if `from` has no value, or a node is missing.
-pub(crate) fn newest_change(
-    c: &mut dyn MetaTx,
-    nodes: &mut Nodes,
-    from: ChangesetId,
-    path: &RepoPath,
-) -> Result<Option<ChangesetId>> {
-    let root = derived::load::<PathHistory>(c, from)?
-        .ok_or_else(|| Error::Corrupt(format!("path history: no value for {from}")))?;
-    newest_change_at(c, nodes, root, path)
-}
-
 /// The newest changeset the history `root` names for `path`, given the
-/// value already in hand: the id part of [`newest_change`]'s answer. The
-/// walk of a log page calls this per link it visits, with the values a
-/// chain fetch brought, so the values cost no statement of their own.
+/// value already in hand: the walk of a log page or a blame starts from
+/// the values a chain fetch brought, so the values cost no statement of
+/// their own. Reads at most one node per part of `path`, and none that
+/// `nodes` holds.
 ///
 /// # Errors
 ///
@@ -859,6 +842,7 @@ mod tests {
 
     use super::*;
     use crate::backend::Backend;
+    use crate::derived;
     use crate::meta::Meta as _;
     use crate::meta::RepoId;
     use crate::meta::testing;
