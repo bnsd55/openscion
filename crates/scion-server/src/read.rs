@@ -202,10 +202,19 @@ pub fn log_page(
             // comes back whole is whole, whatever the clock says after.
             deadline.check()?;
             // `limit` is at most MAX_SCAN, far from any wrap.
+            #[allow(
+                clippy::cast_possible_wrap,
+                clippy::cast_sign_loss,
+                clippy::cast_possible_truncation
+            )]
+            let hops = usize::try_from(limit as i64 + 1).unwrap_or(limit + 1);
             #[allow(clippy::cast_possible_wrap)]
-            let hops = limit as i64 + 1;
-            let rows = c.first_parent_page(repo, cs, hops)?;
-            let more = rows.len() > limit;
+            let rows = c.first_parent_page(repo, cs, hops as i64)?;
+            // The page statement returns at most `hops + 1` rows: a full
+            // page is one with more rows than the page's `limit`, and a
+            // short one ended the walk - at a root, or refused as the
+            // corruption a tampered link is, by the statement itself.
+            let more = rows.len() > hops;
             let keep = rows.len().min(limit);
             let mut entries = Vec::with_capacity(keep);
             for (id, _, body) in rows.into_iter().take(keep) {

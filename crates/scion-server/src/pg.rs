@@ -2897,12 +2897,21 @@ impl MetaTx for PgTx<'_> {
     /// One page of the first-parent chain, one statement: the recursive
     /// term follows the indexed first-parent rows (cs, n = 0) that the
     /// repo may see, so every hop is one index lookup plus one membership
-    /// probe, and the join carries the generation and the body. The chain
-    /// stops at a link the repo may not see: a tampered first-parent row
-    /// that names another repo's changeset shortens the page instead of
-    /// serving that changeset. Every fetched changeset is a member of
-    /// `repo` and an ancestor of `start`. The start row is checked for
-    /// existence by the anchor, as `get_changeset` checks it.
+    /// probe, and the join carries the generation and the body. A link
+    /// the repo may not see ends the walk, and the page stays short.
+    /// Every fetched changeset is a member of `repo` and an ancestor of
+    /// `start`. The page is short at the root of the history, and the
+    /// walk's last link is checked to tell a root from a tampered row:
+    /// one whose parent the repo does not hold is corruption, refused
+    /// with [`Error::Corrupt`] naming the changeset, its first parent
+    /// and the repo, so a truncated history never reads as a whole one.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotFound`] if `repo` does not hold `start`.
+    /// [`Error::Corrupt`] if a row's id is not a changeset id, or the
+    /// page's last changeset names a first parent the repo does not
+    /// hold.
     fn first_parent_page(
         &mut self,
         repo: RepoId,
@@ -2931,6 +2940,34 @@ impl MetaTx for PgTx<'_> {
         )?;
         if rows.is_empty() {
             return Err(Error::NotFound(format!("changeset {start}")));
+        }
+        // A page short of its limit ended the walk: at a root, whose last
+        // changeset has no first-parent row, or at a tampered link, whose
+        // last changeset names a parent this repo does not hold. One
+        // probe tells the two apart, and the tampered one is corruption:
+        // a truncated history must not read as a whole one.
+        // `limit` is a link count, far from any wrap.
+        #[allow(clippy::cast_possible_wrap)]
+        if rows.len() as i64 <= limit {
+            let last = rows.last().unwrap();
+            let last = to_id(last.get::<_, Vec<u8>>(0).as_slice())?;
+            let hop = self.c.query_opt(
+                "SELECT cp.parent, rc.cs IS NOT NULL AS member
+                 FROM changeset_parents cp
+                 LEFT JOIN repo_changesets rc ON rc.repo_id = $1 AND rc.cs = cp.parent
+                 WHERE cp.cs = $2 AND cp.n = 0",
+                &[P::i64(repo.0), P::bytes(&id_bytes(last.as_bytes()))],
+            )?;
+            if let Some(hop) = hop
+                && !hop.get::<_, bool>(1)
+            {
+                let parent: Vec<u8> = hop.get(0);
+                let parent = to_id(&parent)?;
+                return Err(Error::Corrupt(format!(
+                    "changeset {last} points at first parent {parent}, which repo {} does not hold",
+                    repo.0
+                )));
+            }
         }
         rows.into_iter()
             .map(|row| {

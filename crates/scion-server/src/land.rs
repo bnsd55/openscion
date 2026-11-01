@@ -2620,6 +2620,31 @@ mod tests {
         assert!(stored(head));
     }
 
+    /// A tampered first-parent row between the index tip and a land's
+    /// base refuses the land as the corruption it is: the catch-up walk
+    /// does not decide on a truncated history, which could miss changes
+    /// behind the tampered link.
+    #[test]
+    fn a_tampered_first_parent_refuses_the_catch_up() {
+        let _slot = damage::slot();
+        let (f, history) = imported(depth());
+        let foreign = f
+            .store
+            .write(|c| {
+                let repo = c.create_repo("other")?;
+                let cs = changeset(vec![], &[]);
+                c.insert_changeset(repo, &cs)
+            })
+            .unwrap();
+        // The link the catch-up will cross: C2's first parent now names
+        // the other repo's changeset. The catch-up walks from the index
+        // tip down to a base behind it, and crosses C2 on its way.
+        damage::redirect_first_parent(&f.store, &history[2], &foreign).unwrap();
+        let cs = f.commit(history[1], &[put("mine", "x")]);
+        let err = f.try_land(cs, "tampered").unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "{err}");
+    }
+
     #[test]
     fn a_deep_land_reads_its_paths_not_the_history() {
         // The full stop, not a permit: the test measures a read-count

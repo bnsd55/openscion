@@ -212,12 +212,16 @@ pub trait MetaTx {
     /// `repo`: the chain follows only the rows the repo may see, so a
     /// tampered first-parent row that names another repo's changeset
     /// ends the page instead of serving that changeset. The page is
-    /// short at the root of the history.
+    /// short at the root of the history; a short page that is not a
+    /// root - a last changeset whose first parent the repo does not
+    /// hold - is corruption, and is refused with [`Error::Corrupt`].
     ///
     /// # Errors
     ///
     /// [`Error::NotFound`] if `repo` does not hold `start`.
-    /// [`Error::Corrupt`] if a row's id is not a changeset id.
+    /// [`Error::Corrupt`] if a row's id is not a changeset id, or the
+    /// page's last changeset names a first parent the repo does not
+    /// hold.
     fn first_parent_page(
         &mut self,
         repo: RepoId,

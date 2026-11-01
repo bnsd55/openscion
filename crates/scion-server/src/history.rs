@@ -1059,33 +1059,32 @@ mod tests {
     }
 
     /// A tampered first-parent row that names another repo's changeset
-    /// ends the page instead of serving that changeset: the walk follows
-    /// only the rows the repo may see. A body against its ID is not the
-    /// guard here - the other repo's body decodes against its own ID.
+    /// refuses the page as the corruption it is: the walk follows only
+    /// the rows the repo may see, and a truncated history must not read
+    /// as a whole one. A body against its ID is not the guard here - the
+    /// other repo's body decodes against its own ID.
     #[test]
-    fn a_log_page_stops_at_a_tampered_first_parent_link() {
+    fn a_tampered_first_parent_refuses_its_log_page() {
         let _slot = crate::pg::damage::slot();
         let (_dir, store, repo) = open();
         let other_repo = store.write(|c| c.create_repo("other")).unwrap();
         let steps: &[(&str, bool)] = &[("a", true)];
         let ids = store_chain(&store, repo, None, &[steps; 3], true);
-        let other = store_chain(&store, other_repo, None, &[&[("b", true)][..]; 2], true);
+        let foreign = store_chain(&store, other_repo, None, &[&[("b", true)][..]; 2], true);
         // The tip's first parent now names a changeset the repo may not
         // see. The body of the tip still names its own parent, so the
         // page's per-row checks stay green: only the membership catches
         // the crossing.
-        crate::pg::damage::redirect_first_parent(&store, ids.last().unwrap(), &other[0]).unwrap();
-        let page = read::log_page(&store, "r", *ids.last().unwrap(), None, 10, &later()).unwrap();
-        let found: Vec<ChangesetId> = page.entries.iter().map(|(id, _)| *id).collect();
-        assert_eq!(found, [ids[2]], "the page stops at the tampered link");
-        assert_eq!(page.next, None, "the walk ends at the repo's own rows");
+        crate::pg::damage::redirect_first_parent(&store, ids.last().unwrap(), &foreign[0]).unwrap();
+        let page = read::log_page(&store, "r", *ids.last().unwrap(), None, 10, &later());
+        let Err(Error::Corrupt(marked)) = &page else {
+            panic!("the page refuses a history it cannot follow: {page:?}");
+        };
         assert!(
-            !page
-                .entries
-                .iter()
-                .any(|(id, _)| id == other.last().unwrap()),
-            "the other repo's changeset is not served"
+            marked.contains(&format!("changeset {}", ids[2])),
+            "{marked}"
         );
+        assert!(marked.contains(&format!("{}", foreign[0])), "{marked}");
     }
 
     /// A `Log` page with a path checks its deadline before its first
