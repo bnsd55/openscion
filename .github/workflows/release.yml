@@ -143,6 +143,7 @@ jobs:
     env:
       TAG: ${{ needs.verify-tag.outputs.tag }}
       TARGET: ${{ matrix.target }}
+      CELL: ${{ matrix.cell }}
       # The generated proto module's path is embedded as a string
       # literal (env!("OUT_DIR") inside tonic::include_proto!), and a
       # literal remap cannot touch. A fixed target directory makes the
@@ -187,7 +188,7 @@ jobs:
           cargo cyclonedx --all --format json --spec-version 1.5
           mkdir -p out
           for crate in open-scion-server open-scion-tier open-scion; do
-            find . -name "$crate.cdx.json" -exec cp {} "out/$crate.cdx.json" \;
+            find . -name "$crate.cdx.json" -exec cp {} "out/$CELL-$crate.cdx.json" \;
           done
           # The SBOM attestation reads only documents that carry a
           # serialNumber; cargo-cyclonedx writes none. A deterministic
@@ -213,13 +214,19 @@ jobs:
             fi
           }
           mkdir -p out
+          # Every payload name carries its cell: the release holds both
+          # cells' files, and one flat namespace cannot hold two
+          # scion-server binaries.
           for bin in scion-server scion-cache scion-daemon scn; do
-            cp "/tmp/scion-target/$TARGET/release/$bin" out/
+            cp "/tmp/scion-target/$TARGET/release/$bin" "out/$CELL-$bin"
           done
-          cp openscion-*-source.tar.gz out/
+          version="${TAG#v}"
+          cp "openscion-$version-source.tar.gz" \
+            "out/$CELL-openscion-$version-source.tar.gz"
           {
             echo "tag=$TAG"
             echo "target=$TARGET"
+            echo "cell=$CELL"
             echo "runner-image=${ImageOS}-${ImageVersion}"
             echo "source-date-epoch=$SOURCE_DATE_EPOCH"
             echo "rustc=$(rustc -vV | grep '^release' | cut -d' ' -f2)"
@@ -227,13 +234,13 @@ jobs:
             echo "cargo-cyclonedx=$(cargo cyclonedx --version | cut -d' ' -f2)"
             echo "rustflags=$RUSTFLAGS"
             echo "flags=--locked --release"
-          } > out/release-environment.txt
+          } > "out/$CELL-release-environment.txt"
           # The checksums cover the payload; the environment record is
           # metadata about the build (the runner image rolls weekly, so
           # the two builds of one run can name different images). Bare
           # filenames, so the filter matches shasum's output.
-          (cd out && sum -- * | grep -v ' release-environment.txt$' \
-            > checksums.txt.tmp && mv checksums.txt.tmp checksums.txt)
+          (cd out && sum -- * | grep -v -- "-$CELL-release-environment.txt$" \
+            > checksums.txt.tmp && mv checksums.txt.tmp "$CELL-checksums.txt")
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.name }}
@@ -264,8 +271,8 @@ jobs:
           # stays out: it describes each build (its runner image), and
           # one run can span two image versions. Bare filenames, so the
           # filter matches.
-          (cd a && sha256sum -- * | grep -v ' release-environment.txt$') | sort > a.txt
-          (cd b && sha256sum -- * | grep -v ' release-environment.txt$') | sort > b.txt
+          (cd a && sha256sum -- * | grep -v -- '-release-environment.txt$') | sort > a.txt
+          (cd b && sha256sum -- * | grep -v -- '-release-environment.txt$') | sort > b.txt
           diff a.txt b.txt
           echo "NO DIFFERENCE"
 
@@ -291,29 +298,29 @@ jobs:
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
-            cell/scion-server
-            cell/scion-cache
-            cell/scion-daemon
-            cell/scn
-            cell/openscion-*-source.tar.gz
-            cell/checksums.txt
+            cell/${{ matrix.cell }}-scion-server
+            cell/${{ matrix.cell }}-scion-cache
+            cell/${{ matrix.cell }}-scion-daemon
+            cell/${{ matrix.cell }}-scn
+            cell/${{ matrix.cell }}-openscion-*-source.tar.gz
+            cell/${{ matrix.cell }}-checksums.txt
       - name: Attest the server crate's SBOM against its binary
         uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
         with:
-          subject-path: cell/scion-server
-          sbom-path: cell/open-scion-server.cdx.json
+          subject-path: cell/${{ matrix.cell }}-scion-server
+          sbom-path: cell/${{ matrix.cell }}-open-scion-server.cdx.json
       - name: Attest the tier crate's SBOM against its binaries
         uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
         with:
           subject-path: |
-            cell/scion-cache
-            cell/scion-daemon
-          sbom-path: cell/open-scion-tier.cdx.json
+            cell/${{ matrix.cell }}-scion-cache
+            cell/${{ matrix.cell }}-scion-daemon
+          sbom-path: cell/${{ matrix.cell }}-open-scion-tier.cdx.json
       - name: Attest the scn crate's SBOM against its binary
         uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
         with:
-          subject-path: cell/scn
-          sbom-path: cell/open-scion.cdx.json
+          subject-path: cell/${{ matrix.cell }}-scn
+          sbom-path: cell/${{ matrix.cell }}-open-scion.cdx.json
 
   # The evidence step: the attestation verify output, on every run,
   # dry-run included. Its log is what the PR body links for the proof
@@ -349,7 +356,7 @@ jobs:
             echo "attested: $file ($n attestations)"
             count=$((count + n))
           done < <(find cell -type f \
-            ! -name '*.cdx.json' ! -name 'release-environment.txt')
+            ! -name '*.cdx.json' ! -name '*-release-environment.txt')
           echo "$count attestations verified in total"
 
   # The release step: only after the diff and the attestations passed.
@@ -382,8 +389,8 @@ jobs:
       - name: Every artifact verifies against this repository
         run: |
           set -euo pipefail
-          find artifacts -type f ! -name 'checksums.txt' \
-            ! -name '*.cdx.json' ! -name 'release-environment.txt' |
+          find artifacts -type f ! -name '*-checksums.txt' \
+            ! -name '*.cdx.json' ! -name '*-release-environment.txt' |
             while read -r file; do
               gh attestation verify "$file" --repo "$GITHUB_REPOSITORY"
             done

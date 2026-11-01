@@ -46,7 +46,8 @@ here, and what it rests on.
   only the owner can turn on. They are on the checklist in
   [RELEASING.md](RELEASING.md). Until they exist, source identity
   rests on the workflow's own checks, which a maintainer could bypass.
-- `release-environment.txt` travels with the artifacts and is hashed,
+- `<cell>-release-environment.txt` travels with the artifacts and is
+  hashed,
   but it is not a SLSA "resolved dependencies" record. Reproducibility
   (#390) is the compensating control: two runners agreeing byte for
   byte proves the environment is described well enough to rebuild.
