@@ -3,8 +3,7 @@
 This document says where this project stands against the SLSA Build
 track (v1.2), and what each requirement actually rests on. The release
 pipeline it refers to is [.github/workflows/release.yml](../.github/
-workflows/release.yml); the roadmap names SLSA L3 as a v0.8.0 gate
-([ROADMAP.md](ROADMAP.md)).
+workflows/release.yml).
 
 ## What the pipeline does
 

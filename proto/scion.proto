@@ -52,8 +52,12 @@ service Scion {
   // part's next_cursor is where the next call starts.
   rpc Blame(BlameRequest) returns (stream BlameResponse);
 
-  // Queries on the changeset graph and on snapshots. Each call has a bound
-  // on its work.
+  // Queries on the changeset graph and on snapshots. Their bounds differ:
+  // MergeBase and IsAncestor walk with no bound on their reads and stop at
+  // the call's deadline, in steps of about 1,000 reads that release the
+  // read connection between steps, so other work runs beside them. Diff is
+  // bounded: at most 1,000 paths per call, a rename search with a fixed
+  // work budget, and the deadline.
 
   // The best common ancestors of two changesets, over all parents: every
   // common ancestor that is not an ancestor of another common ancestor, as

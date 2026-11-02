@@ -332,7 +332,8 @@ async fn start_reply(
 /// not free within `busy`.
 // SHORTCUT: two blocking hops per object and no read-ahead, so many small
 // objects are read one after another. Upgrade: read a batch capped by bytes
-// per hop, or keep a few reads in flight (issue #6).
+// per hop, or keep a few reads in flight (the section 9 row that names
+// this file).
 async fn find(
     worker: &Worker,
     in_flight: &Arc<Semaphore>,
