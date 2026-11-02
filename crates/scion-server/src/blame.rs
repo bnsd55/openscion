@@ -462,7 +462,8 @@ pub fn blame(
             }
             // A search to go on with is the first step's, at the walk's start.
             let search = std::mem::take(&mut from);
-            if search != RenameSearch::default() && (id != start || next.is_none()) {
+            let parent = changeset.parents().first().copied();
+            if search != RenameSearch::default() && (id != start || parent.is_none()) {
                 return Err(Error::InvalidArgument(format!(
                     "{start} does not add {path:?}, so it has no rename search"
                 )));
@@ -478,7 +479,6 @@ pub fn blame(
                 text: &text,
             };
             let mut cost = 0;
-            let parent = changeset.parents().first().copied();
             let found = match parent {
                 Some(parent) => {
                     let root = tree::root_tree_held(store, c, repo, parent, &walk_until)?;

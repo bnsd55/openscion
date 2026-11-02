@@ -740,3 +740,34 @@ fn a_rename_search_goes_on_across_calls() {
     );
     assert_eq!(paths.get(&ids[0]), Some(&RepoPath::new("f/00").unwrap()));
 }
+
+/// A cursor that carries a rename search at a root changeset is refused:
+/// a root has no parent, so the search has nothing to search in, and
+/// dropping it silently would blame every line on the root.
+#[test]
+fn a_rename_search_at_a_root_changeset_is_refused() {
+    let (dir, store, root) = store(b"content\n");
+    let resume = scion_server::test_support::blame::Resume {
+        next: None,
+        search: scion_server::test_support::blame::RenameSearch {
+            searched: 1,
+            best: None,
+        },
+        ..Default::default()
+    };
+    let err = scion_server::test_support::blame::blame(
+        &store,
+        REPO,
+        root,
+        &RepoPath::new(PATH).unwrap(),
+        &resume,
+        &scion_server::test_support::memory::Bytes::new(scion_server::REPLY_MEMORY_BUDGET),
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(600)),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, scion_server::Error::InvalidArgument(_)),
+        "{err:?}"
+    );
+    drop(dir);
+}
