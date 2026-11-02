@@ -10,8 +10,10 @@
 ![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)
 
 A version control server for large monorepos where most of the writers are
-AI agents. The server keeps the history and makes the commits. Clients read
-only the files they need and never clone. Written in Rust.
+AI agents. Clients land single-parent changesets on refs that exist, and
+the server lands them on the trunk; reads are sparse, so a client reads
+only the files it needs and never clones. Import and restore create repos
+and refs. Written in Rust.
 
 > **Alpha (0.x).** One server process on one machine. Not ready for
 > production code yet. What holds between versions:
@@ -119,7 +121,7 @@ benchmark against git is in [docs/benchmarks.md](docs/benchmarks.md).
 | Binary | Role |
 |---|---|
 | `scion-server` | The server: storage, commits, lands, reads, git import, `fsck`, `gc`, backup and restore |
-| `scn` | The command-line client: read, check out, mount (read-only NFS), commit, land, diff, log, blame |
+| `scn` | The command-line client: read, check out, mount (read-only NFS, experimental), commit, land, diff, log, blame |
 | `scion-cache` | A regional read cache in front of the server |
 | `scion-daemon` | A per-machine cache on a Unix socket, in front of a regional cache |
 
