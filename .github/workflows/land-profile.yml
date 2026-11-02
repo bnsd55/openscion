@@ -1,0 +1,64 @@
+# One land, taken apart: the dispatch runs the land-profile harness on
+# the same runner class the capacity envelope uses (operations.md
+# section 7), with the Postgres service carrying pg_stat_statements so
+# the bench window's statements can be named and counted. The run
+# measures only: it publishes no envelope and changes no product code.
+name: land profile
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  land-profile:
+    name: land profile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    services:
+      postgres:
+        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        env:
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: scion
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          -c shared_preload_libraries=pg_stat_statements
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: protoc
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: the harness needs strace and jq
+        run: |
+          set -euo pipefail
+          command -v strace > /dev/null || sudo apt-get update -qq && sudo apt-get install -y -qq strace
+          command -v jq > /dev/null || sudo apt-get install -y -qq jq
+      - name: profile one land
+        env:
+          SCION_PG_URL: postgres://postgres@127.0.0.1:5432/scion_capacity_profile
+          CAPACITY_MACHINE: "GitHub ubuntu-24.04 hosted runner: 4 vCPU, 16 GiB RAM, ~144 GiB SSD"
+        run: scripts/land-profile.sh
+      - name: upload the raw output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: land-profile-artifacts
+          path: ${{ runner.temp }}/land-profile-artifacts/
+          if-no-files-found: error
