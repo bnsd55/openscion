@@ -44,6 +44,11 @@ esac
 admin_url="${SCION_PG_URL%/*}/postgres"
 
 make_work land-profile
+# Whatever the run produced rides out even on a failure: the breakdown
+# is the run's product, and a broken cell is data too.
+dest="${RUNNER_TEMP:-/tmp}/land-profile-artifacts"
+mkdir -p "$dest"
+trap 'cp -r "$WORK"/. "$dest/" 2> /dev/null || true' EXIT
 if [ -n "${SCION_BIN:-}" ]; then
   BIN=$SCION_BIN
 else
@@ -163,8 +168,5 @@ WRAP=""
 
 note "land-profile: the summary"
 cat "$sum"
-dest="${RUNNER_TEMP:-/tmp}/land-profile-artifacts"
-mkdir -p "$dest"
-cp "$sum" "$WORK"/bench-*.json "$WORK"/pg-statements-*.csv "$WORK"/metrics-*.txt \
-  ${WORK:+$WORK/fsync.log} "$dest/" 2> /dev/null || true
+cp "$sum" "$dest/"
 note "land-profile: done; the artifacts are in $dest"
