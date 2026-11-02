@@ -153,6 +153,14 @@ pub struct Metrics {
     /// latest poll saw them (`data_free_set` says whether any poll ran).
     data_free_bytes: AtomicU64,
     data_free_set: std::sync::atomic::AtomicBool,
+    /// The memory floor the server's budgets sum to, set at start
+    /// (`memory_floor_set` says the start-up check ran).
+    memory_floor_bytes: AtomicU64,
+    memory_floor_set: std::sync::atomic::AtomicBool,
+    /// The host's memory limit, as the start-up check read it
+    /// (`host_memory_set` says whether it read one).
+    host_memory_bytes: AtomicU64,
+    host_memory_set: std::sync::atomic::AtomicBool,
     /// Derive walks in flight, and walks waiting for a permit.
     derive_walks_in_flight: AtomicU64,
     derive_walks_waiting: AtomicU64,
@@ -302,6 +310,30 @@ impl Metrics {
         self.data_free_set.store(true, Ordering::Relaxed);
     }
 
+    /// Sets the memory floor the server's budgets sum to, at start.
+    pub fn set_memory_floor_bytes(&self, bytes: u64) {
+        self.memory_floor_bytes.store(bytes, Ordering::Relaxed);
+        self.memory_floor_set.store(true, Ordering::Relaxed);
+    }
+
+    /// Sets the host's memory limit, as the start-up check read it.
+    pub fn set_host_memory_bytes(&self, bytes: u64) {
+        self.host_memory_bytes.store(bytes, Ordering::Relaxed);
+        self.host_memory_set.store(true, Ordering::Relaxed);
+    }
+
+    /// The host's memory limit the start-up check read, if it ran.
+    #[must_use]
+    pub fn host_memory_bytes(&self) -> u64 {
+        self.host_memory_bytes.load(Ordering::Relaxed)
+    }
+
+    /// The memory floor the server's budgets sum to, if the check ran.
+    #[must_use]
+    pub fn memory_floor_bytes(&self) -> u64 {
+        self.memory_floor_bytes.load(Ordering::Relaxed)
+    }
+
     /// Counts one derive walk that took its permit.
     pub fn derive_walk_started(&self) {
         self.derive_walks_in_flight.fetch_add(1, Ordering::Relaxed);
@@ -412,6 +444,24 @@ impl Metrics {
                  # TYPE scion_data_free_bytes gauge\n\
                  scion_data_free_bytes {}",
                 self.data_free_bytes.load(Ordering::Relaxed)
+            );
+        }
+        if self.memory_floor_set.load(Ordering::Relaxed) {
+            let _ = writeln!(
+                text,
+                "# HELP scion_memory_floor_bytes The memory floor the server's budgets and caps sum to, which its host needs.\n\
+                 # TYPE scion_memory_floor_bytes gauge\n\
+                 scion_memory_floor_bytes {}",
+                self.memory_floor_bytes.load(Ordering::Relaxed)
+            );
+        }
+        if self.host_memory_set.load(Ordering::Relaxed) {
+            let _ = writeln!(
+                text,
+                "# HELP scion_host_memory_bytes The host's memory limit, as the start-up check read it: the cgroup limit, or the host's total.\n\
+                 # TYPE scion_host_memory_bytes gauge\n\
+                 scion_host_memory_bytes {}",
+                self.host_memory_bytes.load(Ordering::Relaxed)
             );
         }
         self.render_derive_walks(&mut text);

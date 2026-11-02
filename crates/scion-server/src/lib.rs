@@ -71,6 +71,7 @@ pub(crate) mod error;
 #[cfg(any(test, feature = "test-hooks"))]
 #[path = "test_support/docs.rs"]
 pub(crate) mod docs_hooks;
+pub mod floor;
 pub mod fsck;
 pub mod gc;
 pub(crate) mod graph;
@@ -295,6 +296,11 @@ pub mod test_support {
     /// The counters the import tests read between retries.
     pub mod import {
         pub use crate::import::{BUSY_TRIES, CHECKS, STRUCTURE_CAPS};
+    }
+    /// The memory floor: the check and the path override a test points
+    /// at a temporary directory.
+    pub mod floor {
+        pub use crate::floor::*;
     }
     /// The land operation: its queue, requests and outcomes.
     pub mod land {
