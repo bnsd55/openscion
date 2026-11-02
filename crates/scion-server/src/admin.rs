@@ -22,7 +22,7 @@ fn root_identity(now_secs: i64) -> Result<IdentityTime> {
         now_secs,
         0,
     )
-    .map_err(|e| Error::Corrupt(format!("the root changeset's identity does not fit: {e}")))
+    .map_err(|e| Error::Internal(format!("the root changeset's identity does not fit: {e}")))
 }
 
 /// The root changeset of a made repo: no parents, no changes — `apply` on
@@ -36,7 +36,7 @@ fn root_changeset(name: &str, now_secs: i64) -> Result<Changeset> {
         format!("create repo {name}").into_bytes(),
         BTreeMap::new(),
     )
-    .map_err(|e| Error::Corrupt(format!("the root changeset does not fit the format: {e}")))
+    .map_err(|e| Error::Internal(format!("the root changeset does not fit the format: {e}")))
 }
 
 /// Parses the hex form of a changeset ID: 64 hex digits.
@@ -92,10 +92,10 @@ async fn create_repo_run(audit: &Audit, store: Backend, name: &str, trunk: &str)
     }
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| Error::Corrupt(format!("the clock is before the epoch: {e}")))?
+        .map_err(|e| Error::Internal(format!("the clock is before the epoch: {e}")))?
         .as_secs();
     let now = i64::try_from(secs)
-        .map_err(|_| Error::Corrupt("the clock is past what a changeset can stamp".to_owned()))?;
+        .map_err(|_| Error::Internal("the clock is past what a changeset can stamp".to_owned()))?;
     let run_store = store.clone();
     let (run_name, run_trunk) = (name.to_owned(), trunk.to_owned());
     let run = move || {
@@ -139,7 +139,7 @@ async fn create_repo_run(audit: &Audit, store: Backend, name: &str, trunk: &str)
             Ok(())
         }
         Ok(Err(e)) => Err(e),
-        Err(e) => Err(Error::Corrupt(format!("the create-repo task failed: {e}"))),
+        Err(e) => Err(Error::Internal(format!("the create-repo task failed: {e}"))),
     }
 }
 
@@ -218,10 +218,18 @@ async fn create_ref_run(
             // racing run) inserts between this run's statements is still
             // refused here, and its current target names the refusal.
             if !c.cas_ref(repo_id, &run_name, None, target)? {
-                let at = c
-                    .get_ref(repo_id, &run_name)?
-                    .expect("cas_ref refused a ref it does not see")
-                    .target;
+                let at = match c.get_ref(repo_id, &run_name)? {
+                    Some(state) => state.target,
+                    // cas_ref refused against the state it saw, so the
+                    // ref is unreadable now: the command's own damage,
+                    // not the store's. Internal, and the audit keeps
+                    // its failed line.
+                    None => {
+                        return Err(Error::Internal(format!(
+                            "ref {run_name:?} was refused but is unreadable"
+                        )));
+                    }
+                };
                 return Err(Error::FailedPrecondition(format!(
                     "ref {run_name:?} already exists at {at}"
                 )));
@@ -250,7 +258,7 @@ async fn create_ref_run(
             Ok(())
         }
         Ok(Err(e)) => Err(e),
-        Err(e) => Err(Error::Corrupt(format!("the create-ref task failed: {e}"))),
+        Err(e) => Err(Error::Internal(format!("the create-ref task failed: {e}"))),
     }
 }
 
