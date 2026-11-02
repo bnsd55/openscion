@@ -37,6 +37,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use hashlink::LruCache;
 use scion_core::{Changeset, ChangesetId, FileState, RepoPath};
 
+use std::time::Instant;
+
 use crate::auth::Caller;
 use crate::backend::Backend;
 use crate::deadline::Deadline;
@@ -44,7 +46,14 @@ use crate::derived;
 use crate::error::{Error, Result};
 use crate::graph::{self, CommitGraph};
 use crate::history::{self, PathHistory};
+use crate::land_profile::{self as profile, Phase};
 use crate::meta::Meta as _;
+
+/// The profile log's land id: the recorded land's id, or -1 when the
+/// record itself failed.
+fn recorded_land_id(outcome: &Result<LandOutcome>) -> i64 {
+    outcome.as_ref().map_or(-1, |o| o.land_id)
+}
 use crate::meta::StaleLand;
 use crate::meta::{MetaTx, RefState, RepoId};
 use crate::tree;
@@ -404,7 +413,11 @@ impl Lands {
     /// The land then stays pending, and a retry with the same request key
     /// resumes it. Store errors otherwise.
     pub fn land(&self, store: &Backend, caller: &Caller, req: &LandRequest) -> Result<LandOutcome> {
-        let outcome = self.land_committed(store, caller, req);
+        let started = Instant::now();
+        let (outcome, trace) = crate::land_profile::Trace::measure(|| {
+            self.land_committed(store, caller, req)
+        });
+        crate::land_profile::log(recorded_land_id(&outcome), started.elapsed(), &trace);
         // An index can hold up to the whole budget, and freeing it takes a
         // while, so it happens here, outside every lock.
         let evicted = mem::take(&mut *self.evicted.lock().unwrap_or_else(PoisonError::into_inner));
@@ -447,7 +460,10 @@ impl Lands {
         // already settled this land, and what the land must do now, is
         // one read that `finish` runs on the row. The record's answer is
         // the state of the row it saw, never a second read of it.
-        let (repo, recorded) = store.commit(|c| c.record_land(caller, req, self.pending_limit))?;
+        let (repo, recorded) = {
+            let _guard = profile::Guard::enter(Phase::Record);
+            store.commit(|c| c.record_land(caller, req, self.pending_limit))?
+        };
         if recorded.state != LandState::Pending {
             return Ok(recorded);
         }
@@ -460,7 +476,10 @@ impl Lands {
         // The head whose history this call derived.
         let mut derived = None;
         loop {
-            let mut index = Self::lock_slot(repo, &req.target_ref, &slot);
+            let mut index = {
+                let _guard = profile::Guard::enter(Phase::SlotWait);
+                Self::lock_slot(repo, &req.target_ref, &slot)
+            };
             // The outcome check rides the plan's read transaction: a call
             // with the same key may have finished the land while this one
             // waited for the lock, and the plan must not run for a land
@@ -781,14 +800,21 @@ fn finish(
         // `set_land_state`'s pending guard, which answers "no longer
         // pending" instead of moving the ref twice - the guard is the
         // backstop there, not the read.
-        let planned = store.read_latest(|c| {
-            let (row, head, head_tree) =
-                c.land_outcome(repo, caller, land_id, Some(&req.target_ref))?;
-            if row.state != LandState::Pending {
-                return Ok(Planned::Settled(row));
-            }
-            plan(lands, c, repo, req, head, head_tree, index).map(Planned::Do)
-        })?;
+        let planned = {
+            let _guard = profile::Guard::enter(Phase::Outcome);
+            store.read_latest(|c| {
+                let (row, head, head_tree) =
+                    c.land_outcome(repo, caller, land_id, Some(&req.target_ref))?;
+                if row.state != LandState::Pending {
+                    return Ok(Planned::Settled(row));
+                }
+                let plan = {
+                    let _guard = profile::Guard::enter(Phase::Plan);
+                    plan(lands, c, repo, req, head, head_tree, index)?
+                };
+                Ok(Planned::Do(plan))
+            })?
+        };
         #[cfg(test)]
         let step = lands
             .before_settle
@@ -806,19 +832,19 @@ fn finish(
             Planned::Settled(row) => return Ok(Finished::Outcome(row)),
             Planned::Do(plan) => plan,
         };
-        match settle(lands, store, repo, land_id, &req.target_ref, plan, index) {
+        match settle(lands, store, repo, land_id, req, plan, index) {
             Err(Error::Aborted(detail)) if attempt < MAX_ATTEMPTS => {
                 tracing::info!(land_id, attempt, %detail, "planning the land again");
                 if let Some(metrics) = &lands.metrics {
                     metrics.land_replan();
                 }
+                profile::attempt_done();
                 attempt += 1;
             }
             outcome => return outcome,
         }
     }
 }
-
 /// Step 4: decides the land against the ref's current head.
 fn plan(
     lands: &Lands,
@@ -900,10 +926,12 @@ fn settle(
     store: &Backend,
     repo: RepoId,
     land_id: i64,
-    target: &str,
+    req: &LandRequest,
     plan: Plan,
     index: &mut Option<PathIndex>,
 ) -> Result<Finished> {
+    let target = req.target_ref.as_str();
+    let deadline = &req.deadline;
     let (rebased, head, head_tree_stored) = match plan {
         Plan::Derive(head) => return Ok(Finished::Derive(head)),
         Plan::Reject { reason, detail } => {
@@ -940,6 +968,7 @@ fn settle(
     // one derives before the write transaction - never inside it, where
     // the derive would run unbounded and hold the write connection.
     if !head_tree_stored {
+        let _guard = profile::Guard::enter(Phase::FillRoot);
         tree::fill_root_tree(store, repo, head.target)?;
     }
     // The blob lengths the tree build needs, read before the write

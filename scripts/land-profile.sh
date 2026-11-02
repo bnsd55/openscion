@@ -61,9 +61,15 @@ export SCION_TOKEN=smoke
 # shellcheck disable=SC2034 # common.sh's import_dataset and start read it
 PG_URL=$SCION_PG_URL
 
-# reset_cell: a fresh store (drop and create, the capacity harness's
-# rule), the extension, the ticket key, and a server wrapped in $WRAP.
+# reset_cell NAME: a fresh store (drop and create, the capacity
+# harness's rule), the extension, and a server wrapped in $WRAP. The
+# cell before's server log moves aside, so each cell keeps its own:
+# the profile reads the land's per-phase lines from it.
 reset_cell() {
+  local name=$1
+  if [ -f "$WORK/server.log" ]; then
+    mv -f "$WORK/server.log" "$WORK/server-$name.log"
+  fi
   psql "$admin_url" -X -q -c "DROP DATABASE IF EXISTS $pg_db" \
     -c "CREATE DATABASE $pg_db" || die "the database reset failed"
   rm -rf "$WORK/server"
@@ -98,7 +104,7 @@ metrics_land() {
 cell() {
   local name=$1 writers=$2 lands=$3
   note "cell $name: $writers writers, $lands lands"
-  reset_cell
+  reset_cell "$name"
   curl -fsS "http://127.0.0.1:$SERVER_METRICS_PORT/metrics" \
     > "$WORK/metrics-$name-before.txt" || die "no metrics before the bench"
   psql "$SCION_PG_URL" -X -q -c "SELECT pg_stat_statements_reset()" > /dev/null \
@@ -142,7 +148,6 @@ cell writers $PROFILE_WRITERS_CELL
 WRAP="strace -f -tt -T -e trace=fsync,fdatasync -o $WORK/fsync.log -s 0"
 cell flush 1 "$PROFILE_FLUSH_LANDS"
 WRAP=""
-
 {
   echo "one land, taken apart (runner: ${CAPACITY_MACHINE:-unspecified})"
   for name in solo writers flush; do
@@ -173,6 +178,43 @@ WRAP=""
       'BEGIN { printf "fsync calls: %s (%.2f per land), total %s s (%.1f ms per land)\n", n, n / l, t, t * 1000 / l }'
   fi
 } >> "$sum"
+
+# The slice's phases, per cell: the land's own per-phase lines, averaged
+# over the cell's lands. wall_ms is the phase's wall time per land,
+# stmt_ms the round-trip time of its statements, stmts their count. The
+# total row is the whole land: the phases nest inside it (settle holds
+# build, cas and set_state), and slot_wait is the queue, not the work.
+for name in solo writers flush; do
+  log="$WORK/server-$name.log"
+  [ -f "$log" ] || continue
+  {
+    echo ""
+    echo "## the slice in $name (per land, mean)"
+    awk '
+      /scion_server::land_profile:/ {
+        phase = ""; wall = 0; sm = 0; st = 0; at = ""
+        for (i = 1; i <= NF; i++) {
+          if ($i ~ /^phase=/)         { phase = substr($i, 7) }
+          else if ($i ~ /^wall_ms=/)  { wall = substr($i, 9) + 0 }
+          else if ($i ~ /^stmt_ms=/)  { sm = substr($i, 9) + 0 }
+          else if ($i ~ /^stmts=/)    { st = substr($i, 7) + 0 }
+          else if ($i ~ /^attempts=/) { at = substr($i, 10) + 0 }
+        }
+        if (phase == "") next
+        n[phase]++; w[phase] += wall; s[phase] += sm; c[phase] += st
+        if (at != "") a[phase] += at
+      }
+      END {
+        printf "%-10s %10s %10s %8s %9s\n", "phase", "wall_ms", "stmt_ms", "stmts", "attempts"
+        m = split("total slot_wait record outcome plan fill_root lens settle build cas set_state other", order, " ")
+        for (i = 1; i <= m; i++) {
+          p = order[i]
+          if (!n[p]) continue
+          printf "%-10s %10.2f %10.2f %8.1f %9.2f\n", p, w[p] / n[p], s[p] / n[p], c[p] / n[p], (p == "total" ? a[p] / n[p] : 0)
+        }
+      }' "$log"
+  } >> "$sum"
+done
 
 note "land-profile: the summary"
 cat "$sum"
