@@ -1042,13 +1042,8 @@ fn an_archive_of_an_unknown_version_or_format_is_refused() {
     assert_ne!(future, manifest, "the manifest's shape moved upstream");
     std::fs::write(&manifest_path, future).unwrap();
     let keep2 = scion_server::test_support::private_tempdir();
-    let error = archive::restore(
-        &out,
-        keep2.path(),
-        &url_of_data(),
-        None,
-    )
-    .expect_err("a version-2 archive must not restore");
+    let error = archive::restore(&out, keep2.path(), &url_of_data(), None)
+        .expect_err("a version-2 archive must not restore");
     assert!(
         error.to_string().contains("version 2 is not 1"),
         "the refusal must name the version rule: {error}"
@@ -1068,13 +1063,8 @@ fn an_archive_of_an_unknown_version_or_format_is_refused() {
     assert_ne!(foreign, manifest, "the manifest's shape moved upstream");
     std::fs::write(&manifest_path, foreign).unwrap();
     let keep2 = scion_server::test_support::private_tempdir();
-    let error = archive::restore(
-        &out,
-        keep2.path(),
-        &url_of_data(),
-        None,
-    )
-    .expect_err("a foreign archive must not restore");
+    let error = archive::restore(&out, keep2.path(), &url_of_data(), None)
+        .expect_err("a foreign archive must not restore");
     assert!(
         error.to_string().contains("not a scion archive"),
         "the refusal must name the format rule: {error}"
