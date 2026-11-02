@@ -2814,85 +2814,72 @@ mod tests {
                     Ok(())
                 })
                 .unwrap();
-            // One land's tips are independent read transactions on
-            // one read-only state (the oracle map, the budgets, the
-            // land, the deadline), so the pool serves them
-            // concurrently: the case's wall is the slowest tip, not
-            // the sum of the tips.
-            std::thread::scope(|s| {
-                let store = &store;
-                let oracle = &oracle;
-                let lands = &lands;
-                let tight = &tight;
-                let land = &land;
-                let deadline = &deadline;
-                let ids = &ids;
-                for tip in ids.iter().copied() {
-                    s.spawn(move || {
-                        store
-                            .read(|c| {
-                                let tip_gen = oracle[&tip].1;
-                                        // The first-parent history of the tip, newest first,
-                                        // from the stored changesets alone.
-                                        let chain: Vec<(ChangesetId, i64, Changeset)> = {
-                                            let mut chain = Vec::new();
-                                            let mut next = Some(tip);
-                                            while let Some(id) = next {
-                                                let (cs, generation) = &oracle[&id];
-                                                next = cs.parents().first().copied();
-                                                chain.push((id, *generation, cs.clone()));
-                                            }
-                                            chain
-                                        };
-                                        // One index for all bases, as a ref's index serves its lands.
-                                        let mut index = PathIndex::new(c, repo, tip, &tight.used)?;
-                                        // Bases on the history, newest first. The model holds the
-                                        // changesets after each.
-                                        let mut model = PathIndex::at(tip, tip_gen, &lands.used);
-                                        for (n, &(base, base_gen, _)) in chain.iter().enumerate() {
-                                            if let Some((id, generation, cs)) =
-                                                n.checked_sub(1).map(|m| &chain[m])
-                                            {
-                                                let cost = model.cost([(*generation, cs.changes())]);
-                                                let add = |m: &mut PathIndex| {
-                                                    m.add(*id, *generation, cs.changes());
-                                                };
-                                                assert!(model.grow(lands, cost, add));
-                                            }
-                                            let walked =
-                                                touched_by(chain[..n].iter().map(|(.., cs)| cs), land);
-                                            let indexed: Vec<RepoPath> = (land.keys())
-                                                .filter(|path| model.touches(path.as_bytes(), base_gen))
-                                                .cloned()
-                                                .collect();
-                                            assert_eq!(indexed, walked);
-                                            let in_history =
-                                                check_history(c, tip, base, base_gen, land, deadline)?;
-                                            assert_eq!(in_history, Checked::Paths(walked.clone()));
-                                            let checked =
-                                                index.check(tight, c, repo, base, land, deadline)?;
-                                            assert_eq!(checked, Checked::Paths(walked));
-                                        }
-                                        let off = ids
-                                            .iter()
-                                            .filter(|&&id| chain.iter().all(|(on, ..)| *on != id));
-                                        for &base in off {
-                                            // The oracle read the generation of every changeset of
-                                            // the case, on-chain or not: no second read here.
-                                            let base_gen = oracle[&base].1;
-                                            let in_history =
-                                                check_history(c, tip, base, base_gen, land, deadline)?;
-                                            assert_eq!(in_history, Checked::NotOnHistory);
-                                            let checked =
-                                                index.check(tight, c, repo, base, land, deadline)?;
-                                            assert_eq!(checked, Checked::NotOnHistory);
-                                        }
-                                        Ok(())
-                                    })
-                                    .unwrap();
-                            });
+            // One land's tips are independent read transactions on one
+            // read-only state (the oracle map, the budgets, the land, the
+            // deadline), so the pool serves them concurrently: the case's
+            // wall is the work over the pool's readers, not the sum of the
+            // tips. A fixed set of workers takes the next tip until the
+            // tips run out (`for_each_item`).
+            crate::test_support::for_each_item(&ids, crate::test_support::PROOF_READERS, |tip| {
+                let tip = *tip;
+                store
+                    .read(|c| {
+                        let tip_gen = oracle[&tip].1;
+                        // The first-parent history of the tip, newest first,
+                        // from the stored changesets alone.
+                        let chain: Vec<(ChangesetId, i64, Changeset)> = {
+                            let mut chain = Vec::new();
+                            let mut next = Some(tip);
+                            while let Some(id) = next {
+                                let (cs, generation) = &oracle[&id];
+                                next = cs.parents().first().copied();
+                                chain.push((id, *generation, cs.clone()));
+                            }
+                            chain
+                        };
+                        // One index for all bases, as a ref's index serves its lands.
+                        let mut index = PathIndex::new(c, repo, tip, &tight.used)?;
+                        // Bases on the history, newest first. The model holds the
+                        // changesets after each.
+                        let mut model = PathIndex::at(tip, tip_gen, &lands.used);
+                        for (n, &(base, base_gen, _)) in chain.iter().enumerate() {
+                            if let Some((id, generation, cs)) = n.checked_sub(1).map(|m| &chain[m]) {
+                                let cost = model.cost([(*generation, cs.changes())]);
+                                let add =
+                                    |m: &mut PathIndex| m.add(*id, *generation, cs.changes());
+                                assert!(model.grow(&lands, cost, add));
+                            }
+                            let walked = touched_by(chain[..n].iter().map(|(.., cs)| cs), &land);
+                            let indexed: Vec<RepoPath> = (land.keys())
+                                .filter(|path| model.touches(path.as_bytes(), base_gen))
+                                .cloned()
+                                .collect();
+                            assert_eq!(indexed, walked);
+                            let in_history =
+                                check_history(c, tip, base, base_gen, &land, &deadline)?;
+                            assert_eq!(in_history, Checked::Paths(walked.clone()));
+                            let checked =
+                                index.check(&tight, c, repo, base, &land, &deadline)?;
+                            assert_eq!(checked, Checked::Paths(walked));
                         }
-                    });
+                        let off = ids
+                            .iter()
+                            .filter(|&&id| chain.iter().all(|(on, ..)| *on != id));
+                        for &base in off {
+                            // The oracle read the generation of every changeset of
+                            // the case, on-chain or not: no second read here.
+                            let base_gen = oracle[&base].1;
+                            let in_history =
+                                check_history(c, tip, base, base_gen, &land, &deadline)?;
+                            assert_eq!(in_history, Checked::NotOnHistory);
+                            let checked =
+                                index.check(&tight, c, repo, base, &land, &deadline)?;
+                            assert_eq!(checked, Checked::NotOnHistory);
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+            });
         }
     }
 

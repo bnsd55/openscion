@@ -988,33 +988,30 @@ mod tests {
             let queried = testing::PATHS.into_iter().chain(["c", "c/a", "a/b/c/d", "z"]);
             // Each (path, tip) pair is one independent read: the log and
             // the in-memory walk share nothing, so the pool serves the
-            // pairs concurrently. A mismatch is collected, and the case
-            // fails below, where proptest can shrink it.
+            // pairs concurrently. A fixed set of workers takes the next
+            // pair from one index (`for_each_item`). A mismatch is
+            // collected, and the case fails below, where proptest can
+            // shrink it.
+            let pairs: Vec<(&str, ChangesetId)> = queried
+                .flat_map(|p| ids.iter().map(move |&tip| (p, tip)))
+                .collect();
             let failures = std::sync::Mutex::new(Vec::new());
-            std::thread::scope(|s| {
-                let store = &store;
-                let stored = &stored;
-                let failures = &failures;
-                for p in queried {
-                    for &tip in &ids {
-                        s.spawn(move || {
-                            let mut walked = Vec::new();
-                            let mut next = Some(tip);
-                            while let Some(id) = next {
-                                let cs = &stored[&id];
-                                if read::changes_path(cs, &path(p)) {
-                                    walked.push(id);
-                                }
-                                next = cs.parents().first().copied();
-                            }
-                            let got = path_log(store, tip, p, limit);
-                            if got != walked {
-                                failures.lock().unwrap().push(format!(
-                                    "{p} at {tip:?}: got {got:?}, want {walked:?}"
-                                ));
-                            }
-                        });
+            crate::test_support::for_each_item(&pairs, crate::test_support::PROOF_READERS, |(p, tip)| {
+                let mut walked = Vec::new();
+                let mut next = Some(*tip);
+                while let Some(id) = next {
+                    let cs = &stored[&id];
+                    if read::changes_path(cs, &path(p)) {
+                        walked.push(id);
                     }
+                    next = cs.parents().first().copied();
+                }
+                let got = path_log(&store, *tip, p, limit);
+                if got != walked {
+                    failures
+                        .lock()
+                        .unwrap()
+                        .push(format!("{p} at {tip:?}: got {got:?}, want {walked:?}"));
                 }
             });
             let failures = failures.into_inner().unwrap();
