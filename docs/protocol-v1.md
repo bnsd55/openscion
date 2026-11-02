@@ -63,12 +63,15 @@ closes a connection:
   fails, and the client MAY retry it (`GetObjects` and `ReadFile` only
   re-read; a `Land` retry uses the same request key).
 - when the replies of the connection that stopped reading hold more than
-  64 MiB together (`--max-stalled-bytes`). A reply that stalls adds what it
-  leaves in HTTP/2, under 4 MiB, to a count of its connection; a connection
-  over the limit is closed, which frees what every stalled reply of it
-  holds. Other connections are not touched. A unary reply that its client
-  never reads is not counted: hyper gives the server no hook that sees it
-  stall.
+  64 MiB together (`--max-stalled-bytes`), or when the replies that
+  stalled connections hold together cross 1 GiB (`STALLED_TOTAL_BYTES`
+  in crates/scion-proto/src/runtime/listen.rs). A reply that stalls adds
+  what it leaves in HTTP/2, under 4 MiB, to a count of its connection
+  and to the process's total; a connection over its own limit, or whose
+  hold crosses the total, is closed, which frees what every stalled
+  reply of it holds. Other connections are not touched. A unary reply
+  that its client never reads is not counted: hyper gives the server no
+  hook that sees it stall.
 
 So a connection beyond the cap waits at most 40 min. A client that stops reading a reply
 keeps the memory that no budget counts for that reply until the stream ends
