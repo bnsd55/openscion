@@ -910,10 +910,11 @@ jobs:
     # SHORTCUT: one job. Split it in two, each with its own Postgres
     # service and the same 2000 cases, when it passes 80 minutes. The
     # two slowest proofs check their independent tips and pairs
-    # concurrently (six readers, test_support::PROOF_READERS); the
-    # coverage runs of 11-02 measure the land proof at 90.4 -> 75.1 s
-    # and the path-log proof at 92.2 -> 36.1 s for 16 cases, which
-    # scales this job from 1h58 to about 75 minutes.
+    # concurrently on ten fixed workers (`test_support::PROOF_READERS`):
+    # the 11-02 push runs measure the land proof 622.6 -> 388.6 s and the
+    # path-log proof 441.2 -> 213.5 s at 128 cases (runs 41412049300 and
+    # 41456136189), which projects this job at about 82 minutes; the next
+    # nightly measures it.
     timeout-minutes: 120
     services:
       # The suite's Postgres tests read this database: the backend they
