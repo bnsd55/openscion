@@ -122,7 +122,7 @@ impl Trace {
     /// trace. Nests only in tests, where the inner trace wins.
     pub(crate) fn measure<R>(f: impl FnOnce() -> R) -> (R, Trace) {
         let saved = Self::get();
-        Self::clear();
+        Self::put(&Trace::default());
         let out = f();
         let trace = Self::get().unwrap_or_default();
         match saved {

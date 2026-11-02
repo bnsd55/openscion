@@ -66,10 +66,6 @@ PG_URL=$SCION_PG_URL
 # cell before's server log moves aside, so each cell keeps its own:
 # the profile reads the land's per-phase lines from it.
 reset_cell() {
-  local name=$1
-  if [ -f "$WORK/server.log" ]; then
-    mv -f "$WORK/server.log" "$WORK/server-$name.log"
-  fi
   psql "$admin_url" -X -q -c "DROP DATABASE IF EXISTS $pg_db" \
     -c "CREATE DATABASE $pg_db" || die "the database reset failed"
   rm -rf "$WORK/server"
@@ -121,6 +117,7 @@ cell() {
         FROM pg_stat_statements ORDER BY total_exec_time DESC" \
     > "$WORK/pg-statements-$name.csv" || die "the statements dump failed"
   stop_server
+  mv -f "$WORK/server.log" "$WORK/server-$name.log"
 }
 
 note "land-profile: building"
@@ -191,10 +188,10 @@ for name in solo writers flush; do
     echo ""
     echo "## the slice in $name (per land, mean)"
     awk '
-      /scion_server::land_profile:/ {
+      / land_profile: / {
         phase = ""; wall = 0; sm = 0; st = 0; at = ""
         for (i = 1; i <= NF; i++) {
-          if ($i ~ /^phase=/)         { phase = substr($i, 7) }
+          if ($i ~ /^phase=/)         { phase = substr($i, 7); gsub(/"/, "", phase) }
           else if ($i ~ /^wall_ms=/)  { wall = substr($i, 9) + 0 }
           else if ($i ~ /^stmt_ms=/)  { sm = substr($i, 9) + 0 }
           else if ($i ~ /^stmts=/)    { st = substr($i, 7) + 0 }
