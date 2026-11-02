@@ -387,9 +387,9 @@ pub fn blame(
                 if walked > 0 && step_started.elapsed() >= step_hold() {
                     break;
                 }
-            // Each step diffs two whole versions: the walk stops at the
-            // deadline before it starts the next one, the first diff too.
-            walk_until.check()?;
+                // Each step diffs two whole versions: the walk stops at the
+                // deadline before it starts the next one, the first diff too.
+                walk_until.check()?;
             if lines[resume.after_line..window_end]
                 .iter()
                 .all(|(source, _)| source.is_some())
@@ -426,9 +426,11 @@ pub fn blame(
             } else {
                 pos = chain.len();
             }
-            // The next version, if the walk goes on, is the newest one at or
-            // below this version's parent.
-            next = changeset.parents().first().copied();
+            // The next version, if the walk goes on, is the newest one at
+            // or below this version's parent. The walk's own cursor moves
+            // there only when this version completes: a step that ends
+            // mid-version must leave the cursor at this version, so the
+            // next one explains it again from its own state.
             // The nodes the lookups read hold share bytes until the call
             // ends. A take that does not fit stops the walk: the next call
             // goes on at the version this one explained, and reads the nodes
@@ -476,7 +478,8 @@ pub fn blame(
                 text: &text,
             };
             let mut cost = 0;
-            let found = match next {
+            let parent = changeset.parents().first().copied();
+            let found = match parent {
                 Some(parent) => {
                     let root = tree::root_tree_held(store, c, repo, parent, &walk_until)?;
                     let budget = Budget {
@@ -530,9 +533,6 @@ pub fn blame(
             }
             diffed += cost;
             step_lines += cost;
-            if step_lines >= BLAME_STEP_LINES {
-                break;
-            }
             if give_lines(&mut lines, id, older.as_ref(), &text) {
                 changesets.push((id, changeset.author().clone(), path.clone()));
             }
@@ -554,12 +554,17 @@ pub fn blame(
                     text = new_text;
                 }
             }
+            // The version is explained, and the descent state moved with
+            // it: the cursor goes to its parent, and the step's line bound
+            // ends the step here, with the state whole.
+            next = parent;
+            if step_lines >= BLAME_STEP_LINES {
+                break;
+            }
             }
             Ok(())
         })?;
     }
-    // The reply covers the window's lines only. The changesets named
-    // outside it are not in the reply.
     // The reply covers the window's lines only. The changesets named
     // outside it are not in the reply.
     let window_ranges = ranges(&lines[resume.after_line..window_end], resume.after_line);
