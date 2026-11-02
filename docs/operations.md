@@ -70,6 +70,35 @@ The import can run while the server serves.
 
 Proof: crates/scion-server/tests/first_boot.rs::a_first_boot_serves_probes_and_reads_back
 
+A repo with no Git history on the server host: `create-repo` makes the
+repository, one root changeset (no parents, the empty tree), and its
+first ref at it, so a client can land on the ref at once. The root
+carries the message `create repo <name>` and the command's own time.
+A repository that exists is refused: a second root would be an orphan
+history.
+
+```sh
+./scion-server --data /srv/scion create-repo --repo fresh
+```
+
+Another ref in a repository that already holds changesets, without a
+Git import: `create-ref` points a new ref at a changeset the repository
+holds, named by its hex ID (a client's `log` prints it). A ref that
+exists is refused — moving a ref is a land's compare-and-set — and a
+changeset another repository holds is refused.
+
+```sh
+./scion-server --data /srv/scion create-ref --repo fresh \
+  --ref release/2026.11 --at 64-hex-changeset-id
+```
+
+Both commands can run while the server serves; their writes are the
+store's own transactions. Each run records one `admin` intent line
+before its change and one `ok` or `failed` line after it, in the same
+audit.log the server appends to.
+
+Proof: crates/scion-server/tests/admin_create.rs::a_made_repo_answers_a_live_server_and_takes_a_land (behaviour, no command: the section's commands run on the operator's host against a named data directory, while the test drives the same commands as a second process on a test directory of its own and proves the outcome - the live server answers the made repo and the landed change)
+
 ### One server
 
 ```sh
