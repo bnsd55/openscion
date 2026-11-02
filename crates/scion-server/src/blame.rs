@@ -164,10 +164,11 @@ enum Older {
 
 /// Blames the file at `path` in `cs`. Diffs at most [`MAX_BLAME_VERSIONS`]
 /// versions and about [`MAX_BLAME_DIFF_LINES`] lines, and reads at most
-/// the call's share of path history nodes: the versions come from the path
-/// history (`history::newest_change`), so a call reads one changeset and
-/// a few node rows per version, however many changesets lie between two
-/// versions. A binary file is blamed line by line too, as
+/// the call's share of path history nodes: the versions come from the
+/// path history, one window of chain links per statement (as the log's
+/// path pages read), so a call reads one changeset and a few node rows
+/// per version, however many changesets lie between two versions. A
+/// binary file is blamed line by line too, as
 /// `git blame` does. `from` goes on with a rename search that an earlier
 /// call stopped (`Blame::next_search`); its default starts none. A call
 /// that cannot take the nodes' share before it explains a version is
@@ -283,6 +284,13 @@ pub fn blame(
     let mut nodes = history::Nodes::default();
     let mut node_bytes = 0usize;
     let mut node_holds: Vec<Held> = Vec::new();
+    // The versions ride the first-parent chain of path histories in
+    // windows of [`crate::meta::DERIVED_BATCH`] links, one statement per
+    // window, as the log's path pages do: the walk visits only the links
+    // whose lookup it needs, and a version deeper than the window holds
+    // costs its own read, to walk on from its parent.
+    let mut chain: Vec<(ChangesetId, Option<history::NodeId>)> = Vec::new();
+    let mut pos = 0usize;
     // Whether this call explained a version: a call that stops before
     // the first one has no progress, and a cursor here would send the
     // client round the same step for ever.
@@ -301,10 +309,28 @@ pub fn blame(
         // `next`, on its first-parent history, that changes the path.
         let Some(at) = next else { break };
         let step = store.read(|c| {
-            let Some(id) = history::newest_change(c, &mut nodes, at, &path)? else {
+            // The value at `at` comes from the window the walk holds, or
+            // from a fresh window from `at` when the walk starts, or
+            // jumped past the window on a version deeper than it held.
+            if pos >= chain.len() || chain[pos].0 != at {
+                chain = history::chain_values(c, at, crate::meta::DERIVED_BATCH + 1)?;
+                pos = 0;
+            }
+            let Some(root) = chain[pos].1 else {
+                return Err(Error::Corrupt(format!("path history: no value for {at}")));
+            };
+            let Some(id) = history::newest_change_at(c, &mut nodes, root, &path)? else {
                 return Ok(None);
             };
             let changeset = c.get_changeset(repo, id)?;
+            // The walk goes on at the parent of the version it found. In
+            // the window, that is the link at its side; past the window,
+            // the next step starts a fresh window there.
+            if let Some(off) = chain[pos..].iter().position(|(seen, _)| *seen == id) {
+                pos += off + 1;
+            } else {
+                pos = chain.len();
+            }
             Ok(Some((id, changeset)))
         })?;
         let Some((id, changeset)) = step else {
