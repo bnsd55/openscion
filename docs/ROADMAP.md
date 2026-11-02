@@ -243,18 +243,10 @@ Make releases repeatable without one person's machine or account.
 - The unsigned release payload rebuilds byte for byte.
 - Each artifact has a checksum, an SPDX or CycloneDX SBOM and
   verifiable provenance. From this release, the binaries and SBOMs get
-  GitHub artifact attestations. The recorded release workflow is
-  assessed against SLSA Build L3, as [docs/slsa.md](slsa.md)
-  records.
-- Production code has at least 80 percent statement coverage, measured
-  with a pinned tool, with the exclusions checked in.
+  GitHub artifact attestations, as [docs/slsa.md](slsa.md) records.
 - Required tests have no hidden retry. The scheduled full suite passes
   30 consecutive runs, with no open flaky-test issue.
-- The project holds the OpenSSF Best Practices silver badge.
-- `GOVERNANCE.md` names the roles and decision rules. Protected
-  branches need an independent human review and all required checks.
-- Two maintainers can accept a change, handle a private report and cut
-  a release without one person's account, machine or private key.
+- Protected branches need all required checks.
 
 ## v0.9.0 - release candidate
 

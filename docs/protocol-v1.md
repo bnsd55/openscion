@@ -753,7 +753,10 @@ merge base for a CI job.
   (over the pair limit) or stopped at its budget. See the rename bounds
   below.
 
-**Bound and resume.** A reply holds at most 1,000 entries. When more follow,
+**Bound and resume.** A reply holds at most 1,000 entries. The bound is the
+walk's: `MergeBase` and `IsAncestor` have none (their steps read without a
+limit, and the call stops only at its deadline), while this one reads at
+most 1,000 paths per call. When more follow,
 `next_after` is the last path in `entries`, and the reply holds exactly
 1,000 entries. To continue, a client sends the same request with `after` set
 to `next_after`, until `next_after` is empty. Snapshots never change, so the
