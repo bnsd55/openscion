@@ -126,6 +126,44 @@ pub mod test_support {
         dir
     }
 
+    /// The reader pool the nightly's two proof tests open with: their
+    /// per-case checks run as independent reads, and the pool serves them
+    /// concurrently. The nightly's runner shares its 4 vCPUs with the
+    /// Postgres container; ten readers pay there because the checks are
+    /// round-trip bound, not CPU bound. The suite's Postgres keeps its
+    /// `max_connections` (100) well above the pools of the tests that run
+    /// in parallel: the nightly's worst case is the two proofs (2 + 10 +
+    /// 1 connections each) plus two other lib tests at the suite default
+    /// of two (3 each), over 4 test threads: 32 connections of 100.
+    pub const PROOF_READERS: usize = 10;
+
+    /// Runs `work` on every item of `items` with `workers` fixed threads:
+    /// each worker takes the next item from one atomic index until the
+    /// items run out. The item count can be hundreds a case, so a thread
+    /// per item is not the shape; the pool's connections are. A panic in
+    /// `work` propagates through the scope when the workers end, like a
+    /// panic in the case body does.
+    pub fn for_each_item<T, F>(items: &[T], workers: usize, work: F)
+    where
+        T: Sync,
+        F: Fn(&T) + Sync,
+    {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..workers {
+                s.spawn(|| {
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if i >= items.len() {
+                            break;
+                        }
+                        work(&items[i]);
+                    }
+                });
+            }
+        });
+    }
+
     /// The caller behind an authenticated RPC, for tests that name one.
     pub mod auth {
         pub use crate::auth::Caller;
