@@ -367,9 +367,8 @@ impl Lands {
     /// resumes it. Store errors otherwise.
     pub fn land(&self, store: &Backend, caller: &Caller, req: &LandRequest) -> Result<LandOutcome> {
         let started = Instant::now();
-        let (outcome, trace) = crate::land_profile::Trace::measure(|| {
-            self.land_committed(store, caller, req)
-        });
+        let (outcome, trace) =
+            crate::land_profile::Trace::measure(|| self.land_committed(store, caller, req));
         crate::land_profile::log(recorded_land_id(&outcome), started.elapsed(), &trace);
         // An index can hold up to the whole budget, and freeing it takes a
         // while, so it happens here, outside every lock.
