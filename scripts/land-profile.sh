@@ -71,8 +71,6 @@ reset_cell() {
   import_dataset
   psql "$SCION_PG_URL" -X -q -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" \
     || die "pg_stat_statements did not load (the service needs shared_preload_libraries=pg_stat_statements)"
-  "$BIN/scion-server" --data "$WORK/server" ticket-key --out "$WORK/ticket.key" \
-    > "$WORK/ticket.pub" 2> /dev/null
   start server serving $WRAP "$BIN/scion-server" --data "$WORK/server" --postgres-url "$PG_URL" serve \
     --listen "127.0.0.1:$SERVER_PORT" \
     --ticket-key "$WORK/ticket.key" \
@@ -122,6 +120,12 @@ cell() {
 note "land-profile: building"
 sum="$WORK/summary.txt"
 : > "$sum"
+
+# One ticket key for every cell: the key must not change under the
+# tiers, and ticket-key refuses to overwrite (its write is create_new).
+"$BIN/scion-server" --data "$WORK/server" ticket-key --out "$WORK/ticket.key" \
+  > "$WORK/ticket.pub" 2> /dev/null \
+  || die "ticket-key failed (its refuse of an existing key is the usual cause)"
 
 # The solo cell: one writer, so a land's cost carries no queueing.
 WRAP=""
