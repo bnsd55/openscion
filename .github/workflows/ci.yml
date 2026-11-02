@@ -908,7 +908,12 @@ jobs:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-24.04
     # SHORTCUT: one job. Split it in two, each with its own Postgres
-    # service and the same 2000 cases, when it passes 80 minutes.
+    # service and the same 2000 cases, when it passes 80 minutes. The
+    # two slowest proofs check their independent tips and pairs
+    # concurrently (six readers, test_support::PROOF_READERS); the
+    # coverage runs of 11-02 measure the land proof at 90.4 -> 75.1 s
+    # and the path-log proof at 92.2 -> 36.1 s for 16 cases, which
+    # scales this job from 1h58 to about 75 minutes.
     timeout-minutes: 120
     services:
       # The suite's Postgres tests read this database: the backend they
