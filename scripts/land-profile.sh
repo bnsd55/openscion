@@ -123,9 +123,12 @@ sum="$WORK/summary.txt"
 
 # One ticket key for every cell: the key must not change under the
 # tiers, and ticket-key refuses to overwrite (its write is create_new).
-"$BIN/scion-server" --data "$WORK/server" ticket-key --out "$WORK/ticket.key" \
-  > "$WORK/ticket.pub" 2> /dev/null \
-  || die "ticket-key failed (its refuse of an existing key is the usual cause)"
+install -d -m 0700 "$WORK/server"
+if ! "$BIN/scion-server" --data "$WORK/server" ticket-key --out "$WORK/ticket.key" \
+  > "$WORK/ticket.pub" 2> "$WORK/ticket.err"; then
+  cat "$WORK/ticket.err" >&2
+  die "ticket-key failed"
+fi
 
 # The solo cell: one writer, so a land's cost carries no queueing.
 WRAP=""
