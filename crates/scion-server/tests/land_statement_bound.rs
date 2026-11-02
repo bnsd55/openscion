@@ -147,20 +147,9 @@ fn land_statement_count(paths: usize) -> u64 {
 }
 
 #[test]
-fn a_land_over_a_hundred_paths_costs_a_constant_more_than_over_ten() {
-    let small = land_statement_count(10);
-    let large = land_statement_count(100);
-    let growth = large - small;
-    eprintln!("the growth from 10 to 100 paths is {growth} statements");
-    assert!(
-        growth <= 8,
-        "a land over 100 paths cost {large} statements, over 10 cost {small}: \
-         the difference {growth} grew with the paths"
-    );
-}
-
-#[test]
-fn a_land_stays_under_its_statement_bound() {
+fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound() {
+    // The seam is process-wide, so the runs share one test: parallel
+    // windows would count each other's statements.
     // Today's count, measured on this suite's first run, with slack for
     // one plan attempt. Each fold of the round-trip card lowers this
     // number; a change that raises it must say why.
@@ -170,5 +159,14 @@ fn a_land_stays_under_its_statement_bound() {
         count <= BOUND,
         "a land cost {count} statements, over the bound {BOUND}:\n{:#?}",
         Backend::test_statement_log()
+    );
+    let small = land_statement_count(10);
+    let large = land_statement_count(100);
+    let growth = large.saturating_sub(small);
+    eprintln!("the growth from 10 to 100 paths is {growth} statements");
+    assert!(
+        growth <= 8,
+        "a land over 100 paths cost {large} statements, over 10 cost {small}: \
+         the difference {growth} grew with the paths"
     );
 }
