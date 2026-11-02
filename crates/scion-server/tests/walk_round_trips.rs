@@ -244,6 +244,13 @@ fn a_read_transaction_frames_four_statements() {
 /// Seeded through the import, so the trees are the ones a real repo
 /// brings.
 fn appended() -> (tempfile::TempDir, Backend) {
+    appended_readers(2)
+}
+
+/// [`appended`], on a pool of `readers` readers: the availability guard
+/// opens the pool the server's own arithmetic names, one reader per
+/// walk lane and one spare.
+fn appended_readers(readers: usize) -> (tempfile::TempDir, Backend) {
     let dir = scion_server::test_support::private_tempdir();
     let git_dir = tempfile::tempdir().unwrap();
     let d = git_dir.path();
@@ -275,7 +282,7 @@ fn appended() -> (tempfile::TempDir, Backend) {
         git(&["add", "."]);
         git(&["commit", "-q", "-m", &format!("c{i}")]);
     }
-    let store = Backend::open_test(dir.path()).unwrap();
+    let store = Backend::open_test_with_readers(dir.path(), readers).unwrap();
     let opts = ImportOptions {
         rev: "main".into(),
         target_ref: "main".into(),
@@ -331,22 +338,103 @@ fn a_blame_rides_windows_between_its_node_reads() {
 
     assert_eq!(out.changesets.len(), 100, "the walk ran to its version cap");
     assert!(out.resume.is_some(), "121 versions, 100 explained");
-    // One window of path histories covers the whole walk here, and the
-    // window's one statement replaces the per-version read the walk used
-    // to pay; the walk itself runs in one read transaction, so the
-    // framing of the per-version reads is gone. What is left is the per
-    // -version changeset, the node reads, and the tree reads of the
+    // The walk runs in steps of versions, one read transaction per
+    // step: the framing costs the step, twelve statements, and the
+    // 100-version walk runs two of them. The path histories still ride
+    // windows, one statement per thousand links. What is left is the
+    // per-version changeset, the node reads, and the tree reads of the
     // diffs.
     assert!(
         statements <= 650,
-        "a 100-version blame costs {statements} statements: the path \
-         histories must ride one window, not one read per version"
+        "a 100-version blame costs {statements} statements: the framing \
+         must cost the step, not the version, and the path histories must \
+         ride one window, not one read per version"
     );
+}
+
+/// The most blames and graph queries the server runs at once hold the
+/// pool's readers in steps, not for the walk's life: with all eight
+/// walk lanes running on one pool of that many readers, a plain read
+/// still gets a reader. On the per-call design this failed: eight walks
+/// held all eight readers for the walk's life, and a plain read waited
+/// out its whole wait and failed unavailable - proven once, on that
+/// design, with a hold planted in the walk.
+#[test]
+fn eight_walks_leave_a_reader_for_a_plain_read() {
+    // The whole test, its seed included, holds the lock: another
+    // test's statements must not land in a counting test's window, and
+    // this test's walks must not run beside one.
+    let _counted = COUNT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // The pool the server's own arithmetic names: one reader per walk
+    // lane, eight readers, eight walks.
+    let (_dir, store) = appended_readers(8);
+    let at = tip(&store);
+    let file = path("file.txt");
+    let root = store
+        .read(|c| {
+            let repo = c.repo_id(REPO)?;
+            let rows = c.first_parent_page(repo, at, 200)?;
+            Ok(rows.last().unwrap().0)
+        })
+        .unwrap();
+
+    // Warm: the walks below are walks, not fills, so the lanes run at
+    // their steady cost.
+    blame::blame(
+        &store,
+        REPO,
+        at,
+        &file,
+        &blame::Resume::default(),
+        &Bytes::new(1 << 30),
+        None,
+    )
+    .unwrap();
+
+    let deadline = Deadline::new(Instant::now() + Duration::from_secs(30));
+    let walks: Vec<_> = (0..8)
+        .map(|i| {
+            let store = store.clone();
+            let file = file.clone();
+            let deadline = deadline.clone();
+            std::thread::spawn(move || {
+                // Each lane walks for two seconds: enough steps that a
+                // reader frees many times, whatever the machine's speed.
+                let end = Instant::now() + Duration::from_secs(2);
+                while Instant::now() < end {
+                    let walk = if i % 2 == 0 {
+                        blame::blame(
+                            &store,
+                            REPO,
+                            at,
+                            &file,
+                            &blame::Resume::default(),
+                            &Bytes::new(1 << 30),
+                            None,
+                        )
+                        .map(|_| ())
+                    } else {
+                        read::is_ancestor(&store, REPO, root, at, &deadline).map(|_| ())
+                    };
+                    walk.unwrap();
+                }
+            })
+        })
+        .collect();
+    // The walks are up. A plain read must win a reader while all eight
+    // lanes walk - it waits out at most a step, never its whole wait.
+    std::thread::sleep(Duration::from_millis(100));
+    store.read(|c| c.repo_id(REPO)).unwrap();
+    for walk in walks {
+        walk.join().unwrap();
+    }
 }
 
 /// A cold walk fills its missing values mid-transaction, in the fills'
 /// own transactions, and its answer is the warm one: what a fill stores
-/// is what the held snapshot reads, whatever order the two happen in.
+/// is what the step's snapshot reads, whatever order the two happen in.
 #[test]
 fn a_cold_blame_answers_like_a_warm_one() {
     let _counted = COUNT
@@ -385,10 +473,10 @@ fn a_cold_blame_answers_like_a_warm_one() {
     assert_eq!(cold.resume, warm.resume, "the same walk-on point");
 }
 
-/// A blame call holds one read transaction for its whole walk: it takes
-/// one reader for the walk whatever it steps, beside the call's few
-/// setup reads, and a deadline that has passed leaves the pool whole -
-/// the transaction's snapshot holdback does not outlive the call.
+/// A blame walk holds one read transaction per step of versions: a
+/// 100-version walk takes two readers for its two steps, beside the
+/// call's few setup reads, and a deadline that has passed leaves the
+/// pool whole - the step's snapshot holdback does not outlive the call.
 #[test]
 fn a_blame_call_holds_one_reader_and_returns_it() {
     // The whole test, its seed included, holds the lock: the reader
@@ -430,11 +518,14 @@ fn a_blame_call_holds_one_reader_and_returns_it() {
     // One reader for the walk's one transaction, beside the call's few
     // setup reads. A walk that reads per version takes a reader per
     // read: about three hundred here.
+    // One reader per step of the walk, beside the call's few setup
+    // reads. The 100-version walk runs two steps of 64 and 36, and a
+    // walk that read per version took about three hundred readers.
     assert_eq!(
         store.test_reader_takes(),
-        5,
+        6,
         "a 100-version blame took {} readers: the walk must hold one \
-         transaction, not one per read",
+         transaction per step, not one per read",
         store.test_reader_takes()
     );
 

@@ -171,6 +171,19 @@ enum Older {
     Stopped(RenameSearch),
 }
 
+/// Most versions one step of the walk explains in one read transaction.
+/// The transaction's framing costs the step, so 64 versions a step keeps
+/// it under one statement a version; one window of chain links serves
+/// about 16 steps, so the window's own statement amortizes too.
+pub(crate) const BLAME_STEP_VERSIONS: usize = 64;
+
+/// The most lines one step of the walk diffs. A tenth of the call's own
+/// diff budget: a step holds the pool's reader for at most about a
+/// second of diffing, a fraction of the plain read's wait of
+/// [`crate::pg::READER_WAIT`], so the most concurrent walks the server
+/// runs never hold every reader past that wait.
+pub(crate) const BLAME_STEP_LINES: usize = MAX_BLAME_DIFF_LINES / 10;
+
 /// Blames the file at `path` in `cs`. Diffs at most [`MAX_BLAME_VERSIONS`]
 /// versions and about [`MAX_BLAME_DIFF_LINES`] lines, and reads at most
 /// the call's share of path history nodes: the versions come from the
@@ -308,192 +321,220 @@ pub fn blame(
     // - the chain window, the node lookups, the changeset, the root tree,
     // the diff's tree reads - ride it, instead of three transactions per
     // version. The transaction holds the pool's reader, and holds back
-    // vacuum for as long; the bound is the call's own deadline, which
-    // stops the walk first, and the transaction's idle bound is that same
-    // deadline, so a long diff between two reads cannot lose the reader
-    // mid-walk. A derived value that is missing fills in the fill's own
-    // transactions, as every fill does; the held snapshot cannot see the
-    // fill's rows and never needs to, because a walk reads each value
-    // once and takes it from the fill's return.
-    store.read_long(CALL_LIMIT, |c| {
-        for _ in 0..MAX_BLAME_VERSIONS {
-        // Each step diffs two whole versions: the walk stops at the
-        // deadline before it starts the next one, the first diff too.
-        walk_until.check()?;
-        if lines[resume.after_line..window_end]
-            .iter()
-            .all(|(source, _)| source.is_some())
-        {
-            break;
-        }
-        // The next version to explain: the newest changeset at or below
-        // `next`, on its first-parent history, that changes the path.
-        let Some(at) = next else { break };
-        // The value at `at` comes from the window the walk holds, or
-        // from a fresh window from `at` when the walk starts, or
-        // jumped past the window on a version deeper than it held.
-        if pos >= chain.len() || chain[pos].0 != at {
-            chain = history::chain_values(c, at, crate::meta::DERIVED_BATCH + 1)?;
-            pos = 0;
-        }
-        let Some(root) = chain[pos].1 else {
-            return Err(Error::Corrupt(format!("path history: no value for {at}")));
-        };
-        let Some(id) = history::newest_change_at(c, &mut nodes, root, &path)? else {
-            // No version below: the walk reached the change that made the
-            // file.
-            next = None;
-            break;
-        };
-        let changeset = c.get_changeset(repo, id)?;
-        // The walk goes on at the parent of the version it found. In
-        // the window, that is the link at its side; past the window,
-        // the next step starts a fresh window there.
-        if let Some(off) = chain[pos..].iter().position(|(seen, _)| *seen == id) {
-            pos += off + 1;
-        } else {
-            pos = chain.len();
-        }
-        // The next version, if the walk goes on, is the newest one at or
-        // below this version's parent.
-        next = changeset.parents().first().copied();
-        // The nodes the lookups read hold share bytes until the call
-        // ends. A take that does not fit stops the walk: the next call
-        // goes on at the version this one explained, and reads the nodes
-        // again within its own share.
-        if nodes.bytes() > node_bytes {
-            if let Ok(hold) = memory.try_take(nodes.bytes() - node_bytes) {
-                node_holds.push(hold);
-                node_bytes = nodes.bytes();
-            } else if !progressed {
-                // Retryable: another time, the pool may hold the share.
-                return Err(Error::ResourceExhausted(format!(
-                    "the walk of {path:?} needs {} bytes of path history nodes before it names a line",
-                    nodes.bytes() - node_bytes
-                )));
+    // The walk runs in steps of versions, one read transaction per
+    // step, the way the graph walks hold one per step of reads: the
+    // framing of the transaction costs the step, not the version, and
+    // the reader frees between steps. A step is at most
+    // [`BLAME_STEP_VERSIONS`] versions or [`BLAME_STEP_LINES`] diffed
+    // lines, whichever first, so its hold on the reader is at most a
+    // tenth of the call's own diff budget, against the plain read's
+    // wait of [`crate::pg::READER_WAIT`]; the walk checks the call's
+    // deadline before it starts each version, so a dead call's step
+    // rolls back with its error. A derived value that is missing fills
+    // in the fill's own transactions, as every fill does; the step's
+    // snapshot cannot see the fill's rows and never needs to, because
+    // a walk reads each value once and takes it from the fill's
+    // return.
+    let mut explained = 0usize;
+    let mut stop = false;
+    while !stop && explained < MAX_BLAME_VERSIONS {
+        let mut step_lines = 0usize;
+        // The step never walks past the call's own version cap: its
+        // bound is what is left of it.
+        let budget = (MAX_BLAME_VERSIONS - explained).min(BLAME_STEP_VERSIONS);
+        store.read_long(CALL_LIMIT, |c| {
+            for _ in 0..budget {
+            // Each step diffs two whole versions: the walk stops at the
+            // deadline before it starts the next one, the first diff too.
+            walk_until.check()?;
+            if lines[resume.after_line..window_end]
+                .iter()
+                .all(|(source, _)| source.is_some())
+            {
+                stop = true;
+                break;
+            }
+            // The next version to explain: the newest changeset at or below
+            // `next`, on its first-parent history, that changes the path.
+            let Some(at) = next else { break };
+            // The value at `at` comes from the window the walk holds, or
+            // from a fresh window from `at` when the walk starts, or
+            // jumped past the window on a version deeper than it held.
+            if pos >= chain.len() || chain[pos].0 != at {
+                chain = history::chain_values(c, at, crate::meta::DERIVED_BATCH + 1)?;
+                pos = 0;
+            }
+            let Some(root) = chain[pos].1 else {
+                return Err(Error::Corrupt(format!("path history: no value for {at}")));
+            };
+            let Some(id) = history::newest_change_at(c, &mut nodes, root, &path)? else {
+                // No version below: the walk reached the change that made the
+                // file.
+                next = None;
+                stop = true;
+                break;
+            };
+            let changeset = c.get_changeset(repo, id)?;
+            // The walk goes on at the parent of the version it found. In
+            // the window, that is the link at its side; past the window,
+            // the next step starts a fresh window there.
+            if let Some(off) = chain[pos..].iter().position(|(seen, _)| *seen == id) {
+                pos += off + 1;
             } else {
-                (next, next_search) = (Some(id), next_search);
-                break;
+                pos = chain.len();
             }
-        }
-        let puts_text = matches!(
-            changeset.changes().get(&path),
-            Some(Some(FileState::Regular { content, .. })) if *content == blob
-        );
-        if !puts_text {
-            return Err(Error::Corrupt(format!(
-                "changeset {id} does not put the blamed version of {path:?}"
-            )));
-        }
-        // A search to go on with is the first step's, at the walk's start.
-        let search = std::mem::take(&mut from);
-        if search != RenameSearch::default() && (id != start || next.is_none()) {
-            return Err(Error::InvalidArgument(format!(
-                "{start} does not add {path:?}, so it has no rename search"
-            )));
-        }
-        // The version before `id`. If nothing is there, or no text blame
-        // can diff, `id` added every line. A step runs if it fits in the
-        // budget left, and in `memory`. The first always runs.
-        let always = diffed == 0;
-        let left = MAX_BLAME_DIFF_LINES.saturating_sub(diffed);
-        let newer = Newer {
-            path: &path,
-            blob,
-            text: &text,
-        };
-        let mut cost = 0;
-        let found = match next {
-            Some(parent) => {
-                let root = tree::root_tree_held(store, c, repo, parent, &walk_until)?;
-                let budget = Budget {
-                    cost: &mut cost,
-                    cap: left,
-                    progress: always,
-                };
-                older_version(store, c, root, &changeset, newer, budget, &search, memory)?
-            }
-            None => Older::Found(None, RenameSearch::default()),
-        };
-        let (older, done) = match found {
-            Older::Found(older, done) => (older, done),
-            Older::Stopped(stopped) => {
-                // Not diffed: the next call goes on with the search at `id`.
-                (next, next_search) = (Some(id), stopped);
-                break;
-            }
-        };
-        // The state of this step's diff, past the share that `_state_hold`
-        // reserves for the blamed file's lines. A diff that does not fit
-        // the whole budget leaves the version absent, so the walk goes on:
-        // the read still cost its size, as a refused read did.
-        let mut diff_hold = None;
-        let mut absent_read = 0;
-        let older = match older {
-            Some((older_path, older_blob, Some(older_text))) => {
-                let both = byte_lines(&older_text).count().max(counted);
-                let need = both.saturating_sub(counted) * BYTES_PER_LINE;
-                if need > memory.cap() {
-                    absent_read = older_text.len().div_ceil(64);
-                    None
+            // The next version, if the walk goes on, is the newest one at or
+            // below this version's parent.
+            next = changeset.parents().first().copied();
+            // The nodes the lookups read hold share bytes until the call
+            // ends. A take that does not fit stops the walk: the next call
+            // goes on at the version this one explained, and reads the nodes
+            // again within its own share.
+            if nodes.bytes() > node_bytes {
+                if let Ok(hold) = memory.try_take(nodes.bytes() - node_bytes) {
+                    node_holds.push(hold);
+                    node_bytes = nodes.bytes();
+                } else if !progressed {
+                    // Retryable: another time, the pool may hold the share.
+                    return Err(Error::ResourceExhausted(format!(
+                        "the walk of {path:?} needs {} bytes of path history nodes before it names a line",
+                        nodes.bytes() - node_bytes
+                    )));
                 } else {
-                    diff_hold = Some(memory.try_take(need)?);
-                    Some((older_path, older_blob, Some(older_text)))
+                    next = Some(id);
+                    stop = true;
+                    break;
                 }
             }
-            other => other,
-        };
-        if let Some((_, _, Some(older_text))) = &older {
-            cost += diff_cost(older_text) + diff_cost(&text);
-        }
-        cost += absent_read;
-        if !always && cost > left {
-            // Not diffed, so the next call starts at `id`, and finds the
-            // file that this search found at once.
-            (next, next_search) = (Some(id), done);
-            break;
-        }
-        diffed += cost;
-        if give_lines(&mut lines, id, older.as_ref(), &text) {
-            changesets.push((id, changeset.author().clone(), path.clone()));
-        }
-        progressed = true;
-        drop(diff_hold);
-        if let Some((older_path, older_blob, older_text)) = older {
-            (path, blob) = (older_path, older_blob);
-            if let Some(HeldText {
-                text: new_text,
-                hold: mut new_hold,
-            }) = older_text
-            {
-                // The older text is the text being explained now: its bytes
-                // replace the ones the last version held.
-                new_hold.keep(new_text.len());
-                Held::release(std::mem::replace(&mut text_hold, new_hold));
-                text = new_text;
+            let puts_text = matches!(
+                changeset.changes().get(&path),
+                Some(Some(FileState::Regular { content, .. })) if *content == blob
+            );
+            if !puts_text {
+                return Err(Error::Corrupt(format!(
+                    "changeset {id} does not put the blamed version of {path:?}"
+                )));
             }
-        }
-        }
-        // The reply covers the window's lines only. The changesets named
-        // outside it are not in the reply.
-        let window_ranges = ranges(&lines[resume.after_line..window_end], resume.after_line);
-        let named: Vec<ChangesetId> = window_ranges.iter().filter_map(|r| r.changeset).collect();
-        changesets.retain(|(id, _, _)| named.contains(id));
-        let resume = next_resume(
-            resume,
-            &lines,
-            counted,
-            window_end,
-            next,
-            &path,
-            next_search,
-            start,
-        )?;
-        Ok(Blame {
-            ranges: window_ranges,
-            changesets,
-            resume,
-        })
+            // A search to go on with is the first step's, at the walk's start.
+            let search = std::mem::take(&mut from);
+            if search != RenameSearch::default() && (id != start || next.is_none()) {
+                return Err(Error::InvalidArgument(format!(
+                    "{start} does not add {path:?}, so it has no rename search"
+                )));
+            }
+            // The version before `id`. If nothing is there, or no text blame
+            // can diff, `id` added every line. A step runs if it fits in the
+            // budget left, and in `memory`. The first always runs.
+            let always = diffed == 0;
+            let left = MAX_BLAME_DIFF_LINES.saturating_sub(diffed);
+            let newer = Newer {
+                path: &path,
+                blob,
+                text: &text,
+            };
+            let mut cost = 0;
+            let found = match next {
+                Some(parent) => {
+                    let root = tree::root_tree_held(store, c, repo, parent, &walk_until)?;
+                    let budget = Budget {
+                        cost: &mut cost,
+                        cap: left,
+                        progress: always,
+                    };
+                    older_version(store, c, root, &changeset, newer, budget, &search, memory)?
+                }
+                None => Older::Found(None, RenameSearch::default()),
+            };
+            let (older, done) = match found {
+                Older::Found(older, done) => (older, done),
+                Older::Stopped(stopped) => {
+                    // Not diffed: the next call goes on with the search at `id`.
+                    (next, next_search) = (Some(id), stopped);
+                    stop = true;
+                    break;
+                }
+            };
+            // The state of this step's diff, past the share that `_state_hold`
+            // reserves for the blamed file's lines. A diff that does not fit
+            // the whole budget leaves the version absent, so the walk goes on:
+            // the read still cost its size, as a refused read did.
+            let mut diff_hold = None;
+            let mut absent_read = 0;
+            let older = match older {
+                Some((older_path, older_blob, Some(older_text))) => {
+                    let both = byte_lines(&older_text).count().max(counted);
+                    let need = both.saturating_sub(counted) * BYTES_PER_LINE;
+                    if need > memory.cap() {
+                        absent_read = older_text.len().div_ceil(64);
+                        None
+                    } else {
+                        diff_hold = Some(memory.try_take(need)?);
+                        Some((older_path, older_blob, Some(older_text)))
+                    }
+                }
+                other => other,
+            };
+            if let Some((_, _, Some(older_text))) = &older {
+                cost += diff_cost(older_text) + diff_cost(&text);
+            }
+            cost += absent_read;
+            if !always && cost > left {
+                // Not diffed, so the next call starts at `id`, and finds the
+                // file that this search found at once.
+                (next, next_search) = (Some(id), done);
+                stop = true;
+                break;
+            }
+            diffed += cost;
+            step_lines += cost;
+            if step_lines >= BLAME_STEP_LINES {
+                break;
+            }
+            if give_lines(&mut lines, id, older.as_ref(), &text) {
+                changesets.push((id, changeset.author().clone(), path.clone()));
+            }
+            progressed = true;
+            explained += 1;
+            drop(diff_hold);
+            if let Some((older_path, older_blob, older_text)) = older {
+                (path, blob) = (older_path, older_blob);
+                if let Some(HeldText {
+                    text: new_text,
+                    hold: mut new_hold,
+                }) = older_text
+                {
+                    // The older text is the text being explained now: its bytes
+                    // replace the ones the last version held.
+                    new_hold.keep(new_text.len());
+                    Held::release(std::mem::replace(&mut text_hold, new_hold));
+                    text = new_text;
+                }
+            }
+            }
+            Ok(())
+        })?;
+    }
+    // The reply covers the window's lines only. The changesets named
+    // outside it are not in the reply.
+    // The reply covers the window's lines only. The changesets named
+    // outside it are not in the reply.
+    let window_ranges = ranges(&lines[resume.after_line..window_end], resume.after_line);
+    let named: Vec<ChangesetId> = window_ranges.iter().filter_map(|r| r.changeset).collect();
+    changesets.retain(|(id, _, _)| named.contains(id));
+    let resume = next_resume(
+        resume,
+        &lines,
+        counted,
+        window_end,
+        next,
+        &path,
+        next_search,
+        start,
+    )?;
+    Ok(Blame {
+        ranges: window_ranges,
+        changesets,
+        resume,
     })
 }
 
