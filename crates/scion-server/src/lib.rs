@@ -66,6 +66,8 @@ pub(crate) mod blame;
 pub(crate) mod deadline;
 pub(crate) mod derived;
 pub(crate) mod error;
+// Branch-only instrument for issue #769: the land slice's breakdown.
+pub(crate) mod land_profile;
 // These two are API, not implementation: a server main runs them by hand,
 // and docs/operations.md documents both. Everything else in the list is
 // an implementation detail of the two binaries, however public it looks.

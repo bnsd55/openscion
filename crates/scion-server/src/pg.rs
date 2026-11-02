@@ -890,8 +890,12 @@ impl PgClient {
                 raw: None,
             })
             .map_err(|_| Error::Internal(WORKER_STOPPED.into()))?;
-        rx.recv()
-            .map_err(|_| Error::Internal(WORKER_STOPPED.into()))?
+        let started = std::time::Instant::now();
+        let reply = rx
+            .recv()
+            .map_err(|_| Error::Internal(WORKER_STOPPED.into()))?;
+        crate::land_profile::stmt_done(started.elapsed());
+        reply
     }
 
     /// The rows of one query.
