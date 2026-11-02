@@ -78,6 +78,11 @@ impl ServerTls {
         // gRPC runs on HTTP/2, so the handshake must negotiate it: a client
         // of tonic refuses a connection without the ALPN protocol.
         config.alpn_protocols = vec![b"h2".to_vec()];
+        // SHORTCUT: the accept checks what webpki checks — the chain to the
+        // client CA and the certificate's dates — and nothing more: no
+        // revocation, and no check that a certificate's name matches the
+        // peer that presents it. Upgrade: the section 9 row that names
+        // this file.
         Ok(Self {
             config: Arc::new(config),
         })

@@ -763,8 +763,8 @@ impl<S: Store> Tier<S> {
     /// Takes the object's share of the reply budget before its bytes are read
     /// from the store or copied into the reply.
     // SHORTCUT: two blocking hops per hit (size, then read) and no read-ahead,
-    // as on the server. Upgrade (issue #6): read a batch capped by bytes per
-    // hop, or keep a few reads in flight.
+    // as on the server. Upgrade: read a batch capped by bytes per hop, or
+    // keep a few reads in flight (the section 9 row that names this file).
     async fn produce(&self, ask: &Ask, i: usize, progress: &Progress) -> Option<Found> {
         let (key, _path) = ask.keys[i].clone();
         // A share taken before the object was in hand.
