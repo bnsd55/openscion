@@ -51,6 +51,12 @@ pub enum Error {
     /// Stored data does not match its ID or format.
     #[error("corrupt data: {0}")]
     Corrupt(String),
+    /// A server-side state that is not the caller's data and not a
+    /// recoverable wait: a worker thread that died, an internal guard
+    /// that could not hold. The message goes to the log; the reply is
+    /// fixed.
+    #[error("internal error: {0}")]
+    Internal(String),
     /// A storage engine failed. The class says how the caller may go on;
     /// the engine's own error is the source, for the log. Which engine the
     /// server embeds, and its error's own type, are not part of the API: a
@@ -334,6 +340,10 @@ impl Error {
                 Status::data_loss("damaged data")
             }
             Error::Git(_) | Error::Io(_) => {
+                tracing::error!(error = %causes(self), "internal error");
+                Status::internal("internal error")
+            }
+            Error::Internal(_) => {
                 tracing::error!(error = %causes(self), "internal error");
                 Status::internal("internal error")
             }
