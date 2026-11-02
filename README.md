@@ -9,11 +9,10 @@
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 ![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)
 
-A version control server for large monorepos where most of the writers are
-AI agents. Clients land single-parent changesets on refs that exist, and
-the server lands them on the trunk; reads are sparse, so a client reads
-only the files it needs and never clones. Import and restore create repos
-and refs. Written in Rust.
+A server for large monorepos, mostly AI-agent writers, that lands changesets
+on the trunk and serves sparse reads. Clients send single-parent changesets
+to refs that exist; import and restore create repos and refs. There is no
+client branch or merge flow yet. Written in Rust.
 
 > **Alpha (0.x).** One server process on one machine. Not ready for
 > production code yet. What holds between versions:
