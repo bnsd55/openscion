@@ -9,7 +9,7 @@
 //! guard pins the derivation's. The count is a process-wide seam, so
 //! this guard owns its binary: no other test speaks SQL in its process.
 
-use scion_core::{Changeset, FileState, IdentityTime, RepoPath};
+use scion_core::{Changeset, FileState, RepoPath};
 use scion_server::Error;
 use scion_server::test_support::auth::Caller;
 use scion_server::test_support::deadline::Deadline;
@@ -161,11 +161,11 @@ fn a_land_over_a_hundred_paths_costs_a_constant_more_than_over_ten() {
 
 #[test]
 fn a_land_stays_under_its_statement_bound() {
-    let count = land_statement_count(3);
     // Today's count, measured on this suite's first run, with slack for
     // one plan attempt. Each fold of the round-trip card lowers this
     // number; a change that raises it must say why.
     const BOUND: u64 = 90;
+    let count = land_statement_count(3);
     assert!(
         count <= BOUND,
         "a land cost {count} statements, over the bound {BOUND}:\n{:#?}",
