@@ -136,6 +136,26 @@ pub(crate) fn corrupt_changeset_body(backend: &Backend, id: &ChangesetId) -> Res
     )
 }
 
+/// Points the first-parent row of `cs` at `to`, which another repo may
+/// hold: a hand-edited or older-build row may cross repos, and the walks
+/// that follow first parents must stop at the repo's own membership
+/// instead of serving the other repo's changeset.
+pub(crate) fn redirect_first_parent(
+    backend: &Backend,
+    cs: &ChangesetId,
+    to: &ChangesetId,
+) -> Result<()> {
+    let data = data_dir(backend);
+    exec(
+        data,
+        &format!(
+            "UPDATE changeset_parents SET parent = {} WHERE cs = {} AND n = 0;",
+            pg_bytes(to.as_bytes()),
+            pg_bytes(cs.as_bytes())
+        ),
+    )
+}
+
 /// Corrupts the stored body of one tree: the id stays, the bytes lie.
 pub(crate) fn corrupt_tree_body(backend: &Backend, id: &[u8; 32], body: &[u8]) -> Result<()> {
     let data = data_dir(backend);

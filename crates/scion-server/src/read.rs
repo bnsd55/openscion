@@ -16,7 +16,7 @@ use crate::derived;
 use crate::error::{Error, Result};
 use crate::graph;
 use crate::history::{self, PathHistory};
-use crate::meta::{Meta as _, MetaTx, RepoId};
+use crate::meta::{DERIVED_BATCH, Meta as _, MetaTx, RepoId};
 use crate::similar::{self, Budget, Chunks, MAX_PAIRS, Progress};
 use crate::tree;
 
@@ -165,13 +165,17 @@ pub fn log(
 }
 
 /// Up to `limit` changesets, and at most [`MAX_SCAN`], walking first
-/// parents from `cs`, newest first. With a `path`, only the changesets that
-/// change it (`changes_path`), found in the path history of `cs`
-/// ([`history`]): each entry reads one changeset and at most one history
-/// node per part of the path, however many changesets lie between two
-/// entries. Such a page stops early, after its first entry, once it has read
-/// [`MAX_LOG_NODE_BYTES`] of nodes. If `cs` has no path history yet, this
-/// derives it first, in steps, until `deadline`.
+/// parents from `cs`, newest first. Without a `path`, the page is one
+/// statement: first parents and their bodies, `limit + 1` links deep, so
+/// a full page knows the link to walk on from. With a `path`, only the
+/// changesets that change it (`changes_path`), found in the path history
+/// of `cs` ([`history`]): the walk reads the chain's values in windows of
+/// [`DERIVED_BATCH`] links, one node per part of the path per link it
+/// visits, however many changesets lie between two entries, and the
+/// entries' bodies one statement per [`DERIVED_BATCH`]. Such a page stops
+/// early, after its first entry, once it has read [`MAX_LOG_NODE_BYTES`]
+/// of nodes. If `cs` has no path history yet, this derives it first, in
+/// steps, until `deadline`.
 ///
 /// # Errors
 ///
@@ -191,21 +195,56 @@ pub fn log_page(
     let Some(path) = path else {
         return store.read(|c| {
             let repo = c.repo_id(repo)?;
-            let mut entries = Vec::new();
-            let mut next = Some(cs);
-            let mut budget = limit;
-            // The deadline guards a read that has more to read: while the
-            // walk still holds a cursor. A page whose last entry ended the
-            // walk comes back whole, whatever the clock says.
-            while next.is_some() {
-                if entries.len() % DEADLINE_EVERY == 0 {
-                    deadline.check()?;
-                }
-                let Some(entry) = next_change(c, repo, &mut next, &mut budget)? else {
-                    break;
-                };
-                entries.push(entry);
+            // One statement for the page: first parents and their bodies
+            // ride one round trip, `limit + 1` links deep, so a full page
+            // still knows the link to walk on from. The deadline refuses
+            // a page whose time is up before its one read; a page that
+            // comes back whole is whole, whatever the clock says after.
+            deadline.check()?;
+            // `limit` is at most MAX_SCAN, far from any wrap.
+            #[allow(
+                clippy::cast_possible_wrap,
+                clippy::cast_sign_loss,
+                clippy::cast_possible_truncation
+            )]
+            let hops = usize::try_from(limit as i64 + 1).unwrap_or(limit + 1);
+            #[allow(clippy::cast_possible_wrap)]
+            let rows = c.first_parent_page(repo, cs, hops as i64)?;
+            // The page statement returns at most `hops + 1` rows: a full
+            // page is one with more rows than the page's `limit`, and a
+            // short one ended the walk - at a root, or refused as the
+            // corruption a tampered link is, by the statement itself.
+            let more = rows.len() > hops;
+            let keep = rows.len().min(limit);
+            // The statement returns one row past a full page, and a history
+            // of k*limit + 1 ends on that very row: its last page comes
+            // back with `limit + 1` rows, the page's own `limit` and the
+            // root as the row it looked ahead to. The root is a real
+            // entry; the page stops short of it because the page is full,
+            // not because the walk is over. The statement's own probe has
+            // proved the row ends the walk, or refused it as corruption.
+            let tail = if !more && rows.len() > keep {
+                Some(rows[keep].0)
+            } else {
+                None
+            };
+            let mut entries = Vec::with_capacity(keep);
+            for (id, _, body) in rows.into_iter().take(keep) {
+                entries.push((id, decode_entry(id, &body)?));
             }
+            // A page short of its `limit + 1` links ended the walk: the
+            // last entry has no parent. A full one has more to read, and
+            // the cursor rides the last entry's own first parent. A full
+            // page whose lookahead row ends the history continues on that
+            // row, and the next page serves it and ends.
+            let next = if more {
+                entries
+                    .last()
+                    .and_then(|(_, cs)| cs.parents().first().copied())
+                    .or(Some(cs))
+            } else {
+                tail
+            };
             Ok(LogPage { entries, next })
         });
     };
@@ -215,47 +254,143 @@ pub fn log_page(
     // changeset, a node and a value of this version never change and are
     // never removed, and a node is stored in the transaction of the value
     // that names it.
-    store.read(|c| {
+    store.read(|c| path_page(c, repo, cs, path, limit, deadline))
+}
+
+/// The walk of a path log page, on one read connection: the chain of path
+/// histories in windows of [`DERIVED_BATCH`] links, one statement per
+/// window; every link, also where no value is stored, so a missing value
+/// is the corruption it is, not a gap to skip. It visits only the links
+/// whose lookup it needs, and reads a node per part of the path per link
+/// it visits, however many changesets lie between two entries; only the
+/// values and the entries' bodies ride in batches. An entry deeper than
+/// the window holds costs its body at once, to walk on from its parent.
+///
+/// # Errors
+///
+/// [`Error::Corrupt`] if a link has no value or a body does not decode,
+/// [`Error::NotFound`] if an entry's changeset is not the repo's,
+/// [`Error::DeadlineExceeded`] once `deadline` has passed, or
+/// [`Error::Cancelled`] once the call has gone.
+fn path_page(
+    c: &mut dyn MetaTx,
+    repo: RepoId,
+    cs: ChangesetId,
+    path: &RepoPath,
+    limit: usize,
+    deadline: &Deadline,
+) -> Result<LogPage> {
+    {
         let mut nodes = history::Nodes::default();
-        let mut entries = Vec::new();
-        let mut next = Some(cs);
-        while let Some(from) = next.filter(|_| entries.len() < limit) {
-            if entries.len() % DEADLINE_EVERY == 0 {
-                deadline.check()?;
-            }
-            if !entries.is_empty() && nodes.bytes() >= MAX_LOG_NODE_BYTES {
+        // The walk follows the first-parent chain of path histories in
+        // windows of [`DERIVED_BATCH`] links, one statement per window:
+        // every link, also where no value is stored, so a missing value
+        // is the corruption it is, not a gap to skip. It visits only the
+        // links whose lookup it needs, and reads a node per part of the
+        // path, as before; only the values and the entries' bodies ride
+        // in batches. An entry deeper than the window holds costs its
+        // body at once, to walk on from its parent.
+        let mut chain = history::chain_values(c, cs, DERIVED_BATCH + 1)?;
+        let mut pos = 0usize;
+        let mut found: Vec<ChangesetId> = Vec::new();
+        let mut jumped: HashMap<ChangesetId, Changeset> = HashMap::new();
+        let next;
+        loop {
+            if found.len() >= limit {
+                // The page is full: the cursor rides the next link, as
+                // the parent of the last entry.
+                next = chain.get(pos).map(|(id, _)| *id).or(Some(cs));
                 break;
             }
-            // Each changeset on the first-parent history of `cs` has a path
-            // history, so `from` has one.
-            let Some(id) = history::newest_change(c, &mut nodes, from, path)? else {
+            if found.len().is_multiple_of(DEADLINE_EVERY) {
+                deadline.check()?;
+            }
+            if !found.is_empty() && nodes.bytes() >= MAX_LOG_NODE_BYTES {
+                next = chain.get(pos).map(|(id, _)| *id).or(Some(cs));
+                break;
+            }
+            let Some((at, value)) = chain.get(pos) else {
                 next = None;
                 break;
             };
-            let changeset = c.get_changeset(repo, id)?;
-            next = changeset.parents().first().copied();
-            entries.push((id, changeset));
+            let Some(root) = value else {
+                return Err(Error::Corrupt(format!("path history: no value for {at}")));
+            };
+            // Each changeset on the first-parent history of `cs` has a
+            // path history, so `at` has one.
+            let Some(id) = history::newest_change_at(c, &mut nodes, *root, path)? else {
+                next = None;
+                break;
+            };
+            found.push(id);
+            // The walk goes on at the parent of the entry it found. In
+            // the window, that is the link at its side. Past the window,
+            // a fresh window starts where the walk goes on: at the entry's
+            // own parent, which costs the entry's body at once.
+            let hit = chain[pos..].iter().position(|(seen, _)| *seen == id);
+            let (from, resume) = if let Some(off) = hit {
+                pos += off + 1;
+                if pos < chain.len() {
+                    continue;
+                }
+                if chain.len() < DERIVED_BATCH + 1 {
+                    // The chain ended: the entry is the root.
+                    next = None;
+                    break;
+                }
+                (chain.last().map_or(cs, |(id, _)| *id), 1)
+            } else {
+                let cs = c.get_changeset(repo, id)?;
+                let parent = cs.parents().first().copied();
+                jumped.insert(id, cs);
+                if let Some(parent) = parent {
+                    (parent, 0)
+                } else {
+                    next = None;
+                    break;
+                }
+            };
+            chain = history::chain_values(c, from, DERIVED_BATCH + 1)?;
+            pos = resume;
         }
+        // The bodies of the entries, in the order the walk found them.
+        let mut bodies: HashMap<ChangesetId, Changeset> = HashMap::with_capacity(found.len());
+        let mut page: Vec<ChangesetId> = Vec::with_capacity(found.len());
+        for id in &found {
+            match jumped.remove(id) {
+                Some(cs) => {
+                    bodies.insert(*id, cs);
+                }
+                None => page.push(*id),
+            }
+        }
+        for chunk in page.chunks(DERIVED_BATCH) {
+            for (id, cs) in chunk.iter().zip(c.get_changeset_many(repo, chunk)?) {
+                bodies.insert(*id, cs);
+            }
+        }
+        let entries = found
+            .iter()
+            .map(|id| {
+                let cs = bodies.remove(id).expect("the batch answered every id");
+                (*id, cs)
+            })
+            .collect();
         Ok(LogPage { entries, next })
-    })
+    }
 }
 
-/// Walks first parents from `next`, newest first: the entries of a `Log`
-/// reply without a path. Checks at most `budget` changesets, and leaves
-/// `next` at the first one it did not check.
-pub(crate) fn next_change(
-    c: &mut dyn MetaTx,
-    repo: RepoId,
-    next: &mut Option<ChangesetId>,
-    budget: &mut usize,
-) -> Result<Option<(ChangesetId, Changeset)>> {
-    let Some(id) = next.filter(|_| *budget > 0) else {
-        return Ok(None);
-    };
-    *budget -= 1;
-    let changeset = c.get_changeset(repo, id)?;
-    *next = changeset.parents().first().copied();
-    Ok(Some((id, changeset)))
+/// Decodes a changeset body from a page row, and checks it against the id
+/// the row names, as [`crate::meta::MetaTx::get_changeset`] checks one.
+fn decode_entry(id: ChangesetId, body: &[u8]) -> Result<Changeset> {
+    let (cs, actual) = Changeset::decode_with_id(body)
+        .map_err(|e| Error::Corrupt(format!("changeset {id}: {e}")))?;
+    if actual != id {
+        return Err(Error::Corrupt(format!(
+            "changeset {id} does not match its ID"
+        )));
+    }
+    Ok(cs)
 }
 
 /// Whether a changeset changes `path`: the file itself, or anything below it

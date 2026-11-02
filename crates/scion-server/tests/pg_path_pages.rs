@@ -157,16 +157,18 @@ fn the_page_statement_returns_the_whole_page() {
 }
 
 /// A 1,000-deep catch-up costs a page or two more than a 100-deep one,
-/// not a statement per changeset.
+/// not a statement per changeset. The page reads carry the depth: since
+/// the walks read first parents in pages, both depths cost about the
+/// same, and the bound holds in either direction.
 #[test]
 fn the_catch_up_walk_reads_first_parents_in_pages() {
     let hundred = catch_up_statements(100);
     let thousand = catch_up_statements(1_000);
     assert!(
-        thousand - hundred <= 20,
-        "the 1,000-deep catch-up costs {} statements over the 100-deep one \
+        thousand.abs_diff(hundred) <= 20,
+        "the 1,000-deep catch-up costs {} statements against the 100-deep one \
          ({} vs {}): the walk reads first parents one changeset at a time",
-        thousand - hundred,
+        thousand.abs_diff(hundred),
         thousand,
         hundred
     );

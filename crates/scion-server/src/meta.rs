@@ -197,17 +197,31 @@ pub trait MetaTx {
     /// Reads a changeset of `repo`, and checks it against its ID.
     fn get_changeset(&mut self, repo: RepoId, id: ChangesetId) -> Result<Changeset>;
 
+    /// The changesets of `repo` that the ids name, in the order asked:
+    /// each one read and checked against its ID, as
+    /// [`MetaTx::get_changeset`] does. One statement where the backend
+    /// can, so a page of entries costs one read, not one per entry. An id
+    /// that `repo` may not see, or that has no stored body, is
+    /// [`Error::NotFound`]; an id asked twice in the batch is answered
+    /// once per ask.
+    fn get_changeset_many(&mut self, repo: RepoId, ids: &[ChangesetId]) -> Result<Vec<Changeset>>;
+
     /// `start` and up to `limit - 1` of its first-parent ancestors, as
     /// (id, generation, body), newest first, in walk order: the page one
-    /// statement fetches where the backend can. Every row is an ancestor
-    /// of `start`, so the repo check rides the start row alone, as
-    /// [`MetaTx::get_changeset`] checks it. The page is short at the root
-    /// of the history.
+    /// statement fetches where the backend can. Every row is a member of
+    /// `repo`: the chain follows only the rows the repo may see, so a
+    /// tampered first-parent row that names another repo's changeset
+    /// ends the page instead of serving that changeset. The page is
+    /// short at the root of the history; a short page that is not a
+    /// root - a last changeset whose first parent the repo does not
+    /// hold - is corruption, and is refused with [`Error::Corrupt`].
     ///
     /// # Errors
     ///
     /// [`Error::NotFound`] if `repo` does not hold `start`.
-    /// [`Error::Corrupt`] if a row's id is not a changeset id.
+    /// [`Error::Corrupt`] if a row's id is not a changeset id, or the
+    /// page's last changeset names a first parent the repo does not
+    /// hold.
     fn first_parent_page(
         &mut self,
         repo: RepoId,
@@ -296,6 +310,22 @@ pub trait MetaTx {
         start: ChangesetId,
         limit: i64,
     ) -> Result<Vec<(ChangesetId, Vec<u8>)>>;
+
+    /// Every link of the first-parent chain that starts at `start`, up to
+    /// `limit` of them, newest first, each as (changeset, value) where the
+    /// value is `None` when no value of this kind is stored for it. One
+    /// statement: the chain follows the indexed first-parent rows, as
+    /// [`MetaTx::get_derived_chain`] does, and the left join keeps every
+    /// link, also where no value is stored. The caller follows the chain
+    /// past the links without values, so a missing value is the caller's
+    /// corruption to report, not a gap to skip.
+    fn get_derived_chain_links(
+        &mut self,
+        kind: &str,
+        version: u32,
+        start: ChangesetId,
+        limit: i64,
+    ) -> Result<Vec<(ChangesetId, Option<Vec<u8>>)>>;
 
     /// Writes a test seed: `css` oldest first, every parent before its
     /// children, file-less (no tree entries, no blobs), and the derived
