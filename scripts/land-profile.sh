@@ -31,6 +31,7 @@ set -euo pipefail
 PROFILE_LANDS=${PROFILE_LANDS:-200}
 PROFILE_FLUSH_LANDS=${PROFILE_FLUSH_LANDS:-50}
 PROFILE_WRITERS_CELL=${PROFILE_WRITERS_CELL:-"50 400"}
+need
 command -v jq > /dev/null || die "needs jq"
 command -v strace > /dev/null || die "needs strace (apt-get install strace)"
 
