@@ -1237,6 +1237,42 @@ mod tests {
         }
     }
 
+    /// Whether the server of `addr` serves a raw TLS client of `ca`
+    /// and `identity`: the client sends the HTTP/2 client preface and
+    /// an empty SETTINGS frame, and reads the server's answer. The
+    /// positive control of the refusal tests: the same server and the
+    /// same raw client path as [`a_raw_client_is_refused`] must serve
+    /// a client the server's own CA signed, so a refusal test cannot
+    /// pass on a handshake error that is not a refusal.
+    async fn a_raw_client_is_served(
+        addr: SocketAddr,
+        ca: &TestCert,
+        identity: &TestCert,
+    ) -> bool {
+        use tokio::io::AsyncWriteExt as _;
+        let mut peer = match raw_connect(addr, ca, Some(identity)).await {
+            Ok(peer) => peer,
+            Err(_refused_in_the_handshake) => return false,
+        };
+        // The HTTP/2 client preface, then an empty SETTINGS frame.
+        let preface: &[u8] =
+            b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00";
+        match tokio::time::timeout(REFUSAL_BOUND, async {
+            peer.write_all(preface).await?;
+            let mut buf = [0u8; 64];
+            peer.read(&mut buf).await
+        })
+        .await
+        {
+            Err(_) => panic!("the served control hung in {REFUSAL_BOUND:?}"),
+            // The server answered with its own frames: it served the
+            // connection.
+            Ok(Ok(n)) => n > 0,
+            // The close and the alert both mean the refusal.
+            Ok(Ok(0) | Err(_)) => false,
+        }
+    }
+
     /// Whether the process closes a raw TCP connection that sends `sent` and
     /// then never answers, within 10 s.
     async fn closes_a_peer_that_sends(addr: SocketAddr, sent: &'static [u8]) -> bool {
@@ -1544,6 +1580,14 @@ mod tests {
         let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
         let (addr, _) = serve_tls(Limits::default(), TIMERS, &server_tls, HANDSHAKE_TIMEOUT).await;
+        // The positive control: the same server and the same raw
+        // client path serve a client the server's CA signed, so the
+        // refusal below cannot pass on a handshake error that is not a
+        // refusal.
+        assert!(
+            a_raw_client_is_served(addr, &certs.authority.cert(), &certs.client).await,
+            "the server refused a client of its own CA"
+        );
         assert!(
             a_raw_client_is_refused(addr, &certs.authority.cert(), None).await,
             "the server served a client without a certificate"
@@ -1581,6 +1625,12 @@ mod tests {
         let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
         let (addr, _) = serve_tls(Limits::default(), TIMERS, &server_tls, HANDSHAKE_TIMEOUT).await;
+        // As above: the control runs on the same server and the same
+        // raw client path.
+        assert!(
+            a_raw_client_is_served(addr, &certs.authority.cert(), &certs.client).await,
+            "the server refused a client of its own CA"
+        );
         assert!(
             a_raw_client_is_refused(addr, &certs.authority.cert(), Some(&certs.stranger_client))
                 .await,
