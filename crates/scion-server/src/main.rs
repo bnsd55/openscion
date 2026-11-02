@@ -1325,6 +1325,7 @@ async fn serve(
                 connections: config.max_connections,
                 streams: config.max_streams,
                 stalled_bytes: config.max_stalled_bytes,
+                ..Limits::default()
             },
             quotas: config.quotas,
             pending_lands: config.pending_lands,
