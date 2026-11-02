@@ -1244,11 +1244,7 @@ mod tests {
     /// same raw client path as [`a_raw_client_is_refused`] must serve
     /// a client the server's own CA signed, so a refusal test cannot
     /// pass on a handshake error that is not a refusal.
-    async fn a_raw_client_is_served(
-        addr: SocketAddr,
-        ca: &TestCert,
-        identity: &TestCert,
-    ) -> bool {
+    async fn a_raw_client_is_served(addr: SocketAddr, ca: &TestCert, identity: &TestCert) -> bool {
         use tokio::io::AsyncWriteExt as _;
         let mut peer = match raw_connect(addr, ca, Some(identity)).await {
             Ok(peer) => peer,
@@ -1257,19 +1253,19 @@ mod tests {
         // The HTTP/2 client preface, then an empty SETTINGS frame.
         let preface: &[u8] =
             b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00";
-        match tokio::time::timeout(REFUSAL_BOUND, async {
+        let read = tokio::time::timeout(REFUSAL_BOUND, async {
             peer.write_all(preface).await?;
             let mut buf = [0u8; 64];
             peer.read(&mut buf).await
         })
-        .await
-        {
-            Err(_) => panic!("the served control hung in {REFUSAL_BOUND:?}"),
+        .await;
+        match read {
+            Err(elapsed) => panic!("the served control hung in {REFUSAL_BOUND:?}: {elapsed}"),
+            // The close and the alert both mean the refusal.
+            Ok(Err(_) | Ok(0)) => false,
             // The server answered with its own frames: it served the
             // connection.
-            Ok(Ok(n)) => n > 0,
-            // The close and the alert both mean the refusal.
-            Ok(Ok(0) | Err(_)) => false,
+            Ok(Ok(_)) => true,
         }
     }
 
