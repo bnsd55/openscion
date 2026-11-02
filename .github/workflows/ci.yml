@@ -377,10 +377,11 @@ jobs:
     # Every suite runs on Postgres, and a cold cache adds the build: a
     # cap covers both, the way the fuzz smoke's does.
     # SHORTCUT: 50 min fits the whole-workspace Postgres suite (22-37
-    # min on main, Oct 2026) with margin; its cost is per-statement
-    # round trips: the log and path-log pages read one changeset per
-    # entry, and the big graph tests seed thousands of changesets.
-    # Bring it back toward 30 when the batched log reads land.
+    # min on main, Oct 2026) with margin; its cost is now the slow tail
+    # of whole-model oracles: the graph, path-log and log-page tests
+    # walk a seeded model of thousands of changesets, and the crash
+    # suite kills a server and lands again. Bring it back toward 30
+    # when the slowest model oracles get a cheaper full walk.
     timeout-minutes: 50
     services:
       # The scripts' servers keep their metadata in Postgres: the smoke
@@ -553,10 +554,11 @@ jobs:
       ${{ !cancelled() && (github.event_name != 'pull_request' || (needs.tier.result == 'success' && !github.event.pull_request.draft && needs.tier.outputs.docs_only != 'true')) }}
     runs-on: ubuntu-24.04
     # SHORTCUT: 45 min fits the Postgres suite (17-30 min on main, Oct
-    # 2026) with margin; its cost is per-statement round trips: the log
-    # and path-log pages read one changeset per entry, and the big graph
-    # tests seed thousands of changesets. Bring it back toward 30 when
-    # the batched log reads land.
+    # 2026) with margin; its cost is now the same slow tail of
+    # whole-model oracles: the graph, path-log and log-page walks of
+    # seeded models, and the crash suite's kill-and-land loops. Bring
+    # it back toward 30 when the slowest model oracles get a cheaper
+    # full walk.
     timeout-minutes: 45
     strategy:
       fail-fast: false
