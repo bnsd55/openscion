@@ -2728,7 +2728,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_damaged_blob_ends_the_reply_with_internal_before_its_last_part() {
+    async fn a_damaged_blob_ends_the_reply_with_data_loss_before_its_last_part() {
         let data = content(3);
         for flip in [10, data.len() / 2, data.len() - 10] {
             let (_dir, store, _, blob) = file_store(&data);
@@ -2748,7 +2748,7 @@ mod tests {
                     Err(status) => break status,
                 }
             };
-            assert_eq!(status.code(), Code::Internal, "bit {flip}: {status:?}");
+            assert_eq!(status.code(), Code::DataLoss, "bit {flip}: {status:?}");
             assert_eq!(parts, 2, "bit {flip}: every part but the last");
             assert!(rx.recv().await.is_none());
             task.await.unwrap();
