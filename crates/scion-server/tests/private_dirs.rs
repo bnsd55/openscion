@@ -271,7 +271,7 @@ fn an_export_into_a_new_out_makes_it_private_whatever_the_umask() {
 /// so no other user reaches the store files whatever their own modes are.
 #[test]
 fn a_restore_under_umask_022_publishes_a_private_data_directory() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = private_tempdir();
     let git = tmp.path().join("git");
     git_repo(&git);
     let data = tmp.path().join("data");

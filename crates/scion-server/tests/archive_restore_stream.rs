@@ -507,7 +507,8 @@ fn a_stream_cut_after_the_first_batch_fails_and_leaves_no_store() {
         })
         .unwrap();
 
-    let out = tempfile::tempdir().unwrap().path().join("archive");
+    let out_keep = scion_server::test_support::private_tempdir();
+    let out = out_keep.path().join("archive");
     archive::export(&store, data.path(), None, true, &out)
         .unwrap_or_else(|e| panic!("export failed: {e:#}"));
     let victim = out.join("repos").join("big").join("changesets.bin");
@@ -527,7 +528,8 @@ fn a_stream_cut_after_the_first_batch_fails_and_leaves_no_store() {
     f.set_len(2 * BUDGET as u64).unwrap();
     drop(f);
 
-    let target = tempfile::tempdir().unwrap().path().join("target");
+    let target_keep = scion_server::test_support::private_tempdir();
+    let target = target_keep.path().join("target");
     let error =
         archive::restore_with_budget(&out, &target, &url_of(&target), None, BUDGET, Backend::open)
             .expect_err("a cut stream must not restore");

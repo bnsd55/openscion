@@ -706,9 +706,8 @@ fn a_restore_at_a_stopped_stores_url_refuses_and_leaves_it_whole() {
 
     // The restore, at the stopped store's URL, into an empty target.
     let (_keep, out, _main, _second) = sound_archive();
-    let target = scion_server::test_support::private_tempdir()
-        .path()
-        .join("restored");
+    let keep_target = scion_server::test_support::private_tempdir();
+    let target = keep_target.path().join("restored");
     std::fs::create_dir_all(&target).unwrap();
     let restored = archive::restore(&out, &target, &url, None);
     assert!(
@@ -770,9 +769,8 @@ fn a_stopped_store_in_a_search_path_schema_is_refused_whole() {
     // lookups ride it, as an operator's URL would.
     let url = format!("{root}/{name}?options=--search_path%3Dprivateschema%2Cpublic");
     let (_keep, out, _main, _second) = sound_archive();
-    let target = scion_server::test_support::private_tempdir()
-        .path()
-        .join("restored-schema");
+    let keep_target = scion_server::test_support::private_tempdir();
+    let target = keep_target.path().join("restored-schema");
     std::fs::create_dir_all(&target).unwrap();
     // Restore A publishes into the private schema: a complete store.
     archive::restore(&out, &target, &url, None)
@@ -789,9 +787,8 @@ fn a_stopped_store_in_a_search_path_schema_is_refused_whole() {
     drop(check);
     // Restore B at the same URL: the stopped store's own schema is
     // reached by the search_path, so its rows decide - REFUSED, whole.
-    let target_b = scion_server::test_support::private_tempdir()
-        .path()
-        .join("restored-schema-b");
+    let keep_target_b = scion_server::test_support::private_tempdir();
+    let target_b = keep_target_b.path().join("restored-schema-b");
     std::fs::create_dir_all(&target_b).unwrap();
     let restored = archive::restore(&out, &target_b, &url, None);
     assert!(
@@ -853,9 +850,8 @@ fn a_mixed_case_schema_is_read_and_dropped_as_itself() {
         .unwrap();
     let url = format!("{plain}?options=--search_path%3D%22Stopped_Store%22%2Cpublic");
     let (_keep, out, _main, _second) = sound_archive();
-    let target = scion_server::test_support::private_tempdir()
-        .path()
-        .join("restored-case");
+    let keep_target = scion_server::test_support::private_tempdir();
+    let target = keep_target.path().join("restored-case");
     std::fs::create_dir_all(&target).unwrap();
     archive::restore(&out, &target, &url, None)
         .unwrap_or_else(|e| panic!("restore A failed: {e:#}"));
@@ -876,9 +872,8 @@ fn a_mixed_case_schema_is_read_and_dropped_as_itself() {
     );
     // Restore B at the same URL: refused - the stopped store's rows
     // decide - and the twin stays untouched.
-    let target_b = scion_server::test_support::private_tempdir()
-        .path()
-        .join("restored-case-b");
+    let keep_target_b = scion_server::test_support::private_tempdir();
+    let target_b = keep_target_b.path().join("restored-case-b");
     std::fs::create_dir_all(&target_b).unwrap();
     assert!(
         archive::restore(&out, &target_b, &url, None).is_err(),
@@ -934,9 +929,8 @@ fn a_restored_store_does_not_carry_the_mark_and_a_later_restore_refuses() {
         name
     );
     let (_keep, out, _main, _second) = sound_archive();
-    let target = scion_server::test_support::private_tempdir()
-        .path()
-        .join("restored-a");
+    let keep_target = scion_server::test_support::private_tempdir();
+    let target = keep_target.path().join("restored-a");
     std::fs::create_dir_all(&target).unwrap();
     // Restore A publishes; the mark must be gone when it reports.
     archive::restore(&out, &target, &url, None)
@@ -962,9 +956,8 @@ fn a_restored_store_does_not_carry_the_mark_and_a_later_restore_refuses() {
         .get(0);
     assert!(repos_before >= 1, "restore A landed its repos");
     // Restore B at the same URL, empty target: refused, A intact.
-    let target_b = scion_server::test_support::private_tempdir()
-        .path()
-        .join("restored-b");
+    let keep_target_b = scion_server::test_support::private_tempdir();
+    let target_b = keep_target_b.path().join("restored-b");
     std::fs::create_dir_all(&target_b).unwrap();
     let restored = archive::restore(&out, &target_b, &url, None);
     assert!(
@@ -1048,9 +1041,10 @@ fn an_archive_of_an_unknown_version_or_format_is_refused() {
     let future = manifest.replace(r#""version": 1"#, r#""version": 2"#);
     assert_ne!(future, manifest, "the manifest's shape moved upstream");
     std::fs::write(&manifest_path, future).unwrap();
+    let keep2 = scion_server::test_support::private_tempdir();
     let error = archive::restore(
         &out,
-        scion_server::test_support::private_tempdir().path(),
+        keep2.path(),
         &url_of_data(),
         None,
     )
@@ -1073,9 +1067,10 @@ fn an_archive_of_an_unknown_version_or_format_is_refused() {
         .replace(r#""version": 1"#, r#""version": 2"#);
     assert_ne!(foreign, manifest, "the manifest's shape moved upstream");
     std::fs::write(&manifest_path, foreign).unwrap();
+    let keep2 = scion_server::test_support::private_tempdir();
     let error = archive::restore(
         &out,
-        scion_server::test_support::private_tempdir().path(),
+        keep2.path(),
         &url_of_data(),
         None,
     )
@@ -1228,9 +1223,8 @@ fn a_zero_repo_archive_leaves_no_staging_mark() {
         "the fixture is an empty archive: {manifest}"
     );
     // The restore lands an empty store in the fresh database.
-    let target = scion_server::test_support::private_tempdir()
-        .path()
-        .join("restored-empty");
+    let keep_target = scion_server::test_support::private_tempdir();
+    let target = keep_target.path().join("restored-empty");
     std::fs::create_dir_all(&target).unwrap();
     archive::restore(&out, &target, &url_b, None)
         .unwrap_or_else(|e| panic!("the empty restore failed: {e:#}"));
@@ -1255,9 +1249,8 @@ fn a_zero_repo_archive_leaves_no_staging_mark() {
     drop(grown);
     // A fresh target: the refusal must come from the rows at the URL,
     // not from the target directory already holding a store.
-    let target_b = scion_server::test_support::private_tempdir()
-        .path()
-        .join("restored-empty-b");
+    let keep_target_b = scion_server::test_support::private_tempdir();
+    let target_b = keep_target_b.path().join("restored-empty-b");
     std::fs::create_dir_all(&target_b).unwrap();
     let second = archive::restore(&out, &target_b, &url_b, None);
     assert!(
