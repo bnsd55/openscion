@@ -126,6 +126,16 @@ pub mod test_support {
         dir
     }
 
+    /// The reader pool the nightly's two proof tests open with: their
+    /// per-case checks run as independent reads, and the pool serves them
+    /// concurrently. The nightly's runner shares its 4 vCPUs with the
+    /// Postgres container, so more readers than this stop paying. The
+    /// suite's Postgres keeps its `max_connections` (100) well above the
+    /// pools of the tests that run in parallel: the two proofs at this
+    /// size and the nextest workers' other tests at the suite default of
+    /// two.
+    pub const PROOF_READERS: usize = 6;
+
     /// The caller behind an authenticated RPC, for tests that name one.
     pub mod auth {
         pub use crate::auth::Caller;

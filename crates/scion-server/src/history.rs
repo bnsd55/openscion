@@ -887,6 +887,17 @@ mod tests {
         (dir, store, repo)
     }
 
+    /// [`open`], with the reader pool the caller names: the proof that
+    /// walks every (path, tip) pair opens with
+    /// [`PROOF_READERS`](crate::test_support::PROOF_READERS), the rest of
+    /// the suite stays at the default of two.
+    fn open_with(readers: usize) -> (tempfile::TempDir, Backend, RepoId) {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test_with_readers(dir.path(), readers).unwrap();
+        let repo = store.write(|c| c.create_repo("r")).unwrap();
+        (dir, store, repo)
+    }
+
     /// The changes of one changeset of a chain: puts (`true`) and deletes.
     type Edits<'a> = &'a [(&'a str, bool)];
 
@@ -949,7 +960,7 @@ mod tests {
             (parents, edits) in testing::histories(24),
             limit in 1..4_usize,
         ) {
-            let (_dir, store, repo) = open();
+            let (_dir, store, repo) = open_with(crate::test_support::PROOF_READERS);
             // In one transaction: a commit per step would take most of the
             // time.
             let ids = store
@@ -975,20 +986,39 @@ mod tests {
                 })
                 .unwrap();
             let queried = testing::PATHS.into_iter().chain(["c", "c/a", "a/b/c/d", "z"]);
-            for p in queried {
-                for &tip in &ids {
-                    let mut walked = Vec::new();
-                    let mut next = Some(tip);
-                    while let Some(id) = next {
-                        let cs = &stored[&id];
-                        if read::changes_path(cs, &path(p)) {
-                            walked.push(id);
-                        }
-                        next = cs.parents().first().copied();
+            // Each (path, tip) pair is one independent read: the log and
+            // the in-memory walk share nothing, so the pool serves the
+            // pairs concurrently. A mismatch is collected, and the case
+            // fails below, where proptest can shrink it.
+            let failures = std::sync::Mutex::new(Vec::new());
+            std::thread::scope(|s| {
+                let store = &store;
+                let stored = &stored;
+                let failures = &failures;
+                for p in queried {
+                    for &tip in &ids {
+                        s.spawn(move || {
+                            let mut walked = Vec::new();
+                            let mut next = Some(tip);
+                            while let Some(id) = next {
+                                let cs = &stored[&id];
+                                if read::changes_path(cs, &path(p)) {
+                                    walked.push(id);
+                                }
+                                next = cs.parents().first().copied();
+                            }
+                            let got = path_log(store, tip, p, limit);
+                            if got != walked {
+                                failures.lock().unwrap().push(format!(
+                                    "{p} at {tip:?}: got {got:?}, want {walked:?}"
+                                ));
+                            }
+                        });
                     }
-                    proptest::prop_assert_eq!(path_log(&store, tip, p, limit), walked, "{}", p);
                 }
-            }
+            });
+            let failures = failures.into_inner().unwrap();
+            proptest::prop_assert!(failures.is_empty(), "{:?}", failures);
         }
 
         /// One level built from the same names through two edit orders
