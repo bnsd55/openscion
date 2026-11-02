@@ -212,15 +212,20 @@ async fn create_ref_run(
                     "repo {run_repo:?} does not hold changeset {target}"
                 )));
             }
-            if c.get_ref(repo_id, &run_name)?.is_some() {
+            // `cas_ref` is the one check: its compare-and-set holds the
+            // ref's absence as its precondition, against the state the
+            // write transaction sees, so a ref another create-ref (or a
+            // racing run) inserts between this run's statements is still
+            // refused here, and its current target names the refusal.
+            if !c.cas_ref(repo_id, &run_name, None, target)? {
+                let at = c
+                    .get_ref(repo_id, &run_name)?
+                    .expect("cas_ref refused a ref it does not see")
+                    .target;
                 return Err(Error::FailedPrecondition(format!(
-                    "ref {run_name:?} already exists"
+                    "ref {run_name:?} already exists at {at}"
                 )));
             }
-            // `cas_ref` checks the generation of `target` in the same
-            // transaction, so a changeset another repo holds is refused
-            // here a second time, against the state the write sees.
-            c.cas_ref(repo_id, &run_name, None, target)?;
             Ok(target)
         })
     };
