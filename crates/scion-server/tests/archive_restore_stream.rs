@@ -162,9 +162,8 @@ fn a_restore_commits_bounded_transactions_and_answers_like_its_source() {
     let data = scion_server::test_support::private_tempdir();
     let store = stream_source(data.path());
 
-    let out = scion_server::test_support::private_tempdir()
-        .path()
-        .join("archive");
+    let keep_out = scion_server::test_support::private_tempdir();
+    let out = keep_out.path().join("archive");
     let manifest = archive::export(&store, data.path(), None, true, &out)
         .unwrap_or_else(|e| panic!("export failed: {e:#}"));
     assert_eq!(manifest["kind"], "store");
@@ -265,9 +264,8 @@ fn a_big_restore_stays_under_its_rss_ceiling() {
         })
         .unwrap();
 
-    let out = scion_server::test_support::private_tempdir()
-        .path()
-        .join("archive");
+    let keep_out = scion_server::test_support::private_tempdir();
+    let out = keep_out.path().join("archive");
     archive::export(&store, data.path(), None, true, &out)
         .unwrap_or_else(|e| panic!("export failed: {e:#}"));
     let bin_len = std::fs::metadata(out.join("repos").join("big").join("changesets.bin"))
@@ -297,16 +295,14 @@ fn a_big_restore_stays_under_its_rss_ceiling() {
 /// like the source, and the fsck that says so.
 #[cfg(target_os = "linux")]
 fn measure_ceiling(store: &Backend, out: &std::path::Path, tx_kb: u64, slack_kb: u64) {
+    let keep_empty = scion_server::test_support::private_tempdir();
     let baseline_kb = restore_sampled(
         &empty_archive(),
-        &scion_server::test_support::private_tempdir()
-            .path()
-            .join("restored-empty"),
+        &keep_empty.path().join("restored-empty"),
         tx_kb * 1024,
     );
-    let target = scion_server::test_support::private_tempdir()
-        .path()
-        .join("restored");
+    let keep_target = scion_server::test_support::private_tempdir();
+    let target = keep_target.path().join("restored");
     let peak_kb = restore_sampled(out, &target, tx_kb * 1024);
     println!(
         "the streamed restore's peak RSS was {peak_kb} kB; \
@@ -334,15 +330,13 @@ fn measure_ceiling(store: &Backend, out: &std::path::Path, tx_kb: u64, slack_kb:
 fn a_killed_restore_leaves_the_next_one_clean() {
     let data = scion_server::test_support::private_tempdir();
     let store = stream_source(data.path());
-    let out = scion_server::test_support::private_tempdir()
-        .path()
-        .join("archive");
+    let keep_out = scion_server::test_support::private_tempdir();
+    let out = keep_out.path().join("archive");
     archive::export(&store, data.path(), None, true, &out)
         .unwrap_or_else(|e| panic!("export failed: {e:#}"));
 
-    let target = scion_server::test_support::private_tempdir()
-        .path()
-        .join("restored");
+    let keep_target = scion_server::test_support::private_tempdir();
+    let target = keep_target.path().join("restored");
     std::fs::create_dir_all(&target).unwrap();
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .arg("--data")
