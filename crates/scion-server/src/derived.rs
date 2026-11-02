@@ -147,6 +147,31 @@ fn get_until<K: Kind>(
     value
 }
 
+/// [`get_by`], for a caller that already holds a read transaction: the
+/// value rides it, and a miss fills the way every fill does, in the
+/// fill's own transactions. The held snapshot never sees the fill's rows
+/// and never needs to: the value comes from the fill's return, and a
+/// walk reads each derived value once, so nothing re-derives.
+///
+/// # Errors
+///
+/// As [`get_by`].
+pub(crate) fn get_by_held<K: Kind>(
+    store: &Backend,
+    c: &mut dyn MetaTx,
+    repo: RepoId,
+    cs: ChangesetId,
+    deadline: &Deadline,
+) -> Result<K::Value> {
+    require(c, repo, cs)?;
+    if let Some(value) = load::<K>(c, cs)? {
+        return Ok(value);
+    }
+    let value = in_one_walk::<K>(store, repo, cs, Some(deadline));
+    store.flush()?;
+    value
+}
+
 /// The bytes of memory that one entry of a derive walk's frontier holds:
 /// a [`ChangesetId`] and a generation. An estimate: a merge's parents also
 /// sit in `next` once each, so a merge-heavy history can hold a little

@@ -638,3 +638,136 @@ async fn an_older_version_with_too_many_lines_counts_as_absent() {
 
 #[path = "common/mod.rs"]
 mod common;
+
+/// A rename search that one call's budget cannot finish goes on in the
+/// next call, across the walk's steps: the walk's cursor and its search
+/// state carry, and the answer names the file the search finds. A step
+/// that ended mid-version once left the cursor at the version's parent
+/// while the path still named the version, and the next call looked for
+/// the blamed path there.
+#[test]
+fn a_rename_search_goes_on_across_calls() {
+    let dir = scion_server::test_support::private_tempdir();
+    let store = Backend::open_test(dir.path()).unwrap();
+    // `new` replaces 24 deleted files of 65,536 lines, one chunk each, so
+    // one call's budget reads about 15 of them, and the search goes on in
+    // a second call. All are 99% like `new`, so the first by path wins.
+    let empty = "\n".repeat((1 << 16) - 1);
+    let put = |text: String| Some(regular(store.blobs().put(text.as_bytes()).unwrap()));
+    let names: Vec<String> = (0..24).map(|k| format!("f/{k:02}")).collect();
+    let root_changes: std::collections::BTreeMap<RepoPath, Option<FileState>> = names
+        .iter()
+        .enumerate()
+        .map(|(k, p)| {
+            (
+                RepoPath::new(p.as_str()).unwrap(),
+                put(format!("{empty}{k}\n")),
+            )
+        })
+        .collect();
+    let mut rename_changes: Vec<(RepoPath, Option<FileState>)> = names
+        .iter()
+        .map(|p| (RepoPath::new(p.as_str()).unwrap(), None))
+        .collect();
+    rename_changes.push((RepoPath::new("new").unwrap(), put(format!("x\n{empty}"))));
+    let author = IdentityTime::new(vec![b'a'; 4], b"a@example.com".to_vec(), 1_700_000_000, 0)
+        .expect("identity fits the format");
+    let message = b"change\n".to_vec();
+    let mut head: Option<ChangesetId> = None;
+    let mut ids = Vec::new();
+    for changes in [
+        root_changes,
+        rename_changes
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>(),
+    ] {
+        let cs = Changeset::new(
+            head.into_iter().collect::<Vec<_>>(),
+            author.clone(),
+            None,
+            message.clone(),
+            changes,
+        )
+        .expect("changeset fits the format");
+        let id = store
+            .write(|c| {
+                let repo = c.create_repo(REPO)?;
+                c.insert_changeset(repo, &cs)
+            })
+            .unwrap();
+        ids.push(id);
+        head = Some(id);
+    }
+
+    // Blame the tip's `new`: the first call reads about 15 candidates and
+    // stops; the second finishes the search and the walk. The lines of
+    // the reply name the tip for its own line, and the file the search
+    // found for the rest.
+    let mut resume = scion_server::test_support::blame::Resume::default();
+    let mut lines: Vec<(ChangesetId, u64)> = Vec::new();
+    let mut paths: std::collections::HashMap<ChangesetId, RepoPath> =
+        std::collections::HashMap::new();
+    loop {
+        let out = scion_server::test_support::blame::blame(
+            &store,
+            REPO,
+            ids[1],
+            &RepoPath::new("new").unwrap(),
+            &resume,
+            &scion_server::test_support::memory::Bytes::new(scion_server::REPLY_MEMORY_BUDGET),
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(600)),
+        )
+        .unwrap();
+        for (id, _, path) in &out.changesets {
+            paths.insert(*id, path.clone());
+        }
+        for range in &out.ranges {
+            let Some(id) = range.changeset else { continue };
+            for n in 0..u64::from(range.line_count) {
+                lines.push((id, u64::from(range.origin_line) + n));
+            }
+        }
+        match out.resume.clone() {
+            None => break,
+            Some(next) => resume = next,
+        }
+    }
+    assert_eq!(lines.len(), 1 << 16, "every line of the file named");
+    assert_eq!(lines[0].0, ids[1], "the line the tip adds is the tip's");
+    assert!(
+        lines[1..].iter().all(|(id, _)| *id == ids[0]),
+        "the rest come from one older changeset"
+    );
+    assert_eq!(paths.get(&ids[0]), Some(&RepoPath::new("f/00").unwrap()));
+}
+
+/// A cursor that carries a rename search at a root changeset is refused:
+/// a root has no parent, so the search has nothing to search in, and
+/// dropping it silently would blame every line on the root.
+#[test]
+fn a_rename_search_at_a_root_changeset_is_refused() {
+    let (dir, store, root) = store(b"content\n");
+    let resume = scion_server::test_support::blame::Resume {
+        next: None,
+        search: scion_server::test_support::blame::RenameSearch {
+            searched: 1,
+            best: None,
+        },
+        ..Default::default()
+    };
+    let err = scion_server::test_support::blame::blame(
+        &store,
+        REPO,
+        root,
+        &RepoPath::new(PATH).unwrap(),
+        &resume,
+        &scion_server::test_support::memory::Bytes::new(scion_server::REPLY_MEMORY_BUDGET),
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(600)),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, scion_server::Error::InvalidArgument(_)),
+        "{err:?}"
+    );
+    drop(dir);
+}

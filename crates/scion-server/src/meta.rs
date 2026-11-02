@@ -76,6 +76,26 @@ pub trait Meta: Send + Sync + 'static {
     /// What `f` returns, or a flush error.
     fn read<T>(&self, f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>) -> Result<T>;
 
+    /// [`Meta::read`], with the read transaction's idle bound set from
+    /// `idle`: a caller that holds one transaction across work between
+    /// statements (a blame's diffs run between its reads) raises the
+    /// bound from the backend's default, so a slow step cannot idle the
+    /// transaction past it and lose the reader mid-walk. The bound is
+    /// the caller's own deadline, so an abandoned walk still gives its
+    /// reader back when the call is gone.
+    ///
+    /// # Errors
+    ///
+    /// What `f` returns, or a flush error.
+    fn read_long<T>(
+        &self,
+        idle: std::time::Duration,
+        f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>,
+    ) -> Result<T> {
+        let _ = idle;
+        self.read(f)
+    }
+
     /// Like [`Meta::read`], but returns before what `f` saw is durable,
     /// with a count that covers every commit `f` could see. The caller
     /// passes that count to [`Meta::wait_durable`] before it replies.

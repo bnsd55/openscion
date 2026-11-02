@@ -74,7 +74,7 @@ pub(crate) const READER_WAIT: Duration = Duration::from_secs(30);
 /// The bound on one statement of a read transaction, below the 600 s
 /// call deadline (`scn`'s), so one stuck query cannot hold a reader to
 /// the end of a stream.
-const READ_STATEMENT_TIMEOUT: Duration = Duration::from_secs(300);
+pub(crate) const READ_STATEMENT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How long a read transaction may sit idle between statements, so an
 /// abandoned walk (its call gone, its reply unread) gives the reader
@@ -83,6 +83,11 @@ const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The advisory lock of the one server process of a database.
 const SERVER_LOCK: i64 = 0x5343_494F_4E53_5256;
+
+/// The readers this process has taken since the last reset, for a test
+/// that counts one walk's transactions by the readers it held.
+#[cfg(any(test, feature = "test-hooks"))]
+static TEST_READER_TAKES: AtomicU64 = AtomicU64::new(0);
 
 // The tests bound a walk's changeset-read cost by this counter, and the
 // full-stop gate keeps another test's statements out of its delta.
@@ -276,6 +281,8 @@ impl Readers {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(started_at);
+        #[cfg(any(test, feature = "test-hooks"))]
+        TEST_READER_TAKES.fetch_add(1, Ordering::Relaxed);
         self.report_busy();
         if let Some(metrics) = self.metrics() {
             metrics.pg_pool_wait(started.elapsed());
@@ -1825,6 +1832,31 @@ pub(crate) fn test_reset_statement_count() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clear();
+}
+
+/// The readers this process has taken since the last reset. A walk that
+/// holds one transaction takes one reader, whatever it steps.
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) fn test_reader_takes() -> u64 {
+    TEST_READER_TAKES.load(Ordering::Relaxed)
+}
+
+/// Sets the reader-take count back to zero.
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) fn test_reset_reader_takes() {
+    TEST_READER_TAKES.store(0, Ordering::Relaxed);
+}
+
+/// How many of this backend's readers sit idle in the pool. A walk that
+/// lost its reader to a leaked transaction leaves the pool short.
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) fn test_idle_readers(pg: &Pg) -> usize {
+    pg.inner
+        .readers
+        .idle
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .len()
 }
 
 /// Runs one statement of a job on the client.

@@ -202,6 +202,23 @@ pub fn root_tree(
     derived::get_by::<RootTree>(store, repo, cs, deadline)
 }
 
+/// [`root_tree`], for a caller that already holds a read transaction: the
+/// value rides it, and a miss fills in its own transactions, as every
+/// fill does (see [`derived::get_by_held`]).
+///
+/// # Errors
+///
+/// As [`root_tree`].
+pub(crate) fn root_tree_held(
+    store: &Backend,
+    c: &mut dyn MetaTx,
+    repo: RepoId,
+    cs: ChangesetId,
+    deadline: &Deadline,
+) -> Result<TreeId> {
+    derived::get_by_held::<RootTree>(store, c, repo, cs, deadline)
+}
+
 /// [`root_tree`] with no deadline: the caller has no request to serve, so
 /// nothing bounds the fill in time. For the `fsck` command and tests.
 ///
