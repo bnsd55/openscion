@@ -474,10 +474,12 @@ fn a_damaged_blob_on_the_server_never_passes_a_tier() {
             let call = objects(&refs, zstd, &ticket);
             // The server unpacks the blob for a RAW client and finds the
             // damage. It does not check what it sends ZSTD: the client does.
+            // The damaged blob is data loss from the server too: the tier
+            // fails the one object and asks again.
             let server = if zstd {
                 End::Refused
             } else {
-                End::Stream(Code::Internal)
+                End::Stream(Code::DataLoss)
             };
             let tier = End::Stream(Code::DataLoss);
             for (name, url, end) in [

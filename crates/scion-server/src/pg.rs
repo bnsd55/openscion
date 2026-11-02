@@ -557,7 +557,7 @@ fn run_job(
         // The caller may be gone, which is fine: the reply
         // fails, and the job's outcome is the caller's
         // business. The worker goes on to the next job.
-        let _ = job.reply.send(Err(Error::Corrupt(TX_LOST.into())));
+        let _ = job.reply.send(Err(Error::Unavailable(TX_LOST.into())));
         return Flow::Go;
     }
     // A client the server closed, as after a restart of
@@ -620,7 +620,7 @@ fn run_job(
     // so the BEGIN opens a fresh one on the fresh session.
     // As above: a gone caller is fine, the worker goes on.
     if reconnected && lost_tx && !job.sql.starts_with("ROLLBACK") && !job.sql.starts_with("BEGIN") {
-        let _ = job.reply.send(Err(Error::Corrupt(TX_LOST.into())));
+        let _ = job.reply.send(Err(Error::Unavailable(TX_LOST.into())));
         return Flow::Go;
     }
     if job.kind == Kind::Raw {
@@ -728,9 +728,9 @@ impl PgClient {
                 reply,
                 raw: None,
             })
-            .map_err(|_| Error::Corrupt(WORKER_STOPPED.into()))?;
+            .map_err(|_| Error::Internal(WORKER_STOPPED.into()))?;
         rx.recv()
-            .map_err(|_| Error::Corrupt(WORKER_STOPPED.into()))?
+            .map_err(|_| Error::Internal(WORKER_STOPPED.into()))?
     }
 
     /// The rows of one query.
@@ -1790,7 +1790,7 @@ fn run_with_retry(
     // was dropped with the old session, and nothing of it runs here.
     if tx.in_progress() {
         *tx = TxState::Lost;
-        return Err(Error::Corrupt(TX_LOST.into()));
+        return Err(Error::Unavailable(TX_LOST.into()));
     }
     run_statement(client, job)
 }
@@ -4892,7 +4892,7 @@ pub(crate) mod pool_tests {
         .unwrap();
         let err = client.query_opt("SELECT 1", &[]).unwrap_err();
         assert!(
-            matches!(err, Error::Corrupt(ref m) if m.contains("lost")),
+            matches!(err, Error::Unavailable(ref m) if m.contains("lost")),
             "the lost transaction answered {err}"
         );
         drop(reader);
