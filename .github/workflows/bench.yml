@@ -140,25 +140,24 @@ jobs:
     if: ${{ inputs.profile }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    services:
-      # pg_stat_statements needs a shared preload, so this service is
-      # not the envelope's: the profile names the statements a land
-      # runs, and the envelope counts what the run spends.
-      postgres:
-        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
-        env:
-          POSTGRES_PASSWORD: scion
-          POSTGRES_DB: scion
-          POSTGRES_HOST_AUTH_METHOD: trust
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-          -c shared_preload_libraries=pg_stat_statements
     steps:
+      # pg_stat_statements needs a shared preload, and a service
+      # container cannot take the postgres command args, so the job
+      # starts its own container: the profile names the statements a
+      # land runs, and the envelope counts what the run spends.
+      - name: postgres, with pg_stat_statements preloaded
+        run: |
+          set -euo pipefail
+          docker run -d --name postgres -p 5432:5432 \
+            -e POSTGRES_PASSWORD=scion -e POSTGRES_DB=scion \
+            -e POSTGRES_HOST_AUTH_METHOD=trust \
+            postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe \
+            -c shared_preload_libraries=pg_stat_statements
+          for _ in $(seq 60); do
+            docker exec postgres pg_isready -U postgres > /dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          echo "postgres never came ready" >&2; exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
