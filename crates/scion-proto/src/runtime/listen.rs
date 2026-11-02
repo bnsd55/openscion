@@ -1093,6 +1093,18 @@ mod tests {
         ca: &TestCert,
         identity: Option<&TestCert>,
     ) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
+        raw_connect(addr, ca, identity).await.unwrap()
+    }
+
+    /// A raw TLS client of `addr`, trusting the CA `ca`, with `identity`.
+    /// The handshake's own result stays with the caller: a refusal can
+    /// end the handshake from the server's side, and the caller reads
+    /// what the server sent back either way.
+    async fn raw_connect(
+        addr: SocketAddr,
+        ca: &TestCert,
+        identity: Option<&TestCert>,
+    ) -> io::Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>> {
         let mut roots = RootCertStore::empty();
         roots
             .add(CertificateDer::from_pem_slice(ca.cert_pem.as_bytes()).unwrap())
@@ -1116,7 +1128,6 @@ mod tests {
         connector
             .connect(ServerName::try_from("localhost").unwrap(), tcp)
             .await
-            .unwrap()
     }
 
     /// The stub, served within `limits` with `timers`, TLS with
@@ -1189,11 +1200,74 @@ mod tests {
         client.resolve_ref(request).await.unwrap_err().code()
     }
 
-    /// The deadline the refusal tests put on their client's connect and
-    /// on its one call: the server answers a failed handshake at once
-    /// (it drops the stream), so anything that hangs is a client that
-    /// keeps the channel and reconnects - the flake this bounds.
+    /// The deadline the refusal tests put on their client's handshake
+    /// and on its read of the refusal: the server answers a failed
+    /// handshake at once (it drops the stream with an alert), so
+    /// anything that hangs past this is not the refusal.
     const REFUSAL_BOUND: Duration = Duration::from_secs(10);
+
+    /// Whether the mTLS server of `addr` refuses a raw TLS client of
+    /// `ca` and `identity`. The answer is what the wire gives: the
+    /// handshake ending in an error (the server's alert inside it), a
+    /// read that ends with an alert or an error, or the clean close.
+    /// The refusal is read from the wire, not through a stub's
+    /// channel: the client's side of the TLS 1.3 handshake can end
+    /// before the server has checked its certificate, and a channel
+    /// that holds such a session reconnects under the refusal — its
+    /// calls wait on a readiness that never comes, instead of
+    /// answering the refusal. A served byte is not a refusal; a server
+    /// that neither alerts nor closes fails with the bound.
+    async fn a_raw_client_is_refused(
+        addr: SocketAddr,
+        ca: &TestCert,
+        identity: Option<&TestCert>,
+    ) -> bool {
+        let mut peer = match raw_connect(addr, ca, identity).await {
+            Ok(peer) => peer,
+            Err(_refused_in_the_handshake) => return true,
+        };
+        let mut buf = [0u8; 64];
+        match tokio::time::timeout(REFUSAL_BOUND, peer.read(&mut buf)).await {
+            Err(elapsed) => {
+                panic!("the server neither alerted nor closed in {REFUSAL_BOUND:?}: {elapsed}")
+            }
+            // The close and the alert both prove the refusal.
+            Ok(Ok(0) | Err(_)) => true,
+            Ok(Ok(_)) => false,
+        }
+    }
+
+    /// Whether the server of `addr` serves a raw TLS client of `ca`
+    /// and `identity`: the client sends the HTTP/2 client preface and
+    /// an empty SETTINGS frame, and reads the server's answer. The
+    /// positive control of the refusal tests: the same server and the
+    /// same raw client path as [`a_raw_client_is_refused`] must serve
+    /// a client the server's own CA signed, so a refusal test cannot
+    /// pass on a handshake error that is not a refusal.
+    async fn a_raw_client_is_served(addr: SocketAddr, ca: &TestCert, identity: &TestCert) -> bool {
+        use tokio::io::AsyncWriteExt as _;
+        let mut peer = match raw_connect(addr, ca, Some(identity)).await {
+            Ok(peer) => peer,
+            Err(_refused_in_the_handshake) => return false,
+        };
+        // The HTTP/2 client preface, then an empty SETTINGS frame.
+        let preface: &[u8] =
+            b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00";
+        let read = tokio::time::timeout(REFUSAL_BOUND, async {
+            peer.write_all(preface).await?;
+            let mut buf = [0u8; 64];
+            peer.read(&mut buf).await
+        })
+        .await;
+        match read {
+            Err(elapsed) => panic!("the served control hung in {REFUSAL_BOUND:?}: {elapsed}"),
+            // The close and the alert both mean the refusal.
+            Ok(Err(_) | Ok(0)) => false,
+            // The server answered with its own frames: it served the
+            // connection.
+            Ok(Ok(_)) => true,
+        }
+    }
 
     /// Whether the process closes a raw TCP connection that sends `sent` and
     /// then never answers, within 10 s.
@@ -1502,38 +1576,18 @@ mod tests {
         let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
         let (addr, _) = serve_tls(Limits::default(), TIMERS, &server_tls, HANDSHAKE_TIMEOUT).await;
-        // The connect of a client can end before the server has checked its
-        // certificate, so the refusal may show in the connect or in the
-        // call. A served client gets the stub's `NotFound`; anything else is
-        // the refusal. Both steps carry the bound: the server drops a
-        // failed handshake at once, so a client that kept the channel and
-        // reconnected under the refusal would hang the test.
-        match tokio::time::timeout(REFUSAL_BOUND, client(addr, &certs.authority.cert(), None)).await
-        {
-            Err(elapsed) => {
-                panic!(
-                    "the client neither connected nor was refused in {REFUSAL_BOUND:?}: {elapsed}"
-                )
-            }
-            Ok(Err(_refused_at_the_connect)) => {}
-            Ok(Ok(mut call)) => {
-                let code = match tokio::time::timeout(
-                    REFUSAL_BOUND,
-                    call.resolve_ref(ResolveRefRequest::default()),
-                )
-                .await
-                {
-                    Err(elapsed) => {
-                        panic!(
-                            "the call past a doubtful handshake hung past {REFUSAL_BOUND:?}: {elapsed}"
-                        )
-                    }
-                    Ok(Ok(_)) => panic!("the stub served the client"),
-                    Ok(Err(status)) => status.code(),
-                };
-                assert_ne!(code, Code::NotFound, "the stub served the client");
-            }
-        }
+        // The positive control: the same server and the same raw
+        // client path serve a client the server's CA signed, so the
+        // refusal below cannot pass on a handshake error that is not a
+        // refusal.
+        assert!(
+            a_raw_client_is_served(addr, &certs.authority.cert(), &certs.client).await,
+            "the server refused a client of its own CA"
+        );
+        assert!(
+            a_raw_client_is_refused(addr, &certs.authority.cert(), None).await,
+            "the server served a client without a certificate"
+        );
     }
 
     /// An mTLS server serves a client with a certificate of its CA.
@@ -1567,38 +1621,17 @@ mod tests {
         let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
         let (addr, _) = serve_tls(Limits::default(), TIMERS, &server_tls, HANDSHAKE_TIMEOUT).await;
-        // As above: the refusal may show in the connect or in the call,
-        // and both carry the bound.
-        match tokio::time::timeout(
-            REFUSAL_BOUND,
-            client(addr, &certs.authority.cert(), Some(&certs.stranger_client)),
-        )
-        .await
-        {
-            Err(elapsed) => {
-                panic!(
-                    "the client neither connected nor was refused in {REFUSAL_BOUND:?}: {elapsed}"
-                )
-            }
-            Ok(Err(_refused_at_the_connect)) => {}
-            Ok(Ok(mut call)) => {
-                let code = match tokio::time::timeout(
-                    REFUSAL_BOUND,
-                    call.resolve_ref(ResolveRefRequest::default()),
-                )
-                .await
-                {
-                    Err(elapsed) => {
-                        panic!(
-                            "the call past a doubtful handshake hung past {REFUSAL_BOUND:?}: {elapsed}"
-                        )
-                    }
-                    Ok(Ok(_)) => panic!("the stub served the client"),
-                    Ok(Err(status)) => status.code(),
-                };
-                assert_ne!(code, Code::NotFound, "the stub served the client");
-            }
-        }
+        // As above: the control runs on the same server and the same
+        // raw client path.
+        assert!(
+            a_raw_client_is_served(addr, &certs.authority.cert(), &certs.client).await,
+            "the server refused a client of its own CA"
+        );
+        assert!(
+            a_raw_client_is_refused(addr, &certs.authority.cert(), Some(&certs.stranger_client))
+                .await,
+            "the server served a client of another CA"
+        );
     }
 
     /// A peer that opens a TLS connection and sends nothing is dropped by
