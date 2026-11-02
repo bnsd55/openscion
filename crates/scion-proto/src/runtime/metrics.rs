@@ -1429,6 +1429,7 @@ mod tests {
         assert!(text.contains("scion_pg_tx_age_seconds 0"), "{text}");
         assert!(!text.contains("scion_pg_pool_wait_seconds_count"), "{text}");
     }
+
     /// A gRPC client streams its request without a content-length: the
     /// counted request bytes are the frames its body carried, so the
     /// metric is not pinned at zero.
