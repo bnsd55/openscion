@@ -15,7 +15,7 @@
 #![allow(unreachable_pub)]
 use std::collections::HashMap;
 use std::collections::hash_map::Entry as Slot;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gix::diff::blob::sources::byte_lines;
 use gix::diff::blob::{Algorithm, Diff, InternedInput};
@@ -184,6 +184,41 @@ pub(crate) const BLAME_STEP_VERSIONS: usize = 64;
 /// runs never hold every reader past that wait.
 pub(crate) const BLAME_STEP_LINES: usize = MAX_BLAME_DIFF_LINES / 10;
 
+/// The longest a step of the walk may hold the pool's reader. Line
+/// counts are not time: a diff's cost grows with lines times edits, and
+/// a slow or loaded host stretches it. Past this hold the step ends and
+/// the next one opens, so a step's hold on the reader stays a fraction
+/// of the plain read's wait of [`crate::pg::READER_WAIT`] whatever the
+/// host's speed. The step always explains its first version: a step
+/// that named nothing would spin, opening a transaction per nothing.
+pub(crate) const BLAME_STEP_HOLD: Duration = Duration::from_secs(2);
+
+/// The hold a step may keep, for tests that shrink it: the step's own
+/// check reads this when it is set.
+#[cfg(any(test, feature = "test-hooks"))]
+static TEST_STEP_HOLD: std::sync::Mutex<Option<Duration>> = std::sync::Mutex::new(None);
+
+/// Sets the hold a step may keep, for a test: [`None`] restores
+/// [`BLAME_STEP_HOLD`].
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn test_set_step_hold(hold: Option<Duration>) {
+    *TEST_STEP_HOLD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = hold;
+}
+
+/// The hold a step of the walk may keep on its pool reader.
+fn step_hold() -> Duration {
+    #[cfg(any(test, feature = "test-hooks"))]
+    if let Some(hold) = *TEST_STEP_HOLD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    {
+        return hold;
+    }
+    BLAME_STEP_HOLD
+}
+
 /// Blames the file at `path` in `cs`. Diffs at most [`MAX_BLAME_VERSIONS`]
 /// versions and about [`MAX_BLAME_DIFF_LINES`] lines, and reads at most
 /// the call's share of path history nodes: the versions come from the
@@ -328,22 +363,30 @@ pub fn blame(
     // [`BLAME_STEP_VERSIONS`] versions or [`BLAME_STEP_LINES`] diffed
     // lines, whichever first, so its hold on the reader is at most a
     // tenth of the call's own diff budget, against the plain read's
-    // wait of [`crate::pg::READER_WAIT`]; the walk checks the call's
-    // deadline before it starts each version, so a dead call's step
-    // rolls back with its error. A derived value that is missing fills
-    // in the fill's own transactions, as every fill does; the step's
-    // snapshot cannot see the fill's rows and never needs to, because
-    // a walk reads each value once and takes it from the fill's
-    // return.
+    // wait of [`crate::pg::READER_WAIT`], and no longer than
+    // [`BLAME_STEP_HOLD`] on the clock, since line counts are not time;
+    // the walk checks the call's deadline before it starts each
+    // version, so a dead call's step rolls back with its error. A
+    // derived value that is missing fills in the fill's own
+    // transactions, as every fill does; the step's snapshot cannot see
+    // the fill's rows and never needs to, because a walk reads each
+    // value once and takes it from the fill's return.
     let mut explained = 0usize;
     let mut stop = false;
     while !stop && explained < MAX_BLAME_VERSIONS {
         let mut step_lines = 0usize;
+        let mut walked = 0usize;
+        let step_started = Instant::now();
         // The step never walks past the call's own version cap: its
         // bound is what is left of it.
         let budget = (MAX_BLAME_VERSIONS - explained).min(BLAME_STEP_VERSIONS);
         store.read_long(CALL_LIMIT, |c| {
             for _ in 0..budget {
+                // The step always explains its first version; past the
+                // hold it ends, and the next one opens.
+                if walked > 0 && step_started.elapsed() >= step_hold() {
+                    break;
+                }
             // Each step diffs two whole versions: the walk stops at the
             // deadline before it starts the next one, the first diff too.
             walk_until.check()?;
@@ -495,6 +538,7 @@ pub fn blame(
             }
             progressed = true;
             explained += 1;
+            walked += 1;
             drop(diff_hold);
             if let Some((older_path, older_blob, older_text)) = older {
                 (path, blob) = (older_path, older_blob);

@@ -432,6 +432,60 @@ fn eight_walks_leave_a_reader_for_a_plain_read() {
     }
 }
 
+/// With the step's hold shrunk to zero, the walk takes one step per
+/// version - a reader per version - and still answers the same: the
+/// step's bounds change the hold, not the answer.
+#[test]
+fn a_shrunk_step_hold_answers_the_same() {
+    let _counted = COUNT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (_dir, store) = appended();
+    let at = tip(&store);
+    let file = path("file.txt");
+
+    let plain = blame::blame(
+        &store,
+        REPO,
+        at,
+        &file,
+        &blame::Resume::default(),
+        &Bytes::new(1 << 30),
+        None,
+    )
+    .unwrap();
+
+    blame::test_set_step_hold(Some(Duration::ZERO));
+    Backend::test_reset_reader_takes();
+    let shrunk = blame::blame(
+        &store,
+        REPO,
+        at,
+        &file,
+        &blame::Resume::default(),
+        &Bytes::new(1 << 30),
+        None,
+    )
+    .unwrap();
+    blame::test_set_step_hold(None);
+
+    assert_eq!(shrunk.ranges, plain.ranges, "the same line map");
+    assert_eq!(
+        shrunk.changesets, plain.changesets,
+        "the same changesets named"
+    );
+    assert_eq!(shrunk.resume, plain.resume, "the same walk-on point");
+    // One reader per version: the call's setup reads, then a step per
+    // version the walk explained - 100 of them, at the version cap.
+    assert_eq!(
+        store.test_reader_takes(),
+        104,
+        "a zero hold took {} readers: the walk must take one step per \
+         version, not one per read",
+        store.test_reader_takes()
+    );
+}
+
 /// A cold walk fills its missing values mid-transaction, in the fills'
 /// own transactions, and its answer is the warm one: what a fill stores
 /// is what the step's snapshot reads, whatever order the two happen in.
