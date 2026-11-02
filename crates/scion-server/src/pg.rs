@@ -1203,13 +1203,24 @@ impl Pg {
         // transaction is back on the writer's clock, so the row locks it
         // meets later still answer Busy at 5 s (SET LOCAL lasts to the
         // end of the transaction).
+        //
+        // The 60 s guard must be in force before the statement that
+        // takes the key: Postgres reads a GUC when a statement starts, so
+        // a `set_config` inside that statement cannot guard its own lock
+        // wait (tests/pg_guard_timeouts.rs proves both directions). The
+        // restore rides the advisory's own statement: it cannot touch the
+        // snapshot the wait runs under, and every statement after it runs
+        // at the writers' 5 s.
         tx.c.query(
             &format!("SET LOCAL lock_timeout = '{LOCK_TIMEOUT_FOR_KEY}'"),
             &[],
         )?;
         let key_started = std::time::Instant::now();
         tx.c.query_opt(
-            "SELECT pg_advisory_xact_lock(hashtext(current_schema() || ':gc'))",
+            &format!(
+                "SELECT pg_advisory_xact_lock(hashtext(current_schema() || ':gc')), \
+                 set_config('lock_timeout', '{LOCK_TIMEOUT_FOR_WRITERS}', true)"
+            ),
             &[],
         )?;
         if let Some(metrics) = self.inner.metrics.get() {
@@ -1217,10 +1228,6 @@ impl Pg {
                 u64::try_from(key_started.elapsed().as_micros()).unwrap_or(u64::MAX),
             );
         }
-        tx.c.query(
-            &format!("SET LOCAL lock_timeout = '{LOCK_TIMEOUT_FOR_WRITERS}'"),
-            &[],
-        )?;
         match f(&mut tx) {
             Ok(value) => {
                 let unflushed = tx.cs_pending.as_deref().is_some_and(|p| !p.is_empty())
