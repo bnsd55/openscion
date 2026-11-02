@@ -6,13 +6,19 @@
 //! cannot come back by accident. The node reads stay per link on purpose:
 //! a lookup reads one node per part of the path, and the nodes a page
 //! reads are the ones its walk visits (see `a_path_log_reads_only_...` in
-//! the history's own tests).
+//! the history's own tests). A blame rides the same windows: its versions
+//! come from the path histories the walk needs, and the guards count its
+//! statements the same way.
 
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use scion_core::{ChangesetId, RepoPath};
+use scion_core::{BlobId, Changeset, ChangesetId, FileState, IdentityTime, RepoPath};
+use scion_server::test_support::blame;
 use scion_server::test_support::deadline::Deadline;
+use scion_server::test_support::memory::Bytes;
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use scion_server::test_support::read;
 use scion_server::{Backend, ImportOptions};
@@ -230,5 +236,192 @@ fn a_read_transaction_frames_four_statements() {
     assert_eq!(
         statements, 5,
         "one repo lookup plus BEGIN, 2 SETs, ROLLBACK"
+    );
+}
+
+/// A repo whose commits append a line to `file.txt`: 121 commits, the
+/// file at the tip holds 121 lines, and every commit changes the path.
+/// Seeded through the import, so the trees are the ones a real repo
+/// brings.
+fn appended() -> (tempfile::TempDir, Backend) {
+    let dir = scion_server::test_support::private_tempdir();
+    let git_dir = tempfile::tempdir().unwrap();
+    let d = git_dir.path();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(["-c", "gc.auto=0", "-c", "maintenance.auto=false"])
+            .args(args)
+            .current_dir(d)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.email", "a@b.c"]);
+    git(&["config", "user.name", "a"]);
+    std::fs::write(d.join("file.txt"), b"l0\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "root"]);
+    for i in 1..=120 {
+        let mut text = std::fs::read_to_string(d.join("file.txt")).unwrap();
+        writeln!(text, "l{i}").unwrap();
+        std::fs::write(d.join("file.txt"), text).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", &format!("c{i}")]);
+    }
+    let store = Backend::open_test(dir.path()).unwrap();
+    let opts = ImportOptions {
+        rev: "main".into(),
+        target_ref: "main".into(),
+        verify_sample: 0,
+    };
+    scion_server::import_git(&store, REPO, d, &opts).unwrap();
+    (dir, store)
+}
+
+/// A blame whose walk explains every line: 100 versions, one statement
+/// window of path histories between the node reads. The first call pays
+/// the derivations; the counted second call is the walk's own cost, and
+/// a per-version read of the path histories cannot hide in it.
+#[test]
+fn a_blame_rides_windows_between_its_node_reads() {
+    // The whole test, its seed included, holds the lock: the statement
+    // counter is one process-global number, and another test's reads must
+    // not land in a page's count.
+    let _counted = COUNT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (_dir, store) = appended();
+    let at = tip(&store);
+    let file = path("file.txt");
+
+    let warm = blame::blame(
+        &store,
+        REPO,
+        at,
+        &file,
+        &blame::Resume::default(),
+        &Bytes::new(1 << 30),
+        None,
+    )
+    .unwrap();
+    assert!(
+        warm.resume.is_some(),
+        "121 versions, the version cap stops the walk"
+    );
+
+    Backend::test_reset_statement_count();
+    let out = blame::blame(
+        &store,
+        REPO,
+        at,
+        &file,
+        &blame::Resume::default(),
+        &Bytes::new(1 << 30),
+        None,
+    )
+    .unwrap();
+    let statements = Backend::test_statement_count();
+
+    assert_eq!(out.changesets.len(), 100, "the walk ran to its version cap");
+    assert!(out.resume.is_some(), "121 versions, 100 explained");
+    // One window of path histories covers the whole walk here, and the
+    // window's one statement replaces the per-version read the walk used
+    // to pay. The rest is the per-version changeset, the node reads, the
+    // tree reads of the diffs, and the framing of the walk's reads.
+    assert!(
+        statements <= 1_800,
+        "a 100-version blame costs {statements} statements: the path \
+         histories must ride one window, not one read per version"
+    );
+}
+
+/// A walk longer than one window of chain links crosses the window, and
+/// the answer loses nothing: every 12th commit of 1,100, down to the
+/// root that made the file, each named once.
+#[test]
+fn a_blame_crosses_its_window_and_names_every_version() {
+    // The whole test, its seed included, holds the lock: the statement
+    // counter is one process-global number, and another test's reads must
+    // not land in a page's count.
+    let _counted = COUNT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = scion_server::test_support::private_tempdir();
+    let store = Backend::open_test(dir.path()).unwrap();
+    // 1,101 commits: the root puts `file.txt`, every 12th commit after
+    // that appends a line, the rest change nothing. The window holds
+    // 1,000 links, and the walk's versions spread over 1,092 of them.
+    let blobs: Vec<BlobId> = (0..=1100)
+        .scan(String::new(), |text, i| {
+            writeln!(text, "l{i}").unwrap();
+            Some(store.blobs().put(text.as_bytes()).unwrap())
+        })
+        .collect();
+    let ids: Vec<ChangesetId> = store
+        .write(|c| {
+            let repo = c.create_repo(REPO)?;
+            let mut history: Vec<ChangesetId> = Vec::new();
+            for (i, &blob) in blobs.iter().enumerate() {
+                let mut changes = std::collections::BTreeMap::new();
+                if i == 0 || i % 12 == 0 {
+                    changes.insert(
+                        RepoPath::new("file.txt").unwrap(),
+                        Some(FileState::Regular {
+                            content: blob,
+                            executable: false,
+                        }),
+                    );
+                }
+                let cs = Changeset::new(
+                    history.last().copied().into_iter().collect(),
+                    IdentityTime::new(b"ada".to_vec(), b"a@x".to_vec(), 1_700_000_000, 0).unwrap(),
+                    None,
+                    format!("c{i}").into_bytes(),
+                    changes,
+                )
+                .unwrap();
+                history.push(c.insert_changeset(repo, &cs)?);
+            }
+            c.cas_ref(repo, "main", None, *history.last().unwrap())?;
+            Ok(history)
+        })
+        .unwrap();
+
+    let out = blame::blame(
+        &store,
+        REPO,
+        *ids.last().unwrap(),
+        &path("file.txt"),
+        &blame::Resume::default(),
+        &Bytes::new(1 << 30),
+        None,
+    )
+    .unwrap();
+
+    let expected: BTreeSet<ChangesetId> = (0..=1100_usize)
+        .filter(|i| *i == 0 || i % 12 == 0)
+        .map(|i| ids[i])
+        .collect();
+    let named: BTreeSet<ChangesetId> = out.changesets.iter().map(|(id, _, _)| *id).collect();
+    assert_eq!(named, expected, "every version, each once, none missed");
+    assert!(out.resume.is_none(), "92 versions, one call explains them");
+    // The walk crossed the window: the chain of path histories came in
+    // more than one statement, and the walk went on from where each
+    // window ended.
+    let windows = Backend::test_statement_log()
+        .iter()
+        .filter(|s| s.contains("SELECT $1::bytea, 0::bigint"))
+        .count();
+    assert!(
+        windows >= 2,
+        "the walk's versions spread past one window of links, so the \
+         chain of path histories must come in {windows} windows"
     );
 }
