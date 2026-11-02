@@ -322,10 +322,18 @@ impl Error {
                 tracing::error!(error = %e, "the disk is read-only");
                 Status::unavailable("the disk is read-only; retry later")
             }
-            Error::Corrupt(_) | Error::Git(_) | Error::Io(_) => {
-                // Details stay in the server log, not in the reply. The
-                // log line carries the whole source chain, so a wrapped
-                // cause reaches the log even though the reply does not.
+            // Damaged stored data is data loss, not a server bug: the
+            // caller reads a code that names the class. A Git error and
+            // any other I/O error stay internal - a failing device or a
+            // tool failure is the server's own state, not the stored
+            // bytes. Details stay in the server log, not in the reply. The
+            // log line carries the whole source chain, so a wrapped
+            // cause reaches the log even though the reply does not.
+            Error::Corrupt(_) => {
+                tracing::error!(error = %causes(self), "damaged stored data");
+                Status::data_loss("damaged data")
+            }
+            Error::Git(_) | Error::Io(_) => {
                 tracing::error!(error = %causes(self), "internal error");
                 Status::internal("internal error")
             }
@@ -351,6 +359,26 @@ mod tests {
     fn a_cancelled_call_answers_cancelled_not_deadline_exceeded() {
         let err = Error::Cancelled("its call has gone".to_owned());
         assert_eq!(Status::from(err).code(), Code::Cancelled);
+    }
+
+    /// Damaged stored data answers `DATA_LOSS`: the caller reads the
+    /// class of the failure, not a server bug. A Git failure and any
+    /// other I/O error stay `INTERNAL`: the server's own state, not the
+    /// stored bytes. The reply's message is fixed either way; the
+    /// details stay in the log.
+    #[test]
+    fn damaged_data_answers_data_loss_and_git_and_io_stay_internal() {
+        let corrupt = Status::from(Error::Corrupt("the tree does not decode".to_owned()));
+        assert_eq!(corrupt.code(), Code::DataLoss);
+        assert_eq!(corrupt.message(), "damaged data");
+        let git = Status::from(Error::Git(Git::message(
+            "the import cap is spent".to_owned(),
+        )));
+        assert_eq!(git.code(), Code::Internal);
+        assert_eq!(git.message(), "internal error");
+        let io = Status::from(Error::Io(std::io::Error::from_raw_os_error(5)));
+        assert_eq!(io.code(), Code::Internal);
+        assert_eq!(io.message(), "internal error");
     }
 
     /// Every error that wraps another returns it from `source()`: the
