@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 mod common;
 
+use common::stall_probe;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 
@@ -24,6 +25,7 @@ async fn serve_http(data: &TempDir, token: &'static str) -> String {
     let store = Backend::open_test(data.path()).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    tokio::spawn(stall_probe("hints"));
     tokio::spawn(service::serve(
         store,
         listener,
@@ -46,21 +48,32 @@ async fn serve_http(data: &TempDir, token: &'static str) -> String {
 }
 
 /// Runs `scn log main` against `url` with `token`, and answers its stderr.
-fn scn_stderr(url: &str, token: &str) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_scn"))
-        .args(["--server", url, "--repo", REPO, "log", "main"])
-        .env("SCION_TOKEN", token)
-        .output()
-        .unwrap();
-    assert!(!out.status.success(), "scn must fail");
-    String::from_utf8(out.stderr).unwrap()
+///
+/// Off the runtime: the call blocks its thread until scn exits, and a
+/// worker thread that waits for a subprocess cannot run the server's
+/// connection task. The client's keep-alive then cuts the call, and the
+/// test reads a transport error instead of the server's hint.
+async fn scn_stderr(url: &str, token: &str) -> String {
+    let url = url.to_owned();
+    let token = token.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let out = Command::new(env!("CARGO_BIN_EXE_scn"))
+            .args(["--server", &url, "--repo", REPO, "log", "main"])
+            .env("SCION_TOKEN", &token)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "scn must fail");
+        String::from_utf8(out.stderr).unwrap()
+    })
+    .await
+    .unwrap()
 }
 
 /// A server that is not there: the error carries the advice to check the
 /// address. The port is 1, which nothing serves on this node.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dead_server_hints_at_the_address() {
-    let stderr = scn_stderr("http://127.0.0.1:1", TOKEN);
+    let stderr = scn_stderr("http://127.0.0.1:1", TOKEN).await;
     assert!(
         stderr.contains("check: is a scion server or tier running at that address?"),
         "{stderr}"
@@ -73,7 +86,7 @@ async fn a_dead_server_hints_at_the_address() {
 async fn a_wrong_token_hints_at_the_token() {
     let data = common::private_tempdir();
     let url = serve_http(&data, TOKEN).await;
-    let stderr = scn_stderr(&url, "wrong");
+    let stderr = scn_stderr(&url, "wrong").await;
     assert!(
         stderr.contains(
             "check: compare --token (or SCION_TOKEN) with the token the server was given"
@@ -172,22 +185,28 @@ async fn a_wrong_ca_hints_at_the_ca() {
     let certs = TestCerts::new();
     let data = common::private_tempdir();
     let url = serve_tls(&data, &certs).await;
-    let out = Command::new(env!("CARGO_BIN_EXE_scn"))
-        .args([
-            "--server",
-            &url,
-            "--repo",
-            REPO,
-            "--tls-ca",
-            certs.stranger_ca.to_str().unwrap(),
-            "log",
-            "main",
-        ])
-        .env("SCION_TOKEN", TOKEN)
-        .output()
-        .unwrap();
-    assert!(!out.status.success(), "scn must fail");
-    let stderr = String::from_utf8(out.stderr).unwrap();
+    // Off the runtime, for the reason on `scn_stderr`.
+    let ca = certs.stranger_ca.clone();
+    let stderr = tokio::task::spawn_blocking(move || {
+        let out = Command::new(env!("CARGO_BIN_EXE_scn"))
+            .args([
+                "--server",
+                &url,
+                "--repo",
+                REPO,
+                "--tls-ca",
+                ca.to_str().unwrap(),
+                "log",
+                "main",
+            ])
+            .env("SCION_TOKEN", TOKEN)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "scn must fail");
+        String::from_utf8(out.stderr).unwrap()
+    })
+    .await
+    .unwrap();
     assert!(
         stderr.contains("check: --tls-ca must hold the CA (PEM) that signed the certificate of the server you trust"),
         "{stderr}"
@@ -202,6 +221,7 @@ async fn serve_tls(data: &TempDir, certs: &TestCerts) -> String {
     let store = Backend::open_test(data.path()).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    tokio::spawn(stall_probe("hints"));
     tokio::spawn(service::serve(
         store,
         listener,

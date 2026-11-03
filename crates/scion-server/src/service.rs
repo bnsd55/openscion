@@ -1889,8 +1889,12 @@ impl Scion for ScionService {
         // apart: the reply counts what it leaves in HTTP/2 on it.
         let stalled = scion_proto::runtime::listen::Stalled::of(&request);
         // The derivation of a first view walks the real tree, under the
-        // call's deadline.
+        // call's deadline. A client that cancels drops this call; the
+        // guard says so to the job's loop checks, so its cold derive
+        // stops at its next step and frees its reader, instead of
+        // running on to the deadline.
         let deadline = Deadline::of_call(&request, REQUEST_TIMEOUT);
+        let _call_gone = deadline.guard();
         let metrics = Arc::clone(&self.metrics);
         let req = request.into_inner();
         check_reader(&self.access, &caller, &req.repo)?;
@@ -1960,8 +1964,12 @@ impl Scion for ScionService {
         // apart: the reply counts what it leaves in HTTP/2 on it.
         let stalled = scion_proto::runtime::listen::Stalled::of(&request);
         // The derivation of a first view walks the real tree, under the
-        // call's deadline.
+        // call's deadline. A client that cancels drops this call; the
+        // guard says so to the job's loop checks, so its cold derive
+        // stops at its next step and frees its reader, instead of
+        // running on to the deadline.
         let deadline = Deadline::of_call(&request, REQUEST_TIMEOUT);
+        let _call_gone = deadline.guard();
         let metrics = Arc::clone(&self.metrics);
         let req = request.into_inner();
         check_reader(&self.access, &caller, &req.repo)?;
@@ -2296,6 +2304,7 @@ pub(crate) use tests::{test_init_log, test_log_text};
 mod tests {
     use crate::backend::Backend;
     use crate::meta::testing;
+    use scion_proto::v1::objects_server::Objects as _;
     use std::time::Instant;
 
     use scion_core::{Changeset, FileState, IdentityTime};
@@ -2559,6 +2568,17 @@ mod tests {
         let mut request = Request::new(message);
         let caller = Caller(scion_proto::runtime::auth::DEFAULT_PRINCIPAL.into());
         request.extensions_mut().insert(caller);
+        request
+    }
+
+    /// A request the objects service's own auth answers: the token the
+    /// fixture's `Access::single` knows.
+    fn as_bearer<T>(message: T) -> Request<T> {
+        let mut request = as_default(message);
+        request.metadata_mut().insert(
+            "authorization",
+            "Bearer t".parse().expect("the header fits the format"),
+        );
         request
     }
 
@@ -3098,6 +3118,299 @@ mod tests {
             c.get_ref(repo, "main")
         });
         assert_eq!(main.unwrap().unwrap().target, b, "main did not move");
+    }
+
+    /// A repo of `depth` changesets stored with no root trees, so a first
+    /// read derives, and the walk needs several steps (the test STEP is
+    /// 2). The service runs over a store whose reader pool holds exactly
+    /// `readers` connections, so the test can hold them all and release
+    /// them one at a time. Returns the dir, the store, the service, the
+    /// head changeset, and the file the head's own change puts.
+    fn cold_derive_fixture(
+        depth: usize,
+        readers: usize,
+    ) -> (
+        tempfile::TempDir,
+        Backend,
+        Arc<ScionService>,
+        Arc<crate::objects::ObjectsService>,
+        ChangesetId,
+        Vec<u8>,
+    ) {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test_with_readers(dir.path(), readers).unwrap();
+        let blob = store.blobs().put(b"x").unwrap();
+        let (head, last) = store
+            .write(|c| {
+                let repo = c.create_repo("r")?;
+                let mut parent: Option<ChangesetId> = None;
+                let mut last: Vec<u8> = Vec::new();
+                for i in 0..depth {
+                    let name = format!("p{i}");
+                    let cs = Changeset::new(
+                        parent.iter().copied().collect(),
+                        IdentityTime::new(b"t".to_vec(), b"t@x".to_vec(), 0, 0)
+                            .expect("identity fits the format"),
+                        None,
+                        name.clone().into_bytes(),
+                        [(
+                            RepoPath::new(name.as_bytes()).unwrap(),
+                            Some(FileState::Regular {
+                                content: blob,
+                                executable: false,
+                            }),
+                        )]
+                        .into(),
+                    )
+                    .expect("changeset fits the format");
+                    let id = c.insert_changeset(repo, &cs)?;
+                    parent = Some(id);
+                    last = name.into_bytes();
+                }
+                let head = parent.expect("a fixture with at least one changeset");
+                assert!(c.cas_ref(repo, "main", None, head)?);
+                Ok((head, last))
+            })
+            .unwrap();
+        let service = Arc::new(ScionService::new(
+            Worker::new(store.clone()),
+            Arc::new(Access::single("t")),
+            Arc::default(),
+            Quotas::off(),
+            Arc::default(),
+            crate::audit::Audit::open(&dir.path().join("audit.log")).unwrap(),
+        ));
+        let objects = Arc::new(crate::objects::ObjectsService::new(
+            Worker::new(store.clone()),
+            Arc::new(Access::single("t")),
+            Quotas::off(),
+            None,
+            Arc::default(),
+        ));
+        (dir, store, service, objects, head, last)
+    }
+
+    /// Holds every reader of the store's pool until its gate is dropped.
+    /// Each holder answers one signal once it holds its reader, so the
+    /// caller knows the pool is full before it starts the call.
+    fn hold_readers(
+        store: &Backend,
+        readers: usize,
+    ) -> (
+        Vec<std::sync::mpsc::Sender<()>>,
+        Vec<std::thread::JoinHandle<()>>,
+    ) {
+        let taken = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut gates = Vec::new();
+        let mut holders = Vec::new();
+        for _ in 0..readers {
+            let (free_tx, free_rx) = std::sync::mpsc::channel::<()>();
+            gates.push(free_tx);
+            let taken = Arc::clone(&taken);
+            let store = store.clone();
+            holders.push(std::thread::spawn(move || {
+                let _ = store.read(|_c| {
+                    taken.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let _ = free_rx.recv();
+                    Ok(())
+                });
+            }));
+        }
+        let started = Instant::now();
+        while taken.load(std::sync::atomic::Ordering::Relaxed) < readers {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "every holder took its reader"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        (gates, holders)
+    }
+
+    /// The one worker permit the call's job holds, once it claimed it:
+    /// the job is in flight, parked on the reader wait.
+    async fn wait_job_claimed(worker: &Worker) {
+        let started = Instant::now();
+        while worker.permits.available_permits() != MAX_BLOCKING - 1 {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the call's job claimed its permit"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    /// Every worker permit is back: the job ended, and with it the
+    /// reader it held.
+    async fn wait_job_ended(worker: &Worker) {
+        let started = Instant::now();
+        while worker.permits.available_permits() != MAX_BLOCKING {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the job ended and freed its reader"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_read_file_stops_its_derive_and_frees_its_reader() {
+        let readers = crate::store::READERS;
+        let (_dir, store, service, _objects, head, path) = cold_derive_fixture(6, readers);
+        let (mut gates, holders) = hold_readers(&store, readers);
+        let call = tokio::spawn({
+            let service = Arc::clone(&service);
+            let path = path.clone();
+            async move {
+                service
+                    .read_file(as_default(scion_proto::v1::ReadFileRequest {
+                        repo: "r".into(),
+                        changeset_id: head.as_bytes().to_vec(),
+                        path,
+                    }))
+                    .await
+            }
+        });
+        // The job claimed its permit and parks on the reader wait: the
+        // window the abort lands in.
+        wait_job_claimed(&service.worker).await;
+        call.abort();
+        assert!(call.await.unwrap_err().is_cancelled());
+        // One reader back: the job takes it, and the guard the dropped
+        // call left behind stops its walk at the first step boundary.
+        drop(gates.remove(0));
+        wait_job_ended(&service.worker).await;
+        // The walk never wrote the root tree: the cancelled call did not
+        // do its work anyway.
+        assert!(
+            store
+                .read(
+                    |c| crate::derived::load::<crate::tree::RootTree>(c, head).map(|v| v.is_none())
+                )
+                .unwrap(),
+            "the cancelled call derived the root tree"
+        );
+        // The reader is serving again, well before the call's deadline
+        // could have passed: a fresh call reads the same file, deriving
+        // the root tree now.
+        for gate in gates.drain(..) {
+            drop(gate);
+        }
+        for holder in holders {
+            holder.join().unwrap();
+        }
+        let mut got = service
+            .read_file(as_default(scion_proto::v1::ReadFileRequest {
+                repo: "r".into(),
+                changeset_id: head.as_bytes().to_vec(),
+                path,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let part = tokio_stream::StreamExt::next(&mut got)
+            .await
+            .unwrap()
+            .expect("the file streams");
+        assert_eq!(part.data, b"x", "the file's content comes back");
+        assert!(
+            store
+                .read(
+                    |c| crate::derived::load::<crate::tree::RootTree>(c, head).map(|v| v.is_some())
+                )
+                .unwrap(),
+            "the fresh call derived the root tree"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_list_dir_stops_its_derive_and_frees_its_reader() {
+        let readers = crate::store::READERS;
+        let (_dir, store, service, _objects, head, _path) = cold_derive_fixture(6, readers);
+        let (mut gates, holders) = hold_readers(&store, readers);
+        let call = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move {
+                service
+                    .list_dir(as_default(scion_proto::v1::ListDirRequest {
+                        repo: "r".into(),
+                        changeset_id: head.as_bytes().to_vec(),
+                        path: Vec::new(),
+                    }))
+                    .await
+            }
+        });
+        wait_job_claimed(&service.worker).await;
+        call.abort();
+        assert!(call.await.unwrap_err().is_cancelled());
+        drop(gates.remove(0));
+        wait_job_ended(&service.worker).await;
+        assert!(
+            store
+                .read(
+                    |c| crate::derived::load::<crate::tree::RootTree>(c, head).map(|v| v.is_none())
+                )
+                .unwrap(),
+            "the cancelled call derived the root tree"
+        );
+        for gate in gates.drain(..) {
+            drop(gate);
+        }
+        for holder in holders {
+            holder.join().unwrap();
+        }
+        service
+            .list_dir(as_default(scion_proto::v1::ListDirRequest {
+                repo: "r".into(),
+                changeset_id: head.as_bytes().to_vec(),
+                path: Vec::new(),
+            }))
+            .await
+            .expect("the fresh call lists, deriving now");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_get_root_tree_stops_its_derive_and_frees_its_reader() {
+        let readers = crate::store::READERS;
+        let (_dir, store, _service, objects, head, _path) = cold_derive_fixture(6, readers);
+        let (mut gates, holders) = hold_readers(&store, readers);
+        let call = tokio::spawn({
+            let objects = Arc::clone(&objects);
+            async move {
+                objects
+                    .get_root_tree(as_bearer(scion_proto::v1::GetRootTreeRequest {
+                        repo: "r".into(),
+                        changeset_id: head.as_bytes().to_vec(),
+                    }))
+                    .await
+            }
+        });
+        wait_job_claimed(objects.worker()).await;
+        call.abort();
+        assert!(call.await.unwrap_err().is_cancelled());
+        drop(gates.remove(0));
+        wait_job_ended(objects.worker()).await;
+        assert!(
+            store
+                .read(
+                    |c| crate::derived::load::<crate::tree::RootTree>(c, head).map(|v| v.is_none())
+                )
+                .unwrap(),
+            "the cancelled call derived the root tree"
+        );
+        for gate in gates.drain(..) {
+            drop(gate);
+        }
+        for holder in holders {
+            holder.join().unwrap();
+        }
+        objects
+            .get_root_tree(as_bearer(scion_proto::v1::GetRootTreeRequest {
+                repo: "r".into(),
+                changeset_id: head.as_bytes().to_vec(),
+            }))
+            .await
+            .expect("the fresh call answers, deriving now");
     }
 
     /// A call cut while its `CreateChangeset` hashed blobs: the job stops

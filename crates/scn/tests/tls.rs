@@ -193,14 +193,25 @@ async fn serve_tls(certs: &TestCerts, shutdown: tokio::sync::oneshot::Receiver<(
 
 /// `scn --server URL --tls-ca FILE log` against an https server: its exit,
 /// and whether it connected.
-fn log(url: &str, ca: Option<&std::path::Path>) -> bool {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_scn"));
-    command.args(["--server", url, "--repo", REPO, "log", "main"]);
-    if let Some(ca) = ca {
-        command.args(["--tls-ca"]).arg(ca);
-    }
-    let out = command.env("SCION_TOKEN", TOKEN).output().unwrap();
-    out.status.success()
+///
+/// Off the runtime: the call blocks its thread until scn exits, and a
+/// worker thread that waits for a subprocess cannot run the server's
+/// connection task. The client's keep-alive then cuts the call, and the
+/// test reads a transport error instead of a clean refusal.
+async fn log(url: &str, ca: Option<&std::path::Path>) -> bool {
+    let url = url.to_owned();
+    let ca = ca.map(std::path::Path::to_path_buf);
+    tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_scn"));
+        command.args(["--server", &url, "--repo", REPO, "log", "main"]);
+        if let Some(ca) = &ca {
+            command.args(["--tls-ca"]).arg(ca);
+        }
+        let out = command.env("SCION_TOKEN", TOKEN).output().unwrap();
+        out.status.success()
+    })
+    .await
+    .unwrap()
 }
 
 /// A client with the CA of the server connects over https; one without a CA,
@@ -212,12 +223,12 @@ async fn a_client_connects_over_https_with_its_ca() {
     let url = serve_tls(&certs, shutdown).await;
 
     assert!(
-        log(&url, Some(certs.ca.as_path())),
+        log(&url, Some(certs.ca.as_path())).await,
         "a client with the right CA connects"
     );
-    assert!(!log(&url, None), "a client without a CA is refused");
+    assert!(!log(&url, None).await, "a client without a CA is refused");
     assert!(
-        !log(&url, Some(certs.stranger_ca.as_path())),
+        !log(&url, Some(certs.stranger_ca.as_path())).await,
         "a client with the wrong CA is refused"
     );
 }
@@ -234,7 +245,7 @@ async fn a_rotated_server_certificate_needs_no_client_change() {
     let (stop, shutdown) = tokio::sync::oneshot::channel::<()>();
     let url = serve_tls(&certs, shutdown).await;
     assert!(
-        log(&url, Some(certs.ca.as_path())),
+        log(&url, Some(certs.ca.as_path())).await,
         "a client with the CA connects before the rotation"
     );
 
@@ -267,7 +278,7 @@ async fn a_rotated_server_certificate_needs_no_client_change() {
     // The client's promise: the CA file did not change, and the client
     // still connects.
     assert!(
-        log(&url, Some(certs.ca.as_path())),
+        log(&url, Some(certs.ca.as_path())).await,
         "a client with the same CA connects after the rotation"
     );
 }
