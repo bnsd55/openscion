@@ -709,6 +709,73 @@ jobs:
           cargo test -p open-scion-server --test backend_refusals -- --ignored
           df -h /
 
+  # The suite under umask 002 (issue #699): a run whose files land
+  # group-writable must still pass, because an operator's umask is not
+  # the suite's to choose. The temp-directory helpers set 0700
+  # explicitly, and the product's parent-directory refusals stay
+  # refusals; this job proves both on the schedule. It owns its
+  # Postgres service (one runner, one database), so no other run's
+  # connections compete with it.
+  # SHORTCUT: the job runs the suite with the runner's default test
+  # parallelism. If a nightly shows Postgres E53300 ("too many
+  # clients"), cap this job's --test-threads first, and raise the
+  # service's max_connections only if a capped run still exhausts.
+  test-umask-002:
+    name: test (umask 002)
+    needs: tier
+    if: ${{ !cancelled() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-24.04
+    # SHORTCUT: 45 min fits the Postgres suite (17-30 min on main, Oct
+    # 2026) with margin; its cost is the same slow tail of
+    # whole-model oracles the main job's 50 min budget names. Bring it
+    # back toward 30 when that tail shrinks.
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        env:
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: scion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: protoc
+      # Same target (Linux x64, the same features) as the test job, so
+      # one shared entry serves both.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: test-postgres
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-workspace-crates: true
+      - name: the whole suite under umask 002
+        run: |
+          umask 002
+          umask  # one line of proof in the log: the run's mask is 0002
+          cargo test --workspace
+        env:
+          PROPTEST_CASES: "128"
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+          # The backup test dumps the live metadata with this job's own
+          # Postgres, so its tools match the server.
+          SCION_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
+      - name: the work tree is still clean after the tests
+        run: |
+          dirty=$(git status --porcelain --untracked-files=all)
+          if [ -n "$dirty" ]; then
+            git diff --exit-code || true
+            echo "::error::the test suite left the work tree dirty: $dirty"
+            exit 1
+          fi
+
   test-writable:
     name: test (the writable mount feature)
     needs: tier
