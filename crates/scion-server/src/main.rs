@@ -825,14 +825,17 @@ async fn main() -> anyhow::Result<()> {
         .with_ansi(std::io::stderr().is_terminal())
         .with_writer(std::io::stderr)
         .init();
-    if let Some(error) = scion_proto::runtime::auth::removed::removed_secret_flag_error(
+    if let Some(removed) = scion_proto::runtime::auth::removed::removed_flag_of(
         std::env::args_os().skip(1).collect::<Vec<_>>().as_slice(),
-        &[(
-            "--token",
-            "pass the token in SCION_TOKEN, in a file with --token-file FILE, or in --access FILE",
-        )],
+        &[scion_proto::runtime::auth::removed::RemovedFlag {
+            flag: "--token",
+            instead: "pass the token in SCION_TOKEN, in a file with --token-file FILE, or in --access FILE",
+        }],
     ) {
-        eprintln!("error: {error}");
+        eprintln!(
+            "error: {}",
+            scion_proto::runtime::auth::removed::refusal_text(removed)
+        );
         std::process::exit(2);
     }
     let cli = Cli::parse();

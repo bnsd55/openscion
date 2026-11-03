@@ -131,14 +131,17 @@ const ERROR_EXIT: u8 = 2;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    if let Some(error) = scion_proto::runtime::auth::removed::removed_secret_flag_error(
+    if let Some(removed) = scion_proto::runtime::auth::removed::removed_flag_of(
         std::env::args_os().skip(1).collect::<Vec<_>>().as_slice(),
-        &[(
-            "--token",
-            "pass the token in SCION_TOKEN, or in a file with --token-file FILE",
-        )],
+        &[scion_proto::runtime::auth::removed::RemovedFlag {
+            flag: "--token",
+            instead: "pass the token in SCION_TOKEN, or in a file with --token-file FILE",
+        }],
     ) {
-        eprintln!("scn: {error}");
+        eprintln!(
+            "scn: {}",
+            scion_proto::runtime::auth::removed::refusal_text(removed)
+        );
         return ExitCode::from(ERROR_EXIT);
     }
     let cli = Cli::parse();

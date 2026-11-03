@@ -9,24 +9,30 @@
 //! this check, and not by the argument parser behind it, which never
 //! runs for a removed flag.
 
-/// The argv forms of the secret flags that a binary has removed:
-/// `(removed flag, what to use instead)`.
-pub type RemovedSecretFlags = &'static [(&'static str, &'static str)];
+/// One removed argv flag: its whole name, and the forms to use instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RemovedFlag {
+    /// The flag's whole name, `--token` style.
+    pub flag: &'static str,
+    /// The forms that replace it, as the refusal names them.
+    pub instead: &'static str,
+}
+
+/// The removed flags a binary refuses: a static table.
+pub type RemovedFlags = &'static [RemovedFlag];
 
 /// Reads `argv` (the arguments after the program name) and answers the
-/// error for the first removed secret flag it names, or `None` when the
-/// call carries none. The scan stops at a bare `--`, after which every
-/// argument is a positional value, not a flag. A flag matches by its
-/// whole name: `--token` does not match `--token-file`, and the `=`
-/// spelling (`--token=…`) matches the flag before its value.
+/// first removed flag it names, or `None` when the call carries none.
+/// The scan stops at a bare `--`, after which every argument is a
+/// positional value, not a flag. A flag matches by its whole name:
+/// `--token` does not match `--token-file`, and the `=` spelling
+/// (`--token=…`) matches the flag before its value.
 ///
-/// The caller prints the error itself and exits, so the argument parser
-/// never sees the line and cannot name the value in its own error.
+/// The caller formats the refusal itself and exits, so the argument
+/// parser never sees the line and cannot name the value in its own
+/// error.
 #[must_use]
-pub fn removed_secret_flag_error(
-    argv: &[std::ffi::OsString],
-    removed: &[(&'static str, &'static str)],
-) -> Option<String> {
+pub fn removed_flag_of(argv: &[std::ffi::OsString], removed: RemovedFlags) -> Option<RemovedFlag> {
     let plain: Vec<String> = argv
         .iter()
         .map(|a| a.to_string_lossy().into_owned())
@@ -35,20 +41,29 @@ pub fn removed_secret_flag_error(
         if arg == "--" {
             return None;
         }
-        for (flag, instead) in removed {
-            if arg == flag
+        for removed in removed {
+            if arg == removed.flag
                 || arg
-                    .strip_prefix(flag)
+                    .strip_prefix(removed.flag)
                     .is_some_and(|rest| rest.starts_with('='))
             {
-                return Some(format!(
-                    "the {flag} flag is gone: a secret on the command line is readable \
-                     by every local user (`ps`). {instead}"
-                ));
+                return Some(*removed);
             }
         }
     }
     None
+}
+
+/// The refusal a binary prints for a removed flag. Built only from the
+/// static table's own words: the value the caller passed is never part
+/// of it.
+#[must_use]
+pub fn refusal_text(removed: RemovedFlag) -> String {
+    format!(
+        "the {0} flag is gone: a secret on the command line is readable by every local user \
+         (`ps`). {1}",
+        removed.flag, removed.instead
+    )
 }
 
 #[cfg(test)]
@@ -66,59 +81,61 @@ mod tests {
         v
     }
 
-    const REMOVED: &[(&str, &str)] = &[
-        (
-            "--token",
-            "pass the token in SCION_TOKEN or --token-file FILE",
-        ),
-        (
-            "--upstream-token",
-            "pass the token in SCION_UPSTREAM_TOKEN or --upstream-token-file FILE",
-        ),
+    const REMOVED: RemovedFlags = &[
+        RemovedFlag {
+            flag: "--token",
+            instead: "pass the token in SCION_TOKEN or --token-file FILE",
+        },
+        RemovedFlag {
+            flag: "--upstream-token",
+            instead: "pass the token in SCION_UPSTREAM_TOKEN or --upstream-token-file FILE",
+        },
     ];
 
     #[test]
     fn the_space_and_equals_spellings_both_refuse() {
-        let error =
-            removed_secret_flag_error(&argv(&["prog", "--token", "s3cr3t"], &[]), REMOVED).unwrap();
-        assert!(error.contains("--token"), "{error}");
-        assert!(error.contains("SCION_TOKEN"), "{error}");
-        assert!(!error.contains("s3cr3t"), "{error}");
-        let error =
-            removed_secret_flag_error(&argv(&["prog", "--token=s3cr3t"], &[]), REMOVED).unwrap();
-        assert!(error.contains("--token"), "{error}");
-        assert!(!error.contains("s3cr3t"), "{error}");
+        let text = refusal_text(
+            removed_flag_of(&argv(&["prog", "--token", "s3cr3t"], &[]), REMOVED).unwrap(),
+        );
+        assert!(text.contains("--token"), "{text}");
+        assert!(text.contains("SCION_TOKEN"), "{text}");
+        assert!(!text.contains("s3cr3t"), "{text}");
+        let text = refusal_text(
+            removed_flag_of(&argv(&["prog", "--token=s3cr3t"], &[]), REMOVED).unwrap(),
+        );
+        assert!(text.contains("--token"), "{text}");
+        assert!(!text.contains("s3cr3t"), "{text}");
     }
 
     #[test]
     fn a_lookalike_flag_is_not_the_removed_one() {
         assert_eq!(
-            removed_secret_flag_error(&argv(&["prog", "--token-file", "f"], &[]), REMOVED),
+            removed_flag_of(&argv(&["prog", "--token-file", "f"], &[]), REMOVED),
             None
         );
         assert_eq!(
-            removed_secret_flag_error(&argv(&["prog", "--tokens", "x"], &[]), REMOVED),
+            removed_flag_of(&argv(&["prog", "--tokens", "x"], &[]), REMOVED),
             None
         );
         assert_eq!(
-            removed_secret_flag_error(&argv(&["prog", "--upstream-token-file", "f"], &[]), REMOVED),
+            removed_flag_of(&argv(&["prog", "--upstream-token-file", "f"], &[]), REMOVED),
             None
         );
     }
 
     #[test]
     fn the_upstream_flag_refuses_with_its_own_replacement() {
-        let error =
-            removed_secret_flag_error(&argv(&["prog", "--upstream-token", "s3cr3t"], &[]), REMOVED)
-                .unwrap();
-        assert!(error.contains("SCION_UPSTREAM_TOKEN"), "{error}");
-        assert!(!error.contains("s3cr3t"), "{error}");
+        let text = refusal_text(
+            removed_flag_of(&argv(&["prog", "--upstream-token", "s3cr3t"], &[]), REMOVED).unwrap(),
+        );
+        assert!(text.contains("SCION_UPSTREAM_TOKEN"), "{text}");
+        assert!(!text.contains("s3cr3t"), "{text}");
     }
 
     #[test]
     fn everything_after_a_bare_double_dash_is_a_value() {
         assert_eq!(
-            removed_secret_flag_error(&argv(&["prog", "--", "--token", "s3cr3t"], &[]), REMOVED),
+            removed_flag_of(&argv(&["prog", "--", "--token", "s3cr3t"], &[]), REMOVED),
             None
         );
     }
@@ -126,7 +143,7 @@ mod tests {
     #[test]
     fn a_call_without_the_removed_flags_passes() {
         assert_eq!(
-            removed_secret_flag_error(
+            removed_flag_of(
                 &argv(&["prog", "--server", "http://x", "checkout", "main"], &[]),
                 REMOVED
             ),
