@@ -409,13 +409,16 @@ server stops the land at its next check, and the land stays `PENDING`.
 | `result_changeset_id` | When `LANDED`: the rebased changeset, which was the tip of the ref when the land finished. Empty otherwise. |
 | `detail` | Why the land is `CONFLICT` or `REJECTED`, for people. Empty when `LANDED`. |
 | `conflict_paths` | When `CONFLICT` from step 4: the paths that conflict. Empty otherwise. |
+| `reject_reason` | When `REJECTED`: why the land can never succeed, as one `LandRejectReason` value: `NEEDS_ONE_PARENT` (the changeset does not hold exactly one parent), `MISSING_REF` (the changeset names a ref the repo does not hold), `BASE_NOT_ON_HISTORY` (the base is not on the ref's first-parent history) or `ABANDONED` (the land stayed pending past its deadline, so the server's stale-land sweep stopped it; retry with a new request key). `UNSPECIFIED` for every other state. When `REJECTED` carries `UNSPECIFIED`, no reason was given: the server that rejected it was older than this field, or the row predates it - read `detail`. Programs match on this field; people read `detail`. |
 
 | State | Meaning | Final |
 |---|---|---|
 | `PENDING` | Recorded, not finished. | No |
 | `LANDED` | The ref moved to `result_changeset_id`. | Yes |
 | `CONFLICT` | A change on the ref after the base touched the same paths, or the changes do not apply to the head's tree. The client re-reads those paths on the ref, makes a new changeset on the new head, and lands that. | Yes |
-| `REJECTED` | The land cannot succeed as asked. | Yes |
+| `REJECTED` | The land cannot succeed as asked; `reject_reason` says why. | Yes |
+
+A client that names a `reject_reason` must still read `detail`: a server older than this field answers `REJECTED` with `UNSPECIFIED` and puts the reason in `detail`.
 
 **Request keys and retries.**
 
@@ -1020,8 +1023,9 @@ order is daemon, cache, server. These rules hold for any tier:
   cache, which covers one step of the server, the cache's own three waits
   of 30 s, and 30 s to spare. On a timeout or a wait that ends, the tier
   fails with `UNAVAILABLE`. A caller's deadline passes down. A tier reads
-  the caller's `grpc-timeout`, ends every wait at it less a margin (a tenth
-  of it, at most 1 s), and sends what is left of it upstream as
+  the caller's `grpc-timeout`, ends every wait at it less a margin (a
+  tenth of it, but at least 50 ms, never more than half of it, and at
+  most 1 s), and sends what is left of it upstream as
   `grpc-timeout`. So the status of the deepest process reaches the caller
   in time, for any deadline. A caller whose deadline passes stops waiting,
   and the fetch that another caller with a later deadline waits for goes

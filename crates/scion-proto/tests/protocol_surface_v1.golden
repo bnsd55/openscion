@@ -71,9 +71,15 @@ LandRequest.changeset_id:2:bytes
 LandRequest.repo:1:string
 LandRequest.request_key:4:string
 LandRequest.target_ref:3:string
+LandRejectReason.LAND_REJECT_REASON_ABANDONED:4
+LandRejectReason.LAND_REJECT_REASON_BASE_NOT_ON_HISTORY:3
+LandRejectReason.LAND_REJECT_REASON_MISSING_REF:2
+LandRejectReason.LAND_REJECT_REASON_NEEDS_ONE_PARENT:1
+LandRejectReason.LAND_REJECT_REASON_UNSPECIFIED:0
 LandResponse.conflict_paths:5:repeated bytes
 LandResponse.detail:4:string
 LandResponse.land_id:1:string
+LandResponse.reject_reason:6:LandRejectReason
 LandResponse.result_changeset_id:3:bytes
 LandResponse.state:2:LandState
 LandState.LAND_STATE_CONFLICT:3
