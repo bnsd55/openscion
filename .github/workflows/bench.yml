@@ -7,6 +7,11 @@ name: bench
 # output are how that shows.
 on:
   workflow_dispatch:
+    inputs:
+      read_profile:
+        description: "Profile the read path instead of the envelope jobs."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -21,6 +26,7 @@ env:
 jobs:
   checkout:
     name: checkout vs git clone
+    if: ${{ !inputs.read_profile }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     services:
@@ -126,4 +132,55 @@ jobs:
         with:
           name: capacity-artifacts
           path: ${{ runner.temp }}/capacity-artifacts/
+          if-no-files-found: error
+
+  # The read path, taken apart (issue #817's step 1): a checkout of many
+  # small files and of few large ones, straight from the server and
+  # through the cache, cold and warm. Like the land profile: a person
+  # asks for it by name, the envelope jobs skip it, and its product is
+  # the breakdown table, not an envelope.
+  read-profile:
+    name: read profile
+    if: ${{ inputs.read_profile }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      # The profile's server keeps its metadata in Postgres, in the
+      # schema pg_url_for names for its data directory.
+      postgres:
+        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        env:
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: scion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: protoc
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: the harness needs jq
+        run: |
+          set -euo pipefail
+          command -v jq > /dev/null || sudo apt-get update -qq && sudo apt-get install -y -qq jq
+      - name: profile the read path
+        env:
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+          CAPACITY_MACHINE: "GitHub ubuntu-24.04 hosted runner: 4 vCPU, 16 GiB RAM, ~144 GiB SSD"
+        run: scripts/read-profile.sh
+      - name: upload the raw output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: read-profile-artifacts
+          path: ${{ runner.temp }}/read-profile-artifacts/
           if-no-files-found: error
