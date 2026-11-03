@@ -71,6 +71,7 @@ LandRequest.changeset_id:2:bytes
 LandRequest.repo:1:string
 LandRequest.request_key:4:string
 LandRequest.target_ref:3:string
+LandRejectReason.LAND_REJECT_REASON_ABANDONED:4
 LandRejectReason.LAND_REJECT_REASON_BASE_NOT_ON_HISTORY:3
 LandRejectReason.LAND_REJECT_REASON_MISSING_REF:2
 LandRejectReason.LAND_REJECT_REASON_NEEDS_ONE_PARENT:1

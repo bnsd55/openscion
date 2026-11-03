@@ -134,7 +134,8 @@ impl LandState {
 /// matches on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LandRejectReason {
-    /// Nothing is wrong with the stored data; the land carries no reason.
+    /// The land is not rejected, or an older server rejected it without
+    /// naming a reason.
     Unspecified,
     /// The changeset does not hold exactly one parent.
     NeedsOneParent,
@@ -142,6 +143,9 @@ pub enum LandRejectReason {
     MissingRef,
     /// The changeset's base is not on the ref's first-parent history.
     BaseNotOnHistory,
+    /// The server gave up: the land stayed pending past its deadline, so
+    /// the stale-land sweep stopped it. A retry needs a new request key.
+    Abandoned,
 }
 
 impl LandRejectReason {
@@ -151,6 +155,7 @@ impl LandRejectReason {
             Self::NeedsOneParent => "needs_one_parent",
             Self::MissingRef => "missing_ref",
             Self::BaseNotOnHistory => "base_not_on_history",
+            Self::Abandoned => "abandoned",
         }
     }
 
@@ -160,6 +165,7 @@ impl LandRejectReason {
             "needs_one_parent" => Ok(Self::NeedsOneParent),
             "missing_ref" => Ok(Self::MissingRef),
             "base_not_on_history" => Ok(Self::BaseNotOnHistory),
+            "abandoned" => Ok(Self::Abandoned),
             other => Err(Error::Corrupt(format!(
                 "unknown land reject reason {other:?}"
             ))),
@@ -3709,6 +3715,11 @@ mod tests {
         assert_eq!(state, "rejected");
         assert!(detail.contains("stale"), "{detail}");
         assert!(detail.contains("retry with a new request key"), "{detail}");
+        // The sweep is its own rejection site: its land reads back
+        // ABANDONED, not the UNSPECIFIED an older row reads.
+        let out = get_land(&f.store, &caller(), "r", recorded.1.land_id).unwrap();
+        assert_eq!(out.state, LandState::Rejected);
+        assert_eq!(out.reject_reason, LandRejectReason::Abandoned);
 
         // The same request key cannot resume a rejected land, so the
         // client retries with a new key, which counts as a new land.

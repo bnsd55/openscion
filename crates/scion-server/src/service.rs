@@ -958,6 +958,7 @@ fn land_response(outcome: LandOutcome) -> LandResponse {
             LandRejectReason::NeedsOneParent => WireReason::NeedsOneParent,
             LandRejectReason::MissingRef => WireReason::MissingRef,
             LandRejectReason::BaseNotOnHistory => WireReason::BaseNotOnHistory,
+            LandRejectReason::Abandoned => WireReason::Abandoned,
         },
         _ => WireReason::Unspecified,
     };
@@ -2559,6 +2560,40 @@ mod tests {
         let caller = Caller(scion_proto::runtime::auth::DEFAULT_PRINCIPAL.into());
         request.extensions_mut().insert(caller);
         request
+    }
+
+    #[test]
+    fn land_response_maps_every_reason_and_forces_unspecified_off_rejected() {
+        use scion_proto::v1::{LandRejectReason as WireReason, LandState as Wire};
+        let outcome = |state: LandState, reason: LandRejectReason| LandOutcome {
+            land_id: 1,
+            state,
+            result: None,
+            previous: None,
+            moved: false,
+            detail: String::new(),
+            conflict_paths: vec![],
+            reject_reason: reason,
+        };
+        let wire = [
+            (LandRejectReason::Unspecified, WireReason::Unspecified),
+            (LandRejectReason::NeedsOneParent, WireReason::NeedsOneParent),
+            (LandRejectReason::MissingRef, WireReason::MissingRef),
+            (LandRejectReason::BaseNotOnHistory, WireReason::BaseNotOnHistory),
+            (LandRejectReason::Abandoned, WireReason::Abandoned),
+        ];
+        for (reason, want) in wire {
+            let reply = land_response(outcome(LandState::Rejected, reason));
+            assert_eq!(reply.state(), Wire::Rejected);
+            assert_eq!(reply.reject_reason(), want, "{reason:?}");
+        }
+        // A reason on a state that must not carry one does not leak.
+        let reply = land_response(outcome(
+            LandState::Landed,
+            LandRejectReason::Abandoned,
+        ));
+        assert_eq!(reply.state(), Wire::Landed);
+        assert_eq!(reply.reject_reason(), WireReason::Unspecified);
     }
 
     #[test]

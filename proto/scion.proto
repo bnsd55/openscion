@@ -155,6 +155,9 @@ enum LandRejectReason {
   LAND_REJECT_REASON_MISSING_REF = 2;
   // The changeset's base is not on the ref's first-parent history.
   LAND_REJECT_REASON_BASE_NOT_ON_HISTORY = 3;
+  // The server gave up: the land stayed pending past its deadline, so
+  // the stale-land sweep stopped it. A retry needs a new request key.
+  LAND_REJECT_REASON_ABANDONED = 4;
 }
 
 message LandResponse {

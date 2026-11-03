@@ -82,6 +82,7 @@ fn print_outcome(json: bool, reply: &LandResponse) -> Result<()> {
             "result": result.map(|id| id.to_string()),
             "detail": reply.detail,
             "conflict_paths": paths,
+            "reject_reason": reply.reject_reason().as_str_name(),
         });
         // An array element carries no sibling field, so the exact bytes
         // travel as a whole sibling array, in the same order, only when a

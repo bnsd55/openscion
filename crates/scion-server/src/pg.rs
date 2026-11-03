@@ -3862,11 +3862,11 @@ impl MetaTx for PgTx<'_> {
             }
             land_id
         } else {
-            let (state, detail) = if self.get_ref(repo, &req.target_ref)?.is_some() {
-                (LandState::Pending, String::new())
+            let (state, detail, reason) = if self.get_ref(repo, &req.target_ref)?.is_some() {
+                (LandState::Pending, String::new(), LandRejectReason::Unspecified)
             } else {
                 let detail = format!("ref {:?} does not exist", req.target_ref);
-                (LandState::Rejected, detail)
+                (LandState::Rejected, detail, LandRejectReason::MissingRef)
             };
             if let Some(limit) = pending_limit {
                 // The pending-lands quota counts new pending rows. A retry
@@ -3900,8 +3900,7 @@ impl MetaTx for PgTx<'_> {
                     "INSERT INTO lands
                      (repo_id, caller, request_key, target_ref, input_cs, state, detail,
                       reject_reason, finished_at, created_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7,
-                         CASE WHEN $6 = 'rejected' THEN 'missing_ref' ELSE 'unspecified' END,
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
                          CASE WHEN $6 = 'pending' THEN NULL ELSE now_epoch() END,
                          now_epoch())
                      ON CONFLICT DO NOTHING
@@ -3914,6 +3913,7 @@ impl MetaTx for PgTx<'_> {
                         P::bytes(&id_bytes(req.changeset.as_bytes())),
                         P::text(state.as_str()),
                         P::text(&detail),
+                        P::text(reason.as_str()),
                     ],
                 )?
                 .map(|row| row.get::<_, i64>(0));
@@ -3952,7 +3952,8 @@ impl MetaTx for PgTx<'_> {
     /// Rejects a land that is still pending; 1 if it changed, else 0.
     fn reject_stale_land(&mut self, land_id: i64, detail: String) -> Result<u64> {
         let changed = self.c.execute(
-            "UPDATE lands SET state = 'rejected', detail = $1, finished_at = now_epoch()
+            "UPDATE lands SET state = 'rejected', detail = $1, \
+                 reject_reason = 'abandoned', finished_at = now_epoch()
              WHERE land_id = $2 AND state = 'pending'",
             &[P::text(&detail), P::i64(land_id)],
         )?;
