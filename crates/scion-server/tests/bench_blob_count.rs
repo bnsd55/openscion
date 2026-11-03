@@ -71,6 +71,32 @@ fn fill(backend: &Backend, count: u64) {
     );
 }
 
+/// The bytes this process asked of the storage device since the last
+/// call, from `/proc/self/io`'s `read_bytes`. A page-cache hit never
+/// reaches this counter, so against the blob count it says whether the
+/// walk reads storage per file.
+#[cfg(target_os = "linux")]
+fn storage_read_delta() -> u64 {
+    thread_local! {
+        static LAST: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    }
+    let now: Option<u64> = std::fs::read_to_string("/proc/self/io")
+        .ok()?
+        .lines()
+        .find(|line| line.starts_with("read_bytes:"))?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok();
+    Some(LAST.with(|slot| slot.replace(now).map_or(0, |last| now.unwrap_or(0) - last))).unwrap_or(0)
+}
+
+/// The counter is Linux's; elsewhere the walk names no storage reads.
+#[cfg(not(target_os = "linux"))]
+fn storage_read_delta() -> u64 {
+    0
+}
+
 #[test]
 #[ignore = "a measurement, not a proof: run it in release mode with SCION_BENCH_BLOB_COUNT set"]
 fn blob_count_costs() {
@@ -106,6 +132,12 @@ fn blob_count_costs() {
         format!("{:.3}", started.elapsed().as_secs_f64()),
     );
     main_line("fsck_problems", report.problems.len());
+    // The bytes the walk asked of the storage device, not the page
+    // cache: /proc/self/io's read_bytes counts them on Linux, and the
+    // runner is Linux. Against the count and the blob bytes this says
+    // whether a large walk pays a storage read per file.
+    let fsck_reads = storage_read_delta();
+    main_line("fsck_storage_read_bytes", fsck_reads);
 
     // gc --dry-run walks the blob files and answers what it would
     // reclaim; it writes nothing.
@@ -121,6 +153,7 @@ fn blob_count_costs() {
         "gc_dry_run_seconds",
         format!("{:.3}", started.elapsed().as_secs_f64()),
     );
+    main_line("gc_storage_read_bytes", storage_read_delta());
     main_line("gc_dry_run_files_young", report.files_young);
     main_line("gc_dry_run_files_removed", report.files_removed);
 }
