@@ -220,14 +220,15 @@ pub struct Access {
     tokens: Vec<([u8; 32], String)>,
     /// By principal and repo.
     grants: HashMap<(String, String), Grant>,
-    /// The one principal of `--token`, which may read and write every repo.
+    /// The one principal of the single-principal mode, which may read
+    /// and write every repo.
     everything: Option<String>,
 }
 
 impl Access {
     /// How many tokens the access carries: one per line of an access
-    /// file, or the one token of `--token`. The audit's start line
-    /// names it, so an operator can match a config to a log.
+    /// file, or the one token of the single-principal mode. The audit's
+    /// start line names it, so an operator can match a config to a log.
     #[must_use]
     pub fn token_count(&self) -> usize {
         self.tokens.len()

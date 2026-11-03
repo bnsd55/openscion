@@ -45,11 +45,11 @@ struct Cli {
     /// The key of `--tls-client-cert` (PEM).
     #[arg(long, requires = "tls_client_cert", value_name = "FILE")]
     tls_client_key: Option<PathBuf>,
-    /// File with the bearer token of `--token`, read like the access
+    /// File with the bearer token for this tier, read like the access
     /// file: the owner alone may read it, and a symlink is refused.
     #[arg(long, value_name = "FILE")]
     token_file: Option<PathBuf>,
-    /// File with the bearer token of `--upstream-token`, read like the
+    /// File with the bearer token for the upstream, read like the
     /// access file.
     #[arg(long, value_name = "FILE")]
     upstream_token_file: Option<PathBuf>,

@@ -56,11 +56,11 @@ struct Cli {
     /// Most object bytes to keep in memory.
     #[arg(long, default_value_t = 1 << 30)]
     max_bytes: usize,
-    /// File with the bearer token of `--token`, read like the access
+    /// File with the bearer token for this tier, read like the access
     /// file: the owner alone may read it, and a symlink is refused.
     #[arg(long, value_name = "FILE")]
     token_file: Option<PathBuf>,
-    /// File with the bearer token of `--upstream-token`, read like the
+    /// File with the bearer token for the upstream, read like the
     /// access file.
     #[arg(long, value_name = "FILE")]
     upstream_token_file: Option<PathBuf>,
