@@ -298,7 +298,7 @@ pub fn store_changeset(
     // batching owns both shapes already — its pending buffer answers
     // the reads and its flush deletes once per kind — so it keeps them.
     if !c.changeset_batching() {
-        c.set_defer_derived_deletes(true);
+        c.defer_derived_deletes();
         let mut css = cs.parents().to_vec();
         css.push(cs.id());
         c.preload_derived(

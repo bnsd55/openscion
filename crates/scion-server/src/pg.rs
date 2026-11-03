@@ -1506,7 +1506,7 @@ pub struct PgTx<'a> {
     derived_preload: Option<&'a mut DerivedPreload>,
     /// The `delete_derived_below` calls a deferring write path made: the
     /// commit deletes with one statement, honoring the summed limits per
-    /// kind and version. Only `set_defer_derived_deletes` fills it.
+    /// kind and version. Only `defer_derived_deletes` fills it.
     deferred_deletes: Vec<(String, i64, i64)>,
     /// Whether `delete_derived_below` defers to the commit. Off for the
     /// importer's batching (the flush owns those deletes) and for the
@@ -3754,13 +3754,13 @@ impl MetaTx for PgTx<'_> {
         Ok(())
     }
 
-    /// Turns the write path's deferral of `delete_derived_below` on or
-    /// off. The collected deletes wait for the commit's flush.
-    fn set_defer_derived_deletes(&mut self, on: bool) {
-        self.defer_derived = on;
-        if !on {
-            self.deferred_deletes.clear();
-        }
+    /// Defers the write path's `delete_derived_below` to the commit:
+    /// the collected deletes wait for the commit's flush, and the
+    /// deferral lasts to the commit. One-way - there is no off, because
+    /// an off would silently drop deletes the transaction already
+    /// promised.
+    fn defer_derived_deletes(&mut self) {
+        self.defer_derived = true;
     }
 
     /// The view that the per-tree memo holds for a (rule set, version,

@@ -415,10 +415,12 @@ pub trait MetaTx {
     /// Makes [`delete_derived_below`](Self::delete_derived_below) wait
     /// for the commit: the transaction collects the calls and the commit
     /// deletes with one statement, honoring each call's limit summed per
-    /// kind. For write paths whose callers never use the count. A
-    /// backend that does not defer keeps deleting per call, which is
-    /// also right.
-    fn set_defer_derived_deletes(&mut self, _on: bool) {}
+    /// kind. The deferral lasts to the commit and is one-way - a
+    /// transaction that turns it on cannot turn it off, so a caller that
+    /// needs `delete_derived_below`'s count must not share a transaction
+    /// with a write path that defers. A backend that does not defer
+    /// keeps deleting per call, which is also right.
+    fn defer_derived_deletes(&mut self) {}
 
     /// The view that a rule-set digest of `version` derives for the real
     /// tree `tree` under the path-context digest `ctx`, if derived already.
