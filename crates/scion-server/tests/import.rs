@@ -1369,11 +1369,19 @@ fn a_rolled_back_import_batch_verifies_again_when_it_reruns() {
     let report = try_import(&store, &git, &rev).unwrap();
     assert_eq!((report.commits, report.imported), (40, 40));
     assert_eq!(report.verified, clean_report.verified);
+    // The count the rolled-back batch adds depends on where the plan
+    // splits into transactions: the budget (1 s of wall clock) cuts a
+    // batch whose recording is slow, and the injected failure fires on
+    // the first transaction that commits - batches before it keep their
+    // commits and their checks, and only the failed batch runs again.
+    // So the count is one pass plus the failed batch's own checks: more
+    // than one pass (the proof this test pins), at most two.
     let walks = CHECKS.get();
-    assert_eq!(
-        walks,
-        2 * one_pass,
-        "the checks of the rolled-back batch ran again"
+    assert!(
+        walks > one_pass && walks <= 2 * one_pass,
+        "the checks of the rolled-back batch ran again: {walks} of [{}, {}]",
+        one_pass + 1,
+        2 * one_pass
     );
 }
 
