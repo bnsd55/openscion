@@ -48,7 +48,9 @@ its files private, and serves. The log's `serving` line names the address.
 grpc_health_probe -addr 127.0.0.1:7878 -service scion.v1.Scion
 ```
 
-The readiness probe answers `SERVING` once the server listens; the empty
+The probe binary is not part of this repository and does not come with
+the platform; section 6 names where it comes from. The readiness probe
+answers `SERVING` once the server listens; the empty
 service name is the liveness probe (`grpc_health_probe -addr
 127.0.0.1:7878` with no `-service`).
 
@@ -66,7 +68,11 @@ SCION_SERVER=http://127.0.0.1:7878 scn --token-file /srv/scion-token log main
 
 The client's global flags (`--server`, `--token-file`) go before the
 subcommand; the environment forms are `SCION_SERVER` and `SCION_TOKEN`.
-The import can run while the server serves.
+The import can run while the server serves. Every subcommand that opens
+the store — `import`, `fsck`, `gc`, `derive`, `ticket-key`, `restore` —
+takes the same metadata flags as `serve` (see "The metadata in
+Postgres"): a Postgres-backed import without them answers
+"no Postgres URL".
 
 Proof: crates/scion-server/tests/first_boot.rs::a_first_boot_serves_probes_and_reads_back
 
@@ -106,8 +112,16 @@ install -d -m 0700 /srv/scion
 SCION_TOKEN=<TOKEN> ./scion-server --data /srv/scion serve
 ```
 
-That is the whole deployment: clients talk to `127.0.0.1:7878` (or `--listen`
-HOST:PORT). `install -d -m 0700` makes the directory the mode it says, whatever
+That is the whole deployment: clients talk to `127.0.0.1:7878`. A
+different address is `serve`'s own flag, which sits after the
+subcommand like every other flag of it:
+
+```sh
+./scion-server --data /srv/scion serve --listen 127.0.0.1:7978
+```
+
+The health-probe and client lines above name the default port; point
+them at the port `--listen` chose. `install -d -m 0700` makes the directory the mode it says, whatever
 the umask is - under umask 002 (Ubuntu's user private groups) a plain `mkdir`
 makes a group-writable directory, and the server refuses it; the error names
 the chmod that fixes it. The data directory holds every blob and every row, so keep it
@@ -247,7 +261,8 @@ process you started.
 
 A cache serves object reads to a region and refuses every other call
 (`UNIMPLEMENTED`): the client resolves refs and reads paths on the server,
-and asks the cache only for objects. Each hop has its own token pair:
+and asks the cache only for objects. It listens on `127.0.0.1:7879` by
+default (`--listen` changes it). Each hop has its own token pair:
 (`--token`), and what it sends upstream (`--upstream-token`). A `scn`
 client's `--token` is what it sends, the other side of the pair of the tier
 in front of it.
@@ -265,8 +280,15 @@ holds at most `--snapshot-bytes` object bytes (256 MiB).
 The cache needs `--ticket-public-key` (the hex that `ticket-key` printed),
 and refuses to start without one: a cache that checked no ticket would
 serve every object it holds to any caller that names an object ID. A
-`scn` user then points reads at the cache with
-`scn checkout --server http://SERVER:7878 --objects http://CACHE:7879`.
+`scn` user then points reads at the cache; the checkout reads into the
+directory `--into` names, which must not exist, or be empty, and every
+global flag (`--server`, `--objects`, `--token-file`) goes before the
+subcommand:
+
+```sh
+scn --server http://SERVER:7878 --objects http://CACHE:7879 \
+  --token-file /srv/scion-token checkout --into /srv/checkouts/my-repo main
+```
 
 One token rule the flag list hides (section 2 says it for the daemon
 chain): `scn` sends its one `--token` on every call, to the server and to
@@ -301,8 +323,17 @@ token a user holds must be accepted by the server **and** by that user's
 daemon. With the chain above, the daemon of a user runs
 `--token <USER_TOKEN>`, where `<USER_TOKEN>` is that user's token at the
 server too. A new node can start warm: copy a snapshot file from the cache
-(`--snapshot DIR --snapshot-repo R`, refreshed every `--snapshot-every`
-seconds) and start the daemon with `--seed FILE --seed-full-repo`. A snapshot
+(the cache makes it with `--snapshot DIR --snapshot-repo R`, refreshed
+every `--snapshot-every` seconds) and start the daemon with the same
+token pair the chain above teaches, plus the seed:
+
+```sh
+SCION_TOKEN=<USER_TOKEN> SCION_UPSTREAM_TOKEN=<CACHE_TOKEN> \
+  ./scion-daemon --data ~/.scion-daemon --upstream http://CACHE:7879 \
+  --seed /srv/snapshots/my-repo.snapshot --seed-full-repo
+```
+
+A snapshot
 holds every object of its repo by ID, so it is a full-repo credential: anyone
 who has the file can read what a folder read rule would hide from a partial
 reader, and a seeded daemon serves those paths, because it checks objects, not
@@ -853,10 +884,13 @@ Proof: crates/scion-server/tests/archive_attacks.rs::a_restored_store_does_not_c
 
 The schema version lives in the database. On open, a server migrates an
 older schema forward, one migration per released version, each in one
-transaction (the released Postgres migrations are table creations and
-a parent numbering; none rewrites data, so none takes long). Two rules:
+transaction (v0.1.0 shipped migrations 1–5: table creations and a parent
+numbering; migration 6 adds a land's reject reason. None rewrites data,
+so none takes long). Two rules:
 
-- A database with a **newer** schema than the binary refuses to open:
+- A database with a **newer** schema than the binary refuses to open,
+  with the build's own numbers — for a build one version behind a
+  database at 7, the refusal is
   `corrupt data: database schema version 7 is newer than this build (6)`.
   Run the old binary until you can upgrade, or restore a backup.
 - Other servers take the schema's advisory lock: one process migrates at
@@ -897,9 +931,13 @@ re-date such a commit in the git history and import again.
 So an upgrade is: stop the server (and any tiers that share the directory —
 none do by default), copy the directory as a backup (section 3), start the
 new binary, watch the log for the migration, run `fsck`. A store that
-has data logs its migration steps when a build migrates it; a first
-boot on a fresh, empty directory logs no migration - it says the store
-was created.
+has data logs its migration steps when a build migrates it — the open
+logs `migrating the metadata schema` with the from and to versions, one
+`the metadata schema migrated one step` line per step with the step's
+time, and `the metadata migration is done` when it ends; a first boot on
+a fresh, empty directory logs `the metadata schema was created`, and an
+open that migrates nothing logs no migration line at all - only the
+usual `serving` line.
 
 Where the binaries come from. v0.1.0 is a source release: build the
 version you need from its signed tag (`docs/RELEASING.md`):
@@ -915,17 +953,14 @@ the previous build's binaries beside the new ones **before** an
 upgrade: the rollback below needs them, because rebuilding the old tag
 mid-incident needs the toolchain and the time you do not have.
 
-Schema 7 (tree
-entry sizes, `#172`) drops every stored tree and its derived rows, so the
-first queries after it re-derive trees from the stored changesets; the
-blobs and changesets stay. A tier's store may keep tree bytes of the old
-format under their old IDs: nothing asks for those IDs again, and the
-format's hash check guards what it does serve. New binaries can
-also add derived data kinds; a server fills what a query needs, and
+New binaries can
+add derived data kinds; a server fills what a query needs, and
 `scion-server derive --kind root_tree|commit_graph|path_history --ref R`
 backfills a whole history in steps when you want it done before the first
-query (it opens the directory as the server, so with the server stopped, and
-it is safe to repeat).
+query. Unlike the gc, derive is not safe beside a live server: it takes
+the one-server lock, so run it with the server stopped (an attempt
+beside a live server refuses with "another server holds this store").
+It is safe to repeat.
 
 Proof: crates/scion-server/tests/crash_pg.rs::a_kill_during_a_schema_upgrade_leaves_one_whole_version (behaviour, no command: the section's upgrade steps are prose; the proof is the kill's own timing inside the migration)
 
@@ -1010,7 +1045,10 @@ success, counted on the real runs only —
 stopped firing, shows up as a timestamp that stops moving, not as a gap
 in the scrape.
 - Derived data can be rebuilt with `scion-server derive --kind ... --ref
-  ...` (server stopped); it is safe to repeat and removes rows of older
+  ...`. Unlike the gc, it is not safe beside a live server: it takes the
+  one-server lock, so run it with the server stopped (beside a live
+  server it refuses with "another server holds this store"). It is safe
+  to repeat and removes rows of older
   versions itself.
 - A cache is stateless except its snapshots: its whole state is memory plus
   the snapshot files, so restart it whenever you like.
