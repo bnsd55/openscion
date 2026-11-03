@@ -89,7 +89,7 @@ async fn a_wrong_token_hints_at_the_token() {
     let stderr = scn_stderr(&url, "wrong").await;
     assert!(
         stderr.contains(
-            "check: compare --token (or SCION_TOKEN) with the token the server was given"
+            "check: compare SCION_TOKEN (or --token-file FILE) with the token the server was given"
         ),
         "{stderr}"
     );
