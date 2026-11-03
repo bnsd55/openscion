@@ -274,7 +274,7 @@ fn a_sweep_drops_at_most_fifty_oldest_first() {
     let survivors: Vec<String> = client
         .query(
             "SELECT schema FROM public.scion_test_schemas
-             WHERE schema LIKE $1 ORDER BY started DESC",
+             WHERE schema LIKE $1 ORDER BY started ASC, schema ASC",
             &[&format!("scion_test_cap{pid}_%")],
         )
         .unwrap()
