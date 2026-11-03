@@ -27,6 +27,10 @@ const REPO: &str = "r";
 
 /// The bytes of the fixture: a name, an author and a message whose bytes
 /// are not valid UTF-8 (a `0x80` byte), and one name that is plain.
+mod common;
+
+use common::stall_probe;
+
 const RAW_NAME: &[u8] = b"raw\xff.txt";
 const RAW_MESSAGE: &[u8] = b"a \xff message";
 const RAW_AUTHOR: &[u8] = b"Ad\xffy";
@@ -209,6 +213,7 @@ impl Fixture {
         let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let read_handle = store.clone();
+        runtime.spawn(stall_probe("json_raw_bytes"));
         runtime.spawn(service::serve(
             store,
             listener,

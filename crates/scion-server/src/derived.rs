@@ -646,7 +646,9 @@ pub(crate) fn on_write<K: Kind>(
     // transaction's own changesets: their ids are new, so the stored
     // check cannot find anything, and the values the transaction
     // inserted answer the parents' reads. The flush lands the rows.
-    let stored = if c.changeset_batching() {
+    // A changeset this transaction inserted itself is the same case
+    // without the batching: its row cannot hold a value yet.
+    let stored = if c.changeset_batching() || c.inserted_this_tx(id) {
         None
     } else {
         load::<K>(c, id)?

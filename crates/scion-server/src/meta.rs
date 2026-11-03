@@ -39,7 +39,7 @@ use gix::ObjectId;
 use crate::auth::Caller;
 use crate::error::{Error, Result};
 use crate::history::NodeId;
-use crate::land::{LandOutcome, LandRequest, LandState};
+use crate::land::{LandOutcome, LandRejectReason, LandRequest, LandState};
 
 /// One pending land the stale-land sweep found, with everything the
 /// answer to its intent line names: the repo (by ID for the ref's lock,
@@ -122,6 +122,21 @@ pub trait Meta: Send + Sync + 'static {
     /// What `f` returns, or a database error from taking the connection.
     fn read_unflushed<T>(&self, f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>) -> Result<T>;
 
+    /// A read that sees the newest committed state per statement, on a
+    /// client that no writer queues behind. The caller's writes happen
+    /// later, in their own transaction, and whatever guard its rows
+    /// carry is what stops a double write - not this read.
+    ///
+    /// The default runs a plain read: a backend whose reads already see
+    /// the newest committed state needs no override.
+    ///
+    /// # Errors
+    ///
+    /// What `f` returns, or a database error from taking the client.
+    fn read_latest<T>(&self, f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>) -> Result<T> {
+        self.read(f)
+    }
+
     /// Runs `f` in one write transaction. It commits when `f` returns `Ok`
     /// and rolls back otherwise, and returns before the commit is durable.
     /// Every backend runs `f` exactly once; a retryable error comes back
@@ -152,20 +167,6 @@ pub trait Meta: Send + Sync + 'static {
     /// As [`Meta::write`].
     fn write_slot_holder<T>(&self, f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>) -> Result<T> {
         self.write(f)
-    }
-
-    /// A read that rides the write client, for a caller that holds its
-    /// ref's slot, with the same lane entry. The land's finish rides
-    /// this until its reads move to the read pool.
-    ///
-    /// # Errors
-    ///
-    /// As [`Meta::read_unflushed`].
-    fn read_unflushed_slot_holder<T>(
-        &self,
-        f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>,
-    ) -> Result<T> {
-        self.read_unflushed(f)
     }
 
     /// Returns once every commit made before this call is durable. No
@@ -413,6 +414,43 @@ pub trait MetaTx {
     /// Deletes up to `limit` derived values of `kind` below `version`.
     fn delete_derived_below(&mut self, kind: &str, version: u32, limit: usize) -> Result<usize>;
 
+    /// Whether the transaction itself inserted this changeset. A write
+    /// path asks to skip a stored-value read that cannot find anything:
+    /// the row of a changeset the transaction inserted can only have
+    /// been written by the transaction itself, and the transaction's
+    /// memory of its derived writes answers that read instead.
+    fn inserted_this_tx(&self, _cs: ChangesetId) -> bool {
+        false
+    }
+
+    /// Reads the derived values of the named kinds, at the kind's own
+    /// version, for the named changesets into the transaction's own
+    /// memory, one statement, so the write path's per-value reads answer
+    /// without round trips. A backend that holds no such memory does
+    /// nothing, which stays correct: the reads then go to the database
+    /// as before.
+    ///
+    /// # Errors
+    ///
+    /// Database errors.
+    fn preload_derived(
+        &mut self,
+        _kinds: &[(&'static str, u32)],
+        _css: &[ChangesetId],
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Makes [`delete_derived_below`](Self::delete_derived_below) wait
+    /// for the commit: the transaction collects the calls and the commit
+    /// deletes with one statement, honoring each call's limit summed per
+    /// kind. The deferral lasts to the commit and is one-way - a
+    /// transaction that turns it on cannot turn it off, so a caller that
+    /// needs `delete_derived_below`'s count must not share a transaction
+    /// with a write path that defers. A backend that does not defer
+    /// keeps deleting per call, which is also right.
+    fn defer_derived_deletes(&mut self) {}
+
     /// The view that a rule-set digest of `version` derives for the real
     /// tree `tree` under the path-context digest `ctx`, if derived already.
     /// The changeset's root view is the row of its real root tree under the
@@ -537,6 +575,9 @@ pub trait MetaTx {
     fn land_outcome(&mut self, repo: RepoId, caller: &Caller, land_id: i64) -> Result<LandOutcome>;
 
     /// Moves a pending land to its final state, and returns the outcome.
+    /// `reject_reason` says why a REJECTED land can never succeed; the
+    /// other states carry [`LandRejectReason::Unspecified`].
+    #[allow(clippy::too_many_arguments)] // the one row's own columns: state, result, detail, paths and reason land together
     fn set_land_state(
         &mut self,
         repo: RepoId,
@@ -545,6 +586,7 @@ pub trait MetaTx {
         result: Option<ChangesetId>,
         detail: String,
         conflict_paths: Vec<RepoPath>,
+        reject_reason: LandRejectReason,
     ) -> Result<LandOutcome>;
 
     /// Records that the git commits became the changesets, all of the

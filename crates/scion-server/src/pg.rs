@@ -45,8 +45,8 @@ use crate::error::{Error, Result, Storage};
 use crate::history::NodeId;
 use crate::import::SHA1;
 use crate::land::{
-    EXPIRE_PER_LAND, LAND_RETENTION_SECS, LandOutcome, LandRequest, LandState, decode_paths,
-    encode_paths,
+    EXPIRE_PER_LAND, LAND_RETENTION_SECS, LandOutcome, LandRejectReason, LandRequest, LandState,
+    decode_paths, encode_paths,
 };
 use crate::meta::{FsckDerivedRow, Meta, MetaTx, RefState, RepoChangeset, RepoId, StaleLand};
 use crate::store::Blobs;
@@ -63,7 +63,7 @@ pub(crate) mod test_hooks;
 pub(crate) mod damage;
 
 /// The schema version this build makes and reads.
-pub(crate) const PG_SCHEMA_VERSION: u32 = 5;
+pub(crate) const PG_SCHEMA_VERSION: u32 = 6;
 
 /// How long a call may wait for a Postgres reader before the server
 /// answers [`Error::Unavailable`]. Well below the 600 s call deadline:
@@ -107,6 +107,7 @@ const PG_MIGRATIONS: [&str; PG_SCHEMA_VERSION as usize] = [
     include_str!("../migrations/postgres/0003_view_trees.sql"),
     include_str!("../migrations/postgres/0004_store_uuid.sql"),
     include_str!("../migrations/postgres/0005_parent_numbering.sql"),
+    include_str!("../migrations/postgres/0006_land_reason.sql"),
 ];
 
 /// The fence of a process that lost the one-server lock. The worker of
@@ -157,11 +158,11 @@ const WRITER_LANE_AHEAD: usize = 4;
 
 /// The write lane's state: who holds the write client, who waits, and
 /// how the lane orders them. A land that holds its ref's lock (the
-/// settle's commit; until the reads move to the read pool, the plan's
-/// read too) enters ahead of other waiting writers, because its wait
-/// costs the whole queue of its ref; the bound keeps the other writers
-/// moving. Without a slot holder waiting, the lane is today's plain
-/// queue.
+/// settle's commit and the sweep's reject; the finish's reads ride the
+/// read pool now) enters ahead of other waiting writers, because its
+/// wait costs the whole queue of its ref; the bound keeps the other
+/// writers moving. Without a slot holder waiting, the lane is today's
+/// plain queue.
 #[derive(Default)]
 struct WriterGate {
     /// The write client is out with a transaction.
@@ -1163,31 +1164,14 @@ impl Pg {
     }
 
     /// A read on the write client, so it sees the caller's own commits.
+    /// The land's finish reads now ride the read pool (read_latest), so
+    /// the lane serves only the writes that hold their ref's slot.
     pub(crate) fn read_unflushed<T>(
         &self,
         f: impl FnOnce(&mut PgTx<'_>) -> Result<T>,
     ) -> Result<T> {
-        self.read_unflushed_in_lane(f, false)
-    }
-
-    /// [`Pg::read_unflushed`], as a caller that holds its ref's slot:
-    /// the read enters the write lane ahead of other waiting writers.
-    /// The land's finish rides this until its reads move to the read
-    /// pool.
-    pub(crate) fn read_unflushed_for_slot_holder<T>(
-        &self,
-        f: impl FnOnce(&mut PgTx<'_>) -> Result<T>,
-    ) -> Result<T> {
-        self.read_unflushed_in_lane(f, true)
-    }
-
-    fn read_unflushed_in_lane<T>(
-        &self,
-        f: impl FnOnce(&mut PgTx<'_>) -> Result<T>,
-        slot_holder: bool,
-    ) -> Result<T> {
         self.check_fenced()?;
-        let (mut writer, _waiting) = self.lock_writer(slot_holder);
+        let (mut writer, _waiting) = self.lock_writer(false);
         let mut pending = Vec::new();
         let mut derived = DerivedPending::default();
         let mut preload = std::collections::HashMap::new();
@@ -1200,10 +1184,52 @@ impl Pg {
             cs_pending: Some(&mut pending),
             derived_pending: Some(&mut derived),
             derived_preload: Some(&mut preload),
+            deferred_deletes: Vec::new(),
+            defer_derived: false,
             history_pending: Some(&mut history),
             ended: true,
         };
         f(&mut pg)
+    }
+
+    /// A read on one client of the pool, in one READ COMMITTED READ ONLY
+    /// transaction with the pooled read's bounds: every statement sees
+    /// the newest committed state, and none of them queues behind the
+    /// write client. The land's outcome check and plan ride this: their
+    /// writes happen later, in their own transaction, and the land row's
+    /// pending guard is what stops a twin call, not a shared read.
+    ///
+    /// READ COMMITTED is the per-statement newest state the land's
+    /// outcome check and plan ran under on the writer's autocommit.
+    /// READ ONLY turns a write that slips onto this path into an error
+    /// (25006): a write on a pooled reader would land outside the
+    /// writer's lock and the collector's key, and must not be possible
+    /// to add silently. The statement and idle bounds keep an abandoned
+    /// read from holding a reader; the transaction rolls back at the
+    /// end, like every pooled read.
+    ///
+    /// # Errors
+    ///
+    /// What `f` returns, a database error from begin, or
+    /// [`Error::Unavailable`] when no reader was free in time.
+    pub(crate) fn read_latest<T>(&self, f: impl FnOnce(&mut PgTx<'_>) -> Result<T>) -> Result<T> {
+        self.check_fenced()?;
+        let mut reader = self.inner.readers.take(READER_WAIT)?;
+        let out = {
+            let mut tx = PgTx::begin_read(
+                reader.client(),
+                ReadIsolation::ReadCommitted,
+                READ_STATEMENT_TIMEOUT,
+                READ_IDLE_TIMEOUT,
+            )?;
+            let out = f(&mut tx);
+            // A read transaction: nothing to keep. The rollback's own error
+            // must not hide the error of `f`; the drop rolls back anyway.
+            let _ = tx.rollback();
+            out
+        };
+        drop(reader);
+        out
     }
 
     /// A strong read on one client of the pool. The read runs in one
@@ -1235,7 +1261,12 @@ impl Pg {
         self.check_fenced()?;
         let mut reader = self.inner.readers.take(wait)?;
         let out = {
-            let mut tx = PgTx::begin_read(reader.client(), statement, idle)?;
+            let mut tx = PgTx::begin_read(
+                reader.client(),
+                ReadIsolation::RepeatableRead,
+                statement,
+                idle,
+            )?;
             let out = f(&mut tx);
             // A read transaction: nothing to keep. The rollback's own error
             // must not hide the error of `f`; the drop rolls back anyway.
@@ -1382,6 +1413,42 @@ impl Pg {
                 }
                 #[cfg(any(test, feature = "test-hooks"))]
                 self.inner.committed.fetch_add(1, Ordering::Release);
+                // A write path that deferred its derived deletes hands
+                // them to the flush: one statement for the whole
+                // transaction, inside it, so a rollback takes the
+                // deletes with it and the end state is the one the
+                // per-call deletes would have reached.
+                if !tx.deferred_deletes.is_empty() {
+                    let kinds: Vec<String> = tx
+                        .deferred_deletes
+                        .iter()
+                        .map(|(k, _, _)| k.clone())
+                        .collect();
+                    let versions: Vec<i64> =
+                        tx.deferred_deletes.iter().map(|(_, v, _)| *v).collect();
+                    let steps: Vec<i64> = tx.deferred_deletes.iter().map(|(_, _, s)| *s).collect();
+                    let deleted = tx.c.execute(
+                        "WITH k AS (
+                             SELECT kind, version, SUM(step) AS step
+                             FROM unnest($1::text[], $2::int8[], $3::int8[]) AS t(kind, version, step)
+                             GROUP BY kind, version),
+                         v AS (
+                             SELECT d.ctid AS ctid, k.step AS step,
+                                    row_number() OVER (PARTITION BY d.kind
+                                                       ORDER BY d.version) AS rn
+                             FROM derived d JOIN k ON d.kind = k.kind
+                                                            AND d.version < k.version)
+                         DELETE FROM derived WHERE ctid IN (SELECT ctid FROM v WHERE rn <= step)",
+                        &[
+                            P::text_array(kinds),
+                            P::i64_array(versions),
+                            P::i64_array(steps),
+                        ],
+                    )?;
+                    if deleted > 0 {
+                        tracing::debug!(deleted, "flushed the transaction's derived deletes");
+                    }
+                }
                 let committed = tx.commit();
                 #[cfg(any(test, feature = "test-hooks"))]
                 self.inner.txes.fetch_add(1, Ordering::Relaxed);
@@ -1436,7 +1503,7 @@ impl Pg {
     /// that ends hands the client to a writer, not to its own next step.
     /// Takes the write client for one transaction, through the lane:
     /// `slot_holder` marks a caller that holds its ref's slot (the
-    /// land's finish and the sweep's reject), which enters ahead of
+    /// settle's commit and the sweep's reject), which enters ahead of
     /// other waiting writers, within the lane's bound. The invariants
     /// the one client keeps are listed on [`PgInner`'s gate
     /// field](Self::writer_gate).
@@ -1573,6 +1640,25 @@ type DerivedPreload = std::collections::HashMap<(String, i64, Vec<u8>), Vec<u8>>
 /// already holds is the same row.
 type HistoryPending = std::collections::HashMap<Vec<u8>, Vec<u8>>;
 
+/// The isolation level of one read transaction. Repeatable read pins
+/// one snapshot for the whole read; read committed takes the newest
+/// state of each statement. The choices are named, not passed as
+/// strings, so a call site says what its read sees.
+#[derive(Clone, Copy)]
+enum ReadIsolation {
+    RepeatableRead,
+    ReadCommitted,
+}
+
+impl ReadIsolation {
+    fn as_sql(self) -> &'static str {
+        match self {
+            Self::RepeatableRead => "REPEATABLE READ",
+            Self::ReadCommitted => "READ COMMITTED",
+        }
+    }
+}
+
 /// One client of the database, inside one transaction. The queries are its
 /// [`MetaTx`] methods. The transaction is begun and ended with statements
 /// of the client, so a `PgTx` is a plain client handle: it stays covariant
@@ -1622,6 +1708,14 @@ pub struct PgTx<'a> {
     /// transaction cost one chain read for the whole chain, not one per
     /// commit. Shared with the reborrows.
     derived_preload: Option<&'a mut DerivedPreload>,
+    /// The `delete_derived_below` calls a deferring write path made: the
+    /// commit deletes with one statement, honoring the summed limits per
+    /// kind and version. Only `defer_derived_deletes` fills it.
+    deferred_deletes: Vec<(String, i64, i64)>,
+    /// Whether `delete_derived_below` defers to the commit. Off for the
+    /// importer's batching (the flush owns those deletes) and for the
+    /// sweeps, which count the rows they removed.
+    defer_derived: bool,
     /// The history nodes the transaction inserted while batching: the
     /// flush writes them after the derived rows. Shared with the
     /// reborrows.
@@ -1682,30 +1776,41 @@ impl<'a> PgTx<'a> {
             cs_pending: Some(pending),
             derived_pending: Some(derived),
             derived_preload: Some(preload),
+            deferred_deletes: Vec::new(),
+            defer_derived: false,
             history_pending: Some(history),
             ended: false,
         })
     }
 
-    /// Begins one read-only transaction at repeatable read: every
-    /// statement of the caller's read sees one snapshot, not the newest
-    /// state of each statement. The transaction is bounded server side:
+    /// Begins one read-only transaction at the level the caller names:
+    /// every statement of a repeatable-read read sees one snapshot; a
+    /// read-committed read sees the newest state of each statement. The
+    /// transaction is bounded server side:
     /// one statement may take `statement`, and the transaction may sit
     /// idle between statements at most `idle` (the timeouts are
     /// `SET LOCAL`, so they end with the transaction, and a stream that
     /// stopped reading cannot hold the reader forever).
     //
-    // SHORTCUT: every read runs at repeatable read, one snapshot per
-    // read, even though reads that touch only immutable rows would be
-    // safe at read committed with a shorter snapshot hold. Nobody has
-    // measured the gain, and the split needs an audit of every walk that
-    // re-reads a ref. Measure first, then split.
-    fn begin_read(c: &'a mut PgClient, statement: Duration, idle: Duration) -> Result<PgTx<'a>> {
+    // SHORTCUT: every read but `read_latest` runs at repeatable read,
+    // one snapshot per read, even though reads that touch only immutable
+    // rows would be safe at read committed with a shorter snapshot hold.
+    // Nobody has measured the gain, and the split needs an audit of
+    // every walk that re-reads a ref. Measure first, then split.
+    fn begin_read(
+        c: &'a mut PgClient,
+        isolation: ReadIsolation,
+        statement: Duration,
+        idle: Duration,
+    ) -> Result<PgTx<'a>> {
         // Three statements, not one string: the client prepares its
         // queries, and Postgres takes no second command in a prepared
         // statement (E42601).
         c.execute(
-            "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+            &format!(
+                "BEGIN TRANSACTION ISOLATION LEVEL {} READ ONLY",
+                isolation.as_sql()
+            ),
             &[],
         )?;
         // The transaction exists from here on: a SET LOCAL that fails
@@ -1720,6 +1825,8 @@ impl<'a> PgTx<'a> {
             cs_pending: None,
             derived_pending: None,
             derived_preload: None,
+            deferred_deletes: Vec::new(),
+            defer_derived: false,
             history_pending: None,
             ended: false,
         };
@@ -2075,9 +2182,14 @@ fn lost_message(setup_held: bool) -> &'static str {
         "this server process lost the database to another \
          server process; it serves nothing from here on"
     } else {
-        "another server holds this store"
+        HOLDER_MESSAGE
     }
 }
+
+/// The text a second open sees while another session still holds the
+/// one-server lock. One name, so a reword cannot silently turn the
+/// test reopen's wait off.
+pub(crate) const HOLDER_MESSAGE: &str = "another server holds this store";
 
 /// Reconnects a dead client, applies the setup again, and hands the new
 /// setup back: the caller folds it into `setup_held` and the lost
@@ -2810,7 +2922,7 @@ impl MetaTx for PgTx<'_> {
                 self.gen_cache.insert((repo.0, key.clone()), parent_gen_i);
             }
         }
-        self.c.execute(
+        let inserted = self.c.execute(
             "INSERT INTO changesets (id, gen, body) VALUES ($1, $2, $3)
              ON CONFLICT (id) DO NOTHING",
             &[
@@ -2820,8 +2932,16 @@ impl MetaTx for PgTx<'_> {
             ],
         )?;
         let generation = parent_gen + 1;
-        self.inserted_gens
-            .insert(id_bytes(id.as_bytes()), generation);
+        // Only a row this statement wrote is the transaction's own. A
+        // conflicting row predates the transaction (a land rebases onto
+        // the head its input changeset already hangs from), and the
+        // write path asks `inserted_this_tx` to tell the two apart: the
+        // stored derived rows of an old changeset are real and must be
+        // read, the ones of a new one cannot exist.
+        if inserted > 0 {
+            self.inserted_gens
+                .insert(id_bytes(id.as_bytes()), generation);
+        }
         self.gen_cache
             .insert((repo.0, id_bytes(id.as_bytes())), generation);
         // While the import's batching is on, the parents and the repo
@@ -3506,21 +3626,26 @@ impl MetaTx for PgTx<'_> {
     ) -> Result<Option<Vec<u8>>> {
         let version = i64::from(version);
         let key = id_bytes(cs.as_bytes());
-        if self.cs_batching {
-            if let Some(pending) = self.derived_pending.as_deref() {
-                for (k, v, c, value) in pending.iter().rev() {
-                    if *k == kind && *v == version && id_bytes(c.as_bytes()) == key {
-                        return Ok(Some(value.clone()));
-                    }
+        if self.cs_batching
+            && let Some(pending) = self.derived_pending.as_deref()
+        {
+            for (k, v, c, value) in pending.iter().rev() {
+                if *k == kind && *v == version && id_bytes(c.as_bytes()) == key {
+                    return Ok(Some(value.clone()));
                 }
             }
-            if let Some(value) = self
-                .derived_preload
-                .as_deref()
-                .and_then(|preload| preload.get(&(kind.to_owned(), version, key.clone())))
-            {
-                return Ok(Some(value.clone()));
-            }
+        }
+        // The transaction's own memory of the derived rows it preloaded
+        // or wrote: one statement filled it at the start of a write path,
+        // and every put of this transaction keeps it true. A row it
+        // deleted is of an older version, which no read of this kind
+        // asks for, so no stale answer can hide there.
+        if let Some(value) = self
+            .derived_preload
+            .as_deref()
+            .and_then(|preload| preload.get(&(kind.to_owned(), version, key.clone())))
+        {
+            return Ok(Some(value.clone()));
         }
         Ok(self
             .c
@@ -3752,6 +3877,16 @@ impl MetaTx for PgTx<'_> {
                 "derived {kind} v{version} for {cs} differs from the stored value"
             )));
         }
+        // The transaction's memory follows its writes, so a later read
+        // of the same row answers with what was written. It follows
+        // after the check above: the check must see the stored row, not
+        // the value just written.
+        if let Some(preload) = self.derived_preload.as_deref_mut() {
+            preload.insert(
+                (kind.to_owned(), version64, id_bytes(cs.as_bytes())),
+                value.to_vec(),
+            );
+        }
         Ok(())
     }
 
@@ -3765,15 +3900,85 @@ impl MetaTx for PgTx<'_> {
         if self.cs_batching {
             return Ok(0);
         }
-        let version = i64::from(version);
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let version64 = i64::from(version);
+        // A write path that deferred its deletes collects this call; the
+        // commit deletes for the whole transaction with one statement,
+        // honoring the summed limits. The callers that count the rows
+        // (the old-value sweep) never turn the deferral on.
+        if self.defer_derived {
+            self.deferred_deletes.push((
+                kind.to_owned(),
+                version64,
+                i64::try_from(limit).unwrap_or(i64::MAX),
+            ));
+            return Ok(0);
+        }
         let deleted = self.c.execute(
             "DELETE FROM derived WHERE (kind, version, cs) IN (
                  SELECT kind, version, cs FROM derived
                  WHERE kind = $1 AND version < $2 LIMIT $3)",
-            &[P::text(kind), P::i64(version), P::i64(limit)],
+            &[
+                P::text(kind),
+                P::i64(version64),
+                P::i64(i64::try_from(limit).unwrap_or(i64::MAX)),
+            ],
         )?;
         Ok(usize::try_from(deleted).unwrap_or(0))
+    }
+
+    /// The stored value of the kind for the changeset the transaction
+    /// itself inserted cannot exist unless the transaction wrote it, and
+    /// its own memory answers that: the stored check reads nothing.
+    fn inserted_this_tx(&self, cs: ChangesetId) -> bool {
+        self.inserted_gens.contains_key(&id_bytes(cs.as_bytes()))
+    }
+
+    /// Reads the derived values of the write path's kinds for the
+    /// changeset's parents into the transaction's memory, one statement:
+    /// every per-value read of the path then answers without a round
+    /// trip. A value written later in the same transaction updates the
+    /// memory, so the answers stay the transaction's own.
+    fn preload_derived(
+        &mut self,
+        kinds: &[(&'static str, u32)],
+        css: &[ChangesetId],
+    ) -> Result<()> {
+        if kinds.is_empty() || css.is_empty() {
+            return Ok(());
+        }
+        let Some(preload) = self.derived_preload.as_deref_mut() else {
+            return Ok(());
+        };
+        let kind_names: Vec<String> = kinds.iter().map(|(name, _)| (*name).to_owned()).collect();
+        let versions: Vec<i64> = kinds
+            .iter()
+            .map(|(_, version)| i64::from(*version))
+            .collect();
+        let keys: Vec<Vec<u8>> = css.iter().map(|cs| id_bytes(cs.as_bytes())).collect();
+        let rows = self.c.query(
+            "SELECT kind, version, cs, value FROM derived
+             WHERE cs = ANY($3)
+               AND (kind, version) IN (SELECT kind, version
+                                       FROM unnest($1::text[], $2::int8[]) AS t(kind, version))",
+            &[
+                P::text_array(kind_names),
+                P::i64_array(versions),
+                P::bytea_array(keys),
+            ],
+        )?;
+        for row in rows {
+            preload.insert((row.get(0), row.get(1), row.get(2)), row.get(3));
+        }
+        Ok(())
+    }
+
+    /// Defers the write path's `delete_derived_below` to the commit:
+    /// the collected deletes wait for the commit's flush, and the
+    /// deferral lasts to the commit. One-way - there is no off, because
+    /// an off would silently drop deletes the transaction already
+    /// promised.
+    fn defer_derived_deletes(&mut self) {
+        self.defer_derived = true;
     }
 
     /// The view that the per-tree memo holds for a (rule set, version,
@@ -4029,11 +4234,15 @@ impl MetaTx for PgTx<'_> {
             }
             land_id
         } else {
-            let (state, detail) = if self.get_ref(repo, &req.target_ref)?.is_some() {
-                (LandState::Pending, String::new())
+            let (state, detail, reason) = if self.get_ref(repo, &req.target_ref)?.is_some() {
+                (
+                    LandState::Pending,
+                    String::new(),
+                    LandRejectReason::Unspecified,
+                )
             } else {
                 let detail = format!("ref {:?} does not exist", req.target_ref);
-                (LandState::Rejected, detail)
+                (LandState::Rejected, detail, LandRejectReason::MissingRef)
             };
             if let Some(limit) = pending_limit {
                 // The pending-lands quota counts new pending rows. A retry
@@ -4066,8 +4275,8 @@ impl MetaTx for PgTx<'_> {
                 .query_opt(
                     "INSERT INTO lands
                      (repo_id, caller, request_key, target_ref, input_cs, state, detail,
-                      finished_at, created_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7,
+                      reject_reason, finished_at, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
                          CASE WHEN $6 = 'pending' THEN NULL ELSE now_epoch() END,
                          now_epoch())
                      ON CONFLICT DO NOTHING
@@ -4080,6 +4289,7 @@ impl MetaTx for PgTx<'_> {
                         P::bytes(&id_bytes(req.changeset.as_bytes())),
                         P::text(state.as_str()),
                         P::text(&detail),
+                        P::text(reason.as_str()),
                     ],
                 )?
                 .map(|row| row.get::<_, i64>(0));
@@ -4118,7 +4328,8 @@ impl MetaTx for PgTx<'_> {
     /// Rejects a land that is still pending; 1 if it changed, else 0.
     fn reject_stale_land(&mut self, land_id: i64, detail: String) -> Result<u64> {
         let changed = self.c.execute(
-            "UPDATE lands SET state = 'rejected', detail = $1, finished_at = now_epoch()
+            "UPDATE lands SET state = 'rejected', detail = $1, \
+                 reject_reason = 'abandoned', finished_at = now_epoch()
              WHERE land_id = $2 AND state = 'pending'",
             &[P::text(&detail), P::i64(land_id)],
         )?;
@@ -4149,7 +4360,7 @@ impl MetaTx for PgTx<'_> {
         let row = self
             .c
             .query_opt(
-                "SELECT state, result_cs, detail, conflict_paths FROM lands
+                "SELECT state, result_cs, detail, conflict_paths, reject_reason FROM lands
                  WHERE repo_id = $1 AND land_id = $2 AND caller = $3",
                 &[P::i64(repo.0), P::i64(land_id), P::text(&caller.0)],
             )?
@@ -4158,6 +4369,7 @@ impl MetaTx for PgTx<'_> {
         let result: Option<Vec<u8>> = row.get(1);
         let detail: String = row.get(2);
         let paths: Vec<u8> = row.get(3);
+        let reason: String = row.get(4);
         let result = result
             .map(|bytes| ChangesetId::try_from(bytes.as_slice()))
             .transpose()
@@ -4171,10 +4383,12 @@ impl MetaTx for PgTx<'_> {
             detail,
             conflict_paths: decode_paths(&paths)
                 .ok_or_else(|| Error::Corrupt(format!("land {land_id} conflict paths")))?,
+            reject_reason: LandRejectReason::parse(&reason)?,
         })
     }
 
     /// Moves a pending land to its final state and returns the outcome.
+    #[allow(clippy::too_many_arguments)] // the one row's own columns: state, result, detail, paths and reason land together
     fn set_land_state(
         &mut self,
         repo: RepoId,
@@ -4183,10 +4397,11 @@ impl MetaTx for PgTx<'_> {
         result: Option<ChangesetId>,
         detail: String,
         conflict_paths: Vec<RepoPath>,
+        reject_reason: LandRejectReason,
     ) -> Result<LandOutcome> {
         let updated = self.c.execute(
             "UPDATE lands SET state = $3, result_cs = $4, detail = $5,
-                 conflict_paths = $6, finished_at = now_epoch()
+                 conflict_paths = $6, reject_reason = $7, finished_at = now_epoch()
              WHERE repo_id = $1 AND land_id = $2 AND state = 'pending'",
             &[
                 P::i64(repo.0),
@@ -4195,6 +4410,7 @@ impl MetaTx for PgTx<'_> {
                 P::opt_bytes(result.as_ref().map(|id| id_bytes(id.as_bytes()))),
                 P::text(&detail),
                 P::bytes(&encode_paths(&conflict_paths)),
+                P::text(reject_reason.as_str()),
             ],
         )?;
         if updated != 1 {
@@ -4210,6 +4426,7 @@ impl MetaTx for PgTx<'_> {
             previous: None,
             detail,
             conflict_paths,
+            reject_reason,
         })
     }
 
@@ -4833,7 +5050,11 @@ mod tests {
         let store = crate::Backend::open_test(dir.path()).unwrap();
         super::damage::corrupt_store_uuid(&store).unwrap();
         drop(store);
-        let Err(error) = crate::Backend::open_test(dir.path()) else {
+        // The corrupt row is the answer the database gives once the old
+        // session has ended; the reopen waits for that session the way
+        // the one-server lock test does, instead of racing the worker's
+        // close.
+        let Err(error) = crate::Backend::reopen_test(dir.path()) else {
             panic!("a store_uuid row of 1 byte refuses the open");
         };
         assert!(
@@ -5680,6 +5901,121 @@ pub(crate) mod pool_tests {
             order.as_slice(),
             ["holder", "holder", "holder", "holder", "plain", "holder"],
             "the lane ran the writers in the bound's order"
+        );
+    }
+
+    /// A read that runs while a write transaction holds the write
+    /// client: the land's outcome check and plan ride it, so a land in
+    /// its slot must not wait for another writer's statements. The
+    /// writer is held here, so a read that queues behind it would hang
+    /// the test.
+    #[test]
+    fn a_read_latest_runs_while_a_write_holds_the_write_client() {
+        let (_pool, pg) = pg();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let writer = {
+            let pg = pg.clone();
+            std::thread::spawn(move || {
+                pg.commit(|_tx| {
+                    held_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            })
+        };
+        held_rx.recv().unwrap();
+        // The land's shape: a per-statement read while the writer is
+        // held. It answers.
+        let seen = pg
+            .read_latest(|tx| Ok(tx.c.query_opt("SELECT 1", &[])?.is_some()))
+            .unwrap();
+        assert!(seen);
+        // A read on the write client queues behind it, as it always did:
+        // the same hold keeps `read_unflushed` waiting.
+        let queued = {
+            let pg = pg.clone();
+            std::thread::spawn(move || pg.read_unflushed(|_| Ok(())))
+        };
+        for _ in 0..2_000 {
+            std::thread::yield_now();
+        }
+        assert!(
+            !queued.is_finished(),
+            "the writer-bound read did not queue behind the held writer"
+        );
+        release_tx.send(()).unwrap();
+        queued.join().unwrap().unwrap();
+        writer.join().unwrap();
+    }
+
+    /// A per-statement read sees the newest committed state: a commit
+    /// that lands between its statements is visible to the later one,
+    /// which is the shape of the land's outcome check and plan.
+    #[test]
+    fn a_read_latest_sees_a_commit_that_lands_between_its_statements() {
+        let (_pool, pg) = pg();
+        pg.commit(|tx| tx.c.execute("CREATE TABLE read_latest_watch (n INT)", &[]))
+            .unwrap();
+        pg.commit(|tx| {
+            tx.c.execute("INSERT INTO read_latest_watch VALUES (1)", &[])
+        })
+        .unwrap();
+        let (counted_tx, counted_rx) = std::sync::mpsc::channel();
+        let (commit_tx, commit_rx) = std::sync::mpsc::channel::<()>();
+        let writer = {
+            let pg = pg.clone();
+            std::thread::spawn(move || {
+                counted_rx.recv().unwrap();
+                pg.commit(|tx| {
+                    tx.c.execute("INSERT INTO read_latest_watch VALUES (2)", &[])
+                })
+                .unwrap();
+                commit_tx.send(()).unwrap();
+            })
+        };
+        let seen = pg
+            .read_latest(|tx| {
+                let first: i64 =
+                    tx.c.query("SELECT count(*) FROM read_latest_watch", &[])
+                        .unwrap()[0]
+                        .get(0);
+                assert_eq!(first, 1, "the read started from an empty table");
+                counted_tx.send(()).unwrap();
+                commit_rx.recv().unwrap();
+                let second: i64 =
+                    tx.c.query("SELECT count(*) FROM read_latest_watch", &[])
+                        .unwrap()[0]
+                        .get(0);
+                Ok(second)
+            })
+            .unwrap();
+        assert_eq!(seen, 2, "the read did not see the commit it raced");
+        writer.join().unwrap();
+        pg.commit(|tx| tx.c.execute("DROP TABLE read_latest_watch", &[]))
+            .unwrap();
+    }
+
+    /// A write inside `read_latest` fails: the read is READ ONLY, so a
+    /// write that slips onto this path cannot land outside the writer's
+    /// lock and the collector's key (SQLSTATE 25006,
+    /// `read_only_sql_transaction`).
+    #[test]
+    fn a_write_inside_read_latest_fails() {
+        let (_pool, pg) = pg();
+        let error = pg
+            .read_latest(|tx| {
+                tx.c.execute("CREATE TABLE read_latest_read_only (n INT)", &[])
+                    .map(|_| ())
+            })
+            .unwrap_err();
+        // The cause chain carries the SQLSTATE text only in the debug
+        // form: the storage error's own display names the class, not
+        // the database's message.
+        assert!(
+            format!("{error:?}").contains("read-only transaction"),
+            "{error:?}"
         );
     }
 }

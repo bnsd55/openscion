@@ -448,6 +448,10 @@ impl Meta for Backend {
         self.pg.read_unflushed(f)
     }
 
+    fn read_latest<T>(&self, f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>) -> Result<T> {
+        self.pg.read_latest(f)
+    }
+
     fn commit<T>(&self, f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>) -> Result<T> {
         self.pg.commit(f)
     }
@@ -458,13 +462,6 @@ impl Meta for Backend {
 
     fn write_slot_holder<T>(&self, f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>) -> Result<T> {
         self.pg.commit_for_slot_holder(f)
-    }
-
-    fn read_unflushed_slot_holder<T>(
-        &self,
-        f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>,
-    ) -> Result<T> {
-        self.pg.read_unflushed_for_slot_holder(f)
     }
 
     fn flush(&self) -> Result<()> {
