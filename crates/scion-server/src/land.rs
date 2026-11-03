@@ -1846,6 +1846,74 @@ mod tests {
         assert_eq!(f.main().target, f.root);
     }
 
+    /// Migration 0006 is the first schema change since v0.1.0: a store
+    /// at the v0.1.0 schema (version 5) must open, climb to this
+    /// build's version, and read its stored lands back. A row written
+    /// before the column existed reads
+    /// [`LandRejectReason::Unspecified`].
+    #[test]
+    fn a_v010_store_migrates_and_its_lands_read_unspecified() {
+        let _slot = damage::slot();
+        let dir = crate::test_support::private_tempdir();
+        let schema = crate::backend::Backend::test_schema(dir.path());
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").expect("SCION_TEST_POSTGRES_URL");
+        let mut db = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+        // The v0.1.0 schema: migrations 1-5 as they shipped, with their
+        // ledger rows, then one repo, one changeset, and one rejected
+        // land - the row shape the version-5 lands table holds, before
+        // 0006's column exists.
+        let shipped: [(&str, u32); 5] = [
+            ("0001_init.sql", 1),
+            ("0002_view_roots.sql", 2),
+            ("0003_view_trees.sql", 3),
+            ("0004_store_uuid.sql", 4),
+            ("0005_parent_numbering.sql", 5),
+        ];
+        let mut sql = format!(
+            "CREATE SCHEMA {schema};\nSET search_path TO {schema};\n\
+             CREATE TABLE schema_migrations (\n\
+                 version BIGINT PRIMARY KEY,\n\
+                 name    TEXT NOT NULL\n\
+             );\n"
+        );
+        for (file, version) in shipped {
+            use std::fmt::Write as _;
+            let text = match file {
+                "0001_init.sql" => include_str!("../migrations/postgres/0001_init.sql"),
+                "0002_view_roots.sql" => include_str!("../migrations/postgres/0002_view_roots.sql"),
+                "0003_view_trees.sql" => include_str!("../migrations/postgres/0003_view_trees.sql"),
+                "0004_store_uuid.sql" => include_str!("../migrations/postgres/0004_store_uuid.sql"),
+                _ => include_str!("../migrations/postgres/0005_parent_numbering.sql"),
+            };
+            let _ = writeln!(
+                sql,
+                "{text}\nINSERT INTO schema_migrations (version, name) \
+                 VALUES ({version}, 'postgres schema');"
+            );
+        }
+        // One repo, one changeset, one rejected land: the row the v5
+        // table holds, with no reason column to name.
+        sql.push_str(
+            "INSERT INTO repos (name) VALUES ('old');\n\
+             INSERT INTO changesets (id, gen, body) \
+                 VALUES (decode(repeat('01', 32), 'hex'), 1, '\\x00');\n\
+              INSERT INTO lands (repo_id, caller, request_key, target_ref, input_cs, state, detail) \
+                 SELECT repo_id, 't', 'k', 'gone', id, 'rejected', 'the sweep took it' \
+                 FROM repos, changesets WHERE repos.name = 'old';\n",
+        );
+        db.batch_execute(&sql).expect("the v0.1.0 store builds");
+        drop(db);
+
+        // The open climbs 5 -> this build's version, adding 0006's
+        // column; the stored land reads back whole, its reason the
+        // column's default.
+        let store =
+            crate::backend::Backend::open_test_shared_in_schema(dir.path(), &schema).unwrap();
+        let out = get_land(&store, &caller(), "old", 1).unwrap();
+        assert_eq!(out.state, LandState::Rejected, "{}", out.detail);
+        assert_eq!(out.reject_reason, LandRejectReason::Unspecified);
+    }
+
     /// A panic that dies under a ref's lock poisons it with a
     /// half-written index. The index is a cache and the database is the
     /// truth, so the poisoned slot must be dropped and rebuilt: a land
