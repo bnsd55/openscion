@@ -191,7 +191,7 @@ fn walk_step_bytes() -> usize {
 /// deep the repo. A walk over a history too deep for it stops at its
 /// step boundary, and the call answers busy; the unbounded forms (fsck,
 /// import, the derive command) finish the walk.
-const DERIVE_WALK_BUDGET: usize = 1 << 30;
+pub(crate) const DERIVE_WALK_BUDGET: usize = 1 << 30;
 
 /// The derive walks of one [`Store`]: which are in flight, and the cap on
 /// how many may be. Every `Store` in the process keeps its own, so repo 1
