@@ -19,7 +19,10 @@ use scion_server::{Backend, fsck, gc};
 fn blob_content(i: u64) -> [u8; 64] {
     let mut raw = [0u8; 64];
     raw[..8].copy_from_slice(&i.to_be_bytes());
-    raw[8..].fill(i as u8);
+    // The rest of the bytes repeat the counter's low byte: the
+    // counter's own bytes already make the content unique, and the
+    // padding makes the blob small but not degenerate.
+    raw[8..].fill(u8::try_from(i % 256).unwrap_or(0));
     raw
 }
 
@@ -33,7 +36,9 @@ fn count() -> u64 {
 
 /// The data directory the run fills, from the environment.
 fn bench_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("SCION_BENCH_DIR").expect("SCION_BENCH_DIR names the store's directory"))
+    std::path::PathBuf::from(
+        std::env::var("SCION_BENCH_DIR").expect("SCION_BENCH_DIR names the store's directory"),
+    )
 }
 
 fn main_line(key: &str, value: impl std::fmt::Display) {
@@ -46,8 +51,10 @@ fn main_line(key: &str, value: impl std::fmt::Display) {
 /// cost the run nothing it would not pay in production. The put path
 /// dedupes by content, so every blob's content is unique.
 fn fill(backend: &Backend, count: u64) {
-    let started = Instant::now();
+    // One sync per 4,096 blobs: the durability of a client's puts, at a
+    // fraction of the sync calls.
     const SYNC_EVERY: u64 = 4096;
+    let started = Instant::now();
     let mut i = 0u64;
     while i < count {
         let top = (i + SYNC_EVERY).min(count);
@@ -58,7 +65,10 @@ fn fill(backend: &Backend, count: u64) {
         batch.sync().expect("the batch is durable");
         i = top;
     }
-    main_line("fill_seconds", format!("{:.3}", started.elapsed().as_secs_f64()));
+    main_line(
+        "fill_seconds",
+        format!("{:.3}", started.elapsed().as_secs_f64()),
+    );
 }
 
 #[test]
@@ -91,15 +101,26 @@ fn blob_count_costs() {
     // fsck walks every blob file, then the metadata tables.
     let started = Instant::now();
     let report = fsck::run(&backend, fsck::BATCH, &mut |_| {}).expect("fsck runs");
-    main_line("fsck_seconds", format!("{:.3}", started.elapsed().as_secs_f64()));
+    main_line(
+        "fsck_seconds",
+        format!("{:.3}", started.elapsed().as_secs_f64()),
+    );
     main_line("fsck_problems", report.problems.len());
 
     // gc --dry-run walks the blob files and answers what it would
     // reclaim; it writes nothing.
     let started = Instant::now();
-    let report = gc::run(&backend, Duration::from_secs(gc::DEFAULT_GRACE_SECS), true, &mut |_| {})
-        .expect("gc --dry-run runs");
-    main_line("gc_dry_run_seconds", format!("{:.3}", started.elapsed().as_secs_f64()));
+    let report = gc::run(
+        &backend,
+        Duration::from_secs(gc::DEFAULT_GRACE_SECS),
+        true,
+        &mut |_| {},
+    )
+    .expect("gc --dry-run runs");
+    main_line(
+        "gc_dry_run_seconds",
+        format!("{:.3}", started.elapsed().as_secs_f64()),
+    );
     main_line("gc_dry_run_files_young", report.files_young);
     main_line("gc_dry_run_files_removed", report.files_removed);
 }
