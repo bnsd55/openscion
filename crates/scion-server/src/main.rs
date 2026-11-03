@@ -29,27 +29,19 @@ struct Cli {
     /// The data directory. Holds the objects and the backend marker file.
     #[arg(long, global = true, env = "SCION_DATA", default_value = "scion-data")]
     data: PathBuf,
-    /// Serve metadata from Postgres at this URL. The URL holds the
-    /// credentials, so it is never logged. Prefer `--postgres-url-file` or
-    /// `SCION_POSTGRES_URL`: a URL on the command line is readable by every
-    /// local account (`ps`).
-    #[arg(long, global = true, value_name = "URL")]
-    postgres_url: Option<String>,
     /// File with the Postgres URL, read like the access file: the owner
-    /// alone may read it, and a symlink is refused. Give `--postgres-url`
-    /// or `--postgres-url-file`, not both.
+    /// alone may read it, and a symlink is refused. The URL may also ride
+    /// `SCION_POSTGRES_URL`; give one, not both.
     #[arg(
         long,
         global = true,
-        conflicts_with = "postgres_url",
         env = "SCION_POSTGRES_URL_FILE",
         value_name = "FILE"
     )]
     postgres_url_file: Option<PathBuf>,
     /// Verify the certificate of the Postgres server with this CA (PEM).
-    /// Required when `--postgres-url` names a host that is not local.
-    /// The URL may come from any source: `--postgres-url`,
-    /// `--postgres-url-file` or `SCION_POSTGRES_URL`.
+    /// Required when the URL names a host that is not local; the URL may
+    /// come from `--postgres-url-file` or `SCION_POSTGRES_URL`.
     #[arg(long, global = true, value_name = "FILE")]
     postgres_ca: Option<PathBuf>,
     #[command(subcommand)]
@@ -872,8 +864,7 @@ async fn main() -> anyhow::Result<()> {
                 .with_context(|| format!("cannot create {}", cli.data.display()))?;
             let audit = cli_audit(&cli.data, audit_file.as_deref())?;
             // Restore makes a store, so it needs the URL.
-            let postgres_url =
-                postgres_url_of(cli.postgres_url_file.as_ref(), cli.postgres_url.as_ref())?;
+            let postgres_url = postgres_url_of(cli.postgres_url_file.as_ref())?;
             return restore_command(
                 audit,
                 &cli.data,
@@ -920,17 +911,16 @@ async fn main() -> anyhow::Result<()> {
     // above, and never refuse a missing one. `fsck`'s exit table
     // promises 2 for "could not run", and a missing URL is that case;
     // the other commands fail with the generic open failure's 1.
-    let postgres_url =
-        match postgres_url_of(cli.postgres_url_file.as_ref(), cli.postgres_url.as_ref()) {
-            Ok(url) => url,
-            Err(why) => {
-                if matches!(cli.command, Command::Fsck) {
-                    eprintln!("scion-server fsck: {why:#}");
-                    std::process::exit(2);
-                }
-                return Err(why);
+    let postgres_url = match postgres_url_of(cli.postgres_url_file.as_ref()) {
+        Ok(url) => url,
+        Err(why) => {
+            if matches!(cli.command, Command::Fsck) {
+                eprintln!("scion-server fsck: {why:#}");
+                std::process::exit(2);
             }
-        };
+            return Err(why);
+        }
+    };
     let store = match cli.command {
         Command::Import { .. }
         | Command::CreateRepo { .. }
@@ -1404,18 +1394,6 @@ async fn serve(
 /// v0.2.0 (the owner's call), the rest in a later minor; the
 /// replacement reads a file that the checked read of the access file
 /// protects.
-fn argv_exposure_warning(flag: &str, replacement: &str, removal: &str) -> String {
-    format!(
-        "warning: {flag} put a secret on the command line, which ps and \
-         /proc/$$/cmdline show to every local account, and which lands in \
-         shell history; use {replacement} instead ({removal})"
-    )
-}
-
-fn warn_argv_exposure(flag: &str, replacement: &str, removal: &str) {
-    eprintln!("{}", argv_exposure_warning(flag, replacement, removal));
-}
-
 /// A secret from a file the checked read protects, trimmed: the owner
 /// alone may read it, a symlink is refused, and the directories above
 /// it are checked.
@@ -1434,25 +1412,16 @@ fn secret_file(file: &Path) -> anyhow::Result<String> {
 /// command that opens the store needs one: the metadata has nowhere
 /// else to live. The fields come in one at a time, because a caller
 /// that matched its command out of `Cli` holds a partially moved value.
-fn postgres_url_of(url_file: Option<&PathBuf>, url_arg: Option<&String>) -> anyhow::Result<String> {
+fn postgres_url_of(url_file: Option<&PathBuf>) -> anyhow::Result<String> {
     let url = if let Some(file) = url_file {
         secret_file(file)?
-    } else if let Some(url) = url_arg {
-        warn_argv_exposure(
-            "--postgres-url",
-            "--postgres-url-file (or SCION_POSTGRES_URL)",
-            "--postgres-url will be removed in v0.2.0",
-        );
-        url.clone()
     } else if let Some(url) = std::env::var("SCION_POSTGRES_URL")
         .ok()
         .filter(|u| !u.is_empty())
     {
         url
     } else {
-        anyhow::bail!(
-            "no Postgres URL: give --postgres-url, --postgres-url-file or SCION_POSTGRES_URL"
-        );
+        anyhow::bail!("no Postgres URL: give --postgres-url-file or SCION_POSTGRES_URL");
     };
     Ok(url)
 }

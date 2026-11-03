@@ -383,9 +383,10 @@ SCION_POSTGRES_URL='postgres://user@dbhost/scion?sslmode=require' \
 ```
 
 - `--postgres-url-file` (or `SCION_POSTGRES_URL`) names the database.
-  `--postgres-url` takes the same value on the command line; it is
-  deprecated: it warns now and is removed in v0.2.0, because
-  the process list shows its value to every local account. Off this
+  No binary takes the URL as a flag: the process list shows a command
+  line to every local account, and the URL holds the database's
+  credentials. A call that still passes `--postgres-url` is refused
+  before any parsing. Off this
   machine the URL must ask for TLS (`sslmode=require`): the open
   refuses a remote URL that does not.
 - `--postgres-ca` (a PEM file) is required with a remote host too: the
@@ -401,7 +402,7 @@ SCION_POSTGRES_URL='postgres://user@dbhost/scion?sslmode=require' \
   an open that waits longer answers busy, and the caller retries. A
   database of a newer build is refused: run that build's server.
 - One server process serves one store - a data directory, or a Postgres
-  schema: a second `serve` on the same `--postgres-url` (and schema)
+  schema: a second `serve` on the same URL (and schema)
   fails at its open with "another server holds this store". An import
   does not take that lock and runs beside a server.
 - The server opens one write connection and a pool of 8 read
@@ -436,7 +437,7 @@ SCION_POSTGRES_URL='postgres://user@dbhost/scion?sslmode=require' \
   directory fails at the start instead of serving metadata whose blobs
   are not on this disk. A directory whose marker names a store also
   refuses a database that holds no store at all - the usual cause is a
-  `--postgres-url` whose search_path names a schema no store ever
+  URL whose search_path names a schema no store ever
   served - so the mistake fails at the start, not as "repo not found"
   on every later call.
 - One server process serves one database, and it stays that way: if the
@@ -490,7 +491,8 @@ into the schema of the same name). A changeset in the dump names only
 blob files that existed when the dump was taken, and a blob file is written
 before its database row commits, so the later copy holds every file the
 dump names. Restore into a fresh database, copy the data directory back,
-start the server with the same `--postgres-url`.
+start the server with the same URL (`SCION_POSTGRES_URL` or
+`--postgres-url-file`).
 
 ### Tokens: one, or an access file
 
@@ -684,7 +686,7 @@ its value is readable by every local account through `ps`.
 | Variable | Flag | Read by | Notes |
 | --- | --- | --- | --- |
 | `SCION_DATA` | `--data` | `scion-server` | Data directory, default `scion-data`. |
-| `SCION_POSTGRES_URL` | `--postgres-url` | `scion-server` | The URL holds the database credentials; the environment keeps them out of the process list (`ps`). `--postgres-url-file` reads it from a file the owner alone may read, and the argv form is deprecated: it warns now and is removed in v0.2.0. |
+| `SCION_POSTGRES_URL` | — | `scion-server` | The URL holds the database credentials; the environment keeps them out of the process list (`ps`). `--postgres-url-file` reads it from a file the owner alone may read. No binary takes the URL on its command line. |
 | `SCION_POSTGRES_URL_FILE` | `--postgres-url-file` | `scion-server` | A file that holds the database URL. Only its owner may read it, and a symlink is refused. |
 | `SCION_TOKEN` | — | `scion-server` (`serve`, `hash-token`), `scion-cache`, `scion-daemon`, `scn` | A secret; the environment keeps it out of the process list. The `--token-file` flag reads the token from a file the owner alone may read, and `hash-token` reads it from stdin. No binary takes a token on its command line. |
 | `SCION_UPSTREAM_TOKEN` | — | `scion-cache`, `scion-daemon` | A secret, as `SCION_TOKEN`; `--upstream-token-file` reads it from a file. |

@@ -50,9 +50,7 @@ fn the_exit_codes_of_fsck() {
     let broken = scion_server::test_support::private_tempdir();
     let url = "postgres://postgres:scion@127.0.0.1:1/scion";
     assert_eq!(
-        fsck_with(broken.path(), &["--postgres-url".as_ref(), url.as_ref()])
-            .status
-            .code(),
+        fsck_with(broken.path(), &[], Some(&url)).status.code(),
         Some(2),
         "a metadata store that cannot be reached exits 2"
     );
@@ -62,7 +60,7 @@ fn the_exit_codes_of_fsck() {
     // exit table says that is 2, not the generic open failure's 1.
     let no_url = scion_server::test_support::private_tempdir();
     assert_eq!(
-        fsck_with(no_url.path(), &[]).status.code(),
+        fsck_with(no_url.path(), &[], None).status.code(),
         Some(2),
         "fsck without a Postgres URL exits 2"
     );
@@ -73,21 +71,23 @@ fn the_exit_codes_of_fsck() {
 /// schema.
 fn fsck(data: &Path) -> Output {
     let url = common::postgres_url(data);
-    fsck_with(data, &["--postgres-url".as_ref(), url.as_ref()])
+    fsck_with(data, &[], Some(&url))
 }
 
-fn fsck_with(data: &Path, extra: &[&std::ffi::OsStr]) -> Output {
+fn fsck_with(data: &Path, extra: &[&std::ffi::OsStr], url: Option<&str>) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_scion-server"));
     cmd.args(["--data"])
         .arg(data)
         .args(extra)
         .arg("fsck")
-        // The run under test sees no URL but the one its arguments name:
-        // an env form meant for another suite must not save it.
+        // The run under test sees no URL but the one it is given: an env
+        // form meant for another suite must not save it.
         .env_remove("SCION_POSTGRES_URL")
-        .env("NO_COLOR", "1")
-        .output()
-        .unwrap()
+        .env("NO_COLOR", "1");
+    if let Some(url) = url {
+        cmd.env("SCION_POSTGRES_URL", url);
+    }
+    cmd.output().unwrap()
 }
 
 // Every test binary compiles this file and uses its own subset of it.

@@ -1039,7 +1039,7 @@ async fn import_process_races_the_server_on_the_same_blob() {
         // takes: the store's own schema, the one the server it races
         // serves.
         let url = common::postgres_url(&data);
-        command.arg("--postgres-url").arg(url);
+        command.env("SCION_POSTGRES_URL", url);
         command
             .args([
                 "--data",

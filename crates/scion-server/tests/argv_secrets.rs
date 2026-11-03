@@ -164,14 +164,13 @@ fn a_serve_token_file_starts_the_server() {
         .arg("--data")
         .arg(data.path())
         .args([
-            "--postgres-url",
-            &common::postgres_url(data.path()),
             "serve",
             "--token-file",
             file.to_str().unwrap(),
             "--listen",
             "127.0.0.1:0",
         ])
+        .env("SCION_POSTGRES_URL", common::postgres_url(data.path()))
         .env_remove("SCION_TOKEN")
         .stdout(Stdio::from(
             std::fs::File::create(data.path().parent().unwrap().join("stdout")).unwrap(),
@@ -201,13 +200,11 @@ fn a_serve_token_file_starts_the_server() {
 // `application_name` parameter no log line could carry by accident.
 //
 // The URL comes from `SCION_TEST_POSTGRES_URL`.
-/// How the serve process receives the database URL.
+/// How the serve process receives the database URL: the environment.
 #[derive(Clone, Copy)]
 enum UrlForm {
-    /// The environment, the documented second-best form.
+    /// The environment, the documented form.
     Env,
-    /// The command line, whose warning must show and must not quote it.
-    Argv,
 }
 
 /// The URL the test serves with, and the secrets it must not leak: the
@@ -250,7 +247,7 @@ impl Serve {
     /// Serves once with the URL in the form `form` names, uploads one
     /// blob through the gRPC API, scrapes /metrics, stops the server,
     /// and returns the three surfaces. Every wait is bounded.
-    fn run(form: UrlForm, url: &str, data: &Path) -> Self {
+    fn run(url: &str, data: &Path) -> Self {
         seed_repo(data);
         let secret = write_secret(
             data.parent().expect("the data directory has a parent"),
@@ -263,14 +260,7 @@ impl Serve {
         // The guard kills and reaps on every path out of this function,
         // panics included: no wait below is allowed to orphan a serving
         // server.
-        let mut child = Guarded(spawn_server(
-            form,
-            url,
-            data,
-            &secret,
-            &stdout_path,
-            &stderr_path,
-        ));
+        let mut child = Guarded(spawn_server(url, data, &secret, &stdout_path, &stderr_path));
         let log = wait_listening(&mut child.0, &stderr_path);
         let metrics_addr = logged_addr(&log, |line| line.contains("serving metrics"));
         // One real upload: the call touches the database through the
@@ -346,7 +336,6 @@ fn seed_repo(data: &Path) {
 /// Starts `serve` on `data`, with the database URL in the form the test
 /// is proving, and both outputs in their own files.
 fn spawn_server(
-    form: UrlForm,
     url: &str,
     data: &Path,
     secret: &Path,
@@ -355,14 +344,7 @@ fn spawn_server(
 ) -> std::process::Child {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_scion-server"));
     cmd.arg("--data").arg(data);
-    match form {
-        UrlForm::Env => {
-            cmd.env("SCION_POSTGRES_URL", url);
-        }
-        UrlForm::Argv => {
-            cmd.arg("--postgres-url").arg(url);
-        }
-    }
+    cmd.env("SCION_POSTGRES_URL", url);
     cmd.args([
         "serve",
         "--token-file",
@@ -482,7 +464,7 @@ fn scrape(url: &str) -> String {
 /// distinctive (12 characters or more): a short one, such as the test
 /// database's, is a word the log and the metrics body carry anyway, and
 /// the canary covers the URL-shaped leaks either way.
-fn assert_no_leak(form: UrlForm, run: &Serve, url: &str, canary: &str, password: Option<&str>) {
+fn assert_no_leak(run: &Serve, url: &str, canary: &str, password: Option<&str>) {
     let surfaces = [
         ("stdout", &run.stdout),
         ("the log (stderr)", &run.stderr),
@@ -504,21 +486,6 @@ fn assert_no_leak(form: UrlForm, run: &Serve, url: &str, canary: &str, password:
             }
         }
     }
-    let warning = matches!(form, UrlForm::Argv);
-    // The warning names the flag and the exposure, and says the form
-    // goes away; the env form says nothing.
-    assert_eq!(
-        run.stderr.contains("warning: --postgres-url"),
-        warning,
-        "the argv warning must print for the argv form alone"
-    );
-    if warning {
-        assert!(
-            run.stderr.contains("--postgres-url-file"),
-            "the warning names the replacement: {}",
-            run.stderr
-        );
-    }
 }
 
 #[test]
@@ -527,18 +494,60 @@ fn the_env_url_and_its_password_reach_no_output() {
     let data = dir.path().join("data");
     scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
     let (url, canary, password) = leak_url(&data);
-    let run = Serve::run(UrlForm::Env, &url, &data);
-    assert_no_leak(UrlForm::Env, &run, &url, &canary, password.as_deref());
+    let run = Serve::run(&url, &data);
+    assert_no_leak(&run, &url, &canary, password.as_deref());
 }
 
 #[test]
-fn the_argv_url_warns_without_quoting_itself() {
+fn the_argv_url_is_refused_without_echoing_itself() {
+    // The argv form is removed: a call that still passes one fails at
+    // once, before any parsing, and neither the URL nor its password
+    // reaches any stream. The data directory stays empty: no flag opens
+    // the store.
     let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
     let (url, canary, password) = leak_url(&data);
-    let run = Serve::run(UrlForm::Argv, &url, &data);
-    assert_no_leak(UrlForm::Argv, &run, &url, &canary, password.as_deref());
+    let out = Command::new(env!("CARGO_BIN_EXE_scion-server"))
+        .arg("--data")
+        .arg(&data)
+        .args(["--postgres-url", &url, "fsck"])
+        .env_remove("SCION_POSTGRES_URL")
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "the argv form of the URL must be refused"
+    );
+    let both = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(both.contains("the --postgres-url flag is gone"), "{both}");
+    assert!(both.contains("SCION_POSTGRES_URL"), "{both}");
+    assert!(both.contains("--postgres-url-file"), "{both}");
+    assert!(
+        !both.contains(&canary),
+        "the URL's canary was echoed: {both}"
+    );
+    if let Some(password) = password {
+        assert!(
+            !both.contains(&format!(":{password}@")),
+            "the password leaked: {both}"
+        );
+        if password.len() >= 12 {
+            assert!(
+                !both.contains(password.as_str()),
+                "the password leaked: {both}"
+            );
+        }
+    }
+    let made: Vec<_> = std::fs::read_dir(&data)
+        .expect("the data directory still exists")
+        .collect();
+    assert!(made.is_empty(), "a refused run creates no file: {made:?}");
 }
 
 /// Only the listener's own line opens the gate: the metrics line says
