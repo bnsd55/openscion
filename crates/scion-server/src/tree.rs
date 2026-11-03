@@ -288,6 +288,28 @@ pub fn store_changeset(
     cs: &Changeset,
     lens: BlobLens<'_>,
 ) -> Result<(ChangesetId, TreeId)> {
+    // The build reads each kind's value for the parents, then deletes a
+    // few old rows per kind: the reads ride one preloaded statement and
+    // the deletes ride the commit's flush, so the transaction spends
+    // two round trips on both together instead of one per kind. The
+    // changeset's own rows ride along: a land rebases onto the head its
+    // input changeset already hangs from, so its derived rows exist and
+    // the build finds them instead of deriving them again. The import's
+    // batching owns both shapes already — its pending buffer answers
+    // the reads and its flush deletes once per kind — so it keeps them.
+    if !c.changeset_batching() {
+        c.defer_derived_deletes();
+        let mut css = cs.parents().to_vec();
+        css.push(cs.id());
+        c.preload_derived(
+            &[
+                (RootTree::NAME, RootTree::VERSION),
+                (CommitGraph::NAME, CommitGraph::VERSION),
+                (PathHistory::NAME, PathHistory::VERSION),
+            ],
+            &css,
+        )?;
+    }
     let base = cs
         .parents()
         .first()

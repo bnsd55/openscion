@@ -122,6 +122,21 @@ pub trait Meta: Send + Sync + 'static {
     /// What `f` returns, or a database error from taking the connection.
     fn read_unflushed<T>(&self, f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>) -> Result<T>;
 
+    /// A read that sees the newest committed state per statement, on a
+    /// client that no writer queues behind. The caller's writes happen
+    /// later, in their own transaction, and whatever guard its rows
+    /// carry is what stops a double write - not this read.
+    ///
+    /// The default runs a plain read: a backend whose reads already see
+    /// the newest committed state needs no override.
+    ///
+    /// # Errors
+    ///
+    /// What `f` returns, or a database error from taking the client.
+    fn read_latest<T>(&self, f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>) -> Result<T> {
+        self.read(f)
+    }
+
     /// Runs `f` in one write transaction. It commits when `f` returns `Ok`
     /// and rolls back otherwise, and returns before the commit is durable.
     /// Every backend runs `f` exactly once; a retryable error comes back
@@ -384,6 +399,43 @@ pub trait MetaTx {
 
     /// Deletes up to `limit` derived values of `kind` below `version`.
     fn delete_derived_below(&mut self, kind: &str, version: u32, limit: usize) -> Result<usize>;
+
+    /// Whether the transaction itself inserted this changeset. A write
+    /// path asks to skip a stored-value read that cannot find anything:
+    /// the row of a changeset the transaction inserted can only have
+    /// been written by the transaction itself, and the transaction's
+    /// memory of its derived writes answers that read instead.
+    fn inserted_this_tx(&self, _cs: ChangesetId) -> bool {
+        false
+    }
+
+    /// Reads the derived values of the named kinds, at the kind's own
+    /// version, for the named changesets into the transaction's own
+    /// memory, one statement, so the write path's per-value reads answer
+    /// without round trips. A backend that holds no such memory does
+    /// nothing, which stays correct: the reads then go to the database
+    /// as before.
+    ///
+    /// # Errors
+    ///
+    /// Database errors.
+    fn preload_derived(
+        &mut self,
+        _kinds: &[(&'static str, u32)],
+        _css: &[ChangesetId],
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Makes [`delete_derived_below`](Self::delete_derived_below) wait
+    /// for the commit: the transaction collects the calls and the commit
+    /// deletes with one statement, honoring each call's limit summed per
+    /// kind. The deferral lasts to the commit and is one-way - a
+    /// transaction that turns it on cannot turn it off, so a caller that
+    /// needs `delete_derived_below`'s count must not share a transaction
+    /// with a write path that defers. A backend that does not defer
+    /// keeps deleting per call, which is also right.
+    fn defer_derived_deletes(&mut self) {}
 
     /// The view that a rule-set digest of `version` derives for the real
     /// tree `tree` under the path-context digest `ctx`, if derived already.

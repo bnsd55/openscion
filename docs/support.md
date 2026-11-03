@@ -111,3 +111,36 @@ There is no long-term-support minor in 0.x: every minor can change
 what [stability.md](stability.md) does not pin, and only the latest
 minor takes the full fix list. The first release that could carry an
 LTS promise is v1.0, per the roadmap.
+
+## Directory width
+
+A tree object holds a whole directory, so a change to one name
+rewrites the directory's whole tree entry set: the cost of a change
+grows with the directory's width, not with the change's size. The
+supported width is **100,000 names in one directory**.
+
+The measured shape, on the land and read paths CI runs (the `dir_width`
+measurement, release build, CI runners):
+
+| Names in the directory | One change writes (trees) | Land time | ListDir reply | ListDir time |
+|---|---|---|---|---|
+| 1,000 | 54 KB | 34 ms | 54 KB | 5 ms |
+| 10,000 | 540 KB | 57 ms | 540 KB | 16 ms |
+| 100,000 | 5.4 MB | 105 ms | 5.4 MB | 28 ms |
+| 1,000,000 | 54 MB | 1,210 ms | 54 MB | 304 ms |
+
+Each name costs about 54 bytes of tree (the name plus its entry), so
+the storage cost matters more than the time: trees are stored in the
+database as their v1 bytes, uncompressed (only blobs are zstd files),
+and each change stores a new tree, content-addressed. A hundred
+changes to a 100,000-name directory store about 540 MB of trees.
+
+Past the supported width, nothing refuses at 100,000: it works, at the
+cost the table states, until `ListDir` reaches the reply cap — a
+directory's reply is its whole tree, and replies above 100 MB are
+refused, which nine-byte names reach near 1.85 million names. A
+directory wider than the supported width is a signal to restructure
+it; the remedy if a real workload needs one is chunked directories, a
+new tree format ([#114](https://github.com/bnsd55/openscion/issues/114)),
+which is the change the 1.x freeze would close off. A test pins the
+supported width's cost per change in `tests/dir_width.rs`.
