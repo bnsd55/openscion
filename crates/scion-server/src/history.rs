@@ -372,15 +372,15 @@ impl Edit {
                 .next_back()
                 .or_else(|| index.iter().next())
                 .map(|(first, _)| first.clone())
-                .ok_or_else(|| Error::Corrupt("history: no edited chunk".into()))?;
+                .ok_or_else(|| Error::Internal("history: no edited chunk".into()))?;
             return match self.chunks.get_mut(&first) {
                 Some(entries) => Ok(entries),
-                None => Err(Error::Corrupt("history: no edited chunk".into())),
+                None => Err(Error::Internal("history: no edited chunk".into())),
             };
         }
         self.leaf
             .as_mut()
-            .ok_or_else(|| Error::Corrupt("history: no level".into()))
+            .ok_or_else(|| Error::Internal("history: no level".into()))
     }
 }
 
