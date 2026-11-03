@@ -680,10 +680,10 @@ Every flag that takes a secret's value also has a file form
 (`--x-file`) and an environment form. The file form is the deployment
 form: the owner alone may read it, and a symlink is refused. The
 environment value is visible to the same user and to root. No binary
-takes a token on its command line: the token argv forms are refused at
-start (`ps` makes the command line public to every local account).
-The database URL's argv form is the last one left, and it is
-deprecated: it warns now and is removed in v0.2.0.
+takes a token or the database URL on its command line: those argv
+forms are refused at start, before any parsing, and the value is
+never echoed (`ps` makes the command line public to every local
+account).
 
 | Variable | Flag | Read by | Notes |
 | --- | --- | --- | --- |
