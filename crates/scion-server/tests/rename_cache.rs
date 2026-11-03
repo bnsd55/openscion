@@ -204,6 +204,10 @@ fn a_paged_diff_runs_its_rename_search_once() {
     let after_second = second.next_after.clone().unwrap();
     let third = page(&store, old_id, new_id, Some(&after_second));
     assert!(third.entries.iter().all(|entry| entry.rename.is_none()));
+    // The map from page 2 waits for the pages after it.
+    let (maps, bytes) = scion_server::test_support::read::test_rename_cache_size();
+    assert_eq!(maps, 1);
+    assert!(bytes > 0);
     // Page 4 carries the second rename's halves: it answers from the
     // stored map, not its own search.
     let after_third = third.next_after.clone().unwrap();
@@ -214,14 +218,19 @@ fn a_paged_diff_runs_its_rename_search_once() {
         answered < searched,
         "the page that answers from the map skips the search: {answered} against {searched}"
     );
+    // The page also carries the second rename's deleted half: the
+    // stored map answers it, as it answers the added halves.
     assert_eq!(
         renames_of(&fourth),
-        vec![added_half(1_000), added_half(3_000)]
+        vec![
+            deleted_half(3_000),
+            added_half(1_000),
+            added_half(3_000)
+        ]
     );
-    // The cache holds the one map, and its size is counted.
-    let (maps, bytes) = scion_server::test_support::read::test_rename_cache_size();
-    assert_eq!(maps, 1);
-    assert!(bytes > 0);
+    // The diff ended on the last page, so its map went with it.
+    let (maps, _) = scion_server::test_support::read::test_rename_cache_size();
+    assert_eq!(maps, 0);
 }
 
 /// A diff never answers from another diff's map: a second diff that
