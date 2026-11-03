@@ -167,6 +167,13 @@ build and then measures - see
 | 1,000,000 | 383.6 | 61.7 | 16.8 | 9.1 | 0.025 | +1.0M | 64 MB | 4.2 GB |
 | 5,000,000 | 2,142.3 | 863.1 | - | 37.9 | 0.031 | +5.0M | 320 MB | ~21 GB |
 
+The 100,000 and 5,000,000 rows are
+[run 41694111403](https://github.com/bnsd55/openscion/actions/runs/41694111403);
+the 1,000,000 row is
+[run 41716921823](https://github.com/bnsd55/openscion/actions/runs/41716921823),
+which also measured the warm walk and the counters the read below
+names.
+
 Read of the table:
 
 - **Reopen is flat**: the server's open scans nothing, so a restart
@@ -179,11 +186,14 @@ Read of the table:
   at 1M - the blob bytes are 64 MB - so the warm-up is the kernel
   populating its per-file caches, not reading data.
 - **The wall is RAM.** Small blobs cost a 4 KiB block each: 1M blobs
-  hold 4.2 GB, and 5M hold about 21 GB - past the host's RAM, every
-  fsck is a cold walk and pays a device read per file (863 s at 5M,
-  about 173 microseconds per blob, 10x the warm cost). A host that
-  sizes RAM to its store keeps fsck warm and flat; a store larger than
-  RAM makes fsck minutes per million blobs.
+  hold 4.2 GB, and 5M hold about 21 GB. Past the host's RAM the page
+  cache cannot hold the store, so the warm-flat walk is not available
+  and fsck is expected to pay a device read per file; the measurement
+  shows the cost (863 s at 5M, about 173 microseconds per blob, 10x
+  the warm 1M walk) but not the mechanism - the read counter ran at
+  100k and 1M only. A host that sizes RAM to its store keeps fsck warm
+  and flat; a store larger than RAM makes fsck minutes per million
+  blobs.
 - **gc --dry-run** grows a little faster than the count (7.8x for 5x)
   but stays far under fsck; it stats every file and reads none.
 

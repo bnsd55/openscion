@@ -2,8 +2,8 @@
 //! blobs through the store's own put path, then times the server's
 //! open, `fsck` and `gc --dry-run` over the result, and prints the
 //! bytes on disk. Runs in release mode only, only when asked: a run of
-//! millions of blobs takes tens of minutes and its numbers belong on a
-//! fixed runner, not a laptop. The count comes from
+//! millions of blobs takes tens of minutes and its numbers belong on
+//! the fixed CI runner. The count comes from
 //! `SCION_BENCH_BLOB_COUNT`; the store lives under `SCION_BENCH_DIR`.
 //!
 //! Every fact prints as one `BENCH <key> <value>` line, so the driving

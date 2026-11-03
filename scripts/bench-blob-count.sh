@@ -5,8 +5,8 @@
 # times, the bytes on disk against the blob bytes, and the inodes used
 # and left (`df -i`, printed before and after each count). Runs in
 # release mode, on the fixed runner the workflow dispatches: a run of
-# millions of blobs takes tens of minutes. Local runs stay under one
-# million blobs - the disk this runs on locally is small.
+# millions of blobs takes tens of minutes. The default count is small
+# so that a check run stays fast; the CI job passes the large counts.
 #
 # SCION_BENCH_COUNTS names the counts, space-separated (default
 # "100000"). SCION_BENCH_WORK names a scratch directory for the stores
