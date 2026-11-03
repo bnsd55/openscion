@@ -5,7 +5,7 @@
 //! grep-able row per run (`target=dir_width`); it never runs with the
 //! suites - each run names its width in `SCION_DIR_WIDTH`.
 //!
-//! Run it through the build slot, for example:
+//! Run it, for example:
 //! `SCION_TEST_POSTGRES_URL=... SCION_DIR_WIDTH=10000 \
 //!  cargo test -p open-scion-server --release --test dir_width -- --ignored --nocapture`
 //! and read the `target=dir_width` line. The wide points run on CI,
