@@ -1110,10 +1110,52 @@ impl Pg {
             cs_pending: Some(&mut pending),
             derived_pending: Some(&mut derived),
             derived_preload: Some(&mut preload),
+            deferred_deletes: Vec::new(),
+            defer_derived: false,
             history_pending: Some(&mut history),
             ended: true,
         };
         f(&mut pg)
+    }
+
+    /// A read on one client of the pool, in one READ COMMITTED READ ONLY
+    /// transaction with the pooled read's bounds: every statement sees
+    /// the newest committed state, and none of them queues behind the
+    /// write client. The land's outcome check and plan ride this: their
+    /// writes happen later, in their own transaction, and the land row's
+    /// pending guard is what stops a twin call, not a shared read.
+    ///
+    /// READ COMMITTED is the per-statement newest state the land's
+    /// outcome check and plan ran under on the writer's autocommit.
+    /// READ ONLY turns a write that slips onto this path into an error
+    /// (25006): a write on a pooled reader would land outside the
+    /// writer's lock and the collector's key, and must not be possible
+    /// to add silently. The statement and idle bounds keep an abandoned
+    /// read from holding a reader; the transaction rolls back at the
+    /// end, like every pooled read.
+    ///
+    /// # Errors
+    ///
+    /// What `f` returns, a database error from begin, or
+    /// [`Error::Unavailable`] when no reader was free in time.
+    pub(crate) fn read_latest<T>(&self, f: impl FnOnce(&mut PgTx<'_>) -> Result<T>) -> Result<T> {
+        self.check_fenced()?;
+        let mut reader = self.inner.readers.take(READER_WAIT)?;
+        let out = {
+            let mut tx = PgTx::begin_read(
+                reader.client(),
+                ReadIsolation::ReadCommitted,
+                READ_STATEMENT_TIMEOUT,
+                READ_IDLE_TIMEOUT,
+            )?;
+            let out = f(&mut tx);
+            // A read transaction: nothing to keep. The rollback's own error
+            // must not hide the error of `f`; the drop rolls back anyway.
+            let _ = tx.rollback();
+            out
+        };
+        drop(reader);
+        out
     }
 
     /// A strong read on one client of the pool. The read runs in one
@@ -1145,7 +1187,12 @@ impl Pg {
         self.check_fenced()?;
         let mut reader = self.inner.readers.take(wait)?;
         let out = {
-            let mut tx = PgTx::begin_read(reader.client(), statement, idle)?;
+            let mut tx = PgTx::begin_read(
+                reader.client(),
+                ReadIsolation::RepeatableRead,
+                statement,
+                idle,
+            )?;
             let out = f(&mut tx);
             // A read transaction: nothing to keep. The rollback's own error
             // must not hide the error of `f`; the drop rolls back anyway.
@@ -1271,6 +1318,42 @@ impl Pg {
                 }
                 #[cfg(any(test, feature = "test-hooks"))]
                 self.inner.committed.fetch_add(1, Ordering::Release);
+                // A write path that deferred its derived deletes hands
+                // them to the flush: one statement for the whole
+                // transaction, inside it, so a rollback takes the
+                // deletes with it and the end state is the one the
+                // per-call deletes would have reached.
+                if !tx.deferred_deletes.is_empty() {
+                    let kinds: Vec<String> = tx
+                        .deferred_deletes
+                        .iter()
+                        .map(|(k, _, _)| k.clone())
+                        .collect();
+                    let versions: Vec<i64> =
+                        tx.deferred_deletes.iter().map(|(_, v, _)| *v).collect();
+                    let steps: Vec<i64> = tx.deferred_deletes.iter().map(|(_, _, s)| *s).collect();
+                    let deleted = tx.c.execute(
+                        "WITH k AS (
+                             SELECT kind, version, SUM(step) AS step
+                             FROM unnest($1::text[], $2::int8[], $3::int8[]) AS t(kind, version, step)
+                             GROUP BY kind, version),
+                         v AS (
+                             SELECT d.ctid AS ctid, k.step AS step,
+                                    row_number() OVER (PARTITION BY d.kind
+                                                       ORDER BY d.version) AS rn
+                             FROM derived d JOIN k ON d.kind = k.kind
+                                                            AND d.version < k.version)
+                         DELETE FROM derived WHERE ctid IN (SELECT ctid FROM v WHERE rn <= step)",
+                        &[
+                            P::text_array(kinds),
+                            P::i64_array(versions),
+                            P::i64_array(steps),
+                        ],
+                    )?;
+                    if deleted > 0 {
+                        tracing::debug!(deleted, "flushed the transaction's derived deletes");
+                    }
+                }
                 let committed = tx.commit();
                 #[cfg(any(test, feature = "test-hooks"))]
                 self.inner.txes.fetch_add(1, Ordering::Relaxed);
@@ -1418,6 +1501,25 @@ type DerivedPreload = std::collections::HashMap<(String, i64, Vec<u8>), Vec<u8>>
 /// already holds is the same row.
 type HistoryPending = std::collections::HashMap<Vec<u8>, Vec<u8>>;
 
+/// The isolation level of one read transaction. Repeatable read pins
+/// one snapshot for the whole read; read committed takes the newest
+/// state of each statement. The choices are named, not passed as
+/// strings, so a call site says what its read sees.
+#[derive(Clone, Copy)]
+enum ReadIsolation {
+    RepeatableRead,
+    ReadCommitted,
+}
+
+impl ReadIsolation {
+    fn as_sql(self) -> &'static str {
+        match self {
+            Self::RepeatableRead => "REPEATABLE READ",
+            Self::ReadCommitted => "READ COMMITTED",
+        }
+    }
+}
+
 /// One client of the database, inside one transaction. The queries are its
 /// [`MetaTx`] methods. The transaction is begun and ended with statements
 /// of the client, so a `PgTx` is a plain client handle: it stays covariant
@@ -1467,6 +1569,14 @@ pub struct PgTx<'a> {
     /// transaction cost one chain read for the whole chain, not one per
     /// commit. Shared with the reborrows.
     derived_preload: Option<&'a mut DerivedPreload>,
+    /// The `delete_derived_below` calls a deferring write path made: the
+    /// commit deletes with one statement, honoring the summed limits per
+    /// kind and version. Only `defer_derived_deletes` fills it.
+    deferred_deletes: Vec<(String, i64, i64)>,
+    /// Whether `delete_derived_below` defers to the commit. Off for the
+    /// importer's batching (the flush owns those deletes) and for the
+    /// sweeps, which count the rows they removed.
+    defer_derived: bool,
     /// The history nodes the transaction inserted while batching: the
     /// flush writes them after the derived rows. Shared with the
     /// reborrows.
@@ -1527,30 +1637,41 @@ impl<'a> PgTx<'a> {
             cs_pending: Some(pending),
             derived_pending: Some(derived),
             derived_preload: Some(preload),
+            deferred_deletes: Vec::new(),
+            defer_derived: false,
             history_pending: Some(history),
             ended: false,
         })
     }
 
-    /// Begins one read-only transaction at repeatable read: every
-    /// statement of the caller's read sees one snapshot, not the newest
-    /// state of each statement. The transaction is bounded server side:
+    /// Begins one read-only transaction at the level the caller names:
+    /// every statement of a repeatable-read read sees one snapshot; a
+    /// read-committed read sees the newest state of each statement. The
+    /// transaction is bounded server side:
     /// one statement may take `statement`, and the transaction may sit
     /// idle between statements at most `idle` (the timeouts are
     /// `SET LOCAL`, so they end with the transaction, and a stream that
     /// stopped reading cannot hold the reader forever).
     //
-    // SHORTCUT: every read runs at repeatable read, one snapshot per
-    // read, even though reads that touch only immutable rows would be
-    // safe at read committed with a shorter snapshot hold. Nobody has
-    // measured the gain, and the split needs an audit of every walk that
-    // re-reads a ref. Measure first, then split.
-    fn begin_read(c: &'a mut PgClient, statement: Duration, idle: Duration) -> Result<PgTx<'a>> {
+    // SHORTCUT: every read but `read_latest` runs at repeatable read,
+    // one snapshot per read, even though reads that touch only immutable
+    // rows would be safe at read committed with a shorter snapshot hold.
+    // Nobody has measured the gain, and the split needs an audit of
+    // every walk that re-reads a ref. Measure first, then split.
+    fn begin_read(
+        c: &'a mut PgClient,
+        isolation: ReadIsolation,
+        statement: Duration,
+        idle: Duration,
+    ) -> Result<PgTx<'a>> {
         // Three statements, not one string: the client prepares its
         // queries, and Postgres takes no second command in a prepared
         // statement (E42601).
         c.execute(
-            "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+            &format!(
+                "BEGIN TRANSACTION ISOLATION LEVEL {} READ ONLY",
+                isolation.as_sql()
+            ),
             &[],
         )?;
         // The transaction exists from here on: a SET LOCAL that fails
@@ -1565,6 +1686,8 @@ impl<'a> PgTx<'a> {
             cs_pending: None,
             derived_pending: None,
             derived_preload: None,
+            deferred_deletes: Vec::new(),
+            defer_derived: false,
             history_pending: None,
             ended: false,
         };
@@ -2660,7 +2783,7 @@ impl MetaTx for PgTx<'_> {
                 self.gen_cache.insert((repo.0, key.clone()), parent_gen_i);
             }
         }
-        self.c.execute(
+        let inserted = self.c.execute(
             "INSERT INTO changesets (id, gen, body) VALUES ($1, $2, $3)
              ON CONFLICT (id) DO NOTHING",
             &[
@@ -2670,8 +2793,16 @@ impl MetaTx for PgTx<'_> {
             ],
         )?;
         let generation = parent_gen + 1;
-        self.inserted_gens
-            .insert(id_bytes(id.as_bytes()), generation);
+        // Only a row this statement wrote is the transaction's own. A
+        // conflicting row predates the transaction (a land rebases onto
+        // the head its input changeset already hangs from), and the
+        // write path asks `inserted_this_tx` to tell the two apart: the
+        // stored derived rows of an old changeset are real and must be
+        // read, the ones of a new one cannot exist.
+        if inserted > 0 {
+            self.inserted_gens
+                .insert(id_bytes(id.as_bytes()), generation);
+        }
         self.gen_cache
             .insert((repo.0, id_bytes(id.as_bytes())), generation);
         // While the import's batching is on, the parents and the repo
@@ -3356,21 +3487,26 @@ impl MetaTx for PgTx<'_> {
     ) -> Result<Option<Vec<u8>>> {
         let version = i64::from(version);
         let key = id_bytes(cs.as_bytes());
-        if self.cs_batching {
-            if let Some(pending) = self.derived_pending.as_deref() {
-                for (k, v, c, value) in pending.iter().rev() {
-                    if *k == kind && *v == version && id_bytes(c.as_bytes()) == key {
-                        return Ok(Some(value.clone()));
-                    }
+        if self.cs_batching
+            && let Some(pending) = self.derived_pending.as_deref()
+        {
+            for (k, v, c, value) in pending.iter().rev() {
+                if *k == kind && *v == version && id_bytes(c.as_bytes()) == key {
+                    return Ok(Some(value.clone()));
                 }
             }
-            if let Some(value) = self
-                .derived_preload
-                .as_deref()
-                .and_then(|preload| preload.get(&(kind.to_owned(), version, key.clone())))
-            {
-                return Ok(Some(value.clone()));
-            }
+        }
+        // The transaction's own memory of the derived rows it preloaded
+        // or wrote: one statement filled it at the start of a write path,
+        // and every put of this transaction keeps it true. A row it
+        // deleted is of an older version, which no read of this kind
+        // asks for, so no stale answer can hide there.
+        if let Some(value) = self
+            .derived_preload
+            .as_deref()
+            .and_then(|preload| preload.get(&(kind.to_owned(), version, key.clone())))
+        {
+            return Ok(Some(value.clone()));
         }
         Ok(self
             .c
@@ -3602,6 +3738,16 @@ impl MetaTx for PgTx<'_> {
                 "derived {kind} v{version} for {cs} differs from the stored value"
             )));
         }
+        // The transaction's memory follows its writes, so a later read
+        // of the same row answers with what was written. It follows
+        // after the check above: the check must see the stored row, not
+        // the value just written.
+        if let Some(preload) = self.derived_preload.as_deref_mut() {
+            preload.insert(
+                (kind.to_owned(), version64, id_bytes(cs.as_bytes())),
+                value.to_vec(),
+            );
+        }
         Ok(())
     }
 
@@ -3615,15 +3761,85 @@ impl MetaTx for PgTx<'_> {
         if self.cs_batching {
             return Ok(0);
         }
-        let version = i64::from(version);
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let version64 = i64::from(version);
+        // A write path that deferred its deletes collects this call; the
+        // commit deletes for the whole transaction with one statement,
+        // honoring the summed limits. The callers that count the rows
+        // (the old-value sweep) never turn the deferral on.
+        if self.defer_derived {
+            self.deferred_deletes.push((
+                kind.to_owned(),
+                version64,
+                i64::try_from(limit).unwrap_or(i64::MAX),
+            ));
+            return Ok(0);
+        }
         let deleted = self.c.execute(
             "DELETE FROM derived WHERE (kind, version, cs) IN (
                  SELECT kind, version, cs FROM derived
                  WHERE kind = $1 AND version < $2 LIMIT $3)",
-            &[P::text(kind), P::i64(version), P::i64(limit)],
+            &[
+                P::text(kind),
+                P::i64(version64),
+                P::i64(i64::try_from(limit).unwrap_or(i64::MAX)),
+            ],
         )?;
         Ok(usize::try_from(deleted).unwrap_or(0))
+    }
+
+    /// The stored value of the kind for the changeset the transaction
+    /// itself inserted cannot exist unless the transaction wrote it, and
+    /// its own memory answers that: the stored check reads nothing.
+    fn inserted_this_tx(&self, cs: ChangesetId) -> bool {
+        self.inserted_gens.contains_key(&id_bytes(cs.as_bytes()))
+    }
+
+    /// Reads the derived values of the write path's kinds for the
+    /// changeset's parents into the transaction's memory, one statement:
+    /// every per-value read of the path then answers without a round
+    /// trip. A value written later in the same transaction updates the
+    /// memory, so the answers stay the transaction's own.
+    fn preload_derived(
+        &mut self,
+        kinds: &[(&'static str, u32)],
+        css: &[ChangesetId],
+    ) -> Result<()> {
+        if kinds.is_empty() || css.is_empty() {
+            return Ok(());
+        }
+        let Some(preload) = self.derived_preload.as_deref_mut() else {
+            return Ok(());
+        };
+        let kind_names: Vec<String> = kinds.iter().map(|(name, _)| (*name).to_owned()).collect();
+        let versions: Vec<i64> = kinds
+            .iter()
+            .map(|(_, version)| i64::from(*version))
+            .collect();
+        let keys: Vec<Vec<u8>> = css.iter().map(|cs| id_bytes(cs.as_bytes())).collect();
+        let rows = self.c.query(
+            "SELECT kind, version, cs, value FROM derived
+             WHERE cs = ANY($3)
+               AND (kind, version) IN (SELECT kind, version
+                                       FROM unnest($1::text[], $2::int8[]) AS t(kind, version))",
+            &[
+                P::text_array(kind_names),
+                P::i64_array(versions),
+                P::bytea_array(keys),
+            ],
+        )?;
+        for row in rows {
+            preload.insert((row.get(0), row.get(1), row.get(2)), row.get(3));
+        }
+        Ok(())
+    }
+
+    /// Defers the write path's `delete_derived_below` to the commit:
+    /// the collected deletes wait for the commit's flush, and the
+    /// deferral lasts to the commit. One-way - there is no off, because
+    /// an off would silently drop deletes the transaction already
+    /// promised.
+    fn defer_derived_deletes(&mut self) {
+        self.defer_derived = true;
     }
 
     /// The view that the per-tree memo holds for a (rule set, version,
@@ -5347,5 +5563,119 @@ pub(crate) mod pool_tests {
         // A normal write after the refusal writes as before.
         let again = store.write(|c| c.insert_changeset(repo, &cs)).unwrap();
         assert_eq!(again, id);
+    }
+    /// A read that runs while a write transaction holds the write
+    /// client: the land's outcome check and plan ride it, so a land in
+    /// its slot must not wait for another writer's statements. The
+    /// writer is held here, so a read that queues behind it would hang
+    /// the test.
+    #[test]
+    fn a_read_latest_runs_while_a_write_holds_the_write_client() {
+        let (_pool, pg) = pg();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let writer = {
+            let pg = pg.clone();
+            std::thread::spawn(move || {
+                pg.commit(|_tx| {
+                    held_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            })
+        };
+        held_rx.recv().unwrap();
+        // The land's shape: a per-statement read while the writer is
+        // held. It answers.
+        let seen = pg
+            .read_latest(|tx| Ok(tx.c.query_opt("SELECT 1", &[])?.is_some()))
+            .unwrap();
+        assert!(seen);
+        // A read on the write client queues behind it, as it always did:
+        // the same hold keeps `read_unflushed` waiting.
+        let queued = {
+            let pg = pg.clone();
+            std::thread::spawn(move || pg.read_unflushed(|_| Ok(())))
+        };
+        for _ in 0..2_000 {
+            std::thread::yield_now();
+        }
+        assert!(
+            !queued.is_finished(),
+            "the writer-bound read did not queue behind the held writer"
+        );
+        release_tx.send(()).unwrap();
+        queued.join().unwrap().unwrap();
+        writer.join().unwrap();
+    }
+
+    /// A per-statement read sees the newest committed state: a commit
+    /// that lands between its statements is visible to the later one,
+    /// which is the shape of the land's outcome check and plan.
+    #[test]
+    fn a_read_latest_sees_a_commit_that_lands_between_its_statements() {
+        let (_pool, pg) = pg();
+        pg.commit(|tx| tx.c.execute("CREATE TABLE read_latest_watch (n INT)", &[]))
+            .unwrap();
+        pg.commit(|tx| {
+            tx.c.execute("INSERT INTO read_latest_watch VALUES (1)", &[])
+        })
+        .unwrap();
+        let (counted_tx, counted_rx) = std::sync::mpsc::channel();
+        let (commit_tx, commit_rx) = std::sync::mpsc::channel::<()>();
+        let writer = {
+            let pg = pg.clone();
+            std::thread::spawn(move || {
+                counted_rx.recv().unwrap();
+                pg.commit(|tx| {
+                    tx.c.execute("INSERT INTO read_latest_watch VALUES (2)", &[])
+                })
+                .unwrap();
+                commit_tx.send(()).unwrap();
+            })
+        };
+        let seen = pg
+            .read_latest(|tx| {
+                let first: i64 =
+                    tx.c.query("SELECT count(*) FROM read_latest_watch", &[])
+                        .unwrap()[0]
+                        .get(0);
+                assert_eq!(first, 1, "the read started from an empty table");
+                counted_tx.send(()).unwrap();
+                commit_rx.recv().unwrap();
+                let second: i64 =
+                    tx.c.query("SELECT count(*) FROM read_latest_watch", &[])
+                        .unwrap()[0]
+                        .get(0);
+                Ok(second)
+            })
+            .unwrap();
+        assert_eq!(seen, 2, "the read did not see the commit it raced");
+        writer.join().unwrap();
+        pg.commit(|tx| tx.c.execute("DROP TABLE read_latest_watch", &[]))
+            .unwrap();
+    }
+
+    /// A write inside `read_latest` fails: the read is READ ONLY, so a
+    /// write that slips onto this path cannot land outside the writer's
+    /// lock and the collector's key (SQLSTATE 25006,
+    /// `read_only_sql_transaction`).
+    #[test]
+    fn a_write_inside_read_latest_fails() {
+        let (_pool, pg) = pg();
+        let error = pg
+            .read_latest(|tx| {
+                tx.c.execute("CREATE TABLE read_latest_read_only (n INT)", &[])
+                    .map(|_| ())
+            })
+            .unwrap_err();
+        // The cause chain carries the SQLSTATE text only in the debug
+        // form: the storage error's own display names the class, not
+        // the database's message.
+        assert!(
+            format!("{error:?}").contains("read-only transaction"),
+            "{error:?}"
+        );
     }
 }

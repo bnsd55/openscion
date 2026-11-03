@@ -894,7 +894,10 @@ mod tests {
     }
 
     /// A real ACL on the filesystem is refused, and its removal restores
-    /// the read. Skipped where `setfacl` is absent.
+    /// the read. Skipped where `setfacl` is absent, unless
+    /// `SCION_TEST_REQUIRE_SETFACL` says the environment promised it:
+    /// CI sets that on the Linux cells it installs `acl` on, so a
+    /// missing `setfacl` there fails instead of passing silently.
     #[cfg(target_os = "linux")]
     #[test]
     fn an_acl_beyond_the_mode_is_refused_for_real() {
@@ -902,7 +905,13 @@ mod tests {
             .arg("--version")
             .output()
             .is_ok_and(|out| out.status.success());
+        let required = std::env::var("SCION_TEST_REQUIRE_SETFACL").is_ok_and(|v| v == "1");
         if !have_setfacl {
+            assert!(
+                !required,
+                "SCION_TEST_REQUIRE_SETFACL=1 but setfacl is missing: \
+                 the real-ACL case cannot run"
+            );
             eprintln!("setfacl is missing; the real-ACL case is skipped");
             return;
         }
