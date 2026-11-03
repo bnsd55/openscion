@@ -57,11 +57,9 @@ const _: () = assert!(crate::land::MAX_INDEX_BYTES as u64 == LAND_INDEX);
 pub(crate) const PRUNE_BODY: u64 = crate::gc::PRUNE_BODY_BUDGET as u64;
 
 /// What the stalled replies of every connection together may hold (the
-/// listener's process-wide stall total).
-// SHORTCUT: a literal, because the listener on this branch counts only
-// per connection; point it at the listener's own total constant when
-// that lands, so the two cannot drift.
-pub(crate) const STALL_TOTAL: u64 = 1 << 30;
+/// listener's process-wide stall total, `STALLED_TOTAL_BYTES` in
+/// scion-proto's runtime/listen.rs).
+pub(crate) const STALL_TOTAL: u64 = scion_proto::runtime::listen::STALLED_TOTAL_BYTES;
 
 /// Slack for what the budgets do not count: the interpreter, the
 /// allocators' overhead, the connection and TLS buffers, the stacks of
