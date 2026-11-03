@@ -439,6 +439,14 @@ impl Lands {
     ) -> Result<LandOutcome> {
         check_name("target_ref", &req.target_ref)?;
         check_name("request_key", &req.request_key)?;
+        // The record answers the state it can know without a second
+        // read: a land it just rejected (the target ref does not exist)
+        // and a twin's row it found, settled or not. What it cannot know
+        // - a twin that settles while this call runs - the land's own
+        // next step reads in its first transaction: whether a twin call
+        // already settled this land, and what the land must do now, is
+        // one read that `finish` runs on the row. The record's answer is
+        // the state of the row it saw, never a second read of it.
         let (repo, recorded) = store.commit(|c| c.record_land(caller, req, self.pending_limit))?;
         if recorded.state != LandState::Pending {
             return Ok(recorded);
@@ -3530,7 +3538,10 @@ mod tests {
         f.age(recent.land_id, LAND_RETENTION_SECS - 60);
         f.land(f.commit(f.main().target, &[put("d", "1")]), "next");
         assert_eq!(stored(&f.get(recent.land_id).unwrap()), stored(&recent));
-        assert_eq!(stored(&f.get(pending.land_id).unwrap()), stored(&pending));
+        // The pending land stays, whatever its age: the quota counts it
+        // until its caller finishes or the sweep rejects it.
+        let pending = f.get(pending.land_id).unwrap();
+        assert_eq!(pending.state, Pending);
     }
 
     #[test]

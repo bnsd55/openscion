@@ -101,17 +101,14 @@ async fn a_restart_after_a_kill_recovers_in_a_stated_time() {
                 Instant::now() + Duration::from_secs(600),
             ),
         };
-        store
-            .commit(|c| {
-                let (_, outcome) = c.record_land(&Caller("bench@x".to_string()), &req, None)?;
-                assert_eq!(
-                    outcome.state,
-                    LandState::Pending,
-                    "the built land records as pending"
-                );
-                Ok(())
-            })
+        let (_, recorded) = store
+            .commit(|c| c.record_land(&Caller("bench@x".to_string()), &req, None))
             .unwrap();
+        assert_eq!(
+            recorded.state,
+            LandState::Pending,
+            "the built land records as pending"
+        );
     }
 
     // The seam's handle closes before the server opens the same files:
