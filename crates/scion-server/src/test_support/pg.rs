@@ -136,10 +136,12 @@ fn drop_stale_schemas(maker: &PgClient, automatic: bool) -> (usize, usize) {
             // The recorded directory decides: gone means the test that
             // made the schema is over, whatever the clock says. No
             // directory recorded - the schema is older than the comment
-            // - falls back to the registration's age.
+            // - falls back to the registration's age, but only when the
+            // clock answers: a database that cannot tell the time keeps
+            // every schema it cannot date.
             let stale = match &dir {
                 Some(recorded) => !Path::new(recorded).exists(),
-                None => started < now - 600,
+                None => now.is_some_and(|now| started < now.saturating_sub(600)),
             };
             if !stale || dropped >= SWEEP_CAP {
                 left += 1;
@@ -159,6 +161,7 @@ fn drop_stale_schemas(maker: &PgClient, automatic: bool) -> (usize, usize) {
     tracing::info!(
         dropped,
         left,
+        clock = now.is_some(),
         "dropped stale test schemas at the run's start"
     );
     // The lock frees when this connection closes: a failed unlock needs
@@ -170,14 +173,15 @@ fn drop_stale_schemas(maker: &PgClient, automatic: bool) -> (usize, usize) {
 }
 
 /// The database server's clock, as the registry's `started` column
-/// spells it, so the age check reads one clock.
+/// spells it, so the age check reads one clock. `None` when the clock
+/// does not answer: the sweep then keeps every schema it cannot date,
+/// rather than date them all stale.
 #[cfg(any(test, feature = "test-hooks"))]
-fn extract_epoch_now(maker: &PgClient) -> i64 {
+fn extract_epoch_now(maker: &PgClient) -> Option<i64> {
     maker
         .query_opt("SELECT extract(epoch from now())::bigint", &[])
         .ok()
         .and_then(|row| row.and_then(|row| row.get(0)))
-        .unwrap_or(i64::MAX)
 }
 
 /// A plain connection. Only the test schema's preparation calls it.

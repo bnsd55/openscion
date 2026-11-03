@@ -131,16 +131,49 @@ fn a_schema_a_connection_still_names_survives_the_sweep() {
         .unwrap();
     dir.close().unwrap();
     Backend::sweep_stale_test_schemas().unwrap();
-    assert!(
-        schema_exists(&mut client, &schema),
-        "a named connection keeps its schema alive"
-    );
+    let mut client = connect();
+    if schema_exists(&mut client, &schema) {
+        // The holder's name protected the schema through the sweep.
+    } else {
+        panic!(
+            "a named connection keeps its schema alive; after the drop: {}",
+            snapshot(&mut client, &schema)
+        );
+    }
     drop(holder);
     Backend::sweep_stale_test_schemas().unwrap();
     assert!(
         !schema_exists(&mut client, &schema),
         "the schema drops once its last connection is gone"
     );
+}
+
+/// What the sweep saw when a named schema vanished anyway: the
+/// registry row, the comment, and the connections that name test
+/// schemas. A test prints this before its own failure, so a parallel
+/// sweep's read is on the record.
+fn snapshot(client: &mut postgres::Client, schema: &str) -> String {
+    let row = client
+        .query_opt(
+            "SELECT started, obj_description(n.oid, 'pg_namespace')
+             FROM public.scion_test_schemas AS r
+             JOIN pg_catalog.pg_namespace AS n ON n.nspname = r.schema
+             WHERE r.schema = $1",
+            &[&schema],
+        )
+        .unwrap();
+    let named: Vec<String> = client
+        .query(
+            "SELECT application_name FROM pg_catalog.pg_stat_activity
+             WHERE application_name LIKE 'scion_test_%'
+               AND application_name <> ''",
+            &[],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    format!("registry {row:?}; connections naming test schemas: {named:?}")
 }
 
 /// The sweep drops only the names the test schema helper spells: a
