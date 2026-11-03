@@ -302,11 +302,12 @@ pub(crate) fn on_first_parents(
     Ok(Some(at.id == base))
 }
 
-/// What a query read: nodes and parents, in steps.
+/// What a query read: nodes and parents, in steps and visits.
 #[derive(Clone, Copy, Debug, Default)]
 struct Cost {
     reads: usize,
     steps: usize,
+    visits: usize,
 }
 
 /// How long a walk holds one read connection: for moves of up to `reads`
@@ -320,6 +321,49 @@ struct Steps {
 /// reads, and a move reads at most a few dozen rows: O(log n) nodes, or the
 /// parents of a merge.
 const STEPS: Steps = Steps { reads: 1000 };
+
+/// How many changesets one graph query may visit before it fails with
+/// [`Error::ResourceExhausted`]. A visit is one move of the walk: the
+/// search taking a link or a history, the paint taking a merge. The
+/// measured cost of a visit is a line in the changesets - the woven
+/// history on the runner read 50 statements over 10,001 changesets in
+/// 67.8 ms, about 6.8 microseconds a visit - so a million visits is
+/// about seven seconds of walk: far above what any honest query here
+/// spends, and far below the 600 s call deadline. A query past the
+/// bound stops instead of holding a read slot to its deadline.
+pub(crate) const GRAPH_QUERY_MAX_VISITS: usize = 1_000_000;
+
+/// The bound a query answers to. Tests set it small through
+/// [`set_visits_bound_for_tests`]; production walks always answer to
+/// [`GRAPH_QUERY_MAX_VISITS`].
+fn visits_bound() -> usize {
+    #[cfg(any(test, feature = "test-hooks"))]
+    {
+        let small = VISITS_BOUND.load(std::sync::atomic::Ordering::Relaxed);
+        if small != 0 {
+            return small;
+        }
+    }
+    GRAPH_QUERY_MAX_VISITS
+}
+
+#[cfg(test)]
+static VISITS_BOUND: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Holds a smaller visit bound for the tests that pin the bound's
+/// error: the walks under it answer, the walks past it fail with an
+/// error that names the bound. The guard puts the default back.
+#[cfg(test)]
+pub(crate) fn set_visits_bound_for_tests(bound: usize) -> impl Drop {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            VISITS_BOUND.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    VISITS_BOUND.store(bound, std::sync::atomic::Ordering::Relaxed);
+    Reset
+}
 
 /// Makes the moves of a walk with `next` until it gives the answer, in
 /// `steps`. Each step holds one read connection, and the walk gives it back
@@ -335,11 +379,18 @@ fn in_steps<T>(
 ) -> Result<(T, Cost)> {
     let mut cost = Cost::default();
     let mut seen = 0;
+    let bound = visits_bound();
     let result = loop {
         cost.steps += 1;
         let (step, step_seen) = store.read_counted(|c| {
             let mut index = Index::new(c, deadline, cache, parents);
             let answer = loop {
+                cost.visits += 1;
+                if cost.visits > bound {
+                    break Err(Error::ResourceExhausted(format!(
+                        "the graph walk passed its {bound}-visit bound"
+                    )));
+                }
                 match next(&mut index) {
                     Ok(None) if index.reads < steps.reads => {}
                     answer => break answer,
@@ -356,7 +407,7 @@ fn in_steps<T>(
     // As `Store::read`: the reply waits until each commit that a step could
     // see is durable, with one flush for all steps.
     store.wait_durable(seen)?;
-    let Cost { reads, steps } = cost;
+    let Cost { reads, steps, .. } = cost;
     match &result {
         Err(Error::DeadlineExceeded(why)) => {
             tracing::info!(reads, steps, %why, "a graph query stopped at its deadline");
@@ -859,6 +910,54 @@ mod tests {
 
     /// Steps of a few reads, so that walks go on across steps.
     const SMALL: Steps = Steps { reads: 4 };
+
+    /// The bound holds: a walk under it answers, a walk past it fails
+    /// with an error that names the bound. The small bound rides the
+    /// test seam, so the pin does not build a million-node history.
+    #[test]
+    fn a_query_past_its_visit_bound_fails_naming_it() {
+        let _slot = damage::slot();
+        // Two branches that weave: each round grows both branches, then
+        // a criss-cross merge takes both tips. The paint that finds the
+        // bases takes one merge a visit, so a woven graph passes a
+        // small bound; a single-parent history answers in one.
+        let mut parents = vec![vec![]];
+        let mut a = vec![0_usize];
+        let mut b = vec![0_usize];
+        for _ in 0..3 {
+            for _ in 0..2 {
+                parents.push(vec![*a.last().unwrap()]);
+                a.push(parents.len() - 1);
+                parents.push(vec![*b.last().unwrap()]);
+                b.push(parents.len() - 1);
+            }
+            let (pa, pb) = (*a.last().unwrap(), *b.last().unwrap());
+            parents.push(vec![pa, pb]);
+            a.push(parents.len() - 1);
+            parents.push(vec![pb, pa]);
+            b.push(parents.len() - 1);
+        }
+        let (_dir, store, repo, ids) = store_graph(&parents);
+        // First, derive: the bound counts the query's walk, not the
+        // graph's derivation.
+        assert!(is_ancestor(&store, repo, ids[0], ids[*a.last().unwrap()], &later()).unwrap());
+        let _guard = set_visits_bound_for_tests(2);
+        // One visit answers on a single-parent history: the walk
+        // descends the jump chain to the root in one move.
+        assert!(is_ancestor(&store, repo, ids[0], ids[1], &later()).unwrap());
+        let got = merge_bases(
+            &store,
+            repo,
+            ids[*a.last().unwrap()],
+            ids[*b.last().unwrap()],
+            &later(),
+        );
+        assert!(
+            matches!(&got, Err(crate::error::Error::ResourceExhausted(text))
+                if text.contains("visit bound")),
+            "{got:?}"
+        );
+    }
 
     /// A deadline that a test does not reach.
     fn later() -> Deadline {
