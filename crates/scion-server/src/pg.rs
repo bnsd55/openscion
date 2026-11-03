@@ -3863,7 +3863,11 @@ impl MetaTx for PgTx<'_> {
             land_id
         } else {
             let (state, detail, reason) = if self.get_ref(repo, &req.target_ref)?.is_some() {
-                (LandState::Pending, String::new(), LandRejectReason::Unspecified)
+                (
+                    LandState::Pending,
+                    String::new(),
+                    LandRejectReason::Unspecified,
+                )
             } else {
                 let detail = format!("ref {:?} does not exist", req.target_ref);
                 (LandState::Rejected, detail, LandRejectReason::MissingRef)

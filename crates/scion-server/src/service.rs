@@ -2579,7 +2579,10 @@ mod tests {
             (LandRejectReason::Unspecified, WireReason::Unspecified),
             (LandRejectReason::NeedsOneParent, WireReason::NeedsOneParent),
             (LandRejectReason::MissingRef, WireReason::MissingRef),
-            (LandRejectReason::BaseNotOnHistory, WireReason::BaseNotOnHistory),
+            (
+                LandRejectReason::BaseNotOnHistory,
+                WireReason::BaseNotOnHistory,
+            ),
             (LandRejectReason::Abandoned, WireReason::Abandoned),
         ];
         for (reason, want) in wire {
@@ -2588,10 +2591,7 @@ mod tests {
             assert_eq!(reply.reject_reason(), want, "{reason:?}");
         }
         // A reason on a state that must not carry one does not leak.
-        let reply = land_response(outcome(
-            LandState::Landed,
-            LandRejectReason::Abandoned,
-        ));
+        let reply = land_response(outcome(LandState::Landed, LandRejectReason::Abandoned));
         assert_eq!(reply.state(), Wire::Landed);
         assert_eq!(reply.reject_reason(), WireReason::Unspecified);
     }
