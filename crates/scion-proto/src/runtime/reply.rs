@@ -42,6 +42,14 @@ use crate::{Bytes, CHUNK_BYTES, MAX_MESSAGE_BYTES, MAX_OBJECT_BYTES};
 /// for the rest, so one call stays short.
 pub(crate) const REPLY_BUDGET_BYTES: usize = MAX_MESSAGE_BYTES;
 
+/// The most reads one reply keeps in flight while it sends, in the request's
+/// order: enough to overlap the hops of a read with the sends of the objects
+/// before it, without holding much of the reply budget for objects the
+/// client may never take. Chosen at the knee of the runner sweep (2, 4, 8,
+/// 16 over the many-small-files cell, the cache cold), which the PR that
+/// introduced it quotes.
+pub const READS_IN_FLIGHT: usize = 4;
+
 /// The byte budget of one process: the most memory that all its replies
 /// together hold for their objects.
 pub const IN_FLIGHT_BYTES: usize = 4 * MAX_OBJECT_BYTES;
@@ -140,6 +148,32 @@ impl Stream for ObjectStream {
                 ))))
             }
             Poll::Ready(None) => Poll::Ready(None),
+        }
+    }
+}
+
+/// What a reply does when its client stops taking parts: the timeout it
+/// waits per part, the handle of the connection that counts the parts a
+/// stall leaves in HTTP/2, and the slot that parks the count.
+pub struct ReplyStall {
+    stall: Duration,
+    stalled: Option<crate::runtime::listen::Stalled>,
+    slot: StallSlot,
+}
+
+impl ReplyStall {
+    /// The reply waits `stall` per part, parks the parts a stall leaves in
+    /// HTTP/2 onto `stalled`'s connection count through `slot`.
+    #[must_use]
+    pub fn new(
+        stall: Duration,
+        stalled: Option<crate::runtime::listen::Stalled>,
+        slot: StallSlot,
+    ) -> Self {
+        Self {
+            stall,
+            stalled,
+            slot,
         }
     }
 }
@@ -304,9 +338,19 @@ impl Parts {
 /// object, takes its share of the budget with [`take`], and only then reads
 /// the bytes, so a reply that waits for budget holds no object. Stops after
 /// an error, once the reply has sent `REPLY_BUDGET_BYTES`, when the client
-/// has gone, when `produce` returns `None`, or when the client does not take
-/// a part within `stall`. Finding an object has no time limit here: a cache
-/// tier bounds its upstream fetches itself.
+/// has gone, when the read of a key gives up (`None`), or when the client
+/// does not take a part within `stall`. A read has no time limit here: a
+/// cache tier bounds its upstream fetches itself.
+///
+/// The reply keeps up to `reads_in_flight` reads running ahead of the object
+/// it is sending, in an ordered window that hands out their results in the
+/// request's order, whatever order they finish in. Each read holds its own
+/// share of the budget from the moment it takes it, so a window of `N` holds
+/// at most `N` shares for its reads, and the reply holds one more for the
+/// object it is sending. The window is polled between the parts of the
+/// object going out, so reads overlap the sends; a slow or stalled client
+/// stops the sends, and with them the polling, until the stall ends the
+/// reply and every share goes back.
 ///
 /// A stall leaves the reply's parts in HTTP/2, where no budget counts them
 /// ([`crate::runtime::listen`]), so `stalled` — the handle of the connection, from
@@ -319,16 +363,24 @@ pub async fn send_objects<K, F>(
     first: Found,
     keys: impl IntoIterator<Item = K>,
     tx: mpsc::Sender<Sent>,
-    stall: Duration,
-    stalled: Option<crate::runtime::listen::Stalled>,
-    slot: StallSlot,
+    stall: ReplyStall,
+    reads_in_flight: usize,
     produce: impl Fn(K) -> F,
 ) where
     F: Future<Output = Option<Found>>,
 {
     let mut keys = keys.into_iter();
+    let mut window = Window::new(reads_in_flight);
     let mut next = Some(first);
     let mut sent = 0;
+    let ReplyStall {
+        stall,
+        stalled,
+        slot,
+    } = stall;
+    // The first reads start before the first object goes out, so they
+    // overlap the send from the start.
+    window.run_ahead(&mut keys, &produce).await;
     while let Some((object, permit)) = next {
         let mut parts = match object {
             Ok(object) => Parts::new(object),
@@ -373,19 +425,120 @@ pub async fn send_objects<K, F>(
                     return;
                 }
             }
+            // The reads in flight run while this object goes out. Each part
+            // that left is one turn of the polling: nothing awaits here, but
+            // every poll pushes a read over its next await point.
+            window.run_ahead(&mut keys, &produce).await;
         }
         // The object's bytes are gone, and so is its share.
         drop((parts, permit));
         if sent >= REPLY_BUDGET_BYTES {
             return;
         }
-        let Some(key) = keys.next() else { return };
-        next = produce(key).await;
+        // The next object in the request's order, from the window's front.
+        // `None`: no keys are left, or the read at the front gave up. Both
+        // end the reply, as the old one-read-at-a-time loop ended it.
+        next = window.next(&mut keys, &produce).await;
+    }
+}
+
+/// The ordered window of reads in flight: at most `limit` reads run at a
+/// time, and the front read's result leaves first, whatever order the reads
+/// finish in. Each entry is a read that has not finished, or the result it
+/// finished with, still waiting for the entries ahead of it to go out.
+struct Window<F> {
+    limit: usize,
+    entries: VecDeque<Entry<F>>,
+}
+
+/// One slot of the order: a read that runs, or the result it finished
+/// with, still waiting for the entries ahead of it to go out.
+enum Entry<F> {
+    Running(Pin<Box<F>>),
+    Done(Option<Found>),
+}
+
+impl<F: Future<Output = Option<Found>>> Window<F> {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit: limit.max(1),
+            entries: VecDeque::new(),
+        }
+    }
+
+    /// Starts a read for each free slot, while keys are left.
+    fn fill<K, P>(&mut self, keys: &mut impl Iterator<Item = K>, produce: &P)
+    where
+        P: Fn(K) -> F,
+    {
+        while self.entries.len() < self.limit
+            && let Some(key) = keys.next()
+        {
+            self.entries
+                .push_back(Entry::Running(Box::pin(produce(key))));
+        }
+    }
+
+    /// Polls every read that has not finished, in the request's order, so
+    /// they all run: a finished read parks its result in its entry, and a
+    /// read that is behind another keeps running ahead of it. A read that
+    /// fails or gives up parks that, in its place in the order.
+    fn poll_all(&mut self, cx: &mut Context<'_>) {
+        for entry in &mut self.entries {
+            if let Entry::Running(read) = entry
+                && let Poll::Ready(found) = read.as_mut().poll(cx)
+            {
+                *entry = Entry::Done(found);
+            }
+        }
+    }
+
+    /// One turn of the polling, without waiting: fills the free slots and
+    /// polls what runs. Ready at once, always: the sends never wait on it.
+    async fn run_ahead<K, P>(&mut self, keys: &mut impl Iterator<Item = K>, produce: &P)
+    where
+        P: Fn(K) -> F,
+    {
+        std::future::poll_fn(|cx| {
+            self.fill(keys, produce);
+            self.poll_all(cx);
+            Poll::Ready(())
+        })
+        .await;
+    }
+
+    /// Waits for the read at the front of the order and yields its result.
+    /// `None` when no keys are left, or when the read at the front gave up:
+    /// the reply ends there. The reads behind it keep running until the
+    /// reply drops them, and their shares go with them.
+    async fn next<K, P>(&mut self, keys: &mut impl Iterator<Item = K>, produce: &P) -> Option<Found>
+    where
+        P: Fn(K) -> F,
+    {
+        std::future::poll_fn(|cx| {
+            self.fill(keys, produce);
+            self.poll_all(cx);
+            match self.entries.front() {
+                Some(Entry::Done(_)) => {
+                    let Entry::Done(found) = self.entries.pop_front().unwrap() else {
+                        unreachable!("the front was done")
+                    };
+                    Poll::Ready(found)
+                }
+                // The fill consumed the keys; an empty window with a result
+                // nowhere in sight only happens when the keys ran out.
+                None if self.entries.is_empty() => Poll::Ready(None),
+                _ => Poll::Pending,
+            }
+        })
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use tokio_stream::StreamExt as _;
     use tonic::Code;
 
@@ -440,9 +593,8 @@ mod tests {
                 first,
                 [(); 0],
                 tx,
-                stall,
-                None,
-                StallSlot::default(),
+                ReplyStall::new(stall, None, StallSlot::default()),
+                1,
                 |()| async { None },
             ));
             let held = || IN_FLIGHT_BYTES - budget.available_permits();
@@ -482,9 +634,8 @@ mod tests {
             first,
             [(); 0],
             tx,
-            stall,
-            None,
-            StallSlot::default(),
+            ReplyStall::new(stall, None, StallSlot::default()),
+            1,
             |()| async { None },
         ));
 
@@ -538,9 +689,8 @@ mod tests {
             first,
             [(); 0],
             tx,
-            stall,
-            Some(stalled),
-            slot,
+            ReplyStall::new(stall, Some(stalled), slot),
+            1,
             |()| async { None },
         ));
 
@@ -553,5 +703,92 @@ mod tests {
         // Dropping the body drops the parked count with it.
         drop(stream);
         until(|| metrics.stalled_reply_bytes() == 0).await;
+    }
+
+    /// A window of `N` reads in flight: the results leave in the request's
+    /// order, whatever order the reads finish in; at most `N` reads run at
+    /// a time, each holding its own share of the budget; and the reply
+    /// holds one more share for the object being sent.
+    #[tokio::test]
+    async fn reads_run_ahead_in_order_and_never_past_the_window() {
+        const N: usize = 4;
+        const KEYS: usize = 12;
+        // A budget of exactly N shares plus the one being sent, so a read
+        // past the bound would wait for budget instead of failing the test.
+        let share = 1000usize;
+        let budget = Arc::new(Semaphore::new((N + 1) * share));
+        let (tx, mut stream, _slot) = channel();
+        // Each read holds a share and finishes out of order: the later the
+        // key, the longer the read takes. A read's own probe counts how
+        // many run at once, and the finish list shows the test's reads
+        // really do finish out of order.
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let most = Arc::new(AtomicUsize::new(0));
+        let finished = Arc::new(Mutex::new(Vec::new()));
+        let first = (
+            Ok(blob(1, true)),
+            take(&budget, share, BUSY_TIMEOUT).await.unwrap(),
+        );
+        let left = budget.clone();
+        let done_list = finished.clone();
+        let most_seen = most.clone();
+        let reply = tokio::spawn(send_objects(
+            first,
+            0..KEYS,
+            tx,
+            ReplyStall::new(Duration::from_secs(10), None, StallSlot::default()),
+            N,
+            move |key: usize| {
+                // Clones before the block: the block owns its handles, the
+                // closure keeps its own, so the closure is a plain `Fn`.
+                let (in_flight, most, finished, budget) = (
+                    in_flight.clone(),
+                    most.clone(),
+                    finished.clone(),
+                    budget.clone(),
+                );
+                async move {
+                    let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    most.fetch_max(now, Ordering::SeqCst);
+                    // The reads finish in the reverse of their order, so
+                    // the window has to reorder them to keep the promise.
+                    tokio::time::sleep(Duration::from_millis(20 * (KEYS - key) as u64)).await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    {
+                        let mut finished = finished.lock().unwrap();
+                        finished.push(key);
+                    }
+                    // The share for the object's bytes, as `produce` takes
+                    // it before the object goes out.
+                    let permit = take(&budget, share, BUSY_TIMEOUT).await.unwrap();
+                    // A size of its own, so the order of the parts names
+                    // the order of the keys.
+                    Some((Ok(blob(share + key, true)), permit))
+                }
+            },
+        ));
+
+        // The object found before the reply began, then every object in
+        // the request's order: the size names the key that sent it.
+        let first_part = stream.next().await.unwrap().unwrap();
+        assert_eq!(first_part.data.len(), 1);
+        for key in 0..KEYS {
+            let part = stream.next().await.unwrap().unwrap();
+            assert_eq!(part.data.len(), share + key, "key {key} out of order");
+            assert_eq!(part.encoded_size, (share + key) as u64);
+        }
+        assert!(stream.next().await.is_none());
+        reply.await.unwrap();
+
+        // The reads finished in the reverse of their order, and all of
+        // them ran; the most at once was the bound; and every share came
+        // back when the reply ended.
+        let done = done_list.lock().unwrap().clone();
+        let mut sorted = done.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..KEYS).collect::<Vec<_>>());
+        assert_ne!(done, sorted, "the test's reads did not finish out of order");
+        assert_eq!(most_seen.load(Ordering::SeqCst), N);
+        assert_eq!(left.available_permits(), (N + 1) * share);
     }
 }
