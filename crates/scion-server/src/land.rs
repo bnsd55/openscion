@@ -2746,20 +2746,31 @@ mod tests {
             room in proptest::option::of(0..4000_usize),
         ) {
             // The per-case cost must not grow with the case count: the
-            // suite shares one schema for the whole test fn, makes one
-            // repo per case, and keeps the schema's planner statistics
-            // current (a schema per case would be hundreds of schemas of
-            // one writer and eight readers each).
+            // suite shares one schema, one backend and one repo per case,
+            // and keeps the schema's planner statistics current (a schema
+            // per case would be hundreds of schemas of one writer and
+            // eight readers each). The shared backend is also what keeps
+            // the cases off their own lock: on macOS the host lock of a
+            // dropped backend can stay held briefly after the drop, so a
+            // case that reopened the store could see "another server
+            // holds this store". One open for the whole proof races
+            // nothing.
             static STAGE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+            static STORE: std::sync::OnceLock<Backend> = std::sync::OnceLock::new();
             static CASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let _slot = damage::slot();
-            // The directory outlives the case: a TempDir dropped early
+            // The directory outlives the store: a TempDir dropped early
             // deletes the schema the store still serves.
             let dir = STAGE
                 .get_or_init(crate::test_support::private_tempdir)
                 .path()
                 .to_owned();
-            let store = Backend::open_test_with_readers(&dir, crate::test_support::PROOF_READERS).unwrap();
+            let store = STORE
+                .get_or_init(|| {
+                    Backend::open_test_with_readers(&dir, crate::test_support::PROOF_READERS)
+                        .unwrap()
+                })
+                .clone();
             let case = CASE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // The planner statistics, the way autovacuum would keep them
             // on a real server: after the first case and then every 16
