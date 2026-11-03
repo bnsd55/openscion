@@ -324,7 +324,15 @@ async fn start_reply(
                     key,
                 )
             };
-            reply::send_objects(first, rest, tx, waits.stall, stalled, slot, produce).await;
+            reply::send_objects(
+                first,
+                rest,
+                tx,
+                reply::ReplyStall::new(waits.stall, stalled, slot),
+                reply::READS_IN_FLIGHT,
+                produce,
+            )
+            .await;
         }
         // The reply runs outside the call, but stays in its span.
         .instrument(tracing::Span::current()),
@@ -336,10 +344,12 @@ async fn start_reply(
 /// `in_flight` for the memory that reading it holds, and only then reads it.
 /// Then keeps only the share of the bytes it sends. `None` if the share is
 /// not free within `busy`.
-// SHORTCUT: two blocking hops per object and no read-ahead, so many small
-// objects are read one after another. Upgrade: read a batch capped by bytes
-// per hop, or keep a few reads in flight (the section 9 row that names
-// this file).
+// SHORTCUT: each read is still two blocking hops (plan, then read), but the
+// reply keeps READS_IN_FLIGHT of them running ahead of its sends, so the
+// hops of many small objects overlap. What stays serialized is the pair of
+// hops within one object. Upgrade: one hop that plans and reads together
+// (a store API that returns the object in one call; the section 9 row that
+// names this file).
 async fn find(
     worker: &Worker,
     in_flight: &Arc<Semaphore>,
@@ -661,10 +671,12 @@ mod tests {
             .map(|data| Key::Blob(store.blobs().put(data).unwrap()))
             .collect();
         let second = packed_len(&store, keys[1]);
+        let third = packed_len(&store, keys[2]);
         // Files of two sizes, so the free budget shows which object holds a
         // share. With one size, the first object, before it is sent, looks
         // like the second.
         assert_ne!(packed_len(&store, keys[0]), second);
+        assert_ne!(second, third);
         let budget = 1000;
         let in_flight = Arc::new(Semaphore::new(budget));
         let stall = Duration::from_millis(50);
@@ -684,10 +696,12 @@ mod tests {
         );
         let mut stream = reply.await.unwrap();
 
-        // Nobody reads: the first object waits in the channel, and its share
-        // is back. The second holds its share while its send stalls, then
-        // the reply ends and gives it back.
-        until(|| in_flight.available_permits() == budget - second).await;
+        // Nobody reads: the first object waits in the channel, and its
+        // share is back. The second holds its share while its send stalls,
+        // and the third's read runs one ahead and holds its own share:
+        // reads in flight are shares held, exactly as the reply's doc
+        // says. The reply ends at the stall, and every share goes back.
+        until(|| in_flight.available_permits() == budget - second - third).await;
         until(|| in_flight.available_permits() == budget).await;
         let first = stream.next().await.unwrap().unwrap();
         let (header, data) = Assembler::new(Header::of(&first, true).unwrap(), first).finish();
