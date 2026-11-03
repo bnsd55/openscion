@@ -200,13 +200,6 @@ fn a_serve_token_file_starts_the_server() {
 // `application_name` parameter no log line could carry by accident.
 //
 // The URL comes from `SCION_TEST_POSTGRES_URL`.
-/// How the serve process receives the database URL: the environment.
-#[derive(Clone, Copy)]
-enum UrlForm {
-    /// The environment, the documented form.
-    Env,
-}
-
 /// The URL the test serves with, and the secrets it must not leak: the
 /// shared harness's URL for `data` (the test database, the data
 /// directory's own schema) plus a canary of system randomness as the
@@ -503,11 +496,23 @@ fn the_argv_url_is_refused_without_echoing_itself() {
     // The argv form is removed: a call that still passes one fails at
     // once, before any parsing, and neither the URL nor its password
     // reaches any stream. The data directory stays empty: no flag opens
-    // the store.
+    // the store. The URL here is synthetic - a password that no database
+    // holds, plus a canary of system randomness - so the test needs no
+    // database at all: the refusal fires before any connect.
     let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
-    let (url, canary, password) = leak_url(&data);
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).expect("system randomness");
+    let canary = bytes.iter().fold(String::new(), |mut text, byte| {
+        use std::fmt::Write as _;
+        let _ = write!(text, "{byte:02x}");
+        text
+    });
+    let url = format!(
+        "postgres://refusal-user:refusal-password-7f3d9c2a1b@127.0.0.1:5/scion?application_name=leak-{canary}"
+    );
+    let password: Option<String> = Some("refusal-password-7f3d9c2a1b".to_owned());
     let out = Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .arg("--data")
         .arg(&data)

@@ -50,7 +50,7 @@ fn the_exit_codes_of_fsck() {
     let broken = scion_server::test_support::private_tempdir();
     let url = "postgres://postgres:scion@127.0.0.1:1/scion";
     assert_eq!(
-        fsck_with(broken.path(), &[], Some(&url)).status.code(),
+        fsck_with(broken.path(), &[], Some(url)).status.code(),
         Some(2),
         "a metadata store that cannot be reached exits 2"
     );

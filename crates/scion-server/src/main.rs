@@ -819,10 +819,16 @@ async fn main() -> anyhow::Result<()> {
         .init();
     if let Some(error) = scion_proto::runtime::auth::removed::removed_secret_flag_error(
         std::env::args_os().skip(1).collect::<Vec<_>>().as_slice(),
-        &[(
-            "--token",
-            "pass the token in SCION_TOKEN, in a file with --token-file FILE, or in --access FILE",
-        )],
+        &[
+            (
+                "--token",
+                "pass the token in SCION_TOKEN, in a file with --token-file FILE, or in --access FILE",
+            ),
+            (
+                "--postgres-url",
+                "pass the URL in SCION_POSTGRES_URL, or in a file with --postgres-url-file FILE",
+            ),
+        ],
     ) {
         eprintln!("error: {error}");
         std::process::exit(2);
