@@ -222,11 +222,7 @@ fn a_paged_diff_runs_its_rename_search_once() {
     // stored map answers it, as it answers the added halves.
     assert_eq!(
         renames_of(&fourth),
-        vec![
-            deleted_half(3_000),
-            added_half(1_000),
-            added_half(3_000)
-        ]
+        vec![deleted_half(3_000), added_half(1_000), added_half(3_000)]
     );
     // The diff ended on the last page, so its map went with it.
     let (maps, _) = scion_server::test_support::read::test_rename_cache_size();
