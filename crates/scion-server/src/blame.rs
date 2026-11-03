@@ -896,7 +896,7 @@ fn renamed_from(
         ..
     } = state
     else {
-        return Err(Error::Corrupt(format!(
+        return Err(Error::Internal(format!(
             "rename source {other:?} is not a regular file"
         )));
     };

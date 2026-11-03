@@ -293,14 +293,14 @@ fn a_reconnect_ends_the_dead_transaction_and_a_new_begin_passes() {
             // dropped the transaction, so the statement is refused.
             let first = c.repo_id("before");
             assert!(
-                matches!(&first, Err(scion_server::Error::Corrupt(message))
+                matches!(&first, Err(scion_server::Error::Unavailable(message))
                     if message.contains("lost with the connection")),
                 "the first statement answers that the transaction was lost: {first:?}"
             );
             // Every later statement of it too, until the caller ends it.
             let second = c.repo_id("before");
             assert!(
-                matches!(&second, Err(scion_server::Error::Corrupt(message))
+                matches!(&second, Err(scion_server::Error::Unavailable(message))
                     if message.contains("lost with the connection")),
                 "the next statement of the dead transaction fails too: {second:?}"
             );
