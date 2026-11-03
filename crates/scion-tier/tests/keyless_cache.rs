@@ -14,15 +14,11 @@ fn a_cache_without_a_public_key_does_not_start() {
         .args([
             "--listen",
             "127.0.0.1:0",
-            "--token",
-            "t",
-            "--upstream-token",
-            "t",
             "--upstream",
             "http://127.0.0.1:39999",
         ])
-        .env_remove("SCION_TOKEN")
-        .env_remove("SCION_UPSTREAM_TOKEN")
+        .env("SCION_TOKEN", "t")
+        .env("SCION_UPSTREAM_TOKEN", "t")
         .stdin(Stdio::null())
         .stdout(Stdio::from(log_file.try_clone().unwrap()))
         .stderr(log_file.try_clone().unwrap())
@@ -66,10 +62,6 @@ fn a_bad_public_key_is_refused_by_the_cache_s_own_flag() {
         let mut args = vec![
             "--listen",
             "127.0.0.1:0",
-            "--token",
-            "t",
-            "--upstream-token",
-            "t",
             "--upstream",
             "http://127.0.0.1:39999",
         ];
@@ -78,8 +70,8 @@ fn a_bad_public_key_is_refused_by_the_cache_s_own_flag() {
         }
         let out = Command::new(env!("CARGO_BIN_EXE_scion-cache"))
             .args(&args)
-            .env_remove("SCION_TOKEN")
-            .env_remove("SCION_UPSTREAM_TOKEN")
+            .env("SCION_TOKEN", "t")
+            .env("SCION_UPSTREAM_TOKEN", "t")
             .stdin(Stdio::null())
             .output()
             .expect("the binary runs");

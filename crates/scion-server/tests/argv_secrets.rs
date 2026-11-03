@@ -1,8 +1,8 @@
 //! The secret flags of the binaries: a token can arrive through a
-//! checked file, the environment, stdin (`hash-token`), or the command
-//! line, which the process list exposes. The file works end to end, a
-//! file the group or others can read is refused, and the command line
-//! prints its deprecation warning.
+//! checked file, the environment, or stdin (`hash-token`). The file
+//! works end to end, a file the group or others can read is refused,
+//! and the command line, which the process list exposes, is refused
+//! outright: no binary takes a token as a flag.
 
 use std::io::Write as _;
 use std::net::{SocketAddr, TcpStream};
@@ -95,17 +95,19 @@ fn the_env_works_end_to_end() {
 }
 
 #[test]
-fn the_argv_form_warns_and_still_answers() {
-    let (ok, stdout, stderr) = hash_token(&["--token", "the-token"], None, &[]);
-    assert!(ok, "{stderr}");
-    assert_eq!(stdout.trim(), expected_digest("the-token"));
-    // The warning names the exposure (the process list, whose ps and
-    // /proc view every local account has) and the replacement, and says
-    // the form is deprecated.
-    assert!(stderr.contains("/proc"), "{stderr}");
-    assert!(stderr.contains("every local account"), "{stderr}");
-    assert!(stderr.contains("--token-file"), "{stderr}");
-    assert!(stderr.contains("deprecated"), "{stderr}");
+fn the_argv_form_refuses_without_echoing_the_secret() {
+    // Both spellings refuse, before any parsing, and name the forms
+    // that remain. The value the flag carried is never printed: the
+    // parser behind the check never runs, so it cannot name it either.
+    for args in [vec!["--token", "the-token"], vec!["--token=the-token"]] {
+        let (ok, stdout, stderr) = hash_token(&args, None, &[]);
+        assert!(!ok, "the argv form must be refused: {stdout}{stderr}");
+        let both = format!("{stdout}{stderr}");
+        assert!(both.contains("the --token flag is gone"), "{both}");
+        assert!(both.contains("SCION_TOKEN"), "{both}");
+        assert!(both.contains("--token-file"), "{both}");
+        assert!(!both.contains("the-token"), "the secret was echoed: {both}");
+    }
 }
 
 #[test]
@@ -152,8 +154,8 @@ fn a_group_readable_serve_token_file_is_refused() {
 
 #[test]
 fn a_serve_token_file_starts_the_server() {
-    // The file form reaches the same single-principal access the argv
-    // form built: the server starts and says so on its log.
+    // The file form builds the same single-principal access: the
+    // server starts and says so on its log.
     let data = scion_server::test_support::private_tempdir();
     let dir = scion_server::test_support::private_tempdir();
     let file = write_secret(dir.path(), "token", 0o600, "the-token\n");

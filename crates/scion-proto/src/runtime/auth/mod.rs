@@ -15,6 +15,8 @@ use std::{fs, io};
 #[cfg(target_os = "macos")]
 mod ffi;
 
+pub mod removed;
+
 use rustix::fs::OFlags;
 use tonic::metadata::errors::InvalidMetadataValue;
 use tonic::metadata::{Ascii, MetadataValue};

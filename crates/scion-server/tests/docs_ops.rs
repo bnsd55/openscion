@@ -437,20 +437,21 @@ fn sh_commands_and_flags_parse() {
     let commands = sh_commands(
         "before\n\
          \x60\x60\x60sh\n\
-         ./scion-server --data /srv serve \\\n\
-         \x20 --token <TOKEN>\n\
+         SCION_TOKEN=<TOKEN> ./scion-server --data /srv serve \\\n\
+         \x20 --ticket-key /srv/keys/ticket.key\n\
          cp -R /srv /backups\n\
-         TOK=$(./scion-server hash-token --token=<S>)\n\
+         TOK=$(./scion-server hash-token --token-file=<S>)\n\
          \x60\x60\x60\n",
     );
     assert_eq!(commands.len(), 3, "{commands:?}");
     assert_eq!(
-        commands[0], "./scion-server --data /srv serve --token <TOKEN>",
+        commands[0],
+        "SCION_TOKEN=<TOKEN> ./scion-server --data /srv serve --ticket-key /srv/keys/ticket.key",
         "{commands:?}"
     );
     assert_eq!(
         used_flags_at(&commands[0]),
-        vec![(1, "--data".to_string()), (4, "--token".to_string())]
+        vec![(2, "--data".to_string()), (5, "--ticket-key".to_string())]
     );
     assert!(
         used_flags_at(&commands[1]).is_empty(),
@@ -458,6 +459,6 @@ fn sh_commands_and_flags_parse() {
     );
     assert_eq!(
         used_flags_at(&commands[2]),
-        vec![(2, "--token".to_string())]
+        vec![(2, "--token-file".to_string())]
     );
 }

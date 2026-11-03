@@ -18,6 +18,10 @@ fn run(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(args)
         .env("NO_COLOR", "1")
+        // hash-token without a file or stdin reads SCION_TOKEN; every
+        // run here that reaches the store opens it, so a token of the
+        // right shape must ride along.
+        .env("SCION_TOKEN", "t")
         .output()
         .expect("the scion-server command runs")
 }
@@ -198,8 +202,6 @@ fn a_postgres_ca_with_a_url_from_a_file_is_accepted() {
             "--postgres-ca",
             ca.to_str().unwrap(),
             "hash-token",
-            "--token",
-            "t",
         ],
         "hash-token with --postgres-ca beside a URL file",
     );

@@ -8,6 +8,9 @@ use std::process::{Command, Stdio};
 fn run(args: &[&str]) -> (i32, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(args)
+        // `serve` validates its token source before the data directory
+        // opens, so the data-dir refusals below need a token source.
+        .env("SCION_TOKEN", "t")
         .env_remove("SCION_DATA")
         .env_remove("SCION_POSTGRES_URL")
         .env_remove("SCION_POSTGRES_URL_FILE")
@@ -70,18 +73,17 @@ fn the_postgres_flags_parse_after_the_subcommand() {
 }
 
 /// A subcommand's own flags do not clash with the globals: `serve`'s
-/// `--token` stays where it was, and a global flag beside it parses.
+/// `--listen` stays where it was, and a global flag beside it parses.
 #[test]
 fn a_subcommand_flag_beside_a_global_flag_parses() {
     let missing = "/tmp/scion-no-such-dir-serve";
     let (code, err) = run(&[
         "serve",
-        "--token",
-        "t",
-        "--data",
-        missing,
         "--listen",
         "127.0.0.1:39190",
+        "--data",
+        missing,
+        "--insecure-listen",
     ]);
     assert_eq!(code, 1, "the missing data dir is the refusal: {err}");
     assert!(err.contains(missing), "{err}");
