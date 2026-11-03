@@ -62,6 +62,12 @@ struct ServeArgs {
     /// Address to listen on.
     #[arg(long, default_value = "127.0.0.1:7878")]
     listen: SocketAddr,
+    /// Move the metadata schema to this build's version at the open,
+    /// when the database is behind. Without it, a serve on a database
+    /// that is behind is refused with the fix named (`scion-server
+    /// migrate`); a fresh database is created either way.
+    #[arg(long)]
+    migrate: bool,
     /// Bearer token that clients must send. Its principal, `default`,
     /// may read and write every repo. Give `--token`, `--token-file` or
     /// `--access`, not two. With this, the per-principal quotas are off
@@ -159,6 +165,23 @@ struct ServeArgs {
 enum Command {
     /// Serve the gRPC API.
     Serve(ServeArgs),
+    /// Move the metadata schema to this build's version: the steps an
+    /// open would run, one transaction each, under the schema's lock.
+    /// `serve` without `--migrate` refuses a database that is behind.
+    /// With `--check`, print the state instead: the database's version,
+    /// this build's version, and the steps a migration would run.
+    Migrate {
+        /// Print the state and exit without touching anything. Exit 3
+        /// when steps are pending, 0 when none, 1 when the state cannot
+        /// be read (a newer database, a database that does not answer).
+        #[arg(long)]
+        check: bool,
+        /// Where the audit log goes. The default is `audit.log` in the
+        /// data directory: the migration's record opens the same file
+        /// every other command appends to.
+        #[arg(long, value_name = "FILE")]
+        audit_file: Option<PathBuf>,
+    },
     /// Print the BLAKE3 digest of a token, as a `token` line of an access
     /// file wants it. The file holds digests, never tokens.
     HashToken {
@@ -856,6 +879,60 @@ async fn main() -> anyhow::Result<()> {
         // is resolved, so an operator who hashes a token needs no
         // database.
         Command::HashToken { .. } => return hash_token(),
+        // `migrate --check` reads the schema state and writes nothing:
+        // the check is safe beside a live server, and its exit table is
+        // 0 clean, 3 pending, 1 unreadable. A pending database is not a
+        // failure of the command - it is the answer the operator asked
+        // for - so it gets its own code.
+        Command::Migrate {
+            check: true,
+            ..
+        } => {
+            let postgres_url =
+                postgres_url_of(cli.postgres_url_file.as_ref(), cli.postgres_url.as_ref())?;
+            let state = scion_server::check_schema(&postgres_url, cli.postgres_ca.as_deref())?;
+            println!(
+                "the database is at schema version {}, this build ships {}",
+                state.db_version(),
+                state.build_version()
+            );
+            if state.is_pending() {
+                for name in state.pending() {
+                    println!("would run: {name}");
+                }
+                eprintln!(
+                    "scion-server migrate --check: {} migration(s) pending; run `scion-server migrate`",
+                    state.pending().len()
+                );
+                std::process::exit(3);
+            }
+            println!("no migrations pending");
+            return Ok(());
+        }
+        // `migrate` moves the schema on purpose: the same path the
+        // open runs, under the schema's lock. The audit record lands in
+        // the data directory's own file, like every other command's.
+        Command::Migrate { check: false, audit_file } => {
+            refuse_missing_data_dir(&cli.data)?;
+            let postgres_url =
+                postgres_url_of(cli.postgres_url_file.as_ref(), cli.postgres_url.as_ref())?;
+            let moved = scion_server::migrate_store(&postgres_url, cli.postgres_ca.as_deref())?;
+            let audit = cli_audit(&cli.data, audit_file.as_deref())?;
+            if let Some((from, to)) = moved {
+                audit
+                    .record(scion_server::Event::new(
+                        "admin",
+                        "ok",
+                        serde_json::json!({ "what": "migrate", "from": from, "to": to }),
+                    ))
+                    .await
+                    .with_context(|| "cannot record the migration in the audit log".to_owned())?;
+                println!("migrated the metadata schema from version {from} to {to}");
+            } else {
+                println!("no migrations pending");
+            }
+            return Ok(());
+        }
         Command::Restore {
             archive,
             audit_file,
@@ -927,7 +1004,7 @@ async fn main() -> anyhow::Result<()> {
                 return Err(why);
             }
         };
-    let store = match cli.command {
+    let store = match &cli.command {
         Command::Import { .. }
         | Command::CreateRepo { .. }
         | Command::CreateRef { .. }
@@ -957,6 +1034,14 @@ async fn main() -> anyhow::Result<()> {
         | Command::TicketKey { .. } => {
             unreachable!("handled before the store opens")
         }
+        // `migrate` ran its command above and returned: it opens no
+        // store here.
+        Command::Migrate { .. } => {
+            unreachable!("handled before the store opens")
+        }
+        Command::Serve(args) if args.migrate => {
+            Backend::open_migrating(&cli.data, &postgres_url, cli.postgres_ca.as_deref())
+        }
         Command::Serve { .. } | Command::Derive { .. } => {
             Backend::open(&cli.data, &postgres_url, cli.postgres_ca.as_deref())
         }
@@ -974,6 +1059,9 @@ async fn main() -> anyhow::Result<()> {
         })
     };
     match cli.command {
+        Command::Migrate { .. } => {
+            unreachable!("handled before the store opens")
+        }
         Command::Serve { .. } => {
             let flags = flags.expect("a serve command validated its flags");
             // The audit opens after the store: the data directory must be
