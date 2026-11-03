@@ -4665,7 +4665,11 @@ mod tests {
         let store = crate::Backend::open_test(dir.path()).unwrap();
         super::damage::corrupt_store_uuid(&store).unwrap();
         drop(store);
-        let Err(error) = crate::Backend::open_test(dir.path()) else {
+        // The corrupt row is the answer the database gives once the old
+        // session has ended; the reopen waits for that session the way
+        // the one-server lock test does, instead of racing the worker's
+        // close.
+        let Err(error) = crate::Backend::reopen_test(dir.path()) else {
             panic!("a store_uuid row of 1 byte refuses the open");
         };
         assert!(
