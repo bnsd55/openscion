@@ -76,12 +76,13 @@ fn fill(backend: &Backend, count: u64) {
 /// says whether a growing cost is the process's work or the kernel's.
 #[cfg(target_os = "linux")]
 fn cpu_seconds() -> (f64, f64) {
+    // The clock ticks a stat's times are counted in.
+    const TICKS: f64 = 100.0;
     let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
     let body = stat.rsplit_once(')').unwrap().1;
     let fields: Vec<&str> = body.split_whitespace().collect();
     // After the comm field, the tokens start at `state` (field 3), so
     // utime (field 14) is token 11 and stime (field 15) is token 12.
-    const TICKS: f64 = 100.0;
     let utime: f64 = fields[11].parse().unwrap();
     let stime: f64 = fields[12].parse().unwrap();
     (utime / TICKS, stime / TICKS)
