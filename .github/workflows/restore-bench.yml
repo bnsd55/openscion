@@ -19,6 +19,11 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # The test cells' builds keep only line tables in their debug info:
+  # backtraces keep file and line at a fraction of the size, so the
+  # work disk holds the workspace's whole build.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
   restore:
@@ -47,7 +52,10 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo test -p open-scion-server --test restore_bench -- --ignored --nocapture
+      - run: |
+          df -h /
+          cargo test -p open-scion-server --test restore_bench -- --ignored --nocapture
+          df -h /
         env:
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           # The bench dumps the live metadata with the job's own

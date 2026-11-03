@@ -75,7 +75,7 @@ const PRUNE_BATCH: usize = 256;
 /// memory is the budget plus one body (a single body larger than the
 /// budget is a chunk of its own). The way the import batches size
 /// themselves.
-const PRUNE_BODY_BUDGET: usize = 64 * 1024 * 1024;
+pub(crate) const PRUNE_BODY_BUDGET: usize = 64 * 1024 * 1024;
 
 /// A test's override of the byte budget, behind the test hooks: the gc
 /// has one caller per process, so a plain static needs no ordering.

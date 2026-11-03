@@ -63,12 +63,15 @@ closes a connection:
   fails, and the client MAY retry it (`GetObjects` and `ReadFile` only
   re-read; a `Land` retry uses the same request key).
 - when the replies of the connection that stopped reading hold more than
-  64 MiB together (`--max-stalled-bytes`). A reply that stalls adds what it
-  leaves in HTTP/2, under 4 MiB, to a count of its connection; a connection
-  over the limit is closed, which frees what every stalled reply of it
-  holds. Other connections are not touched. A unary reply that its client
-  never reads is not counted: hyper gives the server no hook that sees it
-  stall.
+  64 MiB together (`--max-stalled-bytes`), or when the replies that
+  stalled connections hold together cross 1 GiB (`STALLED_TOTAL_BYTES`
+  in crates/scion-proto/src/runtime/listen.rs). A reply that stalls adds
+  what it leaves in HTTP/2, under 4 MiB, to a count of its connection
+  and to the process's total; a connection over its own limit, or whose
+  hold crosses the total, is closed, which frees what every stalled
+  reply of it holds. Other connections are not touched. A unary reply
+  that its client never reads is not counted: hyper gives the server no
+  hook that sees it stall.
 
 So a connection beyond the cap waits at most 40 min. A client that stops reading a reply
 keeps the memory that no budget counts for that reply until the stream ends
@@ -225,8 +228,8 @@ contract. A client MUST NOT depend on its text.
 | `DEADLINE_EXCEEDED` | `ReadFile`: the client took no message for 120 s. `GetObjects`: the client took no part for 120 s in the middle of an object (section 7.3). `Land`: the land ran past 600 s from the start of the call. The land stays `PENDING`. `MergeBase`, `IsAncestor`, `Log` with a path: the call ran past its deadline, 600 s from its start or the caller's `grpc-timeout`. From a tier: the caller's deadline ran out while the tier waited for its first object (section 8). | Yes. A `Land` retry uses the same request key, remembered for at least 7 days (section 6.3). |
 | `UNAVAILABLE` | The server cannot be reached or is shutting down, or its database stayed busy for 5 s (another process, such as an import, held its write lock). A tier also replies `UNAVAILABLE` when its upstream does not answer in time, or when it finds no room to fetch an object from upstream within 30 s (section 8). | Yes |
 | `RESOURCE_EXHAUSTED` | A server limit stopped the call, and the message names it: a per-principal quota (section 2); a memory budget that the call's share does not fit, or did not get in time, such as `GetObjects` with no memory for the first object within 30 s or before the caller's deadline (section 7.3) and `Blame` (section 6.10); the server's budget of unary replies its clients have not read; a reply over its size cap; or a server out of disk space. | Yes, after a wait. A call whose share is more than the whole budget, or whose reply is over its cap, fails the same way again. |
-| `DATA_LOSS` | From a tier only: its upstream sent bytes that are not the object asked for (section 8). | MAY |
-| `INTERNAL` | A database, I/O or stored-data error, or a server bug. The message is `internal error`; the detail stays in the server log. | MAY |
+| `DATA_LOSS` | Stored data is damaged: a tier's upstream sent bytes that are not the object asked for (section 8), or the server's stored copy failed its own check. The message is `damaged data`; the detail stays in the server log. | MAY |
+| `INTERNAL` | A database, I/O or Git error, or a server bug. The message is `internal error`; the detail stays in the server log. | MAY |
 | `UNIMPLEMENTED` | The server does not have the call, the request is compressed, or the caller is a partial reader of folder read rules and the call reads history or writes (section 2). | After the cause is fixed |
 
 A land that conflicts or is rejected is not an error. It is a state in a
@@ -484,11 +487,11 @@ content of a regular file, or the target of a symlink, at `path` in
 - Messages come in file order. Each holds at most 1 MiB. Together they are
   the whole content.
 - An empty file is a reply with no message.
-- An error in the request comes before the first message. `INTERNAL` and
+- An error in the request comes before the first message. `DATA_LOSS` and
   `DEADLINE_EXCEEDED` can end the reply after zero or more messages. A client
   MUST take the content as whole only when the reply ends with `OK`.
 - The server checks the content against the blob ID as it sends it. A
-  damaged stored blob ends the reply with `INTERNAL` before its last message,
+  damaged stored blob ends the reply with `DATA_LOSS` before its last message,
   so a client never gets all of a damaged file.
 - The reply ends with `DEADLINE_EXCEEDED` when the client takes no message
   for 120 s (the stall limit). A client that keeps reading has no time
@@ -505,7 +508,7 @@ content of a regular file, or the target of a symlink, at `path` in
 | `INVALID_ARGUMENT` | A bad repo name or ID; a bad or empty path; the path is a directory or a submodule. |
 | `NOT_FOUND` | The repo or changeset does not exist; nothing is at the path. |
 | `DEADLINE_EXCEEDED` | After zero or more messages: the client took no message for 120 s. |
-| `INTERNAL` | After zero or more messages: the stored blob is damaged. |
+| `DATA_LOSS` | After zero or more messages: the stored blob is damaged. |
 
 ### 6.8 ListDir
 
@@ -946,7 +949,7 @@ or the next object if none is in progress. It ends the reply after the
 objects before it. A server or tier MUST NOT put an error about the whole
 call in the stream. A missing object ends the reply with `NOT_FOUND`. A
 damaged stored tree, or a damaged blob that the server unpacks, ends it
-with `INTERNAL`. The server does not check a blob that it sends `ZSTD`: if
+with `DATA_LOSS`. The server does not check a blob that it sends `ZSTD`: if
 the stored file is damaged, the receiver finds it (section 5). The client
 MAY keep the objects it got before the error.
 
