@@ -1791,32 +1791,28 @@ fn id_of(first: &std::ffi::OsStr, second: &std::ffi::OsStr) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// One file agrees with the index: the store knows its key at the file's
-/// size.
-/// The file is in the index at its size, or the store dropped it: a file
-/// the limit evicted is gone from disk, and the walk owes nothing for it.
-/// A file still on disk must be in the index — that is what the walk of a
-/// start adopts.
+/// A file the store still holds is in the index at its size. A file the
+/// limit dropped since the kill is gone from disk, and the walk owes
+/// nothing for it: a file still on disk must be in the index — that is
+/// what the walk of a start adopts.
 fn agreeing(
     store: &DiskStore,
 ) -> impl Fn(&(String, Vec<u8>, std::path::PathBuf, u64)) -> bool + '_ {
-    move |file| agrees(store, file) || !file.2.exists()
-}
-
-fn agrees(store: &DiskStore, file: &(String, Vec<u8>, std::path::PathBuf, u64)) -> bool {
-    let (kind, id, _, len) = file;
-    let key = if kind == "blob" {
-        BlobId::try_from(id.as_slice()).map(Key::Blob)
-    } else {
-        scion_core::TreeId::try_from(id.as_slice()).map(Key::Tree)
-    };
-    match key {
-        Ok(key) => store
-            .size(key)
-            .ok()
-            .flatten()
-            .is_some_and(|size| size as u64 == *len),
-        Err(_) => false,
+    move |(kind, id, path, len)| {
+        let key = if kind == "blob" {
+            BlobId::try_from(id.as_slice()).map(Key::Blob)
+        } else {
+            scion_core::TreeId::try_from(id.as_slice()).map(Key::Tree)
+        };
+        let known = match key {
+            Ok(key) => store
+                .size(key)
+                .ok()
+                .flatten()
+                .is_some_and(|size| size as u64 == *len),
+            Err(_) => false,
+        };
+        known || !path.exists()
     }
 }
 
