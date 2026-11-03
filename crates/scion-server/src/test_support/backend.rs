@@ -127,7 +127,7 @@ impl Backend {
         loop {
             match Self::open_test(data) {
                 Err(crate::error::Error::FailedPrecondition(message))
-                    if message.contains("another server holds this store")
+                    if message.contains(crate::pg::HOLDER_MESSAGE)
                         && std::time::Instant::now() < deadline =>
                 {
                     std::thread::sleep(Duration::from_millis(20));

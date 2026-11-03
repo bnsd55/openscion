@@ -1907,9 +1907,14 @@ fn lost_message(setup_held: bool) -> &'static str {
         "this server process lost the database to another \
          server process; it serves nothing from here on"
     } else {
-        "another server holds this store"
+        HOLDER_MESSAGE
     }
 }
+
+/// The text a second open sees while another session still holds the
+/// one-server lock. One name, so a reword cannot silently turn the
+/// test reopen's wait off.
+pub(crate) const HOLDER_MESSAGE: &str = "another server holds this store";
 
 /// Reconnects a dead client, applies the setup again, and hands the new
 /// setup back: the caller folds it into `setup_held` and the lost

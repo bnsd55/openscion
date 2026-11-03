@@ -1630,8 +1630,9 @@ mod tests {
             // session ends, the database still refuses a second server.
             // The worker closes it on its own clock, so the reopen waits
             // for the real condition, like `wait_for_lock_release` does
-            // for a file lock.
-            drop(Backend::reopen_test(dir.path()));
+            // for a file lock. The expect keeps a lock that never clears
+            // a test failure: the helper returns the last result.
+            Backend::reopen_test(dir.path()).expect("the store reopens once the old session ends");
             drop(shared);
         });
     }
