@@ -6,6 +6,14 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  # The test cells' builds keep only line tables in their debug info:
+  # backtraces keep file and line at a fraction of the size, so the
+  # work disk holds the workspace's whole build.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
 jobs:
   test:
     name: test (postgres disk full)
@@ -38,7 +46,10 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: the tests
-        run: cargo test -p open-scion-server --test disk_full
+        run: |
+          df -h /
+          cargo test -p open-scion-server --test disk_full
+          df -h /
         env:
           SCION_DISK_REQUIRE: "1"
           SCION_PG_TMPFS_BYTES: "268435456"

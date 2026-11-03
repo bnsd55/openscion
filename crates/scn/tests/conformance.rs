@@ -273,7 +273,7 @@ fn damage(path: &Path) -> Vec<u8> {
 /// size (`common::files`), and a repo `other` that does not have `r`'s
 /// changesets.
 fn fixture() -> (Tiers, ChangesetId) {
-    let data = tempfile::tempdir().unwrap();
+    let data = common::private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
     let first = land(&store, &changeset(None, &common::files(&store).0));
     let other = FileState::Regular {

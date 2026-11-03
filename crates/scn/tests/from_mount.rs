@@ -121,7 +121,7 @@ fn mount_as(tiers: &common::Tiers, base: &ChangesetId, writable: bool) -> Mount 
     });
     let root = id_from(&reply.tree_id).unwrap();
 
-    let home = tempfile::tempdir().unwrap();
+    let home = common::private_tempdir();
     // The mount's checkout lives in `view`; the changes go to the scratch
     // overlay, under its `tree`.
     let view = home.path().join("view");
@@ -160,7 +160,7 @@ fn mount_as(tiers: &common::Tiers, base: &ChangesetId, writable: bool) -> Mount 
 #[cfg(feature = "unstable-writable-mount")]
 #[test]
 fn a_mounts_overlay_commits_without_a_scan() {
-    let data = tempfile::tempdir().unwrap();
+    let data = common::private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
     let base = start(&store);
     let tiers = common::Tiers::start(data, store);
@@ -271,7 +271,7 @@ fn a_non_utf8_name_commits_its_own_content() {
     use scion_core::{Changeset, RepoPath};
     use scion_proto::v1::GetChangesetRequest;
 
-    let data = tempfile::tempdir().unwrap();
+    let data = common::private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
     let base = start(&store);
     let tiers = common::Tiers::start(data, store.clone());
@@ -362,7 +362,7 @@ fn a_non_utf8_name_commits_its_own_content() {
 /// and its reads still work.
 #[test]
 fn a_read_only_mount_answers_rofs_to_every_write() {
-    let data = tempfile::tempdir().unwrap();
+    let data = common::private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
     let base = start(&store);
     let tiers = common::Tiers::start(data, store.clone());
@@ -466,7 +466,7 @@ fn a_read_only_mount_answers_rofs_to_every_write() {
 #[cfg(feature = "unstable-writable-mount")]
 #[test]
 fn a_commit_from_a_read_only_mount_names_the_flag() {
-    let data = tempfile::tempdir().unwrap();
+    let data = common::private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
     let base = start(&store);
     let tiers = common::Tiers::start(data, store.clone());
@@ -499,11 +499,11 @@ mod a_default_build_has_no_writable_mount {
 
     #[test]
     fn the_mount_flag_refuses_by_name() {
-        let data = tempfile::tempdir().unwrap();
+        let data = common::private_tempdir();
         let store = Backend::open_test(data.path()).unwrap();
         let base = start(&store);
         let tiers = common::Tiers::start(data, store.clone());
-        let home = tempfile::tempdir().unwrap();
+        let home = common::private_tempdir();
         std::fs::create_dir_all(home.path().join("view")).unwrap();
         let out = Command::new(env!("CARGO_BIN_EXE_scn"))
             .args(["--server", &tiers.server, "--repo", REPO])
@@ -524,7 +524,7 @@ mod a_default_build_has_no_writable_mount {
 
     #[test]
     fn the_commit_argument_refuses_by_name() {
-        let data = tempfile::tempdir().unwrap();
+        let data = common::private_tempdir();
         let store = Backend::open_test(data.path()).unwrap();
         let base = start(&store);
         let tiers = common::Tiers::start(data, store.clone());
@@ -547,7 +547,7 @@ mod a_default_build_has_no_writable_mount {
 
     #[test]
     fn the_vfs_serves_read_only_and_refuses_every_write() {
-        let data = tempfile::tempdir().unwrap();
+        let data = common::private_tempdir();
         let store = Backend::open_test(data.path()).unwrap();
         let base = start(&store);
         let tiers = common::Tiers::start(data, store.clone());
