@@ -385,6 +385,41 @@ pub trait MetaTx {
     /// Deletes up to `limit` derived values of `kind` below `version`.
     fn delete_derived_below(&mut self, kind: &str, version: u32, limit: usize) -> Result<usize>;
 
+    /// Whether the transaction itself inserted this changeset. A write
+    /// path asks to skip a stored-value read that cannot find anything:
+    /// the row of a changeset the transaction inserted can only have
+    /// been written by the transaction itself, and the transaction's
+    /// memory of its derived writes answers that read instead.
+    fn inserted_this_tx(&self, _cs: ChangesetId) -> bool {
+        false
+    }
+
+    /// Reads the derived values of the named kinds, at the kind's own
+    /// version, for the named changesets into the transaction's own
+    /// memory, one statement, so the write path's per-value reads answer
+    /// without round trips. A backend that holds no such memory does
+    /// nothing, which stays correct: the reads then go to the database
+    /// as before.
+    ///
+    /// # Errors
+    ///
+    /// Database errors.
+    fn preload_derived(
+        &mut self,
+        _kinds: &[(&'static str, u32)],
+        _css: &[ChangesetId],
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Makes [`delete_derived_below`](Self::delete_derived_below) wait
+    /// for the commit: the transaction collects the calls and the commit
+    /// deletes with one statement, honoring each call's limit summed per
+    /// kind. For write paths whose callers never use the count. A
+    /// backend that does not defer keeps deleting per call, which is
+    /// also right.
+    fn set_defer_derived_deletes(&mut self, _on: bool) {}
+
     /// The view that a rule-set digest of `version` derives for the real
     /// tree `tree` under the path-context digest `ctx`, if derived already.
     /// The changeset's root view is the row of its real root tree under the
