@@ -77,7 +77,7 @@ fn start_stack(
     let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     let mut dirs: Vec<TempDir> = Vec::new();
 
-    let data_dir = tempfile::tempdir().unwrap();
+    let data_dir = common::private_tempdir();
     let data = data_dir.path().to_path_buf();
     dirs.push(data_dir);
     let (listener, server) = tcp();
@@ -118,7 +118,7 @@ fn start_stack(
             .await;
     }));
 
-    let node = tempfile::tempdir().unwrap();
+    let node = common::private_tempdir();
     let disk = DiskStore::open(&node.path().join("data"), 64 << 20).unwrap();
     let (listener, daemon) = tcp();
     let daemon_tier =
@@ -200,7 +200,7 @@ async fn root_ticket(url: &str, cs: scion_core::ChangesetId) -> Result<Vec<u8>, 
 fn ticket_key_rotation_while_a_checkout_reads() {
     let runtime = Runtime::new().unwrap();
     let _entered = runtime.enter();
-    let data = tempfile::tempdir().unwrap();
+    let data = common::private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
     let readme = FileState::Regular {
         content: store.blobs().put(b"hello\n").unwrap(),
@@ -208,7 +208,7 @@ fn ticket_key_rotation_while_a_checkout_reads() {
     };
     let first = land(&store, &changeset(None, &[("README.md", readme)]));
     let blob = BlobId::of(b"hello\n");
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::private_tempdir();
 
     // Step 1: the server signs with key A, the tier verifies public A, and
     // a checkout reads.
