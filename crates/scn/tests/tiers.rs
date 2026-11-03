@@ -83,7 +83,7 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, Node> {
 
 #[test]
 fn checkout_through_the_daemon_and_the_cache_matches_a_direct_checkout() {
-    let data = tempfile::tempdir().unwrap();
+    let data = common::private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
     let (files, big) = common::files(&store);
     let first = land(&store, &changeset(None, &files));
@@ -98,7 +98,7 @@ fn checkout_through_the_daemon_and_the_cache_matches_a_direct_checkout() {
     let packed = zstd::bulk::compress(&big, 1).unwrap();
     fs::write(blob_path(data.path(), BlobId::of(&big)), packed).unwrap();
     let tiers = Tiers::start(data, store);
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::private_tempdir();
     let dest = |name: &str| tmp.path().join(name);
 
     checkout(&tiers.socket, "main", &dest("through-tiers"), &tiers.server);
@@ -141,7 +141,7 @@ fn checkout_through_the_daemon_and_the_cache_matches_a_direct_checkout() {
 
 #[test]
 fn a_bad_ticket_fails_the_call_at_the_daemon() {
-    let data = tempfile::tempdir().unwrap();
+    let data = common::private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
     let tiers = Tiers::start(data, store);
     let refs = (0..3u8)
@@ -169,7 +169,7 @@ fn a_bad_ticket_fails_the_call_at_the_daemon() {
 
 #[test]
 fn scn_refuses_a_unix_address_that_is_not_a_socket() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::private_tempdir();
     let socket = tmp.path().join("real.sock");
     // A socket file that nothing listens on, so a connect fails at once
     // instead of hanging if the check lets it through.

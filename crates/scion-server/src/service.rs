@@ -57,7 +57,7 @@ use crate::{blame, names, read, views, write};
 const MAX_BLOCKING: usize = 256;
 /// Most uploads read at once. Each holds one request message in memory, of up
 /// to `MAX_MESSAGE_BYTES`, and a spool file of up to `MAX_OBJECT_BYTES`.
-const MAX_UPLOADS: usize = 16;
+pub(crate) const MAX_UPLOADS: usize = 16;
 /// Most `Blame` calls running at once. One call can diff for seconds, and
 /// a call that waits for its memory budget holds one of the `MAX_BLOCKING`
 /// permits that writes and lands share for the rest of its deadline. Four
@@ -67,7 +67,7 @@ const MAX_BLAMES: usize = 4;
 /// The bytes of memory that all `Blame` calls share: a call takes the bytes
 /// of every version it reads, and `memory::BYTES_PER_LINE` per line of the
 /// blamed file, so together they hold no more than this.
-const BLAME_MEMORY_BUDGET: usize = 1 << 30;
+pub(crate) const BLAME_MEMORY_BUDGET: usize = 1 << 30;
 /// Most `MergeBase`, `IsAncestor` and `Log` calls with a path running at
 /// once. A call has no bound on its reads, only its deadline: a walk, or the
 /// first derivation of path history on a database from before it. So these
@@ -84,7 +84,7 @@ const MAX_DIFFS: usize = 4;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 /// Most bytes that all `ReadFile` replies together hold: the parts read and
 /// not yet sent, and the readers of files of more than one part.
-const READ_BUDGET_BYTES: usize = 256 << 20;
+pub(crate) const READ_BUDGET_BYTES: usize = 256 << 20;
 /// A `ReadFile` reply ends when its client takes no part for this long, and
 /// frees its share, so a client that stops reading does not hold budget.
 /// The parts that it leaves in its channel and in HTTP/2 stay outside the
@@ -294,6 +294,9 @@ pub async fn serve(
     });
     // The free space of the data directory's filesystem, so the operator
     // sees a full drive before the server hits it.
+    // What the host has against the process's memory floor: both numbers
+    // as gauges, and one error line when the host is under the floor.
+    crate::floor::check_startup_memory(&metrics, &crate::floor::production_paths());
     spawn_free_space_poll(data, Arc::clone(&metrics), stop_rx.clone());
     // Refused authentication is counted per peer and flushed as one
     // line per peer, so a stranger who spams bad tokens cannot fill the
@@ -2728,7 +2731,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_damaged_blob_ends_the_reply_with_internal_before_its_last_part() {
+    async fn a_damaged_blob_ends_the_reply_with_data_loss_before_its_last_part() {
         let data = content(3);
         for flip in [10, data.len() / 2, data.len() - 10] {
             let (_dir, store, _, blob) = file_store(&data);
@@ -2748,7 +2751,7 @@ mod tests {
                     Err(status) => break status,
                 }
             };
-            assert_eq!(status.code(), Code::Internal, "bit {flip}: {status:?}");
+            assert_eq!(status.code(), Code::DataLoss, "bit {flip}: {status:?}");
             assert_eq!(parts, 2, "bit {flip}: every part but the last");
             assert!(rx.recv().await.is_none());
             task.await.unwrap();

@@ -183,6 +183,17 @@ fn secret_of(
     }
 }
 
+/// The connection caps of a cache: the three flags, with the process's
+/// stall total at its default.
+fn tier_limits(cli: &Cli) -> Limits {
+    Limits {
+        connections: cli.max_connections,
+        streams: cli.max_streams,
+        stalled_bytes: cli.max_stalled_bytes,
+        ..Limits::default()
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Logs go to stderr: stdout may carry command output that callers
@@ -225,6 +236,8 @@ async fn main() -> anyhow::Result<()> {
         Some(&client_tls),
         ticket_keys(&cli.ticket_public_key)?,
     )?;
+    // Built before the snapshot spawn: it moves out of `cli`.
+    let limits = tier_limits(&cli);
     if let Some(dir) = cli.snapshot {
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -277,11 +290,7 @@ async fn main() -> anyhow::Result<()> {
     // The bound address, so port 0 shows the port that the OS chose.
     let listen = listener.local_addr()?;
     tracing::info!(%listen, upstream = %cli.upstream, "serving");
-    let limits = Limits {
-        connections: cli.max_connections,
-        streams: cli.max_streams,
-        stalled_bytes: cli.max_stalled_bytes,
-    };
+
     Box::pin(tier.serve(
         &token,
         listen::tcp(listener),
