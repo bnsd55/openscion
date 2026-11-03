@@ -142,6 +142,9 @@ fn land_statement_count(paths: usize) -> u64 {
     let outcome = land_once(&store, &lands, cs);
     assert_eq!(outcome.state, LandState::Landed, "{}", outcome.detail);
     let count = Backend::test_statement_count();
+    if std::env::var("SCION_BOUND_SHAPES").is_ok() {
+        eprintln!("shapes: {:?}", Backend::test_statement_log());
+    }
     eprintln!("a land over {} paths cost {count} statements", paths.len());
     count
 }
@@ -152,8 +155,10 @@ fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound()
     // windows would count each other's statements.
     // Today's count, measured on this suite's first run, with slack for
     // one plan attempt. Each fold of the round-trip card lowers this
-    // number; a change that raises it must say why.
-    const BOUND: u64 = 90;
+    // number; a change that raises it must say why. The write path's
+    // derived reads ride one preloaded statement and its old-row
+    // deletes ride the commit's flush: 40 statements became 35.
+    const BOUND: u64 = 45;
     let count = land_statement_count(3);
     assert!(
         count <= BOUND,

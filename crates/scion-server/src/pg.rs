@@ -1110,6 +1110,8 @@ impl Pg {
             cs_pending: Some(&mut pending),
             derived_pending: Some(&mut derived),
             derived_preload: Some(&mut preload),
+            deferred_deletes: Vec::new(),
+            defer_derived: false,
             history_pending: Some(&mut history),
             ended: true,
         };
@@ -1316,6 +1318,42 @@ impl Pg {
                 }
                 #[cfg(any(test, feature = "test-hooks"))]
                 self.inner.committed.fetch_add(1, Ordering::Release);
+                // A write path that deferred its derived deletes hands
+                // them to the flush: one statement for the whole
+                // transaction, inside it, so a rollback takes the
+                // deletes with it and the end state is the one the
+                // per-call deletes would have reached.
+                if !tx.deferred_deletes.is_empty() {
+                    let kinds: Vec<String> = tx
+                        .deferred_deletes
+                        .iter()
+                        .map(|(k, _, _)| k.clone())
+                        .collect();
+                    let versions: Vec<i64> =
+                        tx.deferred_deletes.iter().map(|(_, v, _)| *v).collect();
+                    let steps: Vec<i64> = tx.deferred_deletes.iter().map(|(_, _, s)| *s).collect();
+                    let deleted = tx.c.execute(
+                        "WITH k AS (
+                             SELECT kind, version, SUM(step) AS step
+                             FROM unnest($1::text[], $2::int8[], $3::int8[]) AS t(kind, version, step)
+                             GROUP BY kind, version),
+                         v AS (
+                             SELECT d.ctid AS ctid, k.step AS step,
+                                    row_number() OVER (PARTITION BY d.kind
+                                                       ORDER BY d.version) AS rn
+                             FROM derived d JOIN k ON d.kind = k.kind
+                                                            AND d.version < k.version)
+                         DELETE FROM derived WHERE ctid IN (SELECT ctid FROM v WHERE rn <= step)",
+                        &[
+                            P::text_array(kinds),
+                            P::i64_array(versions),
+                            P::i64_array(steps),
+                        ],
+                    )?;
+                    if deleted > 0 {
+                        tracing::debug!(deleted, "flushed the transaction's derived deletes");
+                    }
+                }
                 let committed = tx.commit();
                 #[cfg(any(test, feature = "test-hooks"))]
                 self.inner.txes.fetch_add(1, Ordering::Relaxed);
@@ -1531,6 +1569,14 @@ pub struct PgTx<'a> {
     /// transaction cost one chain read for the whole chain, not one per
     /// commit. Shared with the reborrows.
     derived_preload: Option<&'a mut DerivedPreload>,
+    /// The `delete_derived_below` calls a deferring write path made: the
+    /// commit deletes with one statement, honoring the summed limits per
+    /// kind and version. Only `defer_derived_deletes` fills it.
+    deferred_deletes: Vec<(String, i64, i64)>,
+    /// Whether `delete_derived_below` defers to the commit. Off for the
+    /// importer's batching (the flush owns those deletes) and for the
+    /// sweeps, which count the rows they removed.
+    defer_derived: bool,
     /// The history nodes the transaction inserted while batching: the
     /// flush writes them after the derived rows. Shared with the
     /// reborrows.
@@ -1591,6 +1637,8 @@ impl<'a> PgTx<'a> {
             cs_pending: Some(pending),
             derived_pending: Some(derived),
             derived_preload: Some(preload),
+            deferred_deletes: Vec::new(),
+            defer_derived: false,
             history_pending: Some(history),
             ended: false,
         })
@@ -1638,6 +1686,8 @@ impl<'a> PgTx<'a> {
             cs_pending: None,
             derived_pending: None,
             derived_preload: None,
+            deferred_deletes: Vec::new(),
+            defer_derived: false,
             history_pending: None,
             ended: false,
         };
@@ -2733,7 +2783,7 @@ impl MetaTx for PgTx<'_> {
                 self.gen_cache.insert((repo.0, key.clone()), parent_gen_i);
             }
         }
-        self.c.execute(
+        let inserted = self.c.execute(
             "INSERT INTO changesets (id, gen, body) VALUES ($1, $2, $3)
              ON CONFLICT (id) DO NOTHING",
             &[
@@ -2743,8 +2793,16 @@ impl MetaTx for PgTx<'_> {
             ],
         )?;
         let generation = parent_gen + 1;
-        self.inserted_gens
-            .insert(id_bytes(id.as_bytes()), generation);
+        // Only a row this statement wrote is the transaction's own. A
+        // conflicting row predates the transaction (a land rebases onto
+        // the head its input changeset already hangs from), and the
+        // write path asks `inserted_this_tx` to tell the two apart: the
+        // stored derived rows of an old changeset are real and must be
+        // read, the ones of a new one cannot exist.
+        if inserted > 0 {
+            self.inserted_gens
+                .insert(id_bytes(id.as_bytes()), generation);
+        }
         self.gen_cache
             .insert((repo.0, id_bytes(id.as_bytes())), generation);
         // While the import's batching is on, the parents and the repo
@@ -3429,21 +3487,26 @@ impl MetaTx for PgTx<'_> {
     ) -> Result<Option<Vec<u8>>> {
         let version = i64::from(version);
         let key = id_bytes(cs.as_bytes());
-        if self.cs_batching {
-            if let Some(pending) = self.derived_pending.as_deref() {
-                for (k, v, c, value) in pending.iter().rev() {
-                    if *k == kind && *v == version && id_bytes(c.as_bytes()) == key {
-                        return Ok(Some(value.clone()));
-                    }
+        if self.cs_batching
+            && let Some(pending) = self.derived_pending.as_deref()
+        {
+            for (k, v, c, value) in pending.iter().rev() {
+                if *k == kind && *v == version && id_bytes(c.as_bytes()) == key {
+                    return Ok(Some(value.clone()));
                 }
             }
-            if let Some(value) = self
-                .derived_preload
-                .as_deref()
-                .and_then(|preload| preload.get(&(kind.to_owned(), version, key.clone())))
-            {
-                return Ok(Some(value.clone()));
-            }
+        }
+        // The transaction's own memory of the derived rows it preloaded
+        // or wrote: one statement filled it at the start of a write path,
+        // and every put of this transaction keeps it true. A row it
+        // deleted is of an older version, which no read of this kind
+        // asks for, so no stale answer can hide there.
+        if let Some(value) = self
+            .derived_preload
+            .as_deref()
+            .and_then(|preload| preload.get(&(kind.to_owned(), version, key.clone())))
+        {
+            return Ok(Some(value.clone()));
         }
         Ok(self
             .c
@@ -3675,6 +3738,16 @@ impl MetaTx for PgTx<'_> {
                 "derived {kind} v{version} for {cs} differs from the stored value"
             )));
         }
+        // The transaction's memory follows its writes, so a later read
+        // of the same row answers with what was written. It follows
+        // after the check above: the check must see the stored row, not
+        // the value just written.
+        if let Some(preload) = self.derived_preload.as_deref_mut() {
+            preload.insert(
+                (kind.to_owned(), version64, id_bytes(cs.as_bytes())),
+                value.to_vec(),
+            );
+        }
         Ok(())
     }
 
@@ -3688,15 +3761,85 @@ impl MetaTx for PgTx<'_> {
         if self.cs_batching {
             return Ok(0);
         }
-        let version = i64::from(version);
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let version64 = i64::from(version);
+        // A write path that deferred its deletes collects this call; the
+        // commit deletes for the whole transaction with one statement,
+        // honoring the summed limits. The callers that count the rows
+        // (the old-value sweep) never turn the deferral on.
+        if self.defer_derived {
+            self.deferred_deletes.push((
+                kind.to_owned(),
+                version64,
+                i64::try_from(limit).unwrap_or(i64::MAX),
+            ));
+            return Ok(0);
+        }
         let deleted = self.c.execute(
             "DELETE FROM derived WHERE (kind, version, cs) IN (
                  SELECT kind, version, cs FROM derived
                  WHERE kind = $1 AND version < $2 LIMIT $3)",
-            &[P::text(kind), P::i64(version), P::i64(limit)],
+            &[
+                P::text(kind),
+                P::i64(version64),
+                P::i64(i64::try_from(limit).unwrap_or(i64::MAX)),
+            ],
         )?;
         Ok(usize::try_from(deleted).unwrap_or(0))
+    }
+
+    /// The stored value of the kind for the changeset the transaction
+    /// itself inserted cannot exist unless the transaction wrote it, and
+    /// its own memory answers that: the stored check reads nothing.
+    fn inserted_this_tx(&self, cs: ChangesetId) -> bool {
+        self.inserted_gens.contains_key(&id_bytes(cs.as_bytes()))
+    }
+
+    /// Reads the derived values of the write path's kinds for the
+    /// changeset's parents into the transaction's memory, one statement:
+    /// every per-value read of the path then answers without a round
+    /// trip. A value written later in the same transaction updates the
+    /// memory, so the answers stay the transaction's own.
+    fn preload_derived(
+        &mut self,
+        kinds: &[(&'static str, u32)],
+        css: &[ChangesetId],
+    ) -> Result<()> {
+        if kinds.is_empty() || css.is_empty() {
+            return Ok(());
+        }
+        let Some(preload) = self.derived_preload.as_deref_mut() else {
+            return Ok(());
+        };
+        let kind_names: Vec<String> = kinds.iter().map(|(name, _)| (*name).to_owned()).collect();
+        let versions: Vec<i64> = kinds
+            .iter()
+            .map(|(_, version)| i64::from(*version))
+            .collect();
+        let keys: Vec<Vec<u8>> = css.iter().map(|cs| id_bytes(cs.as_bytes())).collect();
+        let rows = self.c.query(
+            "SELECT kind, version, cs, value FROM derived
+             WHERE cs = ANY($3)
+               AND (kind, version) IN (SELECT kind, version
+                                       FROM unnest($1::text[], $2::int8[]) AS t(kind, version))",
+            &[
+                P::text_array(kind_names),
+                P::i64_array(versions),
+                P::bytea_array(keys),
+            ],
+        )?;
+        for row in rows {
+            preload.insert((row.get(0), row.get(1), row.get(2)), row.get(3));
+        }
+        Ok(())
+    }
+
+    /// Defers the write path's `delete_derived_below` to the commit:
+    /// the collected deletes wait for the commit's flush, and the
+    /// deferral lasts to the commit. One-way - there is no off, because
+    /// an off would silently drop deletes the transaction already
+    /// promised.
+    fn defer_derived_deletes(&mut self) {
+        self.defer_derived = true;
     }
 
     /// The view that the per-tree memo holds for a (rule set, version,
