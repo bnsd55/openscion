@@ -311,16 +311,22 @@ struct Cost {
 }
 
 /// How long a walk holds one read connection: for moves of up to `reads`
-/// reads.
+/// reads, and for at most `visits` changesets visited over the whole
+/// query.
 #[derive(Clone, Copy, Debug)]
 struct Steps {
     reads: usize,
+    visits: usize,
 }
 
 /// The steps of the queries. A step ends after the move that reaches 1,000
 /// reads, and a move reads at most a few dozen rows: O(log n) nodes, or the
-/// parents of a merge.
-const STEPS: Steps = Steps { reads: 1000 };
+/// parents of a merge. A query visits at most
+/// [`GRAPH_QUERY_MAX_VISITS`] changesets.
+const STEPS: Steps = Steps {
+    reads: 1000,
+    visits: GRAPH_QUERY_MAX_VISITS,
+};
 
 /// How many changesets one graph query may visit before it fails with
 /// [`Error::ResourceExhausted`]. A visit is one move of the walk: the
@@ -332,38 +338,6 @@ const STEPS: Steps = Steps { reads: 1000 };
 /// spends, and far below the 600 s call deadline. A query past the
 /// bound stops instead of holding a read slot to its deadline.
 pub(crate) const GRAPH_QUERY_MAX_VISITS: usize = 1_000_000;
-
-/// The bound a query answers to. Tests set it small through
-/// [`set_visits_bound_for_tests`]; production walks always answer to
-/// [`GRAPH_QUERY_MAX_VISITS`].
-fn visits_bound() -> usize {
-    #[cfg(test)]
-    {
-        let small = VISITS_BOUND.load(std::sync::atomic::Ordering::Relaxed);
-        if small != 0 {
-            return small;
-        }
-    }
-    GRAPH_QUERY_MAX_VISITS
-}
-
-#[cfg(test)]
-static VISITS_BOUND: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// Holds a smaller visit bound for the tests that pin the bound's
-/// error: the walks under it answer, the walks past it fail with an
-/// error that names the bound. The guard puts the default back.
-#[cfg(test)]
-pub(crate) fn set_visits_bound_for_tests(bound: usize) -> impl Drop {
-    struct Reset;
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            VISITS_BOUND.store(0, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-    VISITS_BOUND.store(bound, std::sync::atomic::Ordering::Relaxed);
-    Reset
-}
 
 /// Makes the moves of a walk with `next` until it gives the answer, in
 /// `steps`. Each step holds one read connection, and the walk gives it back
@@ -379,7 +353,7 @@ fn in_steps<T>(
 ) -> Result<(T, Cost)> {
     let mut cost = Cost::default();
     let mut seen = 0;
-    let bound = visits_bound();
+    let bound = steps.visits;
     let result = loop {
         cost.steps += 1;
         let (step, step_seen) = store.read_counted(|c| {
@@ -909,7 +883,10 @@ mod tests {
     }
 
     /// Steps of a few reads, so that walks go on across steps.
-    const SMALL: Steps = Steps { reads: 4 };
+    const SMALL: Steps = Steps {
+        reads: 4,
+        visits: usize::MAX,
+    };
 
     /// The bound holds: a walk under it answers, a walk past it fails
     /// with an error that names the bound. The small bound rides the
@@ -941,16 +918,41 @@ mod tests {
         // First, derive: the bound counts the query's walk, not the
         // graph's derivation.
         assert!(is_ancestor(&store, repo, ids[0], ids[*a.last().unwrap()], &later()).unwrap());
-        let _guard = set_visits_bound_for_tests(2);
         // One visit answers on a single-parent history: the walk
-        // descends the jump chain to the root in one move.
-        assert!(is_ancestor(&store, repo, ids[0], ids[1], &later()).unwrap());
-        let got = merge_bases(
+        // descends the jump chain to the root in one move. The small
+        // bound rides this test's own Steps, so no other test's walk
+        // answers to it.
+        let bounded = Steps { reads: 1_000, visits: 2 };
+        let (found, _) = in_steps(
             &store,
-            repo,
-            ids[*a.last().unwrap()],
-            ids[*b.last().unwrap()],
             &later(),
+            bounded,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            |index| {
+                let mut search = Search::new(
+                    At::get_unbounded(&store, repo, ids[1]).unwrap(),
+                    ids[0],
+                    0,
+                );
+                search.next(index)
+            },
+        )
+        .unwrap();
+        assert!(found);
+        let got = in_steps(
+            &store,
+            &later(),
+            bounded,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            |index| {
+                let mut paint = Paint::new(
+                    At::get_unbounded(&store, repo, ids[*a.last().unwrap()]).unwrap(),
+                    At::get_unbounded(&store, repo, ids[*b.last().unwrap()]).unwrap(),
+                );
+                paint.next(index).map(|answer| answer.map(|_| ()))
+            },
         );
         assert!(
             matches!(&got, Err(crate::error::Error::ResourceExhausted(text))
