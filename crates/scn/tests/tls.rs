@@ -13,6 +13,8 @@ use scion_server::{
     test_support::{service, tree},
 };
 use std::sync::Arc;
+mod common;
+
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 
@@ -32,7 +34,7 @@ struct TestCerts {
 
 impl TestCerts {
     fn new() -> Self {
-        let dir = TempDir::new().unwrap();
+        let dir = common::private_tempdir();
         let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
         ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         ca_params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign];

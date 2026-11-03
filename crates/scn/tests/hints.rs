@@ -3,11 +3,11 @@
 //! real server, so a reword of an upstream error cannot silence the hints
 //! without this file failing.
 
-mod common;
-
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+
+mod common;
 
 use common::stall_probe;
 use tempfile::TempDir;
@@ -84,7 +84,7 @@ async fn a_dead_server_hints_at_the_address() {
 /// says which flag to compare.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_wrong_token_hints_at_the_token() {
-    let data = TempDir::new().unwrap();
+    let data = common::private_tempdir();
     let url = serve_http(&data, TOKEN).await;
     let stderr = scn_stderr(&url, "wrong").await;
     assert!(
@@ -113,7 +113,7 @@ struct TestCerts {
 
 impl TestCerts {
     fn new() -> Self {
-        let dir = TempDir::new().unwrap();
+        let dir = common::private_tempdir();
         let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
         ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         ca_params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign];
@@ -183,7 +183,7 @@ fn write_pem(dir: &TempDir, name: &str, cert: &str, key: &str) -> (PathBuf, Path
 #[tokio::test(flavor = "multi_thread")]
 async fn a_wrong_ca_hints_at_the_ca() {
     let certs = TestCerts::new();
-    let data = TempDir::new().unwrap();
+    let data = common::private_tempdir();
     let url = serve_tls(&data, &certs).await;
     // Off the runtime, for the reason on `scn_stderr`.
     let ca = certs.stranger_ca.clone();
