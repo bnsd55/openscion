@@ -116,6 +116,12 @@ impl ObjectsService {
         }
     }
 
+    /// The worker, for the crate's tests of a cancelled call.
+    #[cfg(test)]
+    pub(crate) fn worker(&self) -> &Worker {
+        &self.worker
+    }
+
     pub(crate) fn into_server(self) -> ObjectsServer<Self> {
         ObjectsServer::new(self)
             .max_decoding_message_size(MAX_MESSAGE_BYTES)
@@ -382,8 +388,12 @@ impl Objects for ObjectsService {
         let caller = self.auth.caller_of(&request)?;
         let _call = self.quotas.enter(&caller).map_err(Status::from)?;
         // The derivation of a first view walks the real tree, under the
-        // call's deadline.
+        // call's deadline. A client that cancels drops this call; the
+        // guard says so to the job's loop checks, so its cold derive
+        // stops at its next step and frees its reader, instead of
+        // running on to the deadline.
         let deadline = Deadline::of_call(&request, crate::deadline::CALL_LIMIT);
+        let _call_gone = deadline.guard();
         let GetRootTreeRequest { repo, changeset_id } = request.into_inner();
         check_reader(&self.access, &caller, &repo)?;
         let cs = parse_id(&changeset_id, "changeset_id")?;
