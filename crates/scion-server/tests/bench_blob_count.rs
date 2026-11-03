@@ -81,14 +81,16 @@ fn storage_read_delta() -> u64 {
         static LAST: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     }
     let now: Option<u64> = std::fs::read_to_string("/proc/self/io")
-        .ok()?
-        .lines()
-        .find(|line| line.starts_with("read_bytes:"))?
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok();
-    Some(LAST.with(|slot| slot.replace(now).map_or(0, |last| now.unwrap_or(0) - last))).unwrap_or(0)
+        .ok()
+        .and_then(|io| {
+            io.lines()
+                .find(|line| line.starts_with("read_bytes:"))?
+                .split_whitespace()
+                .nth(1)?
+                .parse()
+                .ok()
+        });
+    LAST.with(|slot| slot.replace(now).map_or(0, |last| now.unwrap_or(0) - last))
 }
 
 /// The counter is Linux's; elsewhere the walk names no storage reads.
