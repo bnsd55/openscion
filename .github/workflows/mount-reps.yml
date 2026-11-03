@@ -31,6 +31,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # The test cells' builds keep only line tables in their debug info:
+  # backtraces keep file and line at a fraction of the size, so the
+  # work disk holds the workspace's whole build.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 # Every third-party action is pinned to the commit SHA its version tag
 # named, with the version in a comment, as ci.yml does.
@@ -73,8 +78,10 @@ jobs:
         # --lib the one binary holds every lib test anyway. The two
         # filters select at run time, in the step below.
         run: |
+          df -h /
           cargo test -p open-scion --lib --no-run \
             --message-format=json > "$RUNNER_TEMP/build.json"
+          df -h /
           bin=$(jq -r 'select(.executable != null and .profile.test == true
                 and .target.kind[0] == "lib") | .executable' \
                 "$RUNNER_TEMP/build.json")
