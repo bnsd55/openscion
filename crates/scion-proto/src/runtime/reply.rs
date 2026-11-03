@@ -169,6 +169,19 @@ pub struct StallSlot(Arc<Mutex<Option<crate::runtime::listen::Stall>>>);
 impl StallSlot {
     /// Parks `stall`. A reply parks at most once, on the stall that ends
     /// it; a second park gives the first count back.
+    /// Takes the parked stall, if any, so its bytes count no more: the
+    /// caller holds a fresh count for the same reply, and the old one must
+    /// not add to it while both are live (the process total would see a
+    /// connection twice).
+    fn release(&self) {
+        drop(
+            self.0
+                .lock()
+                .expect("the stall slot lock is not poisoned")
+                .take(),
+        );
+    }
+
     fn park(&self, stall: crate::runtime::listen::Stall) {
         let _ = self
             .0
@@ -330,6 +343,7 @@ pub async fn send_objects<K, F>(
                     // It stopped reading: the parts stay in HTTP/2.
                     Err(_) => {
                         if let Some(stalled) = &stalled {
+                            slot.release();
                             slot.park(stalled.hold(STALLED_REPLY_BYTES));
                         }
                     }
@@ -353,6 +367,7 @@ pub async fn send_objects<K, F>(
                 // connection that stalls too much is closed with them.
                 Err(_) => {
                     if let Some(stalled) = &stalled {
+                        slot.release();
                         slot.park(stalled.hold(STALLED_REPLY_BYTES));
                     }
                     return;
@@ -508,7 +523,12 @@ mod tests {
         use crate::runtime::metrics::Metrics;
 
         let metrics = Arc::new(Metrics::default());
-        let stalled = Stalled::new(None, STALLED_REPLY_BYTES * 2, Arc::clone(&metrics));
+        let stalled = Stalled::new(
+            None,
+            STALLED_REPLY_BYTES * 2,
+            Arc::clone(&metrics),
+            Arc::new(crate::runtime::listen::TotalBytes::new(u64::MAX)),
+        );
         let budget = Arc::new(Semaphore::new(IN_FLIGHT_BYTES));
         let permit = take(&budget, 3 * CHUNK_BYTES, BUSY_TIMEOUT).await.unwrap();
         let (tx, mut stream, slot) = channel();

@@ -33,6 +33,16 @@ use tonic::transport::{Channel, Endpoint};
 pub(crate) const REPO: &str = "r";
 pub(crate) const TOKEN: &str = "secret";
 
+/// A temp directory with mode 0700, set rather than left to the umask of
+/// the run: the server refuses a parent that the group can write, as it
+/// must, and a run under umask 002 makes the default temp directory
+/// group-writable.
+pub(crate) fn private_tempdir() -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    dir
+}
+
 pub(crate) type Client = ObjectsClient<InterceptedService<Channel, Bearer>>;
 
 /// An `Objects` client of `url` (`http://` or `unix://`) that sends the
@@ -138,12 +148,10 @@ impl Tiers {
                 .serve(TOKEN, incoming, Limits::default(), None, pending()),
         );
 
-        let node = tempfile::tempdir().unwrap();
+        let node = private_tempdir();
         let store_dir = DiskStore::open(&node.path().join("data"), 64 << 20).unwrap();
         let daemon =
             Tier::new_relay(store_dir, &cache_url, TOKEN, DAEMON_UPSTREAM_TIMEOUT, None).unwrap();
-        // The socket's directory must be private.
-        fs::set_permissions(node.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let path = node.path().join("daemon.sock");
         let incoming = UnixListenerStream::new(runtime.block_on(bind_unix(&path)).unwrap());
         runtime.spawn(
