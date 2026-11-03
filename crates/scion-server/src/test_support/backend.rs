@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 use std::path::Path;
+use std::time::Duration;
 
 use super::{Backend, Marker, marker_agrees, refuse_damaged_marker, refuse_sqlite_dir};
 use crate::error::Result;
@@ -103,6 +104,37 @@ impl Backend {
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn open_test_with_readers(data: &Path, readers: usize) -> Result<Self> {
         Self::open_test_in_schema_with(data, &test_schema(data), readers, Pg::open_test)
+    }
+
+    /// [`Backend::open_test`], after a drop of a store on the same
+    /// directory: the one-server lock rides the dropped store's write
+    /// connection, and the worker thread closes that connection after
+    /// the drop has returned. Until the session ends, the database
+    /// answers "another server holds this store". This reopen retries
+    /// that one error for a short bound and returns the last result, so
+    /// a test that drops and reopens at once waits for the real
+    /// condition instead of racing the worker's clock.
+    ///
+    /// # Errors
+    ///
+    /// What [`Backend::open_test`] returns: any error that is not the
+    /// holder message at once, and the holder message if no reopen
+    /// succeeds within the bound.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn reopen_test(data: &Path) -> Result<Self> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match Self::open_test(data) {
+                Err(crate::error::Error::FailedPrecondition(message))
+                    if message.contains(crate::pg::HOLDER_MESSAGE)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                result => return result,
+            }
+        }
     }
 
     /// [`Backend::open_test`], with the opener chosen: the one seam the
