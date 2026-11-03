@@ -44,8 +44,9 @@
 //! refused at load.
 //!
 //! The file holds digests, not tokens: `scion-server hash-token` prints
-//! one. With `--token` instead, one principal, `default`, may read and
-//! write every repo ([`Access::single`]).
+//! one. With the single-principal mode instead (`SCION_TOKEN` or
+//! `--token-file`), one principal, `default`, may read and write every
+//! repo ([`Access::single`]).
 
 use std::collections::{BTreeSet, HashMap};
 

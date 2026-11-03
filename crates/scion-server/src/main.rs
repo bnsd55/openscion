@@ -1486,7 +1486,7 @@ fn load_access(
         let trimmed = token.trim();
         anyhow::ensure!(
             !trimmed.is_empty(),
-            "--token must not be empty or whitespace-only"
+            "SCION_TOKEN must not be empty or whitespace-only"
         );
         return Ok((scion_server::Access::single(trimmed), true));
     }
