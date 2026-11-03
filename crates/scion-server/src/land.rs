@@ -129,6 +129,44 @@ impl LandState {
     }
 }
 
+/// Why a [`LandState::Rejected`] land can never succeed. `detail` names
+/// the case in a sentence a reader shows; this is the value a program
+/// matches on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LandRejectReason {
+    /// Nothing is wrong with the stored data; the land carries no reason.
+    Unspecified,
+    /// The changeset does not hold exactly one parent.
+    NeedsOneParent,
+    /// The changeset names a ref the repo does not hold.
+    MissingRef,
+    /// The changeset's base is not on the ref's first-parent history.
+    BaseNotOnHistory,
+}
+
+impl LandRejectReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::NeedsOneParent => "needs_one_parent",
+            Self::MissingRef => "missing_ref",
+            Self::BaseNotOnHistory => "base_not_on_history",
+        }
+    }
+
+    pub(crate) fn parse(s: &str) -> Result<Self> {
+        match s {
+            "unspecified" => Ok(Self::Unspecified),
+            "needs_one_parent" => Ok(Self::NeedsOneParent),
+            "missing_ref" => Ok(Self::MissingRef),
+            "base_not_on_history" => Ok(Self::BaseNotOnHistory),
+            other => Err(Error::Corrupt(format!(
+                "unknown land reject reason {other:?}"
+            ))),
+        }
+    }
+}
+
 /// A request to land a changeset.
 #[derive(Clone, Debug)]
 pub struct LandRequest {
@@ -168,6 +206,9 @@ pub struct LandOutcome {
     pub detail: String,
     /// Paths that conflict.
     pub conflict_paths: Vec<RepoPath>,
+    /// Why a rejected land can never succeed; [`LandRejectReason::Unspecified`]
+    /// for every other state.
+    pub reject_reason: LandRejectReason,
 }
 
 /// Per-ref state, guarded by the ref's lock.
@@ -618,6 +659,9 @@ struct Verdict {
     state: LandState,
     detail: String,
     paths: Vec<RepoPath>,
+    /// Why a rejected land can never succeed; [`LandRejectReason::Unspecified`]
+    /// for every other state.
+    reason: LandRejectReason,
     /// The ref version the plan read; `None` for a ref the plan read
     /// and did not find.
     expected: Option<i64>,
@@ -627,7 +671,10 @@ struct Verdict {
 enum Plan {
     /// A verdict that does not depend on the ref: the changeset's own
     /// shape refused it before any head was read.
-    Reject(String),
+    Reject {
+        reason: LandRejectReason,
+        detail: String,
+    },
     /// A verdict the head decided.
     Verdict(Verdict),
     Land {
@@ -759,15 +806,17 @@ fn plan(
     let target = &req.target_ref;
     let cs = c.get_changeset(repo, req.changeset)?;
     let [base] = cs.parents()[..] else {
-        return Ok(Plan::Reject(
-            "a land needs a changeset with exactly one parent".into(),
-        ));
+        return Ok(Plan::Reject {
+            reason: LandRejectReason::NeedsOneParent,
+            detail: "a land needs a changeset with exactly one parent".into(),
+        });
     };
     let Some(head) = c.get_ref(repo, target)? else {
         return Ok(Plan::Verdict(Verdict {
             state: LandState::Rejected,
             detail: format!("ref {target:?} does not exist"),
             paths: vec![],
+            reason: LandRejectReason::MissingRef,
             expected: None,
         }));
     };
@@ -783,6 +832,7 @@ fn plan(
                 state: LandState::Rejected,
                 detail: format!("base {base} is not on the first-parent history of {target:?}"),
                 paths: vec![],
+                reason: LandRejectReason::BaseNotOnHistory,
                 expected: Some(head.version),
             }));
         }
@@ -797,6 +847,7 @@ fn plan(
             state: LandState::Conflict,
             detail,
             paths: conflicts,
+            reason: LandRejectReason::Unspecified,
             expected: Some(head.version),
         }));
     }
@@ -825,10 +876,18 @@ fn settle(
 ) -> Result<Finished> {
     let (rebased, head) = match plan {
         Plan::Derive(head) => return Ok(Finished::Derive(head)),
-        Plan::Reject(detail) => {
+        Plan::Reject { reason, detail } => {
             return store
                 .commit(|c| {
-                    c.set_land_state(repo, land_id, LandState::Rejected, None, detail, vec![])
+                    c.set_land_state(
+                        repo,
+                        land_id,
+                        LandState::Rejected,
+                        None,
+                        detail,
+                        vec![],
+                        reason,
+                    )
                 })
                 .map(Finished::Outcome);
         }
@@ -861,6 +920,7 @@ fn settle(
             Some(id),
             String::new(),
             vec![],
+            LandRejectReason::Unspecified,
         )?;
         // The move's CAS pins the version the plan read, so
         // `head.target` is the target this move replaced: the audit's
@@ -912,6 +972,7 @@ fn settle(
                             state: LandState::Conflict,
                             detail,
                             paths: vec![],
+                            reason: LandRejectReason::Unspecified,
                             expected: Some(head.version),
                         },
                     )
@@ -941,6 +1002,7 @@ fn record_verdict(
         state,
         detail,
         paths,
+        reason,
         expected,
     } = verdict;
     let at = c.get_ref(repo, target)?.map(|r| r.version);
@@ -949,7 +1011,7 @@ fn record_verdict(
             "ref {target:?} moved during the land; retry with the same request key"
         )));
     }
-    c.set_land_state(repo, land_id, state, None, detail, paths)
+    c.set_land_state(repo, land_id, state, None, detail, paths, reason)
 }
 
 /// For one ref's first-parent history: the newest generation at which each
@@ -1771,11 +1833,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(out.state, LandState::Rejected, "{}", out.detail);
+        assert_eq!(out.reject_reason, LandRejectReason::MissingRef);
         assert!(
             out.detail.contains("nope"),
             "the detail names the missing ref: {}",
             out.detail
         );
+        // GetLand reads the same outcome, reason included, from the row.
+        let again = get_land(&f.store, &caller(), "r", out.land_id).unwrap();
+        assert_eq!(again.reject_reason, LandRejectReason::MissingRef);
         // Nothing moved.
         assert_eq!(f.main().target, f.root);
     }
@@ -2283,7 +2349,9 @@ mod tests {
         let f = fixture();
         let side = f.commit(f.root, &[put("s", "1")]);
         let merge = f.insert(&changeset(vec![f.root, side], &[]));
-        assert_eq!(f.land(merge, "m").state, LandState::Rejected);
+        let merged = f.land(merge, "m");
+        assert_eq!(merged.state, LandState::Rejected);
+        assert_eq!(merged.reject_reason, LandRejectReason::NeedsOneParent);
 
         // `side` itself lands; a child of an older sibling of it does not have a
         // base on main.
@@ -2292,6 +2360,7 @@ mod tests {
         assert_eq!(f.land(side, "s").state, LandState::Landed);
         let out = f.land(on_sibling, "u");
         assert_eq!(out.state, LandState::Rejected, "{}", out.detail);
+        assert_eq!(out.reject_reason, LandRejectReason::BaseNotOnHistory);
 
         // A missing ref is rejected without taking a lock slot, so unique bad
         // names cannot grow `Lands`.
@@ -2301,6 +2370,7 @@ mod tests {
         };
         let out = f.lands.land(&f.store, &caller(), &missing).unwrap();
         assert_eq!(out.state, LandState::Rejected);
+        assert_eq!(out.reject_reason, LandRejectReason::MissingRef);
         assert_eq!(f.lands.land(&f.store, &caller(), &missing).unwrap(), out);
         let slots = f.lands.refs.lock().unwrap();
         let keys: Vec<_> = slots.iter().map(|(key, _)| key).collect();

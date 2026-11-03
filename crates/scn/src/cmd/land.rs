@@ -119,6 +119,7 @@ fn print_outcome(json: bool, reply: &LandResponse) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scion_proto::v1::LandRejectReason;
 
     fn conflict_reply() -> LandResponse {
         LandResponse {
@@ -127,6 +128,7 @@ mod tests {
             result_changeset_id: Vec::new(),
             detail: String::from("1 path(s) changed on \"main\" after the base"),
             conflict_paths: vec![b"same.txt".to_vec()],
+            reject_reason: LandRejectReason::Unspecified.into(),
         }
     }
 

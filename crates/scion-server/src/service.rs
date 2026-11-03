@@ -44,7 +44,7 @@ use crate::auth::Caller;
 use crate::backend::Backend;
 use crate::deadline::Deadline;
 use crate::error::Result;
-use crate::land::{self, LandOutcome, LandState, Lands};
+use crate::land::{self, LandOutcome, LandRejectReason, LandState, Lands};
 use crate::meta::{Meta as _, MetaTx as _};
 use crate::objects::ObjectsService;
 use crate::quotas::{Call, Quotas};
@@ -939,12 +939,24 @@ pub(crate) fn caller<T>(request: &Request<T>) -> Result<Caller, Status> {
 }
 
 fn land_response(outcome: LandOutcome) -> LandResponse {
-    use scion_proto::v1::LandState as Wire;
+    use scion_proto::v1::{LandRejectReason as WireReason, LandState as Wire};
     let state = match outcome.state {
         LandState::Pending => Wire::Pending,
         LandState::Landed => Wire::Landed,
         LandState::Conflict => Wire::Conflict,
         LandState::Rejected => Wire::Rejected,
+    };
+    // Only a rejected land names a reason. The other states force
+    // UNSPECIFIED whatever the outcome holds, so a stored row's reason
+    // cannot leak onto a state that must not carry one.
+    let reason = match outcome.state {
+        LandState::Rejected => match outcome.reject_reason {
+            LandRejectReason::Unspecified => WireReason::Unspecified,
+            LandRejectReason::NeedsOneParent => WireReason::NeedsOneParent,
+            LandRejectReason::MissingRef => WireReason::MissingRef,
+            LandRejectReason::BaseNotOnHistory => WireReason::BaseNotOnHistory,
+        },
+        _ => WireReason::Unspecified,
     };
     LandResponse {
         land_id: outcome.land_id.to_string(),
@@ -956,6 +968,7 @@ fn land_response(outcome: LandOutcome) -> LandResponse {
             .into_iter()
             .map(|p| p.as_bytes().to_vec())
             .collect(),
+        reject_reason: reason as i32,
     }
 }
 

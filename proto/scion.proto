@@ -145,6 +145,18 @@ enum LandState {
   LAND_STATE_REJECTED = 4;
 }
 
+// Why a REJECTED land can never succeed. Set on LandResponse.reject_reason
+// when the state is REJECTED; UNSPECIFIED for every other state.
+enum LandRejectReason {
+  LAND_REJECT_REASON_UNSPECIFIED = 0;
+  // The changeset does not hold exactly one parent.
+  LAND_REJECT_REASON_NEEDS_ONE_PARENT = 1;
+  // The changeset names a ref this repo does not hold.
+  LAND_REJECT_REASON_MISSING_REF = 2;
+  // The changeset's base is not on the ref's first-parent history.
+  LAND_REJECT_REASON_BASE_NOT_ON_HISTORY = 3;
+}
+
 message LandResponse {
   string land_id = 1;
   LandState state = 2;
@@ -156,6 +168,11 @@ message LandResponse {
   // CONFLICT whose changes do not apply to the head's tree (detail says why),
   // and for every other state.
   repeated bytes conflict_paths = 5;
+  // Why the land is REJECTED, as one of the LandRejectReason values. Set
+  // when the state is REJECTED; UNSPECIFIED for every other state. detail
+  // carries the sentence a reader shows; this field is the one a program
+  // matches on.
+  LandRejectReason reject_reason = 6;
 }
 
 message ResolveRefRequest {

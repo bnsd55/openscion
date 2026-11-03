@@ -45,8 +45,8 @@ use crate::error::{Error, Result, Storage};
 use crate::history::NodeId;
 use crate::import::SHA1;
 use crate::land::{
-    EXPIRE_PER_LAND, LAND_RETENTION_SECS, LandOutcome, LandRequest, LandState, decode_paths,
-    encode_paths,
+    EXPIRE_PER_LAND, LAND_RETENTION_SECS, LandOutcome, LandRejectReason, LandRequest, LandState,
+    decode_paths, encode_paths,
 };
 use crate::meta::{FsckDerivedRow, Meta, MetaTx, RefState, RepoChangeset, RepoId, StaleLand};
 use crate::store::Blobs;
@@ -63,7 +63,7 @@ pub(crate) mod test_hooks;
 pub(crate) mod damage;
 
 /// The schema version this build makes and reads.
-pub(crate) const PG_SCHEMA_VERSION: u32 = 5;
+pub(crate) const PG_SCHEMA_VERSION: u32 = 6;
 
 /// How long a call may wait for a Postgres reader before the server
 /// answers [`Error::Unavailable`]. Well below the 600 s call deadline:
@@ -107,6 +107,7 @@ const PG_MIGRATIONS: [&str; PG_SCHEMA_VERSION as usize] = [
     include_str!("../migrations/postgres/0003_view_trees.sql"),
     include_str!("../migrations/postgres/0004_store_uuid.sql"),
     include_str!("../migrations/postgres/0005_parent_numbering.sql"),
+    include_str!("../migrations/postgres/0006_land_reason.sql"),
 ];
 
 /// The fence of a process that lost the one-server lock. The worker of
@@ -3898,8 +3899,9 @@ impl MetaTx for PgTx<'_> {
                 .query_opt(
                     "INSERT INTO lands
                      (repo_id, caller, request_key, target_ref, input_cs, state, detail,
-                      finished_at, created_at)
+                      reject_reason, finished_at, created_at)
                      VALUES ($1, $2, $3, $4, $5, $6, $7,
+                         CASE WHEN $6 = 'rejected' THEN 'missing_ref' ELSE 'unspecified' END,
                          CASE WHEN $6 = 'pending' THEN NULL ELSE now_epoch() END,
                          now_epoch())
                      ON CONFLICT DO NOTHING
@@ -3981,7 +3983,7 @@ impl MetaTx for PgTx<'_> {
         let row = self
             .c
             .query_opt(
-                "SELECT state, result_cs, detail, conflict_paths FROM lands
+                "SELECT state, result_cs, detail, conflict_paths, reject_reason FROM lands
                  WHERE repo_id = $1 AND land_id = $2 AND caller = $3",
                 &[P::i64(repo.0), P::i64(land_id), P::text(&caller.0)],
             )?
@@ -3990,6 +3992,7 @@ impl MetaTx for PgTx<'_> {
         let result: Option<Vec<u8>> = row.get(1);
         let detail: String = row.get(2);
         let paths: Vec<u8> = row.get(3);
+        let reason: String = row.get(4);
         let result = result
             .map(|bytes| ChangesetId::try_from(bytes.as_slice()))
             .transpose()
@@ -4003,10 +4006,12 @@ impl MetaTx for PgTx<'_> {
             detail,
             conflict_paths: decode_paths(&paths)
                 .ok_or_else(|| Error::Corrupt(format!("land {land_id} conflict paths")))?,
+            reject_reason: LandRejectReason::parse(&reason)?,
         })
     }
 
     /// Moves a pending land to its final state and returns the outcome.
+    #[allow(clippy::too_many_arguments)] // the one row's own columns: state, result, detail, paths and reason land together
     fn set_land_state(
         &mut self,
         repo: RepoId,
@@ -4015,10 +4020,11 @@ impl MetaTx for PgTx<'_> {
         result: Option<ChangesetId>,
         detail: String,
         conflict_paths: Vec<RepoPath>,
+        reject_reason: LandRejectReason,
     ) -> Result<LandOutcome> {
         let updated = self.c.execute(
             "UPDATE lands SET state = $3, result_cs = $4, detail = $5,
-                 conflict_paths = $6, finished_at = now_epoch()
+                 conflict_paths = $6, reject_reason = $7, finished_at = now_epoch()
              WHERE repo_id = $1 AND land_id = $2 AND state = 'pending'",
             &[
                 P::i64(repo.0),
@@ -4027,6 +4033,7 @@ impl MetaTx for PgTx<'_> {
                 P::opt_bytes(result.as_ref().map(|id| id_bytes(id.as_bytes()))),
                 P::text(&detail),
                 P::bytes(&encode_paths(&conflict_paths)),
+                P::text(reject_reason.as_str()),
             ],
         )?;
         if updated != 1 {
@@ -4042,6 +4049,7 @@ impl MetaTx for PgTx<'_> {
             previous: None,
             detail,
             conflict_paths,
+            reject_reason,
         })
     }
 

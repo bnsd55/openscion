@@ -406,13 +406,14 @@ server stops the land at its next check, and the land stays `PENDING`.
 | `result_changeset_id` | When `LANDED`: the rebased changeset, which was the tip of the ref when the land finished. Empty otherwise. |
 | `detail` | Why the land is `CONFLICT` or `REJECTED`, for people. Empty when `LANDED`. |
 | `conflict_paths` | When `CONFLICT` from step 4: the paths that conflict. Empty otherwise. |
+| `reject_reason` | When `REJECTED`: why the land can never succeed, as one `LandRejectReason` value: `NEEDS_ONE_PARENT` (the changeset does not hold exactly one parent), `MISSING_REF` (the changeset names a ref the repo does not hold) or `BASE_NOT_ON_HISTORY` (the base is not on the ref's first-parent history). `UNSPECIFIED` for every other state, and when a land the sweep rejected is read back: `detail` carries that sweep's reason. Programs match on this field; people read `detail`. |
 
 | State | Meaning | Final |
 |---|---|---|
 | `PENDING` | Recorded, not finished. | No |
 | `LANDED` | The ref moved to `result_changeset_id`. | Yes |
 | `CONFLICT` | A change on the ref after the base touched the same paths, or the changes do not apply to the head's tree. The client re-reads those paths on the ref, makes a new changeset on the new head, and lands that. | Yes |
-| `REJECTED` | The land cannot succeed as asked. | Yes |
+| `REJECTED` | The land cannot succeed as asked; `reject_reason` says why. | Yes |
 
 **Request keys and retries.**
 
