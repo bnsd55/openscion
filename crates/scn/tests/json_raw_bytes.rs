@@ -35,6 +35,28 @@ const PLAIN_NAME: &[u8] = b"plain.txt";
 /// 3 minus 2, so the encoding is 20 characters ending in one `=`.
 const PADDED_NAME: &[u8] = b"thirteen-byt\x80";
 
+/// Reports a stall of this runtime: a task that measures its own wake-up
+/// delay every 100 ms and prints one line for any wake-up over 1 s late.
+/// The server's connection task shares the runtime, so a late wake-up is
+/// the keep-alive silence the client sees.
+async fn stall_probe() {
+    let mut last = tokio::time::Instant::now();
+    let started = std::time::Instant::now();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let now = tokio::time::Instant::now();
+        let lag = now.duration_since(last);
+        last = now;
+        if lag > std::time::Duration::from_secs(1) {
+            eprintln!(
+                "RUNTIME-STALL at +{:?}: the runtime did not run for {:?}",
+                started.elapsed(),
+                lag
+            );
+        }
+    }
+}
+
 struct Fixture {
     url: String,
     /// A read handle of the store the server serves, for the test's own
@@ -209,6 +231,7 @@ impl Fixture {
         let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let read_handle = store.clone();
+        runtime.spawn(stall_probe());
         runtime.spawn(service::serve(
             store,
             listener,

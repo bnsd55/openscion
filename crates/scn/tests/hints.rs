@@ -11,6 +11,28 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 
 use scion_proto::runtime::listen::Limits;
+/// Reports a stall of this runtime: a task that measures its own wake-up
+/// delay every 100 ms and prints one line for any wake-up over 1 s late.
+/// The server's connection task shares the runtime, so a late wake-up is
+/// the keep-alive silence the client sees.
+async fn stall_probe() {
+    let mut last = tokio::time::Instant::now();
+    let started = std::time::Instant::now();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let now = tokio::time::Instant::now();
+        let lag = now.duration_since(last);
+        last = now;
+        if lag > std::time::Duration::from_secs(1) {
+            eprintln!(
+                "RUNTIME-STALL at +{:?}: the runtime did not run for {:?}",
+                started.elapsed(),
+                lag
+            );
+        }
+    }
+}
+
 use scion_server::{Backend, test_support::service};
 
 const REPO: &str = "r";
@@ -22,6 +44,7 @@ async fn serve_http(data: &TempDir, token: &'static str) -> String {
     let store = Backend::open_test(data.path()).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    tokio::spawn(stall_probe());
     tokio::spawn(service::serve(
         store,
         listener,
@@ -200,6 +223,7 @@ async fn serve_tls(data: &TempDir, certs: &TestCerts) -> String {
     let store = Backend::open_test(data.path()).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    tokio::spawn(stall_probe());
     tokio::spawn(service::serve(
         store,
         listener,
