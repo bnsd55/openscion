@@ -315,8 +315,20 @@ fn a_migrate_beside_a_live_server_refuses_and_moves_nothing() {
             "--migrate",
         ])
         .env("NO_COLOR", "1")
-        .stdout(fs::OpenOptions::new().create(true).append(true).open(&log).unwrap())
-        .stderr(fs::OpenOptions::new().create(true).append(true).open(&log).unwrap())
+        .stdout(
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log)
+                .unwrap(),
+        )
+        .stderr(
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log)
+                .unwrap(),
+        )
         .spawn()
         .expect("the migrating serve starts");
     let start = std::time::Instant::now();
@@ -327,7 +339,10 @@ fn a_migrate_beside_a_live_server_refuses_and_moves_nothing() {
                 fs::read_to_string(&log).unwrap_or_default()
             );
         }
-        assert!(start.elapsed() < std::time::Duration::from_secs(60), "no listen");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(60),
+            "no listen"
+        );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     let version = || -> String {
@@ -346,7 +361,10 @@ fn a_migrate_beside_a_live_server_refuses_and_moves_nothing() {
         .env("NO_COLOR", "1")
         .output()
         .expect("the refused migrate runs");
-    assert!(!refused.status.success(), "a migrate beside a server refuses");
+    assert!(
+        !refused.status.success(),
+        "a migrate beside a server refuses"
+    );
     let why = String::from_utf8_lossy(&refused.stderr);
     assert!(why.contains("another server holds this store"), "{why}");
     assert!(why.contains("stop the server first"), "{why}");
@@ -361,5 +379,8 @@ fn a_migrate_beside_a_live_server_refuses_and_moves_nothing() {
         .env("NO_COLOR", "1")
         .output()
         .expect("the migrate after the stop runs");
-    assert!(clean.status.success(), "the migrate runs once the server is gone");
+    assert!(
+        clean.status.success(),
+        "the migrate runs once the server is gone"
+    );
 }
