@@ -1115,6 +1115,37 @@ impl Pg {
         f(&mut pg)
     }
 
+    /// A read on one client of the pool, in autocommit: every statement
+    /// sees the newest committed state, and none of them queues behind
+    /// the write client. The land's outcome check and plan ride this:
+    /// their writes happen later, in their own transaction, and the
+    /// land row's pending guard is what stops a twin call, not a shared
+    /// read.
+    ///
+    /// # Errors
+    ///
+    /// What `f` returns, or [`Error::Unavailable`] when no reader was
+    /// free in time.
+    pub(crate) fn read_latest<T>(&self, f: impl FnOnce(&mut PgTx<'_>) -> Result<T>) -> Result<T> {
+        self.check_fenced()?;
+        let mut reader = self.inner.readers.take(READER_WAIT)?;
+        let mut pg = PgTx {
+            c: reader.client(),
+            gen_cache: std::collections::HashMap::new(),
+            inserted_gens: std::collections::HashMap::new(),
+            cs_batching: false,
+            cs_pending: None,
+            derived_pending: None,
+            derived_preload: None,
+            history_pending: None,
+            ended: true,
+        };
+        let out = f(&mut pg);
+        drop(pg);
+        drop(reader);
+        out
+    }
+
     /// A strong read on one client of the pool. The read runs in one
     /// transaction, so all its statements see one snapshot; on this backend
     /// every commit is durable when it returns, so what `f` saw is durable.
@@ -5313,5 +5344,97 @@ pub(crate) mod pool_tests {
         // A normal write after the refusal writes as before.
         let again = store.write(|c| c.insert_changeset(repo, &cs)).unwrap();
         assert_eq!(again, id);
+    }
+    /// A read that runs while a write transaction holds the write
+    /// client: the land's outcome check and plan ride it, so a land in
+    /// its slot must not wait for another writer's statements. The
+    /// writer is held here, so a read that queues behind it would hang
+    /// the test.
+    #[test]
+    fn a_read_latest_runs_while_a_write_holds_the_write_client() {
+        let (_pool, pg) = pg();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let writer = {
+            let pg = pg.clone();
+            std::thread::spawn(move || {
+                pg.commit(|_tx| {
+                    held_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            })
+        };
+        held_rx.recv().unwrap();
+        // The land's shape: a per-statement read while the writer is
+        // held. It answers.
+        let seen = pg
+            .read_latest(|tx| Ok(tx.c.query_opt("SELECT 1", &[])?.is_some()))
+            .unwrap();
+        assert!(seen);
+        // A read on the write client queues behind it, as it always did:
+        // the same hold keeps `read_unflushed` waiting.
+        let queued = {
+            let pg = pg.clone();
+            std::thread::spawn(move || pg.read_unflushed(|_| Ok(())))
+        };
+        for _ in 0..2_000 {
+            std::thread::yield_now();
+        }
+        assert!(
+            !queued.is_finished(),
+            "the writer-bound read did not queue behind the held writer"
+        );
+        release_tx.send(()).unwrap();
+        queued.join().unwrap().unwrap();
+        writer.join().unwrap();
+    }
+
+    /// A per-statement read sees the newest committed state: a commit
+    /// that lands between its statements is visible to the later one,
+    /// which is the shape of the land's outcome check and plan.
+    #[test]
+    fn a_read_latest_sees_a_commit_that_lands_between_its_statements() {
+        let (_pool, pg) = pg();
+        pg.commit(|tx| tx.c.execute("CREATE TABLE read_latest_watch (n INT)", &[]))
+            .unwrap();
+        pg.commit(|tx| {
+            tx.c.execute("INSERT INTO read_latest_watch VALUES (1)", &[])
+        })
+        .unwrap();
+        let (counted_tx, counted_rx) = std::sync::mpsc::channel();
+        let (commit_tx, commit_rx) = std::sync::mpsc::channel::<()>();
+        let writer = {
+            let pg = pg.clone();
+            std::thread::spawn(move || {
+                counted_rx.recv().unwrap();
+                pg.commit(|tx| {
+                    tx.c.execute("INSERT INTO read_latest_watch VALUES (2)", &[])
+                })
+                .unwrap();
+                commit_tx.send(()).unwrap();
+            })
+        };
+        let seen = pg
+            .read_latest(|tx| {
+                let first: i64 =
+                    tx.c.query("SELECT count(*) FROM read_latest_watch", &[])
+                        .unwrap()[0]
+                        .get(0);
+                assert_eq!(first, 1, "the read started from an empty table");
+                counted_tx.send(()).unwrap();
+                commit_rx.recv().unwrap();
+                let second: i64 =
+                    tx.c.query("SELECT count(*) FROM read_latest_watch", &[])
+                        .unwrap()[0]
+                        .get(0);
+                Ok(second)
+            })
+            .unwrap();
+        assert_eq!(seen, 2, "the read did not see the commit it raced");
+        writer.join().unwrap();
+        pg.commit(|tx| tx.c.execute("DROP TABLE read_latest_watch", &[]))
+            .unwrap();
     }
 }
