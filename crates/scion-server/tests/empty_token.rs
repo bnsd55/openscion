@@ -41,23 +41,37 @@ fn hash_token(args: &[&str]) -> (bool, String, String) {
     )
 }
 
+/// The empty token cannot arrive as a flag any more (no binary takes a
+/// token on its command line), so the empty refusals go through the
+/// file form, whose checked read is what the old argv refusals stood
+/// for.
 #[test]
-fn hash_token_refuses_an_empty_argv_token() {
-    let (ok, out, err) = hash_token(&["--token", ""]);
+fn hash_token_refuses_an_empty_token_file() {
+    let dir = scion_server::test_support::private_tempdir();
+    let file = dir.path().join("token");
+    std::fs::write(&file, "").unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (ok, out, err) = hash_token(&["--token-file", file.to_str().unwrap()]);
     assert!(!ok, "hash-token printed {out}");
     assert!(
-        err.contains("no secret") || err.contains("empty") || err.contains("whitespace"),
+        err.contains("holds no secret"),
         "the refusal names the problem: {err}"
     );
     assert_ne!(out.trim(), empty_digest(), "the empty digest leaked");
 }
 
 #[test]
-fn hash_token_refuses_a_whitespace_only_argv_token() {
-    let (ok, out, err) = hash_token(&["--token", "   \t "]);
+fn hash_token_refuses_a_whitespace_only_token_file() {
+    let dir = scion_server::test_support::private_tempdir();
+    let file = dir.path().join("token");
+    std::fs::write(&file, "   \t\n").unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (ok, out, err) = hash_token(&["--token-file", file.to_str().unwrap()]);
     assert!(!ok, "hash-token printed {out}");
     assert!(
-        err.contains("whitespace") || err.contains("no secret"),
+        err.contains("holds no secret"),
         "the refusal names the problem: {err}"
     );
 }

@@ -164,6 +164,15 @@ impl Server {
     fn scn(&self, args: &[&str]) -> Output {
         scn(&self.url, REPO, args)
     }
+
+    /// Runs `scn` against this server with extra environment.
+    fn scn_with_env(&self, env: &[(&str, &str)], args: &[&str]) -> Output {
+        let mut command = scn_command(&self.url, REPO, args);
+        for (name, value) in env {
+            command.env(name, value);
+        }
+        command.output().unwrap()
+    }
 }
 
 /// Runs `scn` against the server at `url`.
@@ -302,14 +311,15 @@ fn checkout_matches_git_checkout_byte_for_byte() {
     );
 
     // The object reads need the token too.
-    let out = server.scn(&[
-        "--token",
-        "wrong",
-        "checkout",
-        "main",
-        "--into",
-        text(&tmp.path().join("denied")),
-    ]);
+    let out = server.scn_with_env(
+        &[("SCION_TOKEN", "wrong")],
+        &[
+            "checkout",
+            "main",
+            "--into",
+            text(&tmp.path().join("denied")),
+        ],
+    );
     assert!(!out.status.success());
     assert!(stderr(&out).contains("wrong token"), "{}", stderr(&out));
 

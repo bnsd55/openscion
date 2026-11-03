@@ -45,22 +45,13 @@ struct Cli {
     /// The key of `--tls-client-cert` (PEM).
     #[arg(long, requires = "tls_client_cert", value_name = "FILE")]
     tls_client_key: Option<PathBuf>,
-    /// Bearer token that clients must send. Give `--token-file`, or
-    /// `SCION_TOKEN`; the argv form sits in the process list and warns.
-    #[arg(long, value_name = "TOKEN")]
-    token: Option<String>,
     /// File with the bearer token of `--token`, read like the access
     /// file: the owner alone may read it, and a symlink is refused.
-    #[arg(long, conflicts_with = "token", value_name = "FILE")]
+    #[arg(long, value_name = "FILE")]
     token_file: Option<PathBuf>,
-    /// Bearer token to send upstream. Give `--upstream-token-file`, or
-    /// `SCION_UPSTREAM_TOKEN`; the argv form sits in the process list
-    /// and warns.
-    #[arg(long, value_name = "TOKEN")]
-    upstream_token: Option<String>,
     /// File with the bearer token of `--upstream-token`, read like the
     /// access file.
-    #[arg(long, conflicts_with = "upstream_token", value_name = "FILE")]
+    #[arg(long, value_name = "FILE")]
     upstream_token_file: Option<PathBuf>,
     /// Most connections served at once. More clients wait until one closes.
     #[arg(long, default_value_t = listen::DEFAULT_CONNECTIONS)]
@@ -110,46 +101,19 @@ fn refuse_missing_data_dir(data: &std::path::Path) -> anyhow::Result<()> {
 }
 
 fn resolve_tokens(cli: &Cli) -> anyhow::Result<(String, String)> {
-    let token = secret_of(
-        cli.token.as_deref(),
-        cli.token_file.as_deref(),
-        "--token",
-        "--token-file",
-        "SCION_TOKEN",
-    )?;
+    let token = secret_of(cli.token_file.as_deref(), "--token-file", "SCION_TOKEN")?;
     let upstream = secret_of(
-        cli.upstream_token.as_deref(),
         cli.upstream_token_file.as_deref(),
-        "--upstream-token",
         "--upstream-token-file",
         "SCION_UPSTREAM_TOKEN",
     )?;
     Ok((token, upstream))
 }
 
-/// A secret that the flags may carry three ways: the checked file, the
-/// env, or the argv form, which warns that the process list shows it.
-/// The warning names the replacement, per the deprecation rule: warn
-/// first, remove in a later minor.
-fn secret_of(
-    token: Option<&str>,
-    file: Option<&std::path::Path>,
-    flag: &str,
-    file_flag: &str,
-    env: &str,
-) -> anyhow::Result<String> {
-    match (token, file) {
-        (Some(_), Some(_)) => unreachable!("clap refuses {flag} with {file_flag}"),
-        (Some(_), None) => {
-            eprintln!(
-                "warning: {flag} put a secret on the command line, which ps and \
-                 /proc/$$/cmdline show to every local account; use {file_flag} \
-                 (or {env}) instead (the argv form is deprecated and goes away \
-                 in a later release)"
-            );
-            Ok(token.expect("the argv form is given").to_owned())
-        }
-        (None, Some(file)) => {
+/// A secret that arrives two ways: the checked file, or the env.
+fn secret_of(file: Option<&std::path::Path>, file_flag: &str, env: &str) -> anyhow::Result<String> {
+    match file {
+        Some(file) => {
             let bytes = scion_proto::runtime::auth::read_secret_file(file)
                 .map_err(|why| scion_proto::runtime::auth::checked_read_error(file, why))?;
             let text = String::from_utf8(bytes)
@@ -158,9 +122,9 @@ fn secret_of(
             anyhow::ensure!(!token.is_empty(), "{} holds no token", file.display());
             Ok(token.to_owned())
         }
-        (None, None) => {
+        None => {
             let from_env = std::env::var(env).unwrap_or_default();
-            anyhow::ensure!(!from_env.is_empty(), "give {flag}, {file_flag} or {env}");
+            anyhow::ensure!(!from_env.is_empty(), "give {env} or {file_flag} FILE");
             Ok(from_env)
         }
     }
@@ -177,6 +141,22 @@ async fn main() -> anyhow::Result<()> {
         .with_ansi(std::io::stderr().is_terminal())
         .with_writer(std::io::stderr)
         .init();
+    if let Some(error) = scion_proto::runtime::auth::removed::removed_secret_flag_error(
+        std::env::args_os().skip(1).collect::<Vec<_>>().as_slice(),
+        &[
+            (
+                "--token",
+                "pass the token in SCION_TOKEN, or in a file with --token-file FILE",
+            ),
+            (
+                "--upstream-token",
+                "pass the token in SCION_UPSTREAM_TOKEN, or in a file with                  --upstream-token-file FILE",
+            ),
+        ],
+    ) {
+        eprintln!("error: {error}");
+        std::process::exit(2);
+    }
     let cli = Cli::parse();
     refuse_missing_data_dir(&cli.data)?;
     let (token, upstream) = resolve_tokens(&cli)?;

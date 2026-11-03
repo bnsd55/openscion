@@ -62,15 +62,13 @@ fn spawn() -> Cache {
             "--listen",
             &listen.to_string(),
             "--insecure-listen",
-            "--token",
-            "t",
-            "--upstream-token",
-            "t",
             "--upstream",
             &format!("http://{upstream}"),
             "--ticket-public-key",
             "1d9a210b3533c802f27bd5aeef391e48978ecbda81cbdafacd0b76a020df8a99",
         ])
+        .env("SCION_TOKEN", "t")
+        .env("SCION_UPSTREAM_TOKEN", "t")
         .env("NO_COLOR", "1")
         .env("RUST_LOG", "info")
         .stdout(log_file.try_clone().unwrap())

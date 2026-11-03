@@ -900,6 +900,7 @@ fn criss_cross_merges_import_and_the_ref_moves_only_to_descendants() {
 fn server_process(data: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_scion-server"));
     command.arg("--data").arg(data).args(args);
+    command.env("SCION_TOKEN", "t");
     command.env("RUST_LOG", "warn");
     command
 }
@@ -1127,7 +1128,7 @@ fn a_second_server_process_is_refused() {
         "--postgres-url".to_owned(),
         format!("{url}{sep}options=--search_path%3D{schema}"),
     ];
-    let args: Vec<&str> = ["serve", "--token", "t", "--listen", "127.0.0.1:0"]
+    let args: Vec<&str> = ["serve", "--listen", "127.0.0.1:0"]
         .into_iter()
         .chain(extra.iter().map(String::as_str))
         .collect();

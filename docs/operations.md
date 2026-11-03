@@ -121,7 +121,7 @@ adds a ticket key (section 2):
 ./scion-server --data /srv/scion ticket-key --out /srv/scion-keys/ticket.key \
   | tee /srv/scion-keys/ticket.pub   # prints the public key
 chmod 600 /srv/scion-keys/ticket.key
-./scion-server --data /srv/scion serve --token <TOKEN> \
+SCION_TOKEN=<TOKEN> ./scion-server --data /srv/scion serve \
   --ticket-key /srv/scion-keys/ticket.key
 ```
 
@@ -167,11 +167,11 @@ under the floor. A larger `--max-stalled-bytes` changes which
 connections close first, not what the process can hold.
 
 
-Choose the tokens with care: `--token T` (or `SCION_TOKEN=T`) makes one
-principal, `default`, with every right on every repo. A token on the command
-line is readable by every local account, so the argv form warns and goes
-away in a later release; pass the token through `SCION_TOKEN` or
-`--token-file FILE` (a file the owner alone may read). For several people or
+Choose the tokens with care: `SCION_TOKEN=T` (or `--token-file FILE`)
+makes one principal, `default`, with every right on every repo. A token on
+the command line is readable by every local account, so no binary takes
+one: pass the token through `SCION_TOKEN` or `--token-file FILE` (a file
+the owner alone may read). For several people or
 services, use an access file instead (see "Tokens: one, or an access file",
 below).
 
@@ -248,8 +248,9 @@ process you started.
 A cache serves object reads to a region and refuses every other call
 (`UNIMPLEMENTED`): the client resolves refs and reads paths on the server,
 and asks the cache only for objects. Each hop has its own token pair:
-(`--token`), and what it sends upstream (`--upstream-token`). A `scn`
-client's `--token` is what it sends, the other side of the pair of the tier
+(`SCION_TOKEN` or `--token-file`), and what it sends upstream
+(`SCION_UPSTREAM_TOKEN` or `--upstream-token-file`). A `scn`
+client's `SCION_TOKEN` is what it sends, the other side of the pair of the tier
 in front of it.
 
 ```sh
@@ -269,7 +270,7 @@ serve every object it holds to any caller that names an object ID. A
 `scn checkout --server http://SERVER:7878 --objects http://CACHE:7879`.
 
 One token rule the flag list hides (section 2 says it for the daemon
-chain): `scn` sends its one `--token` on every call, to the server and to
+chain): `scn` sends its one token on every call, to the server and to
 the cache, so the token the user holds must be accepted by both. The
 example gives the cache the same caller token the server holds.
 
@@ -295,11 +296,12 @@ group or others unless it has the sticky bit. It refuses anything else, and
 `scn` checks the socket the same way; the error names the directory and
 `chmod go-w DIR` fixes it.
 
-One token rule the flag list hides: `scn` sends its one `--token` on every
+One token rule the flag list hides: `scn` sends its one token (`SCION_TOKEN`
+or `--token-file`) on every
 call, to the server (refs and reads) and to the daemon (objects). So the
 token a user holds must be accepted by the server **and** by that user's
-daemon. With the chain above, the daemon of a user runs
-`--token <USER_TOKEN>`, where `<USER_TOKEN>` is that user's token at the
+daemon. With the chain above, the daemon of a user runs with
+`SCION_TOKEN=<USER_TOKEN>`, where `<USER_TOKEN>` is that user's token at the
 server too. A new node can start warm: copy a snapshot file from the cache
 (`--snapshot DIR --snapshot-repo R`, refreshed every `--snapshot-every`
 seconds) and start the daemon with `--seed FILE --seed-full-repo`. A snapshot
@@ -461,7 +463,7 @@ start the server with the same `--postgres-url`.
 
 ### Tokens: one, or an access file
 
-`--token` and `--access` are exclusive. An access file names tokens by their
+`--token-file` and `--access` are exclusive. An access file names tokens by their
 BLAKE3 digest (never the token itself) and maps each to a principal with
 per-repo read and write rules. Every line is tab-separated, and the columns
 are: the line's kind (`token`, `read`, `write`), the principal, then what
@@ -481,7 +483,8 @@ chmod 600 /srv/scion/access.txt
 With `--access`, the per-principal caps are on by default (64 requests, 512
 MiB upload bytes, 64 pending lands per principal); raise or lower them with
 `--max-principal-requests`, `--max-principal-upload-bytes`,
-`--max-principal-pending-lands`. With `--token`, every caller is the same
+`--max-principal-pending-lands`. With the single-principal mode
+(`SCION_TOKEN` or `--token-file`), every caller is the same
 principal, so the caps are off unless a flag sets one.
 
 Rewriting the access file takes effect at the next start (or restart): the
@@ -652,8 +655,8 @@ its value is readable by every local account through `ps`.
 | `SCION_DATA` | `--data` | `scion-server` | Data directory, default `scion-data`. |
 | `SCION_POSTGRES_URL` | `--postgres-url` | `scion-server` | The URL holds the database credentials; the environment keeps them out of the process list (`ps`). `--postgres-url-file` reads it from a file the owner alone may read, and the argv form is deprecated: it warns now and is removed in v0.2.0. |
 | `SCION_POSTGRES_URL_FILE` | `--postgres-url-file` | `scion-server` | A file that holds the database URL. Only its owner may read it, and a symlink is refused. |
-| `SCION_TOKEN` | `--token` | `scion-server` (`serve`, `hash-token`), `scion-cache`, `scion-daemon`, `scn` | A secret; the environment keeps it out of the process list. The `--token-file` flag reads the token from a file the owner alone may read, and `hash-token` reads it from stdin. The argv form prints a deprecation warning and goes away in a later release. |
-| `SCION_UPSTREAM_TOKEN` | `--upstream-token` | `scion-cache`, `scion-daemon` | A secret, as `SCION_TOKEN`; `--upstream-token-file` reads it from a file, and the argv form is deprecated: it warns now and goes away in a later release. |
+| `SCION_TOKEN` | — | `scion-server` (`serve`, `hash-token`), `scion-cache`, `scion-daemon`, `scn` | A secret; the environment keeps it out of the process list. The `--token-file` flag reads the token from a file the owner alone may read, and `hash-token` reads it from stdin. No binary takes a token on its command line. |
+| `SCION_UPSTREAM_TOKEN` | — | `scion-cache`, `scion-daemon` | A secret, as `SCION_TOKEN`; `--upstream-token-file` reads it from a file. |
 | `SCION_DAEMON_DATA` | `--data` | `scion-daemon` | Data directory, default `scion-daemon-data`. |
 | `SCION_AUTHOR` | `--author` | `scn commit` | Default `scn <scn@localhost>`. |
 | `SCION_SERVER` | `--server` | `scn` | Default `http://127.0.0.1:7878`. |

@@ -1548,10 +1548,8 @@ async fn start_daemon(
         .arg(upstream)
         .arg("--max-bytes")
         .arg(limit.to_string())
-        .arg("--token")
-        .arg(TOKEN)
-        .arg("--upstream-token")
-        .arg(TOKEN)
+        .env("SCION_TOKEN", TOKEN)
+        .env("SCION_UPSTREAM_TOKEN", TOKEN)
         .spawn()
         .map(Kill)
         .unwrap();
@@ -1835,10 +1833,8 @@ async fn a_daemons_stderr_stays_quiet_and_colorless_across_gets() {
         .arg(&upstream)
         .arg("--max-bytes")
         .arg((8 << 20).to_string())
-        .arg("--token")
-        .arg(TOKEN)
-        .arg("--upstream-token")
-        .arg(TOKEN)
+        .env("SCION_TOKEN", TOKEN)
+        .env("SCION_UPSTREAM_TOKEN", TOKEN)
         // The caller's RUST_LOG must not steer the daemon's log filter:
         // RUST_LOG=debug would bring the per-call line back, RUST_LOG=off
         // would silence the check entirely.
