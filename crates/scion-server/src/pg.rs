@@ -1318,41 +1318,12 @@ impl Pg {
                 }
                 #[cfg(any(test, feature = "test-hooks"))]
                 self.inner.committed.fetch_add(1, Ordering::Release);
-                // A write path that deferred its derived deletes hands
-                // them to the flush: one statement for the whole
-                // transaction, inside it, so a rollback takes the
-                // deletes with it and the end state is the one the
-                // per-call deletes would have reached.
-                if !tx.deferred_deletes.is_empty() {
-                    let kinds: Vec<String> = tx
-                        .deferred_deletes
-                        .iter()
-                        .map(|(k, _, _)| k.clone())
-                        .collect();
-                    let versions: Vec<i64> =
-                        tx.deferred_deletes.iter().map(|(_, v, _)| *v).collect();
-                    let steps: Vec<i64> = tx.deferred_deletes.iter().map(|(_, _, s)| *s).collect();
-                    let deleted = tx.c.execute(
-                        "WITH k AS (
-                             SELECT kind, version, SUM(step) AS step
-                             FROM unnest($1::text[], $2::int8[], $3::int8[]) AS t(kind, version, step)
-                             GROUP BY kind, version),
-                         v AS (
-                             SELECT d.ctid AS ctid, k.step AS step,
-                                    row_number() OVER (PARTITION BY d.kind
-                                                       ORDER BY d.version) AS rn
-                             FROM derived d JOIN k ON d.kind = k.kind
-                                                            AND d.version < k.version)
-                         DELETE FROM derived WHERE ctid IN (SELECT ctid FROM v WHERE rn <= step)",
-                        &[
-                            P::text_array(kinds),
-                            P::i64_array(versions),
-                            P::i64_array(steps),
-                        ],
-                    )?;
-                    if deleted > 0 {
-                        tracing::debug!(deleted, "flushed the transaction's derived deletes");
-                    }
+                // A write path that deferred its per-row flushes hands
+                // them to the commit, inside the transaction, so a
+                // rollback takes them with it and the end state is the
+                // one the per-call writes would have reached.
+                if tx.defer_derived {
+                    tx.flush_deferred()?;
                 }
                 let committed = tx.commit();
                 #[cfg(any(test, feature = "test-hooks"))]
@@ -1573,9 +1544,11 @@ pub struct PgTx<'a> {
     /// commit deletes with one statement, honoring the summed limits per
     /// kind and version. Only `defer_derived_deletes` fills it.
     deferred_deletes: Vec<(String, i64, i64)>,
-    /// Whether `delete_derived_below` defers to the commit. Off for the
-    /// importer's batching (the flush owns those deletes) and for the
-    /// sweeps, which count the rows they removed.
+    /// Whether the write path's per-row flushes wait for the commit:
+    /// `delete_derived_below` collects its calls, and history node
+    /// writes collect in the buffer the commit writes with one
+    /// statement. Off for the importer's batching (its flush owns the
+    /// shapes) and for the sweeps, which count the rows they removed.
     defer_derived: bool,
     /// The history nodes the transaction inserted while batching: the
     /// flush writes them after the derived rows. Shared with the
@@ -1596,6 +1569,53 @@ impl<'a> PgTx<'a> {
     /// # Errors
     ///
     /// Database errors.
+    /// Writes the per-row flushes a deferring write path collected: the
+    /// history nodes the build wrote, one statement per 1,000 rows, and
+    /// the derived old-row deletes, one statement for the whole
+    /// transaction honoring the summed limits per kind. Runs inside the
+    /// transaction at its commit, so a rollback takes the writes with
+    /// it and the end state is the one the per-call writes would have
+    /// reached.
+    ///
+    /// # Errors
+    ///
+    /// Database errors.
+    fn flush_deferred(&mut self) -> Result<()> {
+        self.flush_history_rows()?;
+        if self.deferred_deletes.is_empty() {
+            return Ok(());
+        }
+        let kinds: Vec<String> = self
+            .deferred_deletes
+            .iter()
+            .map(|(k, _, _)| k.clone())
+            .collect();
+        let versions: Vec<i64> = self.deferred_deletes.iter().map(|(_, v, _)| *v).collect();
+        let steps: Vec<i64> = self.deferred_deletes.iter().map(|(_, _, s)| *s).collect();
+        let deleted = self.c.execute(
+            "WITH k AS (
+                 SELECT kind, version, SUM(step) AS step
+                 FROM unnest($1::text[], $2::int8[], $3::int8[]) AS t(kind, version, step)
+                 GROUP BY kind, version),
+             v AS (
+                 SELECT d.ctid AS ctid, k.step AS step,
+                        row_number() OVER (PARTITION BY d.kind
+                                           ORDER BY d.version) AS rn
+                 FROM derived d JOIN k ON d.kind = k.kind
+                                                        AND d.version < k.version)
+             DELETE FROM derived WHERE ctid IN (SELECT ctid FROM v WHERE rn <= step)",
+            &[
+                P::text_array(kinds),
+                P::i64_array(versions),
+                P::i64_array(steps),
+            ],
+        )?;
+        if deleted > 0 {
+            tracing::debug!(deleted, "flushed the transaction's derived deletes");
+        }
+        Ok(())
+    }
+
     fn flush_history_rows(&mut self) -> Result<()> {
         const CHUNK: usize = 1_000;
         let Some(history) = self.history_pending.as_deref_mut() else {
@@ -1609,12 +1629,21 @@ impl<'a> PgTx<'a> {
                 .iter()
                 .map(|(_, body)| body.clone())
                 .collect::<Vec<_>>();
-            self.c.execute(
+            let stored = self.c.query(
                 "INSERT INTO history_nodes (id, body)
                  SELECT * FROM unnest($1::bytea[], $2::bytea[])
-                 ON CONFLICT (id) DO NOTHING",
+                 ON CONFLICT (id) DO NOTHING
+                 RETURNING octet_length(body)",
                 &[P::bytea_array(ids), P::bytea_array(bodies)],
             )?;
+            #[cfg(test)]
+            for row in stored {
+                let len: i32 = row.get(0);
+                let len = usize::try_from(len.max(0)).unwrap_or(usize::MAX);
+                crate::history::note_flushed_node_bytes(len);
+            }
+            #[cfg(not(test))]
+            let _ = stored;
         }
         Ok(())
     }
@@ -3833,11 +3862,12 @@ impl MetaTx for PgTx<'_> {
         Ok(())
     }
 
-    /// Defers the write path's `delete_derived_below` to the commit:
-    /// the collected deletes wait for the commit's flush, and the
-    /// deferral lasts to the commit. One-way - there is no off, because
-    /// an off would silently drop deletes the transaction already
-    /// promised.
+    /// Defers the write path's per-row flushes to the commit: the
+    /// collected `delete_derived_below` calls wait for the commit's
+    /// one-statement flush, and the history nodes the write path
+    /// buffers do too. The deferral lasts to the commit. One-way -
+    /// there is no off, because an off would silently drop deletes the
+    /// transaction already promised.
     fn defer_derived_deletes(&mut self) {
         self.defer_derived = true;
     }
@@ -4346,12 +4376,26 @@ impl MetaTx for PgTx<'_> {
     fn put_history_node(&mut self, id: NodeId, body: Vec<u8>) -> Result<(NodeId, bool)> {
         // While the importer's batching is on, the row waits for the
         // flush, which writes it in batches after the derived rows; the
-        // buffer answers this transaction's reads of the same node.
+        // buffer answers this transaction's reads of the same node. A
+        // deferring write path collects the same way: its commit writes
+        // the transaction's nodes with one statement, however many
+        // levels the history tree grew. A row the buffer already holds
+        // reports as stored, like a conflicting insert would: the
+        // content-addressed body makes the repeat free.
         if self.cs_batching
             && let Some(pending) = self.history_pending.as_deref_mut()
         {
             pending.insert(id.0.to_vec(), body);
             return Ok((id, true));
+        }
+        if self.defer_derived
+            && let Some(pending) = self.history_pending.as_deref_mut()
+        {
+            // The flush reports what actually landed: a row the table
+            // already holds is stored again for free, and the byte
+            // bound counts only what landed.
+            pending.insert(id.0.to_vec(), body);
+            return Ok((id, false));
         }
         let stored = self.c.execute(
             "INSERT INTO history_nodes (id, body) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING",
@@ -4367,11 +4411,13 @@ impl MetaTx for PgTx<'_> {
     ///
     /// [`Error::Corrupt`] if absent or if it does not match its ID.
     fn get_history_node(&mut self, id: NodeId) -> Result<(Vec<u8>, usize)> {
-        if self.cs_batching
-            && let Some(body) = self
-                .history_pending
-                .as_deref()
-                .and_then(|pending| pending.get(id.0.as_slice()))
+        // A row the transaction holds for its flush answers from the
+        // buffer, batching or not: a deferred write is the transaction's
+        // own state.
+        if let Some(body) = self
+            .history_pending
+            .as_deref()
+            .and_then(|pending| pending.get(id.0.as_slice()))
         {
             let len = body.len();
             return Ok((body.clone(), len));

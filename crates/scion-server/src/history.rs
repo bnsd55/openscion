@@ -96,6 +96,15 @@ thread_local! {
         const { std::cell::Cell::new(usize::MAX) };
 }
 
+/// Counts the bytes of history nodes a commit's flush actually stored,
+/// so the byte bound sees the rows that landed, not the ones a
+/// deferring write path buffered. Test-only: the counter exists for the
+/// tests, and a production flush reports to no one.
+#[cfg(test)]
+pub(crate) fn note_flushed_node_bytes(bytes: usize) {
+    NODE_BYTES.with(|n| n.set(n.get() + bytes));
+}
+
 /// The byte cap of one check's row cache: the same bound a log page's
 /// nodes stop at, [`crate::read::MAX_LOG_NODE_BYTES`].
 #[cfg(not(test))]
