@@ -665,33 +665,45 @@ pair_6() {
   stop "$dir"
 }
 
-# pair_4: the store pair, one direction by design. A server of N opens a
-# store of N-1, the migration runs forward, and reads and writes work on
-# the migrated store. A store of N on a server of N-1 is refused with
-# the version reason -- but only when the two builds write different
-# schema versions at all.
+# pair_4: the store pair, one direction by design. A server of N takes
+# a store of N-1 through the explicit upgrade (docs/operations.md §4):
+# the check reports the pending step (exit 3), the plain open refuses
+# with the fix named, the migrate moves the schema, and reads and
+# writes work on the migrated store. A store of N on a server of N-1 is
+# refused with the version reason -- but only when the two builds write
+# different schema versions at all.
 pair_4() {
   local dir port cur_schema prev_schema
   PAIR=store SIDE='N opens N-1' SCN=$BIN
   dir=$(mktemp -d "$WORK/pair4.XXXXXX")
   note "pair 4 (N opens N-1)"
   import "$dir" "$PREV_BIN"
-  "$BIN/scion-server" --data "$dir/server" --postgres-url "$URL" fsck >"$dir/fsck.log" 2>&1 ||
-    die "pair '$PAIR' ($SIDE): the N server cannot open the N-1 store"
-  port=$(start server "$dir" "$BIN/scion-server" port --data "$dir/server" --postgres-url "$URL" serve \
-    --listen 127.0.0.1:0 --ticket-key "$dir/ticket.key")
-  story "$dir" "http://127.0.0.1:$port"
-  stop "$dir"
-
   cur_schema=$(schema_of "$ROOT")
   prev_schema=$(schema_of "$PREV_SRC")
   if [ -z "$cur_schema" ] || [ -z "$prev_schema" ]; then
     die "pair 'store': cannot read PG_SCHEMA_VERSION from one of the two builds"
   fi
   if [ "$cur_schema" = "$prev_schema" ]; then
-    summary "pair 4: both builds write schema $cur_schema, so the N-1 refusal cannot fire on this pair"
+    "$BIN/scion-server" --data "$dir/server" --postgres-url "$URL" fsck >"$dir/fsck.log" 2>&1 ||
+      die "pair '$PAIR' ($SIDE): the N server cannot open the N-1 store"
+    summary "pair 4: both builds write schema $cur_schema, so the upgrade ladder and the N-1 refusal cannot fire on this pair"
     return 0
   fi
+  "$BIN/scion-server" --data "$dir/server" --postgres-url "$URL" migrate --check >"$dir/check.log" 2>&1
+  [ "$?" -eq 3 ] || die "pair '$PAIR' ($SIDE): the check on the N-1 store did not say pending (exit 3)"
+  if "$BIN/scion-server" --data "$dir/server" --postgres-url "$URL" fsck >"$dir/fsck.log" 2>&1; then
+    die "pair '$PAIR' ($SIDE): the N server opened the N-1 store without being asked to migrate"
+  fi
+  grep -q 'run `scion-server migrate` first' "$dir/fsck.log" ||
+    die "pair '$PAIR' ($SIDE): the refusal does not name the migrate"
+  "$BIN/scion-server" --data "$dir/server" --postgres-url "$URL" migrate >"$dir/migrate.log" 2>&1 ||
+    die "pair '$PAIR' ($SIDE): the migrate of the N-1 store failed"
+  "$BIN/scion-server" --data "$dir/server" --postgres-url "$URL" fsck >/dev/null 2>&1 ||
+    die "pair '$PAIR' ($SIDE): the N server cannot open the migrated store"
+  port=$(start server "$dir" "$BIN/scion-server" port --data "$dir/server" --postgres-url "$URL" serve \
+    --listen 127.0.0.1:0 --ticket-key "$dir/ticket.key")
+  story "$dir" "http://127.0.0.1:$port"
+  stop "$dir"
   SIDE='N-1 refuses N'
   note "pair 4 ($SIDE)"
   URL=$(pg_db_for "$dir/server2")

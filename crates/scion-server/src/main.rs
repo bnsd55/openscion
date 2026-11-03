@@ -884,10 +884,7 @@ async fn main() -> anyhow::Result<()> {
         // 0 clean, 3 pending, 1 unreadable. A pending database is not a
         // failure of the command - it is the answer the operator asked
         // for - so it gets its own code.
-        Command::Migrate {
-            check: true,
-            ..
-        } => {
+        Command::Migrate { check: true, .. } => {
             let postgres_url =
                 postgres_url_of(cli.postgres_url_file.as_ref(), cli.postgres_url.as_ref())?;
             let state = scion_server::check_schema(&postgres_url, cli.postgres_ca.as_deref())?;
@@ -912,7 +909,10 @@ async fn main() -> anyhow::Result<()> {
         // `migrate` moves the schema on purpose: the same path the
         // open runs, under the schema's lock. The audit record lands in
         // the data directory's own file, like every other command's.
-        Command::Migrate { check: false, audit_file } => {
+        Command::Migrate {
+            check: false,
+            audit_file,
+        } => {
             refuse_missing_data_dir(&cli.data)?;
             let postgres_url =
                 postgres_url_of(cli.postgres_url_file.as_ref(), cli.postgres_url.as_ref())?;
@@ -1027,16 +1027,13 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         // `verify`, `restore`, `hash-token` and `ticket-key` ended the
-        // function above: verify exits, and the others return.
+        // function above: verify exits, and the others return. `migrate`
+        // ran its command above and returned: it opens no store here.
         Command::Verify { .. }
         | Command::Restore { .. }
         | Command::HashToken { .. }
-        | Command::TicketKey { .. } => {
-            unreachable!("handled before the store opens")
-        }
-        // `migrate` ran its command above and returned: it opens no
-        // store here.
-        Command::Migrate { .. } => {
+        | Command::TicketKey { .. }
+        | Command::Migrate { .. } => {
             unreachable!("handled before the store opens")
         }
         Command::Serve(args) if args.migrate => {
@@ -1059,9 +1056,6 @@ async fn main() -> anyhow::Result<()> {
         })
     };
     match cli.command {
-        Command::Migrate { .. } => {
-            unreachable!("handled before the store opens")
-        }
         Command::Serve { .. } => {
             let flags = flags.expect("a serve command validated its flags");
             // The audit opens after the store: the data directory must be
@@ -1115,7 +1109,8 @@ async fn main() -> anyhow::Result<()> {
         Command::HashToken { .. }
         | Command::TicketKey { .. }
         | Command::Verify { .. }
-        | Command::Restore { .. } => {
+        | Command::Restore { .. }
+        | Command::Migrate { .. } => {
             unreachable!("handled before the store opens")
         }
         Command::Export { repo, all, out } => {

@@ -73,15 +73,6 @@ fn seed_behind_store(url: &str, schema: &str) {
     }
 }
 
-fn run_server_command(args: &[&str], env_url: &str) -> std::process::Output {
-    std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
-        .args(["--postgres-url", env_url])
-        .args(args)
-        .env("NO_COLOR", "1")
-        .output()
-        .expect("the command runs")
-}
-
 /// A fresh database: the check reports version 0, every step pending,
 /// and exits 3 - the code that says "steps to run", not "failed".
 #[test]
@@ -110,26 +101,28 @@ fn a_check_on_a_fresh_database_prints_the_steps_and_exits_3() {
 fn a_migrate_applies_the_pending_steps_and_the_check_is_clean() {
     let base = std::env::var("SCION_TEST_POSTGRES_URL")
         .expect("SCION_TEST_POSTGRES_URL must name the test database");
-    let url = url_for(&base, "mig_apply");
-    seed_behind_store(&base, "mig_check_behind");
+    seed_behind_store(&base, "mig_apply");
     let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
     let run = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(["--data", data.to_str().unwrap()])
-        .args(["--postgres-url", &url_for(&base, "mig_check_behind")])
+        .args(["--postgres-url", &url_for(&base, "mig_apply")])
         .args(["migrate", "--check"])
         .env("NO_COLOR", "1")
         .output()
         .expect("the check runs");
     assert_eq!(run.status.code(), Some(3), "the store is one step behind");
     let out = String::from_utf8_lossy(&run.stdout);
-    assert!(out.contains("schema version 5, this build ships 6"), "{out}");
+    assert!(
+        out.contains("schema version 5, this build ships 6"),
+        "{out}"
+    );
     assert!(out.contains("would run: 0006_land_reason"), "{out}");
 
     let moved = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(["--data", data.to_str().unwrap()])
-        .args(["--postgres-url", &url_for(&base, "mig_check_behind")])
+        .args(["--postgres-url", &url_for(&base, "mig_apply")])
         .args(["migrate"])
         .env("NO_COLOR", "1")
         .output()
@@ -142,7 +135,7 @@ fn a_migrate_applies_the_pending_steps_and_the_check_is_clean() {
     );
     let check = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(["--data", data.to_str().unwrap()])
-        .args(["--postgres-url", &url_for(&base, "mig_check_behind")])
+        .args(["--postgres-url", &url_for(&base, "mig_apply")])
         .args(["migrate", "--check"])
         .env("NO_COLOR", "1")
         .output()
@@ -191,8 +184,20 @@ fn a_serve_refuses_a_behind_database_until_asked_to_migrate() {
             "--migrate",
         ])
         .env("NO_COLOR", "1")
-        .stdout(fs::OpenOptions::new().create(true).append(true).open(&log).unwrap())
-        .stderr(fs::OpenOptions::new().create(true).append(true).open(&log).unwrap())
+        .stdout(
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log)
+                .unwrap(),
+        )
+        .stderr(
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log)
+                .unwrap(),
+        )
         .spawn()
         .expect("the migrating serve starts");
     let start = std::time::Instant::now();
@@ -206,7 +211,10 @@ fn a_serve_refuses_a_behind_database_until_asked_to_migrate() {
                 fs::read_to_string(&log).unwrap_or_default()
             );
         }
-        assert!(start.elapsed() < std::time::Duration::from_secs(60), "no listen");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(60),
+            "no listen"
+        );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     let check = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
@@ -217,6 +225,7 @@ fn a_serve_refuses_a_behind_database_until_asked_to_migrate() {
         .expect("the check runs");
     assert_eq!(check.status.code(), Some(0), "the serve migrated it");
     child.kill().unwrap();
+    child.wait().unwrap();
 }
 
 /// A fresh database is still created by `serve`: the refusal is for a
@@ -242,8 +251,20 @@ fn a_serve_still_creates_a_fresh_database() {
         .args(["serve", "--listen", "127.0.0.1:0", "--token-file"])
         .arg(ensure_token())
         .env("NO_COLOR", "1")
-        .stdout(fs::OpenOptions::new().create(true).append(true).open(&log).unwrap())
-        .stderr(fs::OpenOptions::new().create(true).append(true).open(&log).unwrap())
+        .stdout(
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log)
+                .unwrap(),
+        )
+        .stderr(
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log)
+                .unwrap(),
+        )
         .spawn()
         .expect("the fresh serve starts");
     let start = std::time::Instant::now();
@@ -254,8 +275,12 @@ fn a_serve_still_creates_a_fresh_database() {
                 fs::read_to_string(&log).unwrap_or_default()
             );
         }
-        assert!(start.elapsed() < std::time::Duration::from_secs(60), "no listen");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(60),
+            "no listen"
+        );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     child.kill().unwrap();
+    child.wait().unwrap();
 }

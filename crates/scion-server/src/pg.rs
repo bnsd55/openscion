@@ -2492,8 +2492,11 @@ fn schema_version(client: &mut PgClient) -> Result<u32> {
         .first()
         .and_then(|row| row.get::<_, Option<i64>>(0))
         .unwrap_or(0);
-    u32::try_from(version)
-        .map_err(|_| Error::FailedPrecondition(format!("database schema version {version} is not a version")))
+    u32::try_from(version).map_err(|_| {
+        Error::FailedPrecondition(format!(
+            "database schema version {version} is not a version"
+        ))
+    })
 }
 
 /// What `migrate --check` reports: the version the database stands at,

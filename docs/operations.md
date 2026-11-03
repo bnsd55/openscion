@@ -243,13 +243,19 @@ supervisor. The minimal systemd unit — the token through the file
 [Service]
 ExecStart=/usr/local/bin/scion-server --data /srv/scion serve \
   --token-file /etc/scion/token \
-  --ticket-key /srv/scion-keys/ticket.key
+  --ticket-key /srv/scion-keys/ticket.key \
+  --migrate
 Restart=on-failure
 User=scion
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+The `--migrate` on the serve line is the unattended start's rule
+(section 4): a machine that reboots after an upgrade moves the schema
+instead of refusing to come up. The upgrade window itself still runs
+the four steps of section 4 — check, back up, migrate, serve — by hand.
 
 `systemctl stop scion` sends SIGTERM, and the drain of the last
 section is what happens next. Never kill by pattern: on a machine that
@@ -394,10 +400,13 @@ SCION_POSTGRES_URL='postgres://user@dbhost/scion?sslmode=require' \
   trusts, and the open refuses one (`chmod go-w /srv/scion/db-ca.pem`).
 - The open checks the database runs `synchronous_commit=on`: a returned
   commit must be durable. A database that answers otherwise is refused.
-- The open migrates the database's schema to this build's version, one
-  transaction per migration, under a database lock with the same 5 s clock:
-  an open that waits longer answers busy, and the caller retries. A
-  database of a newer build is refused: run that build's server.
+- The open refuses a database whose schema is behind this build's
+  version: the answer names the fix ("run `scion-server migrate` first,
+  or pass --migrate to serve"). Only `migrate` and `serve --migrate`
+  move the schema, one transaction per migration, under a database lock
+  with the same 5 s clock: a second that waits longer answers busy, and
+  the caller retries. A database of a newer build is refused: run that
+  build's server. A fresh, empty database is created by the open.
 - One server process serves one store - a data directory, or a Postgres
   schema: a second `serve` on the same `--postgres-url` (and schema)
   fails at its open with "another server holds this store". An import
@@ -536,14 +545,15 @@ and administrative changes, with no tokens and no contents. It lives at
 The CLI's state-changing subcommands record their own admin lines in
 the same file: one intent before a change, and one result after it.
 Every state-changing command is covered: gc, import, restore, derive,
-ticket-key generation, and the schema migration an open performs. The
+ticket-key generation, and the schema migration of `migrate` (or a
+serve asked to move it). The
 restore's lines land in the restored store's own
 audit file, so its history opens with the restore that made it. The
 collector is the runbook's cure for a full disk, so a gc whose intent
 cannot go in because the disk is full runs anyway, and records its
 intent, marked `deferred: disk_full`, after it freed the space. The
-migration's line has no intent before it: it ran inside the store's
-open, before the audit could exist, so its record, marked with the
+migration's line has no intent before it: it runs under the schema's
+own lock, before the audit could exist, so its record, marked with the
 versions it moved, goes in as soon as the audit exists.
 There is no way to turn it off: a server that cannot record refuses the
 changes it cannot account for, and flips readiness until a restart. The
@@ -908,19 +918,27 @@ Proof: crates/scion-server/tests/archive_attacks.rs::a_restored_store_does_not_c
 
 ## 4. Upgrades
 
-The schema version lives in the database. On open, a server migrates an
-older schema forward, one migration per released version, each in one
+The schema version lives in the database. A build moves an older schema
+forward only when you ask: the `migrate` command, or a serve started
+with `--migrate`. One migration per released version, each in one
 transaction (v0.1.0 shipped migrations 1–5: table creations and a parent
 numbering; migration 6 adds a land's reject reason. None rewrites data,
-so none takes long). Two rules:
+so none takes long). Three rules:
 
 - A database with a **newer** schema than the binary refuses to open,
   with the build's own numbers — for a build one version behind a
   database at 7, the refusal is
   `corrupt data: database schema version 7 is newer than this build (6)`.
   Run the old binary until you can upgrade, or restore a backup.
-- Other servers take the schema's advisory lock: one process migrates at
-  a time, and an open that waits longer than 5 s answers busy, and the
+- A database **behind** the build refuses every open but the two that
+  are asked to move it: `serve`, `import`, `gc`, `fsck` and `derive`
+  answer "the database is at schema version N, this build ships M; run
+  `scion-server migrate` first, or pass --migrate to serve", and nothing
+  changes. Only `migrate` and `serve --migrate` move the schema. A
+  fresh, empty database is not behind: `serve` and `import` still
+  create it, so a first boot needs no migrate step.
+- The move takes the schema's advisory lock: one process migrates at a
+  time, and a second that waits longer than 5 s answers busy, and the
   caller retries.
 
 ### A failed migration
@@ -935,9 +953,9 @@ is the rule that names the case:
    in the database by hand: the version is the migration's bookmark,
    and a hand-moved one leaves the database half-migrated in a way no
    migration can finish.
-2. The open answers busy (the 5 s clock above): another server holds
+2. The migrate answers busy (the 5 s clock above): another server holds
    the schema's migration lock. It finishes its migration; this one
-   retries and serves.
+   retries.
 
 After the fix, the server starts and serves; `fsck` says the store is
 whole.
@@ -954,16 +972,55 @@ offset is unknown, not zero, and importing it would fold the sign into
 the stored history. Every real zone imports with its offset; fix or
 re-date such a commit in the git history and import again.
 
-So an upgrade is: stop the server (and any tiers that share the directory —
-none do by default), copy the directory as a backup (section 3), start the
-new binary, watch the log for the migration, run `fsck`. A store that
-has data logs its migration steps when a build migrates it — the open
-logs `migrating the metadata schema` with the from and to versions, one
-`the metadata schema migrated one step` line per step with the step's
-time, and `the metadata migration is done` when it ends; a first boot on
-a fresh, empty directory logs `the metadata schema was created`, and an
-open that migrates nothing logs no migration line at all - only the
-usual `serving` line.
+So an upgrade is four steps: check, back up, migrate, serve. The check
+runs first, and it reads the state and writes nothing, so it is safe
+beside the live old server. With the new binary installed beside the
+old one (below), run it against the running store:
+
+```sh
+scion-server --data /srv/scion \
+  --postgres-url-file /etc/scion/db-url migrate --check
+```
+
+It prints the database's version, this build's version, and one
+`would run:` line per pending migration. It exits 0 when nothing is
+pending, 3 when steps are pending, and 1 when the state cannot be read
+— a database that is newer than this build, or one that does not
+answer. Exit 3 is the answer the check exists for, not a failure: a
+script tells "steps to run" from "cannot reach the database" by the
+code, never by the text.
+
+Then stop the server (and any tiers that share the directory — none do
+by default), copy the directory as a backup (section 3), and move the
+schema:
+
+```sh
+scion-server --data /srv/scion \
+  --postgres-url-file /etc/scion/db-url migrate
+```
+
+The migrate takes the schema's advisory lock, runs one transaction per
+step, and prints `migrated the metadata schema from version N to M`. A
+first boot on a fresh, empty database creates it and prints `no
+migrations pending` — the creation moves no version. The migration's
+record lands in the data directory's audit log with the from and to
+versions, like every other command's record. Nothing here rewrites
+store data, so the directory copy from before the migrate is the
+rollback point (below).
+
+Then start the server and run `fsck`. An unattended start — the unit
+below, or the compose file — passes `--migrate`, and a serve that finds
+steps pending moves them first: the log carries `migrating the metadata
+schema` with the from and to versions, one `the metadata schema
+migrated one step` line per step with the step's time, and `the
+metadata migration is done` when it ends. A serve that migrates nothing
+logs no migration line at all — only the usual `serving` line. When the
+owner's policy is to keep every move explicit, drop `--migrate` from
+the unit: the start then refuses a database that is behind, with the
+message that names the migrate.
+
+Proof: crates/scion-server/tests/migrations.rs::a_serve_refuses_a_behind_database_until_asked_to_migrate (behaviour, no command: the runbook's steps are operator actions on a stopped server; the test holds the refusal the section quotes and the serve --migrate that ends it)
+Proof: crates/scion-server/tests/migrations.rs::a_check_on_a_fresh_database_prints_the_steps_and_exits_3 (behaviour, no command: the check's exit table the section states — 0 clean, 3 pending — is the test's own assertion)
 
 Where the binaries come from. v0.1.0 is a source release: build the
 version you need from its signed tag (`docs/RELEASING.md`):

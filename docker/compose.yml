@@ -38,6 +38,10 @@ services:
       - 0.0.0.0:7878
       - --token
       - ${SCION_DEMO_TOKEN:?set by docker/demo.sh}
+      # The demo is an unattended start (section 4 of
+      # docs/operations.md): a start moves the schema instead of
+      # refusing to come up.
+      - --migrate
       - --tls-cert
       - /certs/server.crt
       - --tls-key
