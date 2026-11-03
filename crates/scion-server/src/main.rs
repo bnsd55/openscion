@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use scion_proto::runtime::listen::{self, Limits};
 use scion_proto::runtime::metrics::{loopback_or_allow, serve as metrics_serve};
 use scion_proto::runtime::tls::ServerTls;
-use scion_server::{ImportOptions, import_git};
+use scion_server::{ImportOptions, admin, import_git};
 
 use scion_server::Metrics;
 use scion_server::Quotas;
@@ -202,6 +202,41 @@ enum Command {
         verify: usize,
         /// Path to the git repository.
         git_dir: PathBuf,
+        /// Where the audit log goes. The default is `audit.log` in the
+        /// data directory: the same file the server appends to, so one
+        /// file holds the whole history of a data directory.
+        #[arg(long, value_name = "FILE")]
+        audit_file: Option<PathBuf>,
+    },
+    /// Make a repository with one root changeset (no parents, the empty
+    /// tree) and its first ref at it, without a Git import. Refuses a repo
+    /// that exists. It can run while the server runs.
+    CreateRepo {
+        /// Scion repository to make.
+        #[arg(long)]
+        repo: String,
+        /// The first ref, at the root changeset. A client lands on it.
+        #[arg(long = "ref", default_value = "main")]
+        trunk: String,
+        /// Where the audit log goes. The default is `audit.log` in the
+        /// data directory: the same file the server appends to, so one
+        /// file holds the whole history of a data directory.
+        #[arg(long, value_name = "FILE")]
+        audit_file: Option<PathBuf>,
+    },
+    /// Make a ref in an existing repository at a changeset the repository
+    /// holds, named by its hex ID. Refuses a ref that exists; moving a ref
+    /// is a land's compare-and-set. It can run while the server runs.
+    CreateRef {
+        /// Scion repository to make the ref in.
+        #[arg(long)]
+        repo: String,
+        /// The ref to make.
+        #[arg(long = "ref")]
+        target_ref: String,
+        /// Hex ID of the changeset the ref points at.
+        #[arg(long)]
+        at: String,
         /// Where the audit log goes. The default is `audit.log` in the
         /// data directory: the same file the server appends to, so one
         /// file holds the whole history of a data directory.
@@ -893,7 +928,11 @@ async fn main() -> anyhow::Result<()> {
             }
         };
     let store = match cli.command {
-        Command::Import { .. } | Command::Gc { .. } | Command::Export { .. } => {
+        Command::Import { .. }
+        | Command::CreateRepo { .. }
+        | Command::CreateRef { .. }
+        | Command::Gc { .. }
+        | Command::Export { .. } => {
             Backend::open_shared(&cli.data, &postgres_url, cli.postgres_ca.as_deref())
         }
         // `fsck` cannot run when the store cannot open, and its table
@@ -1034,6 +1073,25 @@ async fn main() -> anyhow::Result<()> {
                 verify_sample: verify,
             };
             import_command(audit, store, repo, git_dir, opts).await?;
+        }
+        Command::CreateRepo {
+            repo,
+            trunk,
+            audit_file,
+        } => {
+            let audit = cli_audit(&cli.data, audit_file.as_deref())?;
+            record_migrated(&audit, &store).await?;
+            admin::create_repo(audit, store, repo, trunk).await?;
+        }
+        Command::CreateRef {
+            repo,
+            target_ref,
+            at,
+            audit_file,
+        } => {
+            let audit = cli_audit(&cli.data, audit_file.as_deref())?;
+            record_migrated(&audit, &store).await?;
+            admin::create_ref(audit, store, repo, target_ref, at).await?;
         }
         Command::Derive {
             kind,
@@ -1325,6 +1383,7 @@ async fn serve(
                 connections: config.max_connections,
                 streams: config.max_streams,
                 stalled_bytes: config.max_stalled_bytes,
+                ..Limits::default()
             },
             quotas: config.quotas,
             pending_lands: config.pending_lands,

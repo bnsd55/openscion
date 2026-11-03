@@ -97,7 +97,7 @@ fn a_checkout_shows_one_id_at_every_hop() {
     // The two tests share one log, so this test reads only the lines that
     // it logged itself.
     let mark = log_text().len();
-    let data = tempfile::tempdir().unwrap();
+    let data = common::private_tempdir();
     let store = Backend::open_test(&data.path().join("scion")).unwrap();
     let content = store.blobs().put(b"the demo file\n").unwrap();
     let files = vec![(
@@ -108,7 +108,7 @@ fn a_checkout_shows_one_id_at_every_hop() {
         },
     )];
     land(&store, &changeset(None, &files));
-    let tiers = Tiers::start(tempfile::tempdir().unwrap(), store);
+    let tiers = Tiers::start(common::private_tempdir(), store);
 
     let dest = data.path().join("out");
     checkout(&tiers, "main", &dest);
@@ -133,7 +133,7 @@ fn a_tier_forwards_the_id_its_caller_sent() {
     // The two phases share one log, so this phase reads only the lines
     // that it logged itself.
     let mark = log_text().len();
-    let data = tempfile::tempdir().unwrap();
+    let data = common::private_tempdir();
     let store = Backend::open_test(&data.path().join("scion")).unwrap();
     let content = store.blobs().put(b"the demo file\n").unwrap();
     let files = vec![(
@@ -144,7 +144,7 @@ fn a_tier_forwards_the_id_its_caller_sent() {
         },
     )];
     let changeset = land(&store, &changeset(None, &files));
-    let tiers = Tiers::start(tempfile::tempdir().unwrap(), store);
+    let tiers = Tiers::start(common::private_tempdir(), store);
 
     // The ticket comes from the server; the read goes to the daemon, which
     // has no copy, so it fetches from the cache.
