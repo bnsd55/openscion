@@ -922,7 +922,10 @@ mod tests {
         // descends the jump chain to the root in one move. The small
         // bound rides this test's own Steps, so no other test's walk
         // answers to it.
-        let bounded = Steps { reads: 1_000, visits: 2 };
+        let bounded = Steps {
+            reads: 1_000,
+            visits: 2,
+        };
         let (found, _) = in_steps(
             &store,
             &later(),
@@ -930,11 +933,8 @@ mod tests {
             &mut HashMap::new(),
             &mut HashMap::new(),
             |index| {
-                let mut search = Search::new(
-                    At::get_unbounded(&store, repo, ids[1]).unwrap(),
-                    ids[0],
-                    0,
-                );
+                let mut search =
+                    Search::new(At::get_unbounded(&store, repo, ids[1]).unwrap(), ids[0], 0);
                 search.next(index)
             },
         )
