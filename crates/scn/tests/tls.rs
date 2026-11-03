@@ -193,7 +193,7 @@ async fn serve_tls(certs: &TestCerts, shutdown: tokio::sync::oneshot::Receiver<(
 /// and whether it connected.
 ///
 /// Off the runtime: the call blocks its thread until scn exits, and a
-/// runtime thread that waits for a subprocess cannot run the server's
+/// worker thread that waits for a subprocess cannot run the server's
 /// connection task. The client's keep-alive then cuts the call, and the
 /// test reads a transport error instead of a clean refusal.
 async fn log(url: &str, ca: Option<&std::path::Path>) -> bool {

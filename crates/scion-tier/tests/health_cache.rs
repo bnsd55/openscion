@@ -169,7 +169,7 @@ async fn ceiling<T>(step: &str, fut: impl std::future::Future<Output = T>) -> T 
 /// Sends `SIGINT`, as Ctrl-C does.
 ///
 /// Off the runtime: the call blocks its thread until kill exits, and a
-/// runtime thread that waits for a subprocess cannot run the cache's
+/// worker thread that waits for a subprocess cannot run the cache's
 /// connection task (issue #795).
 async fn interrupt(child: &Child) {
     let pid = child.id();

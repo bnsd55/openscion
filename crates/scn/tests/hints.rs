@@ -3,36 +3,17 @@
 //! real server, so a reword of an upstream error cannot silence the hints
 //! without this file failing.
 
+mod common;
+
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 
+use common::stall_probe;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 
 use scion_proto::runtime::listen::Limits;
-/// Reports a stall of this runtime: a task that measures its own
-/// wake-up delay every 100 ms and prints one line for any wake-up over
-/// 1 s late, naming the test. The server's connection task shares the
-/// runtime, so a late wake-up is the keep-alive silence the client sees.
-async fn stall_probe(test: &'static str) {
-    let mut last = tokio::time::Instant::now();
-    let started = std::time::Instant::now();
-    loop {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let now = tokio::time::Instant::now();
-        let lag = now.duration_since(last);
-        last = now;
-        if lag > std::time::Duration::from_secs(1) {
-            eprintln!(
-                "RUNTIME-STALL in {test} at +{:?}: the runtime did not run for {:?}",
-                started.elapsed(),
-                lag
-            );
-        }
-    }
-}
-
 use scion_server::{Backend, test_support::service};
 
 const REPO: &str = "r";
@@ -69,7 +50,7 @@ async fn serve_http(data: &TempDir, token: &'static str) -> String {
 /// Runs `scn log main` against `url` with `token`, and answers its stderr.
 ///
 /// Off the runtime: the call blocks its thread until scn exits, and a
-/// runtime thread that waits for a subprocess cannot run the server's
+/// worker thread that waits for a subprocess cannot run the server's
 /// connection task. The client's keep-alive then cuts the call, and the
 /// test reads a transport error instead of the server's hint.
 async fn scn_stderr(url: &str, token: &str) -> String {

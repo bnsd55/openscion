@@ -23,6 +23,10 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
 
+mod common;
+
+use common::stall_probe;
+
 const REPO: &str = "r";
 const TOKEN: &str = "secret";
 
@@ -80,6 +84,7 @@ impl Server {
         let runtime = Runtime::new().unwrap();
         let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
+        runtime.spawn(stall_probe("history"));
         runtime.spawn(service::serve(
             store,
             listener,

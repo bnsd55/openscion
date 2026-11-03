@@ -27,6 +27,10 @@ const REPO: &str = "r";
 
 /// The bytes of the fixture: a name, an author and a message whose bytes
 /// are not valid UTF-8 (a `0x80` byte), and one name that is plain.
+mod common;
+
+use common::stall_probe;
+
 const RAW_NAME: &[u8] = b"raw\xff.txt";
 const RAW_MESSAGE: &[u8] = b"a \xff message";
 const RAW_AUTHOR: &[u8] = b"Ad\xffy";
@@ -34,28 +38,6 @@ const PLAIN_NAME: &[u8] = b"plain.txt";
 /// A name whose base64 encoding needs padding: 13 bytes are 4 groups of
 /// 3 minus 2, so the encoding is 20 characters ending in one `=`.
 const PADDED_NAME: &[u8] = b"thirteen-byt\x80";
-
-/// Reports a stall of this runtime: a task that measures its own
-/// wake-up delay every 100 ms and prints one line for any wake-up over
-/// 1 s late, naming the test. The server's connection task shares the
-/// runtime, so a late wake-up is the keep-alive silence the client sees.
-async fn stall_probe(test: &'static str) {
-    let mut last = tokio::time::Instant::now();
-    let started = std::time::Instant::now();
-    loop {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let now = tokio::time::Instant::now();
-        let lag = now.duration_since(last);
-        last = now;
-        if lag > std::time::Duration::from_secs(1) {
-            eprintln!(
-                "RUNTIME-STALL in {test} at +{:?}: the runtime did not run for {:?}",
-                started.elapsed(),
-                lag
-            );
-        }
-    }
-}
 
 struct Fixture {
     url: String,

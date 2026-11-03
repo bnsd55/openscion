@@ -276,3 +276,26 @@ pub(crate) fn land(store: &Backend, cs: &Changeset) -> ChangesetId {
         })
         .unwrap()
 }
+
+/// Reports a stall of the runtime that runs the server: a task that
+/// measures its own wake-up delay every 100 ms and prints one line for
+/// any wake-up over 1 s late, naming the test. The server's connection
+/// task shares the runtime, so a late wake-up is the keep-alive silence
+/// the client sees (issue #795).
+pub(crate) async fn stall_probe(test: &'static str) {
+    let mut last = tokio::time::Instant::now();
+    let started = std::time::Instant::now();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let now = tokio::time::Instant::now();
+        let lag = now.duration_since(last);
+        last = now;
+        if lag > std::time::Duration::from_secs(1) {
+            eprintln!(
+                "RUNTIME-STALL in {test} at +{:?}: the runtime did not run for {:?}",
+                started.elapsed(),
+                lag
+            );
+        }
+    }
+}
