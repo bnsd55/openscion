@@ -664,6 +664,32 @@ its value is readable by every local account through `ps`.
 Two more names exist for the test suite only, never for an operator:
 `SCION_TEST_POSTGRES_URL` and `SCION_TEST_PG_CONTAINER`.
 
+### Cleaning a long-lived test database
+
+The test suite keeps every store in its own schema of one database,
+named `scion_test_` plus a hash of the store's data directory. A test
+run drops the schemas of tests that are over: the first open of a run
+sweeps the registry (`public.scion_test_schemas`), and drops at most
+fifty schemas whose data directory is gone and whose connections are
+closed, oldest first. A schema whose directory still exists always
+survives, so a suite that reopens a fixed directory keeps its data.
+A database that served many runs therefore stops growing; what one
+sweep leaves, the next run's first open takes.
+
+A database that predates this cleanup may still carry schemas the
+registry never saw (or saw without a recorded directory, older than
+ten minutes, which the sweep also takes). To clean one by hand, list
+the leftovers and drop them one by one - never the whole database:
+
+```sql
+SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname LIKE 'scion_test_%';
+DROP SCHEMA "scion_test_0000000000000000" CASCADE;
+```
+
+Never drop a schema that a live connection still names (`pg_stat_activity`,
+`application_name`), and never `DROP DATABASE`: the test database is
+shared, and its `public` schema holds the registry.
+
 ## 2. Ticket keys
 
 An object read carries a ticket that the server signs with an Ed25519 key.

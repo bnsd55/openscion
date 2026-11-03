@@ -5,6 +5,8 @@
 
 #![forbid(unsafe_code)]
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use super::{
     Client, Error, Job, Kind, Marker, P, Path, Pg, PgClient, Reply, Result, connect_with,
     map_pg_error,
@@ -39,43 +41,108 @@ impl PgClient {
     }
 }
 
-/// Drops the test schemas whose tests ended minutes ago: a test run
-/// leaves them behind, because a server holds its schema while it runs.
-/// One process at a time holds the cleanup lock, so the test binaries
-/// that run in parallel clean nothing under each other's feet. A schema
-/// whose owner still runs is named in `pg_stat_activity` under its
-/// `application_name`, and registered with its start time, so the
-/// schema of a test that just began is never dropped.
+/// The name prefix of every schema the test helpers make. The sweep
+/// drops nothing outside it, and the test schema helper spells it: a
+/// test pins the two to one prefix.
 #[cfg(any(test, feature = "test-hooks"))]
-fn drop_stale_schemas(maker: &PgClient) {
-    let got = maker.query_opt("SELECT pg_try_advisory_lock($1)", &[P::i64(CLEAN_LOCK)]);
+pub(crate) const TEST_SCHEMA_PREFIX: &str = "scion_test_";
+
+/// The advisory lock of the test-schema cleanup.
+#[cfg(any(test, feature = "test-hooks"))]
+const CLEAN_LOCK: i64 = 0x5343_494F_4E53_5445;
+
+/// How many stale schemas one process drops, oldest registration
+/// first: a database with hundreds of stale schemas must not stall the
+/// first test of a run for minutes. The next run, or the next process,
+/// continues.
+#[cfg(any(test, feature = "test-hooks"))]
+const SWEEP_CAP: usize = 50;
+
+/// Whether this process has swept: the sweep runs at the start of the
+/// run, on the first test open, and not again.
+#[cfg(any(test, feature = "test-hooks"))]
+static SWEPT: AtomicBool = AtomicBool::new(false);
+
+/// Drops the test schemas whose tests are over: a test run leaves them
+/// behind, because a server holds its schema while it runs. One
+/// process at a time holds the cleanup lock, so the test binaries that
+/// run in parallel clean nothing under each other's feet.
+///
+/// A schema whose owner still runs is named in `pg_stat_activity`
+/// under its `application_name`, and never drops. A schema whose test
+/// directory still exists never drops either: the open records the
+/// directory in the schema's comment, so a suite that reopens a fixed
+/// directory in a later run keeps its data. Schemas registered before
+/// the comment existed carry no directory: for those, the old rule
+/// holds - older than ten minutes and no live connection. At most
+/// [`SWEEP_CAP`] drops per sweep, oldest registration first, and one
+/// line says what dropped and what stayed.
+#[cfg(any(test, feature = "test-hooks"))]
+fn drop_stale_schemas(maker: &PgClient, automatic: bool) -> (usize, usize) {
+    if automatic && SWEPT.swap(true, Ordering::SeqCst) {
+        return (0, 0);
+    }
+    let got = if automatic {
+        maker.query_opt("SELECT pg_try_advisory_lock($1)", &[P::i64(CLEAN_LOCK)])
+    } else {
+        // A test-driven sweep waits for the cleanup lock: it must run
+        // against the database the test shaped, even while a run's own
+        // sweep holds the lock.
+        maker.query_opt("SELECT pg_advisory_lock($1)", &[P::i64(CLEAN_LOCK)])
+    };
     let Ok(got) = got else {
         // This connection cannot even ask: another open's cleanup runs, or
         // the database is in trouble. The next open tries again.
-        return;
+        if automatic {
+            SWEPT.store(false, Ordering::SeqCst);
+        }
+        return (0, 0);
     };
-    // The answer is a row that holds the verdict: a `false` row means
-    // another cleanup runs, and this one stands down.
-    if !got.is_some_and(|row| row.get::<_, bool>(0)) {
-        return;
+    // The try-lock's answer is a row that holds the verdict: a `false`
+    // row means another cleanup runs, and this one stands down. The
+    // blocking lock's row always grants.
+    if automatic && !got.is_some_and(|row| row.get::<_, bool>(0)) {
+        SWEPT.store(false, Ordering::SeqCst);
+        return (0, 0);
     }
     // The registry names every test schema with its start time, in
     // `public`, spelled in full: the maker's search path is the
-    // database's default, and no test schema holds the table.
-    if let Ok(rows) = maker.query(
-        "SELECT r.schema FROM public.scion_test_schemas AS r
+    // database's default, and no test schema holds the table. A
+    // connection whose `application_name` is the schema's name keeps
+    // its schema; so does a schema whose recorded directory exists.
+    let eligible = maker.query(
+        "SELECT r.schema, obj_description(n.oid, 'pg_namespace'), r.started
+         FROM public.scion_test_schemas AS r
          JOIN pg_catalog.pg_namespace AS n ON n.nspname = r.schema
-         WHERE r.started < extract(epoch from now())::bigint - 600
-           AND r.schema NOT IN (
-               SELECT application_name FROM pg_catalog.pg_stat_activity
-               WHERE application_name LIKE 'scion_test_%')",
+         WHERE r.schema NOT IN (
+             SELECT application_name FROM pg_catalog.pg_stat_activity
+             WHERE application_name LIKE 'scion_test_%')
+         ORDER BY r.started ASC",
         &[],
-    ) {
+    );
+    let now = extract_epoch_now(maker);
+    let mut dropped = 0_usize;
+    let mut left = 0_usize;
+    if let Ok(rows) = &eligible {
         for row in rows {
             let name: String = row.get(0);
+            let dir: Option<String> = row.get(1);
+            let started: i64 = row.get(2);
             // Only the names this backend makes: no other schema drops,
             // whatever a row of the registry names.
-            if !name.starts_with("scion_test_") {
+            if !name.starts_with(TEST_SCHEMA_PREFIX) {
+                continue;
+            }
+            // The recorded directory decides: gone means the test that
+            // made the schema is over, whatever the clock says. No
+            // directory recorded - the schema is older than the comment
+            // - falls back to the registration's age.
+            let stale = match &dir {
+                Some(recorded) => !Path::new(recorded).exists(),
+                None => started < now - 600,
+            };
+            if !stale || dropped >= SWEEP_CAP {
+                left += 1;
                 continue;
             }
             if let Err(why) = maker.batch(&format!(
@@ -83,19 +150,35 @@ fn drop_stale_schemas(maker: &PgClient) {
                  DELETE FROM public.scion_test_schemas WHERE schema = '{name}'"
             )) {
                 tracing::warn!(schema = %name, error = %why, "cannot drop a stale test schema");
+                left += 1;
+            } else {
+                dropped += 1;
             }
         }
     }
+    tracing::info!(
+        dropped,
+        left,
+        "dropped stale test schemas at the run's start"
+    );
     // The lock frees when this connection closes: a failed unlock needs
     // nothing but the drop of the maker.
     if let Err(why) = maker.query_opt("SELECT pg_advisory_unlock($1)", &[P::i64(CLEAN_LOCK)]) {
         tracing::warn!(error = %why, "cannot unlock the test-schema cleanup");
     }
+    (dropped, left)
 }
 
-/// The advisory lock of the test-schema cleanup.
+/// The database server's clock, as the registry's `started` column
+/// spells it, so the age check reads one clock.
 #[cfg(any(test, feature = "test-hooks"))]
-const CLEAN_LOCK: i64 = 0x5343_494F_4E53_5445;
+fn extract_epoch_now(maker: &PgClient) -> i64 {
+    maker
+        .query_opt("SELECT extract(epoch from now())::bigint", &[])
+        .ok()
+        .and_then(|row| row.and_then(|row| row.get(0)))
+        .unwrap_or(i64::MAX)
+}
 
 /// A plain connection. Only the test schema's preparation calls it.
 #[cfg(any(test, feature = "test-hooks"))]
@@ -111,12 +194,39 @@ pub(super) fn too_deep(max_visits: usize) -> Error {
     ))
 }
 
-/// Makes the test schema, and registers it, before any connection
-/// narrows its search path to it. One maker at a time: two concurrent
-/// `CREATE TABLE IF NOT EXISTS` of the registry race on the type
-/// catalog, and the loser dies.
+/// The statements that register a test schema: the registry row with
+/// its start time, and the schema's comment, which records the
+/// directory the schema serves - the fact the sweep's drop decision
+/// reads. One maker at a time: two concurrent `CREATE TABLE IF NOT
+/// EXISTS` of the registry race on the type catalog, and the loser
+/// dies - the transaction's advisory lock serializes them. The name is
+/// spelled by the test helpers alone (`scion_test_` plus hex), so the
+/// literal interpolations carry no user text.
 #[cfg(any(test, feature = "test-hooks"))]
-fn prepare_test_schema(url: &str, schema: &str) -> Result<()> {
+pub(crate) fn register_test_schema(
+    client: &mut Client,
+    name: &str,
+    dir: &Path,
+) -> std::result::Result<(), postgres::Error> {
+    let comment = dir.to_string_lossy().replace('\'', "''");
+    client.batch_execute(&format!(
+        "SELECT pg_advisory_xact_lock({CLEAN_LOCK});
+         CREATE TABLE IF NOT EXISTS public.scion_test_schemas (
+             schema  TEXT PRIMARY KEY,
+             started BIGINT NOT NULL
+         );
+         INSERT INTO public.scion_test_schemas (schema, started)
+         VALUES ('{name}', extract(epoch from now())::bigint)
+         ON CONFLICT (schema) DO UPDATE SET started = excluded.started;
+         COMMENT ON SCHEMA {name} IS '{comment}'"
+    ))
+}
+
+/// Makes the test schema, and registers it with its directory, before
+/// any connection narrows its search path to it. Runs the stale-schema
+/// sweep once per process, at the first open.
+#[cfg(any(test, feature = "test-hooks"))]
+fn prepare_test_schema(url: &str, schema: &str, dir: &Path) -> Result<()> {
     let preparer = connect(url, None)?;
     preparer.as_raw({
         let name = schema.to_owned();
@@ -126,26 +236,38 @@ fn prepare_test_schema(url: &str, schema: &str) -> Result<()> {
                 .map_err(map_pg_error)
         }
     })?;
-    drop_stale_schemas(&preparer);
+    drop_stale_schemas(&preparer, true);
     preparer.as_raw({
         let name = schema.to_owned();
+        let dir = dir.to_path_buf();
         move |client| {
             client
-                .batch_execute(&format!(
-                    "SELECT pg_advisory_xact_lock({CLEAN_LOCK});
-                         CREATE SCHEMA IF NOT EXISTS {name};
-                         CREATE TABLE IF NOT EXISTS public.scion_test_schemas (
-                             schema  TEXT PRIMARY KEY,
-                             started BIGINT NOT NULL
-                         );
-                         INSERT INTO public.scion_test_schemas (schema, started)
-                         VALUES ('{name}', extract(epoch from now())::bigint)
-                         ON CONFLICT (schema) DO UPDATE SET started = excluded.started"
-                ))
-                .map_err(map_pg_error)
+                .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {name};"))
+                .map_err(map_pg_error)?;
+            register_test_schema(client, &name, &dir).map_err(map_pg_error)
         }
     })?;
     Ok(())
+}
+
+/// Runs the stale-schema sweep out of band, without the
+/// once-per-process gate: the run's own sweep runs once, at the first
+/// test open; a test calls this to run the sweep again against a
+/// database it shaped. It waits for the cleanup lock, and answers the
+/// schemas it dropped and the eligible ones it left.
+///
+/// # Errors
+///
+/// What the database returns for the maker's connect.
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) fn sweep_stale_test_schemas(url: &str) -> Result<(usize, usize)> {
+    let preparer = connect(url, None)?;
+    preparer.as_raw(move |client| {
+        client
+            .batch_execute("SET application_name TO ''")
+            .map_err(map_pg_error)
+    })?;
+    Ok(drop_stale_schemas(&preparer, false))
 }
 
 impl Pg {
@@ -164,7 +286,7 @@ impl Pg {
         data: &Path,
         marker: Marker,
     ) -> Result<Self> {
-        prepare_test_schema(url, schema)?;
+        prepare_test_schema(url, schema, data)?;
         // The test store is the one server of its schema: it takes the
         // per-schema one-server lock, and its loss fences the process,
         // exactly as a serve does on the database key.
@@ -182,7 +304,7 @@ impl Pg {
         data: &Path,
         marker: Marker,
     ) -> Result<Self> {
-        prepare_test_schema(url, schema)?;
+        prepare_test_schema(url, schema, data)?;
         Self::open_in(url, None, readers, data, Some(schema), false, marker, None)
     }
     /// [`PgClient::open_test_shared`], with the derive walks built for
@@ -196,7 +318,7 @@ impl Pg {
         marker: Marker,
         flights: crate::derived::DeriveFlights,
     ) -> Result<Self> {
-        prepare_test_schema(url, schema)?;
+        prepare_test_schema(url, schema, data)?;
         Self::open_in(
             url,
             None,
