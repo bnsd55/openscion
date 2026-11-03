@@ -1142,7 +1142,7 @@ impl Pg {
         let out = {
             let mut tx = PgTx::begin_read(
                 reader.client(),
-                "READ COMMITTED",
+                ReadIsolation::ReadCommitted,
                 READ_STATEMENT_TIMEOUT,
                 READ_IDLE_TIMEOUT,
             )?;
@@ -1185,7 +1185,12 @@ impl Pg {
         self.check_fenced()?;
         let mut reader = self.inner.readers.take(wait)?;
         let out = {
-            let mut tx = PgTx::begin_read(reader.client(), "REPEATABLE READ", statement, idle)?;
+            let mut tx = PgTx::begin_read(
+                reader.client(),
+                ReadIsolation::RepeatableRead,
+                statement,
+                idle,
+            )?;
             let out = f(&mut tx);
             // A read transaction: nothing to keep. The rollback's own error
             // must not hide the error of `f`; the drop rolls back anyway.
@@ -1458,6 +1463,25 @@ type DerivedPreload = std::collections::HashMap<(String, i64, Vec<u8>), Vec<u8>>
 /// already holds is the same row.
 type HistoryPending = std::collections::HashMap<Vec<u8>, Vec<u8>>;
 
+/// The isolation level of one read transaction. Repeatable read pins
+/// one snapshot for the whole read; read committed takes the newest
+/// state of each statement. The choices are named, not passed as
+/// strings, so a call site says what its read sees.
+#[derive(Clone, Copy)]
+enum ReadIsolation {
+    RepeatableRead,
+    ReadCommitted,
+}
+
+impl ReadIsolation {
+    fn as_sql(self) -> &'static str {
+        match self {
+            Self::RepeatableRead => "REPEATABLE READ",
+            Self::ReadCommitted => "READ COMMITTED",
+        }
+    }
+}
+
 /// One client of the database, inside one transaction. The queries are its
 /// [`MetaTx`] methods. The transaction is begun and ended with statements
 /// of the client, so a `PgTx` is a plain client handle: it stays covariant
@@ -1572,22 +1596,23 @@ impl<'a> PgTx<'a> {
         })
     }
 
-    /// Begins one read-only transaction at repeatable read: every
-    /// statement of the caller's read sees one snapshot, not the newest
-    /// state of each statement. The transaction is bounded server side:
+    /// Begins one read-only transaction at the level the caller names:
+    /// every statement of a repeatable-read read sees one snapshot; a
+    /// read-committed read sees the newest state of each statement. The
+    /// transaction is bounded server side:
     /// one statement may take `statement`, and the transaction may sit
     /// idle between statements at most `idle` (the timeouts are
     /// `SET LOCAL`, so they end with the transaction, and a stream that
     /// stopped reading cannot hold the reader forever).
     //
-    // SHORTCUT: every read runs at repeatable read, one snapshot per
-    // read, even though reads that touch only immutable rows would be
-    // safe at read committed with a shorter snapshot hold. Nobody has
-    // measured the gain, and the split needs an audit of every walk that
-    // re-reads a ref. Measure first, then split.
+    // SHORTCUT: every read but `read_latest` runs at repeatable read,
+    // one snapshot per read, even though reads that touch only immutable
+    // rows would be safe at read committed with a shorter snapshot hold.
+    // Nobody has measured the gain, and the split needs an audit of
+    // every walk that re-reads a ref. Measure first, then split.
     fn begin_read(
         c: &'a mut PgClient,
-        isolation: &str,
+        isolation: ReadIsolation,
         statement: Duration,
         idle: Duration,
     ) -> Result<PgTx<'a>> {
@@ -1595,7 +1620,10 @@ impl<'a> PgTx<'a> {
         // queries, and Postgres takes no second command in a prepared
         // statement (E42601).
         c.execute(
-            &format!("BEGIN TRANSACTION ISOLATION LEVEL {isolation} READ ONLY"),
+            &format!(
+                "BEGIN TRANSACTION ISOLATION LEVEL {} READ ONLY",
+                isolation.as_sql()
+            ),
             &[],
         )?;
         // The transaction exists from here on: a SET LOCAL that fails
@@ -5499,8 +5527,11 @@ pub(crate) mod pool_tests {
                     .map(|_| ())
             })
             .unwrap_err();
+        // The cause chain carries the SQLSTATE text only in the debug
+        // form: the storage error's own display names the class, not
+        // the database's message.
         assert!(
-            error.to_string().contains("read-only transaction"),
+            format!("{error:?}").contains("read-only transaction"),
             "{error:?}"
         );
     }
