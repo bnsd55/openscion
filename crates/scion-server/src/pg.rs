@@ -2561,11 +2561,49 @@ pub fn check_schema(url: &str, ca: Option<&Path>) -> Result<SchemaCheck> {
 /// the same logs and the same schema lock. The caller records the move
 /// in its audit log.
 ///
+/// The schema's one-server lock comes first, held for the migration on
+/// this connection: a live server holds it for its life, so a migrate
+/// beside one refuses before the schema can move under it - a migration
+/// an old server does not know (a rename, a drop) would break the
+/// process that serves. The wait is none: the operator's next step is
+/// stopping the server, not queuing behind it. `serve --migrate` holds
+/// the same lock by its open, so an unattended start keeps working.
+///
 /// # Errors
 ///
-/// What the database returns, and the newer-schema refusal.
+/// What the database returns, the newer-schema refusal, the
+/// no-schema refusal, or the one-server lock held by a live server.
 pub fn migrate_store(url: &str, ca: Option<&Path>) -> Result<Option<(u32, u32)>> {
     let mut client = connect_with(url, ca, &base_options(), None)?;
+    // What the connection actually writes into, whatever the URL
+    // spelled: the same current-schema read the open's exclusive setup
+    // makes, so a plain URL and one that rides `--search_path=public`
+    // take the same lock.
+    let current = client
+        .query("SELECT current_schema()::text", &[])?
+        .into_iter()
+        .next()
+        .and_then(|row| row.get::<_, Option<String>>(0))
+        .ok_or_else(|| {
+            Error::FailedPrecondition(
+                "the URL's search_path names no existing schema; create it first".into(),
+            )
+        })?;
+    // The one-server lock, tried, not waited on: the operator's next
+    // step is stopping the server, not queuing behind it.
+    let held = client
+        .query(
+            "SELECT pg_try_advisory_lock($1)",
+            &[P::i64(schema_lock_key(&current))],
+        )?
+        .into_iter()
+        .next()
+        .is_some_and(|row| row.get::<_, bool>(0));
+    if !held {
+        return Err(Error::FailedPrecondition(format!(
+            "{HOLDER_MESSAGE}; stop the server first"
+        )));
+    }
     migrate(&mut client, true)
 }
 

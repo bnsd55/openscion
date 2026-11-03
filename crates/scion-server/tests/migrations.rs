@@ -284,3 +284,82 @@ fn a_serve_still_creates_a_fresh_database() {
     child.kill().unwrap();
     child.wait().unwrap();
 }
+
+/// A `migrate` beside a live server refuses: the server holds the
+/// store's one-server lock for its life, and a schema moved under it
+/// could break a build that does not know the new shape. The refusal
+/// names the fix, and the version the server already brought up stays
+/// as it is.
+#[test]
+fn a_migrate_beside_a_live_server_refuses_and_moves_nothing() {
+    let base = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL must name the test database");
+    let schema = "mig_beside_server";
+    let url = url_for(&base, schema);
+    seed_behind_store(&base, schema);
+    let dir = scion_server::test_support::private_tempdir();
+    let data = dir.path().join("data");
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
+    // The server is an unattended start: it migrates the store to this
+    // build's version and serves, holding the one-server lock.
+    let log = dir.path().join("serve.log");
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
+        .args(["--data", data.to_str().unwrap()])
+        .args(["--postgres-url", &url])
+        .args([
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--token-file",
+            ensure_token().to_str().unwrap(),
+            "--migrate",
+        ])
+        .env("NO_COLOR", "1")
+        .stdout(fs::OpenOptions::new().create(true).append(true).open(&log).unwrap())
+        .stderr(fs::OpenOptions::new().create(true).append(true).open(&log).unwrap())
+        .spawn()
+        .expect("the migrating serve starts");
+    let start = std::time::Instant::now();
+    while bound_addr(&log).is_none() {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!(
+                "the migrating serve exited: {status}: {}",
+                fs::read_to_string(&log).unwrap_or_default()
+            );
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(60), "no listen");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let version = || -> String {
+        let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+        client
+            .query_opt("SELECT max(version)::text FROM schema_migrations", &[])
+            .unwrap()
+            .map(|row| row.get::<_, String>(0))
+            .unwrap_or_default()
+    };
+    assert_eq!(version(), "6", "the serve migrated the store");
+    let refused = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
+        .args(["--data", data.to_str().unwrap()])
+        .args(["--postgres-url", &url])
+        .args(["migrate"])
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("the refused migrate runs");
+    assert!(!refused.status.success(), "a migrate beside a server refuses");
+    let why = String::from_utf8_lossy(&refused.stderr);
+    assert!(why.contains("another server holds this store"), "{why}");
+    assert!(why.contains("stop the server first"), "{why}");
+    assert_eq!(version(), "6", "the refusal moved no version");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    // Stopped, the same migrate runs: nothing is pending.
+    let clean = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
+        .args(["--data", data.to_str().unwrap()])
+        .args(["--postgres-url", &url])
+        .args(["migrate"])
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("the migrate after the stop runs");
+    assert!(clean.status.success(), "the migrate runs once the server is gone");
+}
