@@ -1024,8 +1024,9 @@ order is daemon, cache, server. These rules hold for any tier:
   cache, which covers one step of the server, the cache's own three waits
   of 30 s, and 30 s to spare. On a timeout or a wait that ends, the tier
   fails with `UNAVAILABLE`. A caller's deadline passes down. A tier reads
-  the caller's `grpc-timeout`, ends every wait at it less a margin (a tenth
-  of it, at most 1 s), and sends what is left of it upstream as
+  the caller's `grpc-timeout`, ends every wait at it less a margin (a
+  tenth of it, but at least 50 ms, never more than half of it, and at
+  most 1 s), and sends what is left of it upstream as
   `grpc-timeout`. So the status of the deepest process reaches the caller
   in time, for any deadline. A caller whose deadline passes stops waiting,
   and the fetch that another caller with a later deadline waits for goes
