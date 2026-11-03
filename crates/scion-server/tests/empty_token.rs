@@ -50,7 +50,6 @@ fn hash_token_refuses_an_empty_token_file() {
     let dir = scion_server::test_support::private_tempdir();
     let file = dir.path().join("token");
     std::fs::write(&file, "").unwrap();
-    use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
     let (ok, out, err) = hash_token(&["--token-file", file.to_str().unwrap()]);
     assert!(!ok, "hash-token printed {out}");
@@ -66,7 +65,6 @@ fn hash_token_refuses_a_whitespace_only_token_file() {
     let dir = scion_server::test_support::private_tempdir();
     let file = dir.path().join("token");
     std::fs::write(&file, "   \t\n").unwrap();
-    use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
     let (ok, out, err) = hash_token(&["--token-file", file.to_str().unwrap()]);
     assert!(!ok, "hash-token printed {out}");

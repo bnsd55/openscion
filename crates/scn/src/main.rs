@@ -226,24 +226,21 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         _ => {}
     }
     // The token's source: the checked file, or the environment.
-    let token = match &cli.token_file {
-        Some(file) => {
-            let bytes = scion_proto::runtime::auth::read_secret_file(file)
-                .map_err(|why| scion_proto::runtime::auth::checked_read_error(file, why))?;
-            let text = String::from_utf8(bytes)
-                .map_err(|_| anyhow::anyhow!("{} is not UTF-8", file.display()))?;
-            let token = text.trim();
-            anyhow::ensure!(!token.is_empty(), "{} holds no token", file.display());
-            token.to_owned()
-        }
-        None => {
-            let from_env = std::env::var("SCION_TOKEN").unwrap_or_default();
-            anyhow::ensure!(
-                !from_env.is_empty(),
-                "give SCION_TOKEN or --token-file FILE"
-            );
-            from_env
-        }
+    let token = if let Some(file) = &cli.token_file {
+        let bytes = scion_proto::runtime::auth::read_secret_file(file)
+            .map_err(|why| scion_proto::runtime::auth::checked_read_error(file, why))?;
+        let text = String::from_utf8(bytes)
+            .map_err(|_| anyhow::anyhow!("{} is not UTF-8", file.display()))?;
+        let token = text.trim();
+        anyhow::ensure!(!token.is_empty(), "{} holds no token", file.display());
+        token.to_owned()
+    } else {
+        let from_env = std::env::var("SCION_TOKEN").unwrap_or_default();
+        anyhow::ensure!(
+            !from_env.is_empty(),
+            "give SCION_TOKEN or --token-file FILE"
+        );
+        from_env
     };
     let mut ctx = Ctx::connect(
         &cli.server,

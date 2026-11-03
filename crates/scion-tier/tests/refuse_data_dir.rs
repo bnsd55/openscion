@@ -30,7 +30,7 @@ fn spawn(cwd: &std::path::Path, args: &[&str]) -> Child {
 /// the missing directory must still be missing. A daemon that keeps
 /// running has created the directory and serves from it.
 fn refuses(cwd: &std::path::Path, missing: &str, args: &[&str]) {
-    let mut child = spawn(cwd, &args);
+    let mut child = spawn(cwd, args);
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
