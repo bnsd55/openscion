@@ -118,10 +118,12 @@ fn the_blob_hook_refuses_exactly_one_write_per_count() {
     // Another open of the same directory still reads the stored files.
     // The reopen waits out the inherited-flock teardown tick (the child
     // another test forked shares the lock until the reap; macOS releases
-    // it one tick after waitpid): a real lock leak still fails the guard.
+    // it one tick after waitpid), then the one-server lock's session
+    // end, which the worker closes on its own clock: a real lock leak
+    // still fails the guard.
     drop(store);
     common::spawn_guard::wait_for_lock_release(dir.path());
-    let again = Backend::open_test(dir.path()).unwrap();
+    let again = Backend::reopen_test(dir.path()).unwrap();
     assert_eq!(
         again.blobs().get(scion_core::BlobId::of(b"a\n")).unwrap(),
         b"a\n"

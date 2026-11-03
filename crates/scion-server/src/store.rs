@@ -1630,20 +1630,9 @@ mod tests {
             // session ends, the database still refuses a second server.
             // The worker closes it on its own clock, so the reopen waits
             // for the real condition, like `wait_for_lock_release` does
-            // for a file lock.
-            let deadline = std::time::Instant::now() + Duration::from_secs(2);
-            loop {
-                match Backend::open_test(dir.path()) {
-                    Ok(reopen) => {
-                        drop(reopen);
-                        break;
-                    }
-                    Err(_) if std::time::Instant::now() < deadline => {
-                        std::thread::sleep(Duration::from_millis(20));
-                    }
-                    Err(e) => panic!("the store never reopened: {e}"),
-                }
-            }
+            // for a file lock. The expect keeps a lock that never clears
+            // a test failure: the helper returns the last result.
+            Backend::reopen_test(dir.path()).expect("the store reopens once the old session ends");
             drop(shared);
         });
     }

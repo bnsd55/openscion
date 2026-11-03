@@ -6,7 +6,8 @@
 //! [`Until`], and gives each call that it makes for this one what is left,
 //! as its `grpc-timeout`. Each process down the line then ends its waits
 //! before the one above it, and the status of the deepest one reaches the
-//! caller in time. The margin is a tenth of the timeout, at most
+//! caller in time. The margin is a tenth of the timeout, but at least
+//! `MIN_MARGIN` and never more than half of the timeout, at most
 //! `MAX_MARGIN`: room for the answer to travel back, and a short deadline
 //! still leaves most of its time to the deepest process.
 
@@ -17,6 +18,11 @@ use tonic::metadata::MetadataMap;
 
 /// The most that a process keeps of a caller's timeout for its answer.
 pub(crate) const MAX_MARGIN: Duration = Duration::from_secs(1);
+
+/// The least that a process keeps of a caller's timeout for its answer:
+/// the margin is the reply's trip back, and that trip does not shrink
+/// with the deadline.
+const MIN_MARGIN: Duration = Duration::from_millis(50);
 
 /// The instant by which a process ends its waits for a call. With no
 /// deadline from the caller, only the fixed limits of each wait apply.
@@ -37,7 +43,10 @@ impl Until {
     /// For a call whose caller gives up `timeout` from now.
     #[must_use]
     pub fn after(timeout: Duration) -> Self {
-        let margin = (timeout / 10).min(MAX_MARGIN);
+        let margin = (timeout / 10)
+            .max(MIN_MARGIN)
+            .min(MAX_MARGIN)
+            .min(timeout / 2);
         Self(Instant::now().checked_add(timeout.saturating_sub(margin)))
     }
 
@@ -156,6 +165,88 @@ mod tests {
         assert_eq!(Until::after(Duration::ZERO).wait(cap), Duration::ZERO);
         assert!(Until::after(Duration::ZERO).passed());
         assert!(!Until::NONE.passed());
+    }
+
+    /// The margin is a tenth of the timeout, but at least the floor and
+    /// never more than half of the timeout, at most the cap.
+    #[test]
+    fn the_margin_has_a_floor_and_two_caps() {
+        // `Until` starts at `now`, so a read-back loses the few
+        // microseconds between; one ms of slack absorbs the truncation.
+        let kept = |timeout: Duration| {
+            let at = Until::after(timeout).at().unwrap();
+            at.saturating_duration_since(Instant::now()).as_millis()
+        };
+        let is = |got: u128, want: u128| got + 1 >= want && got <= want;
+        // Under the floor: half of the timeout caps the floor.
+        assert!(
+            is(kept(Duration::from_millis(80)), 40),
+            "{}",
+            kept(Duration::from_millis(80))
+        );
+        // At the floor.
+        assert!(
+            is(kept(Duration::from_millis(200)), 150),
+            "{}",
+            kept(Duration::from_millis(200))
+        );
+        assert!(
+            is(kept(Duration::from_millis(500)), 450),
+            "{}",
+            kept(Duration::from_millis(500))
+        );
+        // The tenth above the floor.
+        assert!(
+            is(kept(Duration::from_secs(1)), 900),
+            "{}",
+            kept(Duration::from_secs(1))
+        );
+        assert!(
+            is(kept(Duration::from_secs(4)), 3600),
+            "{}",
+            kept(Duration::from_secs(4))
+        );
+        // The cap: a tenth over 1 s keeps 1 s.
+        assert!(
+            is(kept(Duration::from_secs(20)), 19_000),
+            "{}",
+            kept(Duration::from_secs(20))
+        );
+    }
+
+    /// A 200 ms deadline through three processes: each keeps its margin,
+    /// capped at half of what it got, so the deepest answers with 50 ms
+    /// of the caller's 200 ms still ahead of it.
+    #[test]
+    fn a_200ms_deadline_reaches_the_deepest_of_three_with_time_to_spare() {
+        let pass = |left: Option<Instant>| {
+            let mut request = Request::new(());
+            if let Some(at) = left {
+                let left = at.saturating_duration_since(Instant::now());
+                let value = format!("{}m", left.as_millis());
+                request
+                    .metadata_mut()
+                    .insert("grpc-timeout", value.parse().unwrap());
+            }
+            Until::of(&request).at()
+        };
+        let first = Until::after(Duration::from_millis(200)).at();
+        let second = pass(first);
+        let third = pass(second);
+        // What each hop kept: the daemon 50 ms, the cache 50 ms, the
+        // deepest 50 ms (its half cap). The margins are read as deltas
+        // between the instants, so a scheduler slice between the hops
+        // moves them all and changes no margin.
+        let between = |a: Option<Instant>, b: Option<Instant>| {
+            a.unwrap().saturating_duration_since(b.unwrap()).as_millis()
+        };
+        let kept1 = between(first, second);
+        let kept2 = between(second, third);
+        assert!((40..=60).contains(&kept1), "{}", kept1);
+        assert!((40..=60).contains(&kept2), "{}", kept2);
+        // The deepest still has its margin ahead of it: the caller's
+        // 200 ms is not spent by the two hops above it.
+        assert!(third.unwrap() > Instant::now());
     }
 
     #[test]

@@ -56,6 +56,7 @@ commit commit.changeset:string
 land land.conflict_paths:array
 land land.detail:string
 land land.land_id:string
+land land.reject_reason:string
 land land.result:string
 land land.state:string
 is-ancestor is-ancestor.is_ancestor:boolean

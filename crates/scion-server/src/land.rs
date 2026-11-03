@@ -129,6 +129,50 @@ impl LandState {
     }
 }
 
+/// Why a [`LandState::Rejected`] land can never succeed. `detail` names
+/// the case in a sentence a reader shows; this is the value a program
+/// matches on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LandRejectReason {
+    /// The land is not rejected, or an older server rejected it without
+    /// naming a reason.
+    Unspecified,
+    /// The changeset does not hold exactly one parent.
+    NeedsOneParent,
+    /// The changeset names a ref the repo does not hold.
+    MissingRef,
+    /// The changeset's base is not on the ref's first-parent history.
+    BaseNotOnHistory,
+    /// The server gave up: the land stayed pending past its deadline, so
+    /// the stale-land sweep stopped it. A retry needs a new request key.
+    Abandoned,
+}
+
+impl LandRejectReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::NeedsOneParent => "needs_one_parent",
+            Self::MissingRef => "missing_ref",
+            Self::BaseNotOnHistory => "base_not_on_history",
+            Self::Abandoned => "abandoned",
+        }
+    }
+
+    pub(crate) fn parse(s: &str) -> Result<Self> {
+        match s {
+            "unspecified" => Ok(Self::Unspecified),
+            "needs_one_parent" => Ok(Self::NeedsOneParent),
+            "missing_ref" => Ok(Self::MissingRef),
+            "base_not_on_history" => Ok(Self::BaseNotOnHistory),
+            "abandoned" => Ok(Self::Abandoned),
+            other => Err(Error::Corrupt(format!(
+                "unknown land reject reason {other:?}"
+            ))),
+        }
+    }
+}
+
 /// A request to land a changeset.
 #[derive(Clone, Debug)]
 pub struct LandRequest {
@@ -168,6 +212,9 @@ pub struct LandOutcome {
     pub detail: String,
     /// Paths that conflict.
     pub conflict_paths: Vec<RepoPath>,
+    /// Why a rejected land can never succeed; [`LandRejectReason::Unspecified`]
+    /// for every other state.
+    pub reject_reason: LandRejectReason,
 }
 
 /// Per-ref state, guarded by the ref's lock.
@@ -618,6 +665,9 @@ struct Verdict {
     state: LandState,
     detail: String,
     paths: Vec<RepoPath>,
+    /// Why a rejected land can never succeed; [`LandRejectReason::Unspecified`]
+    /// for every other state.
+    reason: LandRejectReason,
     /// The ref version the plan read; `None` for a ref the plan read
     /// and did not find.
     expected: Option<i64>,
@@ -627,7 +677,10 @@ struct Verdict {
 enum Plan {
     /// A verdict that does not depend on the ref: the changeset's own
     /// shape refused it before any head was read.
-    Reject(String),
+    Reject {
+        reason: LandRejectReason,
+        detail: String,
+    },
     /// A verdict the head decided.
     Verdict(Verdict),
     Land {
@@ -761,15 +814,17 @@ fn plan(
     let target = &req.target_ref;
     let cs = c.get_changeset(repo, req.changeset)?;
     let [base] = cs.parents()[..] else {
-        return Ok(Plan::Reject(
-            "a land needs a changeset with exactly one parent".into(),
-        ));
+        return Ok(Plan::Reject {
+            reason: LandRejectReason::NeedsOneParent,
+            detail: "a land needs a changeset with exactly one parent".into(),
+        });
     };
     let Some(head) = c.get_ref(repo, target)? else {
         return Ok(Plan::Verdict(Verdict {
             state: LandState::Rejected,
             detail: format!("ref {target:?} does not exist"),
             paths: vec![],
+            reason: LandRejectReason::MissingRef,
             expected: None,
         }));
     };
@@ -785,6 +840,7 @@ fn plan(
                 state: LandState::Rejected,
                 detail: format!("base {base} is not on the first-parent history of {target:?}"),
                 paths: vec![],
+                reason: LandRejectReason::BaseNotOnHistory,
                 expected: Some(head.version),
             }));
         }
@@ -799,6 +855,7 @@ fn plan(
             state: LandState::Conflict,
             detail,
             paths: conflicts,
+            reason: LandRejectReason::Unspecified,
             expected: Some(head.version),
         }));
     }
@@ -827,10 +884,18 @@ fn settle(
 ) -> Result<Finished> {
     let (rebased, head) = match plan {
         Plan::Derive(head) => return Ok(Finished::Derive(head)),
-        Plan::Reject(detail) => {
+        Plan::Reject { reason, detail } => {
             return store
                 .commit(|c| {
-                    c.set_land_state(repo, land_id, LandState::Rejected, None, detail, vec![])
+                    c.set_land_state(
+                        repo,
+                        land_id,
+                        LandState::Rejected,
+                        None,
+                        detail,
+                        vec![],
+                        reason,
+                    )
                 })
                 .map(Finished::Outcome);
         }
@@ -863,6 +928,7 @@ fn settle(
             Some(id),
             String::new(),
             vec![],
+            LandRejectReason::Unspecified,
         )?;
         // The move's CAS pins the version the plan read, so
         // `head.target` is the target this move replaced: the audit's
@@ -914,6 +980,7 @@ fn settle(
                             state: LandState::Conflict,
                             detail,
                             paths: vec![],
+                            reason: LandRejectReason::Unspecified,
                             expected: Some(head.version),
                         },
                     )
@@ -943,6 +1010,7 @@ fn record_verdict(
         state,
         detail,
         paths,
+        reason,
         expected,
     } = verdict;
     let at = c.get_ref(repo, target)?.map(|r| r.version);
@@ -951,7 +1019,7 @@ fn record_verdict(
             "ref {target:?} moved during the land; retry with the same request key"
         )));
     }
-    c.set_land_state(repo, land_id, state, None, detail, paths)
+    c.set_land_state(repo, land_id, state, None, detail, paths, reason)
 }
 
 /// For one ref's first-parent history: the newest generation at which each
@@ -1773,13 +1841,85 @@ mod tests {
             )
             .unwrap();
         assert_eq!(out.state, LandState::Rejected, "{}", out.detail);
+        assert_eq!(out.reject_reason, LandRejectReason::MissingRef);
         assert!(
             out.detail.contains("nope"),
             "the detail names the missing ref: {}",
             out.detail
         );
+        // GetLand reads the same outcome, reason included, from the row.
+        let again = get_land(&f.store, &caller(), "r", out.land_id).unwrap();
+        assert_eq!(again.reject_reason, LandRejectReason::MissingRef);
         // Nothing moved.
         assert_eq!(f.main().target, f.root);
+    }
+
+    /// Migration 0006 is the first schema change since v0.1.0: a store
+    /// at the v0.1.0 schema (version 5) must open, climb to this
+    /// build's version, and read its stored lands back. A row written
+    /// before the column existed reads
+    /// [`LandRejectReason::Unspecified`].
+    #[test]
+    fn a_v010_store_migrates_and_its_lands_read_unspecified() {
+        let _slot = damage::slot();
+        let dir = crate::test_support::private_tempdir();
+        let schema = crate::backend::Backend::test_schema(dir.path());
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").expect("SCION_TEST_POSTGRES_URL");
+        let mut db = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+        // The v0.1.0 schema: migrations 1-5 as they shipped, with their
+        // ledger rows, then one repo, one changeset, and one rejected
+        // land - the row shape the version-5 lands table holds, before
+        // 0006's column exists.
+        let shipped: [(&str, u32); 5] = [
+            ("0001_init.sql", 1),
+            ("0002_view_roots.sql", 2),
+            ("0003_view_trees.sql", 3),
+            ("0004_store_uuid.sql", 4),
+            ("0005_parent_numbering.sql", 5),
+        ];
+        let mut sql = format!(
+            "CREATE SCHEMA {schema};\nSET search_path TO {schema};\n\
+             CREATE TABLE schema_migrations (\n\
+                 version BIGINT PRIMARY KEY,\n\
+                 name    TEXT NOT NULL\n\
+             );\n"
+        );
+        for (file, version) in shipped {
+            use std::fmt::Write as _;
+            let text = match file {
+                "0001_init.sql" => include_str!("../migrations/postgres/0001_init.sql"),
+                "0002_view_roots.sql" => include_str!("../migrations/postgres/0002_view_roots.sql"),
+                "0003_view_trees.sql" => include_str!("../migrations/postgres/0003_view_trees.sql"),
+                "0004_store_uuid.sql" => include_str!("../migrations/postgres/0004_store_uuid.sql"),
+                _ => include_str!("../migrations/postgres/0005_parent_numbering.sql"),
+            };
+            let _ = writeln!(
+                sql,
+                "{text}\nINSERT INTO schema_migrations (version, name) \
+                 VALUES ({version}, 'postgres schema');"
+            );
+        }
+        // One repo, one changeset, one rejected land: the row the v5
+        // table holds, with no reason column to name.
+        sql.push_str(
+            "INSERT INTO repos (name) VALUES ('old');\n\
+             INSERT INTO changesets (id, gen, body) \
+                 VALUES (decode(repeat('01', 32), 'hex'), 1, '\\x00');\n\
+              INSERT INTO lands (repo_id, caller, request_key, target_ref, input_cs, state, detail) \
+                 SELECT repo_id, 't', 'k', 'gone', id, 'rejected', 'the sweep took it' \
+                 FROM repos, changesets WHERE repos.name = 'old';\n",
+        );
+        db.batch_execute(&sql).expect("the v0.1.0 store builds");
+        drop(db);
+
+        // The open climbs 5 -> this build's version, adding 0006's
+        // column; the stored land reads back whole, its reason the
+        // column's default.
+        let store =
+            crate::backend::Backend::open_test_shared_in_schema(dir.path(), &schema).unwrap();
+        let out = get_land(&store, &caller(), "old", 1).unwrap();
+        assert_eq!(out.state, LandState::Rejected, "{}", out.detail);
+        assert_eq!(out.reject_reason, LandRejectReason::Unspecified);
     }
 
     /// A panic that dies under a ref's lock poisons it with a
@@ -2285,7 +2425,9 @@ mod tests {
         let f = fixture();
         let side = f.commit(f.root, &[put("s", "1")]);
         let merge = f.insert(&changeset(vec![f.root, side], &[]));
-        assert_eq!(f.land(merge, "m").state, LandState::Rejected);
+        let merged = f.land(merge, "m");
+        assert_eq!(merged.state, LandState::Rejected);
+        assert_eq!(merged.reject_reason, LandRejectReason::NeedsOneParent);
 
         // `side` itself lands; a child of an older sibling of it does not have a
         // base on main.
@@ -2294,6 +2436,7 @@ mod tests {
         assert_eq!(f.land(side, "s").state, LandState::Landed);
         let out = f.land(on_sibling, "u");
         assert_eq!(out.state, LandState::Rejected, "{}", out.detail);
+        assert_eq!(out.reject_reason, LandRejectReason::BaseNotOnHistory);
 
         // A missing ref is rejected without taking a lock slot, so unique bad
         // names cannot grow `Lands`.
@@ -2303,6 +2446,7 @@ mod tests {
         };
         let out = f.lands.land(&f.store, &caller(), &missing).unwrap();
         assert_eq!(out.state, LandState::Rejected);
+        assert_eq!(out.reject_reason, LandRejectReason::MissingRef);
         assert_eq!(f.lands.land(&f.store, &caller(), &missing).unwrap(), out);
         let slots = f.lands.refs.lock().unwrap();
         let keys: Vec<_> = slots.iter().map(|(key, _)| key).collect();
@@ -3573,6 +3717,11 @@ mod tests {
         assert_eq!(state, "rejected");
         assert!(detail.contains("stale"), "{detail}");
         assert!(detail.contains("retry with a new request key"), "{detail}");
+        // The sweep is its own rejection site: its land reads back
+        // ABANDONED, not the UNSPECIFIED an older row reads.
+        let out = get_land(&f.store, &caller(), "r", recorded.1.land_id).unwrap();
+        assert_eq!(out.state, LandState::Rejected);
+        assert_eq!(out.reject_reason, LandRejectReason::Abandoned);
 
         // The same request key cannot resume a rejected land, so the
         // client retries with a new key, which counts as a new land.

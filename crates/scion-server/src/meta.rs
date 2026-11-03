@@ -39,7 +39,7 @@ use gix::ObjectId;
 use crate::auth::Caller;
 use crate::error::{Error, Result};
 use crate::history::NodeId;
-use crate::land::{LandOutcome, LandRequest, LandState};
+use crate::land::{LandOutcome, LandRejectReason, LandRequest, LandState};
 
 /// One pending land the stale-land sweep found, with everything the
 /// answer to its intent line names: the repo (by ID for the ref's lock,
@@ -524,6 +524,9 @@ pub trait MetaTx {
     fn land_outcome(&mut self, repo: RepoId, caller: &Caller, land_id: i64) -> Result<LandOutcome>;
 
     /// Moves a pending land to its final state, and returns the outcome.
+    /// `reject_reason` says why a REJECTED land can never succeed; the
+    /// other states carry [`LandRejectReason::Unspecified`].
+    #[allow(clippy::too_many_arguments)] // the one row's own columns: state, result, detail, paths and reason land together
     fn set_land_state(
         &mut self,
         repo: RepoId,
@@ -532,6 +535,7 @@ pub trait MetaTx {
         result: Option<ChangesetId>,
         detail: String,
         conflict_paths: Vec<RepoPath>,
+        reject_reason: LandRejectReason,
     ) -> Result<LandOutcome>;
 
     /// Records that the git commits became the changesets, all of the

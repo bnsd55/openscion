@@ -6,9 +6,12 @@
 #![forbid(unsafe_code)]
 
 use std::path::Path;
+use std::time::Duration;
 
 use super::{Backend, Marker, marker_agrees, refuse_damaged_marker, refuse_sqlite_dir};
 use crate::error::Result;
+#[cfg(any(test, feature = "test-hooks"))]
+use crate::pg::test_hooks::TEST_SCHEMA_PREFIX;
 use crate::pg::{Pg, map_pg_error};
 
 /// The reader-pool size of a test backend. Tests run many backends at
@@ -20,6 +23,22 @@ use crate::pg::{Pg, map_pg_error};
 const PG_TEST_READERS: usize = 2;
 
 impl Backend {
+    /// Runs the stale-schema sweep out of band, without the
+    /// once-per-process gate: the run's own sweep runs once, at the
+    /// first test open; a test calls this to run the sweep again
+    /// against a database it shaped. It waits for the cleanup lock,
+    /// and answers the schemas it dropped and the eligible ones it
+    /// left for a later sweep.
+    ///
+    /// # Errors
+    ///
+    /// A missing test URL, or what the database returns.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn sweep_stale_test_schemas() -> Result<(usize, usize)> {
+        crate::pg::test_hooks::sweep_stale_test_schemas(&test_url()?)
+    }
+
     /// The advisory-lock key of the test schema's one-server lock, for
     /// the test that takes the lock from its own connection, as a
     /// second server process would.
@@ -105,6 +124,37 @@ impl Backend {
         Self::open_test_in_schema_with(data, &test_schema(data), readers, Pg::open_test)
     }
 
+    /// [`Backend::open_test`], after a drop of a store on the same
+    /// directory: the one-server lock rides the dropped store's write
+    /// connection, and the worker thread closes that connection after
+    /// the drop has returned. Until the session ends, the database
+    /// answers "another server holds this store". This reopen retries
+    /// that one error for a short bound and returns the last result, so
+    /// a test that drops and reopens at once waits for the real
+    /// condition instead of racing the worker's clock.
+    ///
+    /// # Errors
+    ///
+    /// What [`Backend::open_test`] returns: any error that is not the
+    /// holder message at once, and the holder message if no reopen
+    /// succeeds within the bound.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn reopen_test(data: &Path) -> Result<Self> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match Self::open_test(data) {
+                Err(crate::error::Error::FailedPrecondition(message))
+                    if message.contains(crate::pg::HOLDER_MESSAGE)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                result => return result,
+            }
+        }
+    }
+
     /// [`Backend::open_test`], with the opener chosen: the one seam the
     /// open shapes share.
     fn open_test_in_schema_with(
@@ -174,10 +224,17 @@ impl Backend {
         std::thread::spawn(move || {
             let url = test_url()?;
             let schema = test_schema(&data);
+            let dir = canonical_test_dir(&data);
             let mut client =
                 postgres::Client::connect(&url, postgres::NoTls).map_err(map_pg_error)?;
             client
                 .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"))
+                .map_err(map_pg_error)?;
+            // Register the schema and record the directory in its
+            // comment, exactly as an open does: a store opened through
+            // this URL leaves a schema the sweep can name and decide
+            // about, not an orphan the registry never saw.
+            crate::pg::test_hooks::register_test_schema(&mut client, &schema, &dir)
                 .map_err(map_pg_error)?;
             let sep = if url.contains('?') { '&' } else { '?' };
             Ok(format!("{url}{sep}options=--search_path%3D{schema}"))
@@ -354,13 +411,27 @@ pub(crate) fn test_url() -> Result<String> {
 /// test-hooks feature, and so does this.
 #[cfg(any(test, feature = "test-hooks"))]
 pub(crate) fn test_schema(data: &Path) -> String {
+    let path = canonical_test_dir(data);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&path, &mut hasher);
+    format!(
+        "{TEST_SCHEMA_PREFIX}{:016x}",
+        std::hash::Hasher::finish(&hasher)
+    )
+}
+
+/// The canonical form `test_schema` hashes, spelled the same way the
+/// schema's comment records it: the canonical form of the deepest
+/// existing ancestor, with the missing tail spelled as the caller
+/// spelled it. A first open of a data directory that does not exist yet
+/// and every open after the directory exists see one name.
+#[cfg(any(test, feature = "test-hooks"))]
+fn canonical_test_dir(data: &Path) -> std::path::PathBuf {
     // The hash must not move when the leaf directory appears: a first
     // open of a data directory that does not exist yet would otherwise
     // hash the raw path (on macOS /var is a symlink to /private/var, so
     // the raw and the canonical spellings hash apart), and every open
-    // after the directory exists would hash the canonical one. The
-    // canonical form of the deepest existing ancestor, with the missing
-    // tail spelled as the caller spelled it, is one name for both.
+    // after the directory exists would hash the canonical one.
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
     let mut cur = data.to_path_buf();
     let base = loop {
@@ -376,10 +447,7 @@ pub(crate) fn test_schema(data: &Path) -> String {
         }
     };
     let tail: std::path::PathBuf = tail.into_iter().rev().collect();
-    let path = base.join(tail);
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&path, &mut hasher);
-    format!("scion_test_{:016x}", std::hash::Hasher::finish(&hasher))
+    base.join(tail)
 }
 
 /// Arms the marker write's directory fsync of `data` to fail with EIO,
