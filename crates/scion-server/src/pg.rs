@@ -1617,6 +1617,9 @@ impl Pg {
 
 /// The count of a taken write client, while it is taken: it falls, and
 /// wakes the waiters, when the client is back.
+// SHORTCUT: one condvar, notify_all, so a release wakes every waiting
+// writer and a commit costs O(waiters) wake-ups. Per-class condvars if
+// waiting writers often pass ~50.
 struct PgWriteWaiter<'a>(&'a Mutex<WriterGate>, &'a Condvar);
 
 impl Drop for PgWriteWaiter<'_> {
@@ -5745,8 +5748,7 @@ pub(crate) mod pool_tests {
     /// wait for the write client: the write client is held by a slow
     /// transaction, five other writers and one slot holder queue behind
     /// it, and the slot holder's commit completes before any of the
-    /// five. The same queue without a slot holder keeps its order (the
-    /// next test).
+    /// five.
     #[test]
     fn a_slot_holders_commit_enters_ahead_of_the_write_queue() {
         use crate::test_support::meta::Meta as _;
@@ -5774,30 +5776,27 @@ pub(crate) mod pool_tests {
         while !hold.load(std::sync::atomic::Ordering::Acquire) {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        // Five other writers and one slot holder queue; every completion
-        // appends its class to the shared record.
+        // Five other writers and one slot holder queue; the slot holder
+        // goes first, then the other writers.
         let order = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
         let mut threads = Vec::new();
         for class in ["plain", "plain", "plain", "plain", "plain", "holder"] {
             let store = Arc::clone(&store);
             let order = Arc::clone(&order);
-            threads.push((
-                class,
-                std::thread::spawn(move || {
-                    let done = |_c: &mut crate::pg::PgTx<'_>| -> crate::error::Result<()> {
-                        order
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .push(class);
-                        Ok(())
-                    };
-                    if class == "holder" {
-                        store.write_slot_holder(done).unwrap();
-                    } else {
-                        store.write(done).unwrap();
-                    }
-                }),
-            ));
+            threads.push(std::thread::spawn(move || {
+                let done = |_c: &mut crate::pg::PgTx<'_>| -> crate::error::Result<()> {
+                    order
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(class);
+                    Ok(())
+                };
+                if class == "holder" {
+                    store.write_slot_holder(done).unwrap();
+                } else {
+                    store.write(done).unwrap();
+                }
+            }));
         }
         // All six wait: one slot holder and five other writers.
         for _ in 0..2_000 {
@@ -5811,19 +5810,14 @@ pub(crate) mod pool_tests {
         assert_eq!((holders, plain), (1, 5), "the six writers did not queue");
         release.store(true, std::sync::atomic::Ordering::Release);
         holder.join().unwrap();
-        for (class, thread) in threads {
+        for thread in threads {
             thread.join().unwrap();
-            let _ = class;
         }
         let order = order
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(order.len(), 6, "every writer ran: {order:?}");
         assert_eq!(order[0], "holder", "the slot holder went first: {order:?}");
-        assert_eq!(
-            order[1], "plain",
-            "the plain writers kept their order: {order:?}"
-        );
     }
 
     /// The bound: after four slot holders in a row, the next turn is
