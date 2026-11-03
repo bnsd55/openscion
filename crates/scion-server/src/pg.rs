@@ -1115,33 +1115,42 @@ impl Pg {
         f(&mut pg)
     }
 
-    /// A read on one client of the pool, in autocommit: every statement
-    /// sees the newest committed state, and none of them queues behind
-    /// the write client. The land's outcome check and plan ride this:
-    /// their writes happen later, in their own transaction, and the
-    /// land row's pending guard is what stops a twin call, not a shared
-    /// read.
+    /// A read on one client of the pool, in one READ COMMITTED READ ONLY
+    /// transaction with the pooled read's bounds: every statement sees
+    /// the newest committed state, and none of them queues behind the
+    /// write client. The land's outcome check and plan ride this: their
+    /// writes happen later, in their own transaction, and the land row's
+    /// pending guard is what stops a twin call, not a shared read.
+    ///
+    /// READ COMMITTED is the per-statement newest state the land's
+    /// outcome check and plan ran under on the writer's autocommit.
+    /// READ ONLY turns a write that slips onto this path into an error
+    /// (25006): a write on a pooled reader would land outside the
+    /// writer's lock and the collector's key, and must not be possible
+    /// to add silently. The statement and idle bounds keep an abandoned
+    /// read from holding a reader; the transaction rolls back at the
+    /// end, like every pooled read.
     ///
     /// # Errors
     ///
-    /// What `f` returns, or [`Error::Unavailable`] when no reader was
-    /// free in time.
+    /// What `f` returns, a database error from begin, or
+    /// [`Error::Unavailable`] when no reader was free in time.
     pub(crate) fn read_latest<T>(&self, f: impl FnOnce(&mut PgTx<'_>) -> Result<T>) -> Result<T> {
         self.check_fenced()?;
         let mut reader = self.inner.readers.take(READER_WAIT)?;
-        let mut pg = PgTx {
-            c: reader.client(),
-            gen_cache: std::collections::HashMap::new(),
-            inserted_gens: std::collections::HashMap::new(),
-            cs_batching: false,
-            cs_pending: None,
-            derived_pending: None,
-            derived_preload: None,
-            history_pending: None,
-            ended: true,
+        let out = {
+            let mut tx = PgTx::begin_read(
+                reader.client(),
+                "READ COMMITTED",
+                READ_STATEMENT_TIMEOUT,
+                READ_IDLE_TIMEOUT,
+            )?;
+            let out = f(&mut tx);
+            // A read transaction: nothing to keep. The rollback's own error
+            // must not hide the error of `f`; the drop rolls back anyway.
+            let _ = tx.rollback();
+            out
         };
-        let out = f(&mut pg);
-        drop(pg);
         drop(reader);
         out
     }
@@ -1175,7 +1184,7 @@ impl Pg {
         self.check_fenced()?;
         let mut reader = self.inner.readers.take(wait)?;
         let out = {
-            let mut tx = PgTx::begin_read(reader.client(), statement, idle)?;
+            let mut tx = PgTx::begin_read(reader.client(), "REPEATABLE READ", statement, idle)?;
             let out = f(&mut tx);
             // A read transaction: nothing to keep. The rollback's own error
             // must not hide the error of `f`; the drop rolls back anyway.
@@ -1575,12 +1584,17 @@ impl<'a> PgTx<'a> {
     // safe at read committed with a shorter snapshot hold. Nobody has
     // measured the gain, and the split needs an audit of every walk that
     // re-reads a ref. Measure first, then split.
-    fn begin_read(c: &'a mut PgClient, statement: Duration, idle: Duration) -> Result<PgTx<'a>> {
+    fn begin_read(
+        c: &'a mut PgClient,
+        isolation: &str,
+        statement: Duration,
+        idle: Duration,
+    ) -> Result<PgTx<'a>> {
         // Three statements, not one string: the client prepares its
         // queries, and Postgres takes no second command in a prepared
         // statement (E42601).
         c.execute(
-            "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+            &format!("BEGIN TRANSACTION ISOLATION LEVEL {isolation} READ ONLY"),
             &[],
         )?;
         // The transaction exists from here on: a SET LOCAL that fails
@@ -5448,5 +5462,24 @@ pub(crate) mod pool_tests {
         writer.join().unwrap();
         pg.commit(|tx| tx.c.execute("DROP TABLE read_latest_watch", &[]))
             .unwrap();
+    }
+
+    /// A write inside `read_latest` fails: the read is READ ONLY, so a
+    /// write that slips onto this path cannot land outside the writer's
+    /// lock and the collector's key (SQLSTATE 25006,
+    /// `read_only_sql_transaction`).
+    #[test]
+    fn a_write_inside_read_latest_fails() {
+        let (_pool, pg) = pg();
+        let error = pg
+            .read_latest(|tx| {
+                tx.c.execute("CREATE TABLE read_latest_read_only (n INT)", &[])
+                    .map(|_| ())
+            })
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("read-only transaction"),
+            "{error:?}"
+        );
     }
 }
