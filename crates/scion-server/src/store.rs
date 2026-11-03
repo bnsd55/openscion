@@ -1300,6 +1300,14 @@ impl GroupFlush {
         // Nothing panics while the lock is held.
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
+
+    /// The callers of [`GroupFlush::run`] in the wait, for the sharing
+    /// test's latch: the fake flush holds its run open until every caller
+    /// is inside, so none can arrive after the flushes have ended.
+    #[cfg(test)]
+    fn joined(&self) -> usize {
+        self.lock().waiting
+    }
 }
 
 /// Whether [`fsync`] can leave data in the drive cache: true on Apple
@@ -2112,7 +2120,6 @@ mod tests {
         const CALLERS: usize = 8;
         let group = GroupFlush::default();
         let runs = AtomicUsize::new(0);
-        let ready = AtomicUsize::new(0);
         let started = AtomicBool::new(false);
         let arrive = Barrier::new(CALLERS);
         let results: Vec<io::Result<()>> = thread::scope(|s| {
@@ -2120,29 +2127,23 @@ mod tests {
                 .map(|_| {
                     s.spawn(|| {
                         arrive.wait();
-                        // Every caller announces itself before the call,
-                        // so the flush that owns the group can hold it
-                        // open until every caller has had the chance to
-                        // share it. A fixed sleep here rested the sharing
-                        // on luck: under load, a caller that arrives late
-                        // runs its own flush, and the count goes wrong.
-                        ready.fetch_add(1, Ordering::SeqCst);
                         group.run(|| {
                             runs.fetch_add(1, Ordering::Relaxed);
                             if started.swap(true, Ordering::SeqCst) {
-                                // A straggler that missed the group runs
-                                // its own flush; the count assert below
-                                // still holds.
+                                // Two leads of one flush race only on
+                                // which of them got the group first; the
+                                // loser runs the closure a second time,
+                                // and the count assert below still holds.
                                 return Err(io::Error::other("the drive is gone"));
                             }
-                            // Generous, so a loaded machine only slows
-                            // the test; the bound keeps a lost scheduler
-                            // slice from hanging it.
+                            // The first flush holds itself open until
+                            // every caller is inside the group's wait,
+                            // so none can arrive after the flushes have
+                            // ended and run its own. The bound keeps a
+                            // lost scheduler slice from hanging it.
                             let give_up = std::time::Instant::now() + Duration::from_secs(30);
-                            while ready.load(Ordering::SeqCst) < CALLERS
-                                && std::time::Instant::now() < give_up
-                            {
-                                thread::sleep(Duration::from_millis(5));
+                            while group.joined() < CALLERS && std::time::Instant::now() < give_up {
+                                thread::sleep(Duration::from_millis(1));
                             }
                             Err(io::Error::other("the drive is gone"))
                         })
