@@ -612,9 +612,39 @@ fn of(key: &Key) -> (ObjectKind, [u8; 32]) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::backend::Backend;
     use std::io::Read as _;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// The second read's hold, for the cut-off test: the read waits until
+    /// the third's share is taken, so the read-ahead is forced, not hoped
+    /// for. A `Read` is a plain fn pointer, so the hold rides a static.
+    static SECOND_HOLD: Mutex<Option<(Arc<Semaphore>, Key, usize, usize, usize)>> =
+        Mutex::new(None);
+
+    /// The cut-off test's read: the second's key spins until the free
+    /// budget names all three shares (the first is back, the second and
+    /// the third are held), with a bound so a broken window fails loudly
+    /// instead of hanging.
+    fn read_with_hold(store: &Backend, key: Key, plan: Plan) -> Result<Outgoing> {
+        let hold = SECOND_HOLD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some((in_flight, second_key, second, third, budget)) = hold
+            && key == second_key
+        {
+            for _ in 0..5_000 {
+                if in_flight.available_permits() == budget - second - third {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        read_object(store, key, plan)
+    }
 
     use scion_proto::CHUNK_BYTES;
     use scion_proto::runtime::object::Assembler;
@@ -680,6 +710,14 @@ mod tests {
         let budget = 1000;
         let in_flight = Arc::new(Semaphore::new(budget));
         let stall = Duration::from_millis(50);
+        // The read-ahead is forced, not hoped for: the second's read
+        // holds until the third's share is taken, so the exact accounting
+        // below holds whatever order the two reads' plans finish in. A
+        // spin with a bound: the read runs on a blocking thread, and the
+        // window's polls keep coming while it waits. The hold rides a
+        // static, because a `Read` is a plain fn pointer.
+        *SECOND_HOLD.lock().unwrap() =
+            Some((Arc::clone(&in_flight), keys[1], second, third, budget));
         let reply = start_reply(
             Worker::new(store),
             keys.clone(),
@@ -690,7 +728,7 @@ mod tests {
                 stalled: None,
                 call: Call::default(),
             },
-            read_object,
+            read_with_hold,
             true,
             0,
         );
