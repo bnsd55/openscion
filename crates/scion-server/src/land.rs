@@ -92,7 +92,7 @@ const MAX_DEPTH: i64 = if cfg!(test) { 16 } else { PRUNE_EVERY };
 /// advance or a land moves its floor up to the tip, and a reach back to a
 /// base stops, and [`check_history`] checks the land. Tests use a small
 /// budget, so that they reach it.
-const MAX_INDEX_BYTES: usize = if cfg!(test) { 64 << 10 } else { 128 << 20 };
+pub(crate) const MAX_INDEX_BYTES: usize = if cfg!(test) { 64 << 10 } else { 128 << 20 };
 
 /// Where a land stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

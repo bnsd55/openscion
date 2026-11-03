@@ -18,7 +18,9 @@
 //! count, a connection over the limit is closed, which frees its
 //! stalled streams' buffers at once ([`Stalled`]), and a stalled reply
 //! gives its count back when its stream ends, so a connection that has
-//! served its stalls counts nothing. And it closes every
+//! served its stalls counts nothing. The process bounds their sum too:
+//! [`Limits::stalled_total`] over every connection, and a connection
+//! whose count crosses it is closed the same way. And it closes every
 //! connection in time, so a connection that waits for a place gets one:
 //!
 //! - a client that does not send the HTTP/2 preface within
@@ -167,6 +169,13 @@ const PREFACE_BYTES: usize = 24;
 /// `--max-stalled-bytes`.
 pub const DEFAULT_STALLED_BYTES: NonZeroU64 = NonZeroU64::new(64 << 20).unwrap();
 
+/// The bytes that the stalled replies of the whole process may hold, over
+/// every connection: the per-connection cap bounds one client, and this
+/// bounds their sum, so a host sized for the process's fixed shares can
+/// hold the worst case. A connection whose `hold` crosses it is closed,
+/// like a connection over its own cap.
+pub const STALLED_TOTAL_BYTES: u64 = 1 << 30;
+
 /// How many connections a process serves, and how many streams each may
 /// have open.
 #[derive(Clone, Copy, Debug)]
@@ -182,6 +191,11 @@ pub struct Limits {
     /// Most bytes that the stalled replies of one connection may hold. A
     /// connection over it is closed, and what its stalled replies hold goes.
     pub stalled_bytes: NonZeroU64,
+    /// Most bytes that the stalled replies of the whole process may hold:
+    /// the per-connection cap bounds one client, this bounds their sum. A
+    /// connection whose count crosses it is closed, like one over its own
+    /// cap.
+    pub stalled_total: NonZeroU64,
 }
 
 impl Default for Limits {
@@ -190,6 +204,7 @@ impl Default for Limits {
             connections: DEFAULT_CONNECTIONS,
             streams: DEFAULT_STREAMS,
             stalled_bytes: DEFAULT_STALLED_BYTES,
+            stalled_total: NonZeroU64::new(STALLED_TOTAL_BYTES).unwrap(),
         }
     }
 }
@@ -205,11 +220,30 @@ impl Default for Limits {
 #[derive(Clone)]
 pub struct Stalled(Arc<Counted>);
 
+/// The process-wide count every connection's `Counted` shares: the sum of
+/// what stalled replies hold over the process, bounded by
+/// [`STALLED_TOTAL_BYTES`] (a `Limits::stalled_total` in the tests).
+pub(crate) struct TotalBytes {
+    limit: u64,
+    bytes: AtomicU64,
+}
+
+impl TotalBytes {
+    pub(crate) fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            bytes: AtomicU64::new(0),
+        }
+    }
+}
+
 struct Counted {
     /// Most bytes that the stalled replies of this connection may hold.
     limit: u64,
     /// Bytes that stalled replies are estimated to hold now.
     bytes: AtomicU64,
+    /// The process-wide count the connection shares.
+    total: Arc<TotalBytes>,
     /// The process's registry, whose `scion_stalled_reply_bytes` gauge
     /// sums what the stalled replies of every live connection hold.
     metrics: Arc<Metrics>,
@@ -226,11 +260,17 @@ struct Counted {
 }
 
 impl Stalled {
-    pub(crate) fn new(peer: Option<SocketAddr>, limit: u64, metrics: Arc<Metrics>) -> Self {
+    pub(crate) fn new(
+        peer: Option<SocketAddr>,
+        limit: u64,
+        metrics: Arc<Metrics>,
+        total: Arc<TotalBytes>,
+    ) -> Self {
         Self(Arc::new(Counted {
             peer,
             limit,
             bytes: AtomicU64::new(0),
+            total,
             metrics,
             waker: Mutex::new(None),
             logged: AtomicBool::new(false),
@@ -263,11 +303,16 @@ impl Stalled {
     /// Only if a lock is poisoned, which cannot happen: no holder panics.
     pub fn hold(&self, bytes: u64) -> Stall {
         let held = self.0.bytes.fetch_add(bytes, Ordering::Relaxed) + bytes;
+        let total = self.0.total.bytes.fetch_add(bytes, Ordering::Relaxed) + bytes;
         self.0.metrics.stalled_reply_held(bytes);
-        if held >= self.0.limit && !self.0.logged.swap(true, Ordering::Relaxed) {
+        if (held >= self.0.limit || total >= self.0.total.limit)
+            && !self.0.logged.swap(true, Ordering::Relaxed)
+        {
             tracing::warn!(
                 held,
                 limit = self.0.limit,
+                total,
+                total_limit = self.0.total.limit,
                 peer = ?self.0.peer,
                 "closing a connection: its stalled replies hold too much"
             );
@@ -287,9 +332,11 @@ impl Stalled {
         }
     }
 
-    /// Whether the connection must close now.
+    /// Whether the connection must close now: its own count, or the
+    /// process total it shares, is over its limit.
     fn over(&self) -> bool {
         self.0.bytes.load(Ordering::Relaxed) >= self.0.limit
+            || self.0.total.bytes.load(Ordering::Relaxed) >= self.0.total.limit
     }
 
     /// Registers the read waker, so a crossing of the limit is seen at once.
@@ -298,14 +345,16 @@ impl Stalled {
         *waker = Some(read.clone());
     }
 
-    /// The I/O error that closes a connection over the limit.
+    /// The I/O error that closes a connection over a limit.
     fn error(&self) -> io::Error {
         io::Error::new(
             io::ErrorKind::ConnectionAborted,
             format!(
-                "its stalled replies hold {} bytes, over the {} limit",
+                "its stalled replies hold {} bytes, over the {} limit (the process holds {} of {})",
                 self.0.bytes.load(Ordering::Relaxed),
-                self.0.limit
+                self.0.limit,
+                self.0.total.bytes.load(Ordering::Relaxed),
+                self.0.total.limit
             ),
         )
     }
@@ -325,6 +374,10 @@ pub struct Stall {
 impl Drop for Stall {
     fn drop(&mut self) {
         self.counted.bytes.fetch_sub(self.bytes, Ordering::Relaxed);
+        self.counted
+            .total
+            .bytes
+            .fetch_sub(self.bytes, Ordering::Relaxed);
         self.counted.metrics.stalled_reply_freed(self.bytes);
     }
 }
@@ -475,6 +528,7 @@ impl Limits {
                 self.connections,
                 timers.handshake,
                 self.stalled_bytes,
+                Arc::new(TotalBytes::new(self.stalled_total.get())),
                 config,
                 Arc::clone(&metrics),
             );
@@ -487,6 +541,7 @@ impl Limits {
             self.connections,
             timers.handshake,
             self.stalled_bytes,
+            Arc::new(TotalBytes::new(self.stalled_total.get())),
             metrics,
         );
         router(server)
@@ -521,6 +576,7 @@ fn accept_tls<I, IO>(
     max: NonZeroUsize,
     handshake: Duration,
     stalled_bytes: NonZeroU64,
+    total: Arc<TotalBytes>,
     config: Arc<ServerConfig>,
     metrics: Arc<Metrics>,
 ) -> ReceiverStream<io::Result<Connection<TlsStream<IO>>>>
@@ -570,6 +626,7 @@ where
             let sender = done.clone();
             let stalled_bytes = stalled_bytes.get();
             let metrics = Arc::clone(&metrics);
+            let total = Arc::clone(&total);
             tokio::spawn(async move {
                 match wait.await {
                     Ok(Ok(stream)) => {
@@ -581,7 +638,7 @@ where
                                 io: stream,
                                 _place: place,
                                 preface,
-                                stalled: Stalled::new(peer, stalled_bytes, metrics),
+                                stalled: Stalled::new(peer, stalled_bytes, metrics, total),
                             }))
                             .await;
                     }
@@ -609,6 +666,7 @@ fn accept<I, IO, E>(
     max: NonZeroUsize,
     handshake: Duration,
     stalled_bytes: NonZeroU64,
+    total: Arc<TotalBytes>,
     metrics: Arc<Metrics>,
 ) -> impl Stream<Item = Result<Connection<IO>, E>>
 where
@@ -621,6 +679,7 @@ where
     incoming.then(move |accepted| {
         let places = Arc::clone(&places);
         let metrics = Arc::clone(&metrics);
+        let total = Arc::clone(&total);
         async move {
             let io = accepted?;
             let place = if let Ok(place) = Arc::clone(&places).try_acquire_owned() {
@@ -633,11 +692,12 @@ where
                     .expect("the semaphore of places is never closed")
             };
             let peer = io.peer_of();
+            let total = Arc::clone(&total);
             Ok(Connection {
                 io,
                 _place: place,
                 preface: Some((PREFACE_BYTES, Box::pin(tokio::time::sleep(handshake)))),
-                stalled: Stalled::new(peer, stalled_bytes, metrics),
+                stalled: Stalled::new(peer, stalled_bytes, metrics, total),
             })
         }
     })
@@ -1444,6 +1504,60 @@ mod tests {
         assert_eq!(code, Code::NotFound);
         // The stalled stream of the closed connection holds nothing more.
         assert!(matches!(stalled_stream.message().await, Err(_) | Ok(None)));
+    }
+
+    /// Two connections, each holding one stalled reply under its own cap,
+    /// together over the process's stall total: the connection whose count
+    /// crosses the total is closed, and the one under it goes on holding.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_connections_over_the_stall_total_close_the_crossing_one() {
+        let limits = Limits {
+            connections: NonZeroUsize::new(8).unwrap(),
+            stalled_bytes: NonZeroU64::new(2 * reply::STALLED_REPLY_BYTES).unwrap(),
+            stalled_total: NonZeroU64::new(6 * (1 << 20)).unwrap(),
+            ..Limits::default()
+        };
+        // Long keepalive and age, so only a count can close a connection.
+        let long = Duration::from_secs(3600);
+        let timers = Timers {
+            handshake: Duration::from_millis(100),
+            keepalive: long,
+            keepalive_timeout: long,
+            age: long,
+            grace: long,
+        };
+        let (addr, metrics) = serve(limits, timers).await;
+        let mut first = a_stalling_client(addr).await;
+        // The stream stays bound: its reply's stall is what the gauge
+        // settles on.
+        let _first_stream = stall(&mut first).await;
+        let mut second = a_stalling_client(addr).await;
+        let mut second_stream = stall(&mut second).await;
+
+        // The second connection's hold crossed the process total (the first
+        // connection's 4 MiB plus its own), so its stalled reply ends and
+        // its bytes go free; the frames it had buffered drain first.
+        let closed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match second_stream.message().await {
+                    Err(_) | Ok(None) => break,
+                    Ok(Some(_)) => {}
+                }
+            }
+        })
+        .await;
+        assert!(closed.is_ok(), "the connection over the total is closed");
+        // The first connection keeps its stall: the gauge settles at its
+        // one reply's estimate, not at nothing.
+        until(|| stalled_gauge(&metrics) == reply::STALLED_REPLY_BYTES).await;
+
+        // A new client is served: the closed connection freed its place
+        // and its share of the total.
+        let mut third = ObjectsClient::new(endpoint(addr).connect_lazy());
+        let code = tokio::time::timeout(Duration::from_secs(10), quick(&mut third))
+            .await
+            .expect("a new connection is served after the close");
+        assert_eq!(code, Code::NotFound);
     }
 
     /// What the process's gauge says the stalled replies hold, from a

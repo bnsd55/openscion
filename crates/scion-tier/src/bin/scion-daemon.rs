@@ -233,6 +233,7 @@ async fn main() -> anyhow::Result<()> {
         connections: cli.max_connections,
         streams: cli.max_streams,
         stalled_bytes: cli.max_stalled_bytes,
+        ..Limits::default()
     };
     Box::pin(tier.serve(
         &token,
