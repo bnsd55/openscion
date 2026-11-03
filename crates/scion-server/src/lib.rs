@@ -56,6 +56,7 @@
 //! enabling it in a build is at the user's own risk.
 
 pub(crate) mod access;
+pub mod admin;
 pub(crate) mod audit;
 pub(crate) mod auth;
 pub(crate) mod backend;
