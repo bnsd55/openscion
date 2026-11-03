@@ -1699,20 +1699,27 @@ async fn a_daemon_killed_mid_fill_serves_no_torn_object_after_its_restart() {
     };
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if files.iter().all(|file| agrees(&store, file)) {
+        if files.iter().all(agreeing(&store)) {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "the walk never adopted the files that the kill stranded"
+            "the walk never settled the files that the kill stranded"
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
-    // No stored file is torn: each unpacks to bytes that hash to the ID
-    // in its name. The tier's serve-time check would drop a bad one and
-    // fetch it again; this asserts none is bad in the first place.
-    for (kind, id, path, _) in &files {
+    // No stored file is torn: each file the store holds unpacks to bytes
+    // that hash to the ID in its name. The tier's serve-time check would
+    // drop a bad one and fetch it again; this asserts none is bad in the
+    // first place. The limit may have dropped files of the list since the
+    // kill; what it dropped is gone, and owes nothing.
+    let held = stored_files(&objects);
+    assert!(
+        held.len() < fill.len(),
+        "the store holds the whole fill: the limit never bit"
+    );
+    for (kind, id, path, _) in &held {
         let body = std::fs::read(path).unwrap();
         if kind == "blob" {
             unpacks_to_its_id(&body, id);
@@ -1720,7 +1727,7 @@ async fn a_daemon_killed_mid_fill_serves_no_torn_object_after_its_restart() {
     }
 
     // The byte limit still holds, after the walk and the fills.
-    let kept: u64 = files.iter().map(|(.., len)| *len).sum();
+    let kept: u64 = held.iter().map(|(.., len)| *len).sum();
     assert!(
         kept <= limit as u64,
         "the store holds {kept} bytes over its limit"
@@ -1786,6 +1793,16 @@ fn id_of(first: &std::ffi::OsStr, second: &std::ffi::OsStr) -> Option<Vec<u8>> {
 
 /// One file agrees with the index: the store knows its key at the file's
 /// size.
+/// The file is in the index at its size, or the store dropped it: a file
+/// the limit evicted is gone from disk, and the walk owes nothing for it.
+/// A file still on disk must be in the index — that is what the walk of a
+/// start adopts.
+fn agreeing(
+    store: &DiskStore,
+) -> impl Fn(&(String, Vec<u8>, std::path::PathBuf, u64)) -> bool + '_ {
+    move |file| agrees(store, file) || !file.2.exists()
+}
+
 fn agrees(store: &DiskStore, file: &(String, Vec<u8>, std::path::PathBuf, u64)) -> bool {
     let (kind, id, _, len) = file;
     let key = if kind == "blob" {

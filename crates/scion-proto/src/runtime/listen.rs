@@ -1018,9 +1018,8 @@ mod tests {
                 (Ok(object), permit),
                 [(); 0],
                 tx,
-                stall,
-                Stalled::of(&request),
-                slot,
+                reply::ReplyStall::new(stall, Stalled::of(&request), slot),
+                1,
                 |()| async { None },
             ));
             Ok(Response::new(stream))

@@ -324,7 +324,15 @@ async fn start_reply(
                     key,
                 )
             };
-            reply::send_objects(first, rest, tx, waits.stall, stalled, slot, produce).await;
+            reply::send_objects(
+                first,
+                rest,
+                tx,
+                reply::ReplyStall::new(waits.stall, stalled, slot),
+                reply::READS_IN_FLIGHT,
+                produce,
+            )
+            .await;
         }
         // The reply runs outside the call, but stays in its span.
         .instrument(tracing::Span::current()),
@@ -336,10 +344,12 @@ async fn start_reply(
 /// `in_flight` for the memory that reading it holds, and only then reads it.
 /// Then keeps only the share of the bytes it sends. `None` if the share is
 /// not free within `busy`.
-// SHORTCUT: two blocking hops per object and no read-ahead, so many small
-// objects are read one after another. Upgrade: read a batch capped by bytes
-// per hop, or keep a few reads in flight (the section 9 row that names
-// this file).
+// SHORTCUT: each read is still two blocking hops (plan, then read), but the
+// reply keeps READS_IN_FLIGHT of them running ahead of its sends, so the
+// hops of many small objects overlap. What stays serialized is the pair of
+// hops within one object. Upgrade: one hop that plans and reads together
+// (a store API that returns the object in one call; the section 9 row that
+// names this file).
 async fn find(
     worker: &Worker,
     in_flight: &Arc<Semaphore>,

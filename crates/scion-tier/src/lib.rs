@@ -739,9 +739,8 @@ impl<S: Store> Tier<S> {
             first,
             1..ask.keys.len(),
             tx,
-            STALL_TIMEOUT,
-            stalled,
-            slot,
+            reply::ReplyStall::new(STALL_TIMEOUT, stalled, slot),
+            reply::READS_IN_FLIGHT,
             produce,
         )
         .await;
@@ -762,9 +761,13 @@ impl<S: Store> Tier<S> {
     /// Finds `ask.keys[i]` for a reply: in the store, or else from upstream.
     /// Takes the object's share of the reply budget before its bytes are read
     /// from the store or copied into the reply.
-    // SHORTCUT: two blocking hops per hit (size, then read) and no read-ahead,
-    // as on the server. Upgrade: read a batch capped by bytes per hop, or
-    // keep a few reads in flight (the section 9 row that names this file).
+    // SHORTCUT: each hit is still two blocking hops (size, then read), but
+    // the reply keeps READS_IN_FLIGHT of them running ahead of its sends,
+    // as on the server, so the hops of many small objects overlap. What
+    // stays serialized is the pair of hops within one hit, and a miss's
+    // fetch (bounded by FETCH_SLOTS) waits on the upstream call. Upgrade:
+    // one hop that sizes and reads together (a store API that returns the
+    // object in one call; the section 9 row that names this file).
     async fn produce(&self, ask: &Ask, i: usize, progress: &Progress) -> Option<Found> {
         let (key, _path) = ask.keys[i].clone();
         // A share taken before the object was in hand.
