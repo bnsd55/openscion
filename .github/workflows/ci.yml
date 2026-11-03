@@ -703,9 +703,9 @@ jobs:
             exit 1
           fi
           container=$names
+          df -h /
           SCION_TEST_PG_CONTAINER="$container" \
           SCION_TEST_POSTGRES_URL=postgres://postgres:scion@localhost:5432/scion \
-          df -h /
           cargo test -p open-scion-server --test backend_refusals -- --ignored
           df -h /
 
