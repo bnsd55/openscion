@@ -1,11 +1,16 @@
 //! The write transaction's collector key: the wait for it runs under
 //! the timeout that is in force before the statement starts, and the
 //! restore that rides the advisory's own statement governs the
-//! statements that follow. Postgres reads a GUC when a statement
-//! starts, so a `set_config` in the same statement cannot guard that
-//! statement's own lock wait — which is why the 60 s guard for the key
-//! stays its own statement, and only the 5 s restore folds into the
-//! advisory's statement. These proofs fail if that order is reversed.
+//! statements that follow. The 60 s guard for the key stays its own
+//! statement because the executor's evaluation order inside one
+//! statement is not promised: a `set_config` in a target-list neighbor
+//! of the lock's statement happens to run first on today's Postgres,
+//! but nothing in SQL promises it (the plan proof pins the shape whose
+//! order the proofs test). Only the 5 s restore folds into the
+//! advisory's statement, as a data dependency: `FROM` the subquery that
+//! holds the lock, `OFFSET 0`, so the executor must run it before it
+//! can answer the outer statement. These proofs fail if that order is
+//! reversed.
 
 use std::time::{Duration, Instant};
 
@@ -153,7 +158,9 @@ fn the_plan_takes_the_key_before_the_restore_reads_it() {
         "the outer scan that evaluates the restore is the plan's top: {plan:?}"
     );
     let (child_at, child_indent) = {
-        let at = plan[1].find("->").expect("the child marker: {plan:?}");
+        let at = plan[1]
+            .find("->")
+            .unwrap_or_else(|| panic!("the child marker: {plan:?}"));
         (at, plan[1].len() - plan[1].trim_start().len())
     };
     assert!(
