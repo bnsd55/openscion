@@ -1172,9 +1172,10 @@ fn server_tls(
     }
 }
 
-/// The three per-principal caps, as the flags set them. With one principal
-/// (the `--token` mode) a per-principal cap is a global one, so each cap is
-/// off unless a flag sets it; with an access file the defaults apply.
+/// The three per-principal caps, as the flags set them. In the
+/// single-principal mode (one token from the environment or a file) a
+/// per-principal cap is a global one, so each cap is off unless a flag
+/// sets it; with an access file the defaults apply.
 struct Caps {
     quotas: Quotas,
     pending_lands: Option<usize>,
@@ -1245,12 +1246,14 @@ struct ServeFlags {
     mtls: bool,
 }
 
-/// Checks every `serve` flag that a parse alone does not settle: the rules
-/// of `--token` against `--access`, the TLS files, the ticket keys, and the
-/// listen rule (a non-loopback address needs TLS or `--insecure-listen`).
-/// Checks every `serve` flag that a parse alone does not settle: the rules
-/// of `--token` against `--access`, the TLS files, the ticket keys, and the
-/// listen rule (a non-loopback address needs TLS or `--insecure-listen`).
+/// Checks every `serve` flag that a parse alone does not settle: the
+/// token's rules against `--access`, the TLS files, the ticket keys,
+/// and the listen rule (a non-loopback address needs TLS or
+/// `--insecure-listen`).
+/// Checks every `serve` flag that a parse alone does not settle: the
+/// token's rules against `--access`, the TLS files, the ticket keys,
+/// and the listen rule (a non-loopback address needs TLS or
+/// `--insecure-listen`).
 fn serve_flags(args: &ServeArgs) -> anyhow::Result<ServeFlags> {
     // The token of the flags: the checked file, or the environment. The
     // second reply says whether the mode is one token: with one

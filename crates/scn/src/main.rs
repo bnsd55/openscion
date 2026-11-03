@@ -164,7 +164,7 @@ fn hint(text: &str) -> Option<&'static str> {
     if text.contains("invalid peer certificate") {
         Some("--tls-ca must hold the CA (PEM) that signed the certificate of the server you trust")
     } else if text.contains("valid authentication credentials") || text.contains("wrong token") {
-        Some("compare --token (or SCION_TOKEN) with the token the server was given")
+        Some("compare SCION_TOKEN (or --token-file FILE) with the token the server was given")
     } else if text.contains("cannot connect") {
         Some("is a scion server or tier running at that address?")
     } else {
