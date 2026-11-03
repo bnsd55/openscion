@@ -8,8 +8,9 @@
 //! Run it, for example:
 //! `SCION_TEST_POSTGRES_URL=... SCION_DIR_WIDTH=10000 \
 //!  cargo test -p open-scion-server --release --test dir_width -- --ignored --nocapture`
-//! and read the `target=dir_width` line. The wide points run on CI,
-//! through this branch's `dir-width` workflow dispatch.
+//! and read the `target=dir_width` line. The table in
+//! `docs/support.md` carries the measured rows, with the run ids that
+//! produced them; this test re-creates a row at any width.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
