@@ -117,21 +117,22 @@ struct Cli {
 /// Fails the run when the command line still names a secret flag the
 /// binary has removed, before any parsing: the parser never sees the
 /// line, so its own errors cannot quote the value either.
-fn refuse_removed_secret_flags() {
-    if let Some(error) = scion_proto::runtime::auth::removed::removed_secret_flag_error(
+fn refuse_removed_flags() {
+    use scion_proto::runtime::auth::removed::{RemovedFlag, refusal_text, removed_flag_of};
+    if let Some(removed) = removed_flag_of(
         std::env::args_os().skip(1).collect::<Vec<_>>().as_slice(),
         &[
-            (
-                "--token",
-                "pass the token in SCION_TOKEN, or in a file with --token-file FILE",
-            ),
-            (
-                "--upstream-token",
-                "pass the token in SCION_UPSTREAM_TOKEN, or in a file with --upstream-token-file FILE",
-            ),
+            RemovedFlag {
+                flag: "--token",
+                instead: "pass the token in SCION_TOKEN, or in a file with --token-file FILE",
+            },
+            RemovedFlag {
+                flag: "--upstream-token",
+                instead: "pass the token in SCION_UPSTREAM_TOKEN, or in a file with --upstream-token-file FILE",
+            },
         ],
     ) {
-        eprintln!("error: {error}");
+        eprintln!("error: {}", refusal_text(removed));
         std::process::exit(2);
     }
 }
@@ -186,7 +187,7 @@ async fn main() -> anyhow::Result<()> {
         .with_ansi(std::io::stderr().is_terminal())
         .with_writer(std::io::stderr)
         .init();
-    refuse_removed_secret_flags();
+    refuse_removed_flags();
     let cli = Cli::parse();
     let (token, upstream) = resolve_tokens(&cli)?;
     let server_tls = match (cli.tls_cert.as_deref(), cli.tls_key.as_deref()) {
