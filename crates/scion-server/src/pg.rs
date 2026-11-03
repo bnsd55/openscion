@@ -1204,13 +1204,29 @@ impl Pg {
         // transaction is back on the writer's clock, so the row locks it
         // meets later still answer Busy at 5 s (SET LOCAL lasts to the
         // end of the transaction).
+        // The 60 s guard must be in force before the statement that
+        // takes the key. `lock_timeout` is read when the lock wait
+        // begins (the timer starts in the lock's sleep), so the guard
+        // cannot ride the same statement as the key: it stays its own
+        // statement, before the key's.
+        //
+        // The restore is a data dependency, not a target-list neighbor:
+        // it reads FROM the subquery that takes the key, so it cannot
+        // evaluate until the key returned, and the wait always ran under
+        // the 60 s. OFFSET 0 keeps the planner from flattening the
+        // subquery into one target list (tests/pg_guard_timeouts.rs
+        // checks the plan's shape and times the wait).
         tx.c.query(
             &format!("SET LOCAL lock_timeout = '{LOCK_TIMEOUT_FOR_KEY}'"),
             &[],
         )?;
         let key_started = std::time::Instant::now();
         tx.c.query_opt(
-            "SELECT pg_advisory_xact_lock(hashtext(current_schema() || ':gc'))",
+            &format!(
+                "SELECT set_config('lock_timeout', '{LOCK_TIMEOUT_FOR_WRITERS}', true) \
+                 FROM (SELECT pg_advisory_xact_lock(hashtext(current_schema() || ':gc')) \
+                       OFFSET 0) AS held"
+            ),
             &[],
         )?;
         if let Some(metrics) = self.inner.metrics.get() {
@@ -1218,10 +1234,6 @@ impl Pg {
                 u64::try_from(key_started.elapsed().as_micros()).unwrap_or(u64::MAX),
             );
         }
-        tx.c.query(
-            &format!("SET LOCAL lock_timeout = '{LOCK_TIMEOUT_FOR_WRITERS}'"),
-            &[],
-        )?;
         match f(&mut tx) {
             Ok(value) => {
                 let unflushed = tx.cs_pending.as_deref().is_some_and(|p| !p.is_empty())
