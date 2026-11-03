@@ -160,9 +160,11 @@ body takes before the body is built (`READ_BUDGET_BYTES` in
 crates/scion-server/src/service.rs); the third is the unary-reply budget
 (`REPLY_MEMORY_BUDGET` in crates/scion-server/src/reply.rs). Size the
 server's memory from that sum plus its fixed shares (the blame, derive,
-land and gc budgets, the uploads in flight). A larger
-`--max-stalled-bytes` changes which connections close first, not what
-the process can hold.
+land and gc budgets, the uploads in flight), which together make the
+memory floor (floor.rs): at start the server sets the floor and the
+host's limit as gauges, and an error line at start says when the host is
+under the floor. A larger `--max-stalled-bytes` changes which
+connections close first, not what the process can hold.
 
 
 Choose the tokens with care: `--token T` (or `SCION_TOKEN=T`) makes one
