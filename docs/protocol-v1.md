@@ -409,13 +409,16 @@ server stops the land at its next check, and the land stays `PENDING`.
 | `result_changeset_id` | When `LANDED`: the rebased changeset, which was the tip of the ref when the land finished. Empty otherwise. |
 | `detail` | Why the land is `CONFLICT` or `REJECTED`, for people. Empty when `LANDED`. |
 | `conflict_paths` | When `CONFLICT` from step 4: the paths that conflict. Empty otherwise. |
+| `reject_reason` | When `REJECTED`: why the land can never succeed, as one `LandRejectReason` value: `NEEDS_ONE_PARENT` (the changeset does not hold exactly one parent), `MISSING_REF` (the changeset names a ref the repo does not hold), `BASE_NOT_ON_HISTORY` (the base is not on the ref's first-parent history) or `ABANDONED` (the land stayed pending past its deadline, so the server's stale-land sweep stopped it; retry with a new request key). `UNSPECIFIED` for every other state. When `REJECTED` carries `UNSPECIFIED`, no reason was given: the server that rejected it was older than this field, or the row predates it - read `detail`. Programs match on this field; people read `detail`. |
 
 | State | Meaning | Final |
 |---|---|---|
 | `PENDING` | Recorded, not finished. | No |
 | `LANDED` | The ref moved to `result_changeset_id`. | Yes |
 | `CONFLICT` | A change on the ref after the base touched the same paths, or the changes do not apply to the head's tree. The client re-reads those paths on the ref, makes a new changeset on the new head, and lands that. | Yes |
-| `REJECTED` | The land cannot succeed as asked. | Yes |
+| `REJECTED` | The land cannot succeed as asked; `reject_reason` says why. | Yes |
+
+A client that names a `reject_reason` must still read `detail`: a server older than this field answers `REJECTED` with `UNSPECIFIED` and puts the reason in `detail`.
 
 **Request keys and retries.**
 

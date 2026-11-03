@@ -44,7 +44,7 @@ use crate::auth::Caller;
 use crate::backend::Backend;
 use crate::deadline::Deadline;
 use crate::error::Result;
-use crate::land::{self, LandOutcome, LandState, Lands};
+use crate::land::{self, LandOutcome, LandRejectReason, LandState, Lands};
 use crate::meta::{Meta as _, MetaTx as _};
 use crate::objects::ObjectsService;
 use crate::quotas::{Call, Quotas};
@@ -942,12 +942,25 @@ pub(crate) fn caller<T>(request: &Request<T>) -> Result<Caller, Status> {
 }
 
 fn land_response(outcome: LandOutcome) -> LandResponse {
-    use scion_proto::v1::LandState as Wire;
+    use scion_proto::v1::{LandRejectReason as WireReason, LandState as Wire};
     let state = match outcome.state {
         LandState::Pending => Wire::Pending,
         LandState::Landed => Wire::Landed,
         LandState::Conflict => Wire::Conflict,
         LandState::Rejected => Wire::Rejected,
+    };
+    // Only a rejected land names a reason. The other states force
+    // UNSPECIFIED whatever the outcome holds, so a stored row's reason
+    // cannot leak onto a state that must not carry one.
+    let reason = match outcome.state {
+        LandState::Rejected => match outcome.reject_reason {
+            LandRejectReason::Unspecified => WireReason::Unspecified,
+            LandRejectReason::NeedsOneParent => WireReason::NeedsOneParent,
+            LandRejectReason::MissingRef => WireReason::MissingRef,
+            LandRejectReason::BaseNotOnHistory => WireReason::BaseNotOnHistory,
+            LandRejectReason::Abandoned => WireReason::Abandoned,
+        },
+        _ => WireReason::Unspecified,
     };
     LandResponse {
         land_id: outcome.land_id.to_string(),
@@ -959,6 +972,7 @@ fn land_response(outcome: LandOutcome) -> LandResponse {
             .into_iter()
             .map(|p| p.as_bytes().to_vec())
             .collect(),
+        reject_reason: reason as i32,
     }
 }
 
@@ -2546,6 +2560,40 @@ mod tests {
         let caller = Caller(scion_proto::runtime::auth::DEFAULT_PRINCIPAL.into());
         request.extensions_mut().insert(caller);
         request
+    }
+
+    #[test]
+    fn land_response_maps_every_reason_and_forces_unspecified_off_rejected() {
+        use scion_proto::v1::{LandRejectReason as WireReason, LandState as Wire};
+        let outcome = |state: LandState, reason: LandRejectReason| LandOutcome {
+            land_id: 1,
+            state,
+            result: None,
+            previous: None,
+            moved: false,
+            detail: String::new(),
+            conflict_paths: vec![],
+            reject_reason: reason,
+        };
+        let wire = [
+            (LandRejectReason::Unspecified, WireReason::Unspecified),
+            (LandRejectReason::NeedsOneParent, WireReason::NeedsOneParent),
+            (LandRejectReason::MissingRef, WireReason::MissingRef),
+            (
+                LandRejectReason::BaseNotOnHistory,
+                WireReason::BaseNotOnHistory,
+            ),
+            (LandRejectReason::Abandoned, WireReason::Abandoned),
+        ];
+        for (reason, want) in wire {
+            let reply = land_response(outcome(LandState::Rejected, reason));
+            assert_eq!(reply.state(), Wire::Rejected);
+            assert_eq!(reply.reject_reason(), want, "{reason:?}");
+        }
+        // A reason on a state that must not carry one does not leak.
+        let reply = land_response(outcome(LandState::Landed, LandRejectReason::Abandoned));
+        assert_eq!(reply.state(), Wire::Landed);
+        assert_eq!(reply.reject_reason(), WireReason::Unspecified);
     }
 
     #[test]

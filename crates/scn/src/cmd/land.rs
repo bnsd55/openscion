@@ -82,6 +82,7 @@ fn print_outcome(json: bool, reply: &LandResponse) -> Result<()> {
             "result": result.map(|id| id.to_string()),
             "detail": reply.detail,
             "conflict_paths": paths,
+            "reject_reason": reply.reject_reason().as_str_name(),
         });
         // An array element carries no sibling field, so the exact bytes
         // travel as a whole sibling array, in the same order, only when a
@@ -119,6 +120,7 @@ fn print_outcome(json: bool, reply: &LandResponse) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scion_proto::v1::LandRejectReason;
 
     fn conflict_reply() -> LandResponse {
         LandResponse {
@@ -127,6 +129,7 @@ mod tests {
             result_changeset_id: Vec::new(),
             detail: String::from("1 path(s) changed on \"main\" after the base"),
             conflict_paths: vec![b"same.txt".to_vec()],
+            reject_reason: LandRejectReason::Unspecified.into(),
         }
     }
 
