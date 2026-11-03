@@ -1397,12 +1397,6 @@ async fn serve(
     Ok(())
 }
 
-/// The stderr warning of a secret that arrived on the command line: ps
-/// and `/proc/$$/cmdline` show it to every local account, and it lands
-/// in shell history. The argv form goes away: `--postgres-url` in
-/// v0.2.0 (the owner's call), the rest in a later minor; the
-/// replacement reads a file that the checked read of the access file
-/// protects.
 /// A secret from a file the checked read protects, trimmed: the owner
 /// alone may read it, a symlink is refused, and the directories above
 /// it are checked.
@@ -1416,11 +1410,11 @@ fn secret_file(file: &Path) -> anyhow::Result<String> {
     Ok(token.to_owned())
 }
 
-/// The Postgres URL of the CLI, required: the file form wins (clap
-/// refuses both at once), the argv form warns, the env is quiet. Every
-/// command that opens the store needs one: the metadata has nowhere
-/// else to live. The fields come in one at a time, because a caller
-/// that matched its command out of `Cli` holds a partially moved value.
+/// The Postgres URL of the CLI, required: a checked file named by
+/// `--postgres-url-file`, or `SCION_POSTGRES_URL`. Every command that
+/// opens the store needs one: the metadata has nowhere else to live.
+/// The fields come in one at a time, because a caller that matched its
+/// command out of `Cli` holds a partially moved value.
 fn postgres_url_of(url_file: Option<&PathBuf>) -> anyhow::Result<String> {
     let url = if let Some(file) = url_file {
         secret_file(file)?
