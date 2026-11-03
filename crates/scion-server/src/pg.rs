@@ -1164,7 +1164,7 @@ impl Pg {
     }
 
     /// A read on the write client, so it sees the caller's own commits.
-    /// The land's finish reads now ride the read pool (read_latest), so
+    /// The land's finish reads now ride the read pool (`read_latest`), so
     /// the lane serves only the writes that hold their ref's slot.
     pub(crate) fn read_unflushed<T>(
         &self,
