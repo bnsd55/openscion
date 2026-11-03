@@ -144,3 +144,57 @@ it; the remedy if a real workload needs one is chunked directories, a
 new tree format ([#114](https://github.com/bnsd55/openscion/issues/114)),
 which is the change the 1.x freeze would close off. A test pins the
 supported width's cost per change in `tests/dir_width.rs`.
+
+
+## Blob count
+
+The store keeps one file per blob, so the costs that scale with the
+blob count are file costs: fsck reads every file, gc walks every file,
+and each blob spends one inode and one directory entry of the
+filesystem that holds the data directory. The supported count is
+**1,000,000 blobs per data directory**.
+
+The measured shape, on the fixed `ubuntu-24.04` CI runner (4 vCPU,
+16 GiB RAM, ext4; the `blob-count` job of
+[bench.yml](../.github/workflows/bench.yml), a dispatch that fills a
+store of small blobs through the store's own put path in a release
+build and then measures - see
+`crates/scion-server/tests/bench_blob_count.rs`):
+
+| Blobs | Fill (s) | fsck, first walk (s) | fsck, warm (s) | gc --dry-run (s) | Reopen (s) | Inodes used | Blob bytes | Bytes on disk |
+|---|---|---|---|---|---|---|---|---|
+| 100,000 | 47.7 | 2.06 | - | 0.80 | 0.023 | +0.1M | 6.4 MB | ~0.4 GB |
+| 1,000,000 | 383.6 | 61.7 | 16.8 | 9.1 | 0.025 | +1.0M | 64 MB | 4.2 GB |
+| 5,000,000 | 2,142.3 | 863.1 | - | 37.9 | 0.031 | +5.0M | 320 MB | ~21 GB |
+
+Read of the table:
+
+- **Reopen is flat**: the server's open scans nothing, so a restart
+  costs the same at five million blobs as at one hundred thousand.
+- **Fill is linear**, about 2,400 blobs per second on the runner.
+- **fsck's steady state is flat**: a walk with the page cache warm
+  costs about 17 microseconds per blob (16.8 s at 1M). The first walk
+  in a fresh process pays a one-time warm-up that grows with the count
+  (45 s extra at 1M); the profile shows it asks the device for nothing
+  at 1M - the blob bytes are 64 MB - so the warm-up is the kernel
+  populating its per-file caches, not reading data.
+- **The wall is RAM.** Small blobs cost a 4 KiB block each: 1M blobs
+  hold 4.2 GB, and 5M hold about 21 GB - past the host's RAM, every
+  fsck is a cold walk and pays a device read per file (863 s at 5M,
+  about 173 microseconds per blob, 10x the warm cost). A host that
+  sizes RAM to its store keeps fsck warm and flat; a store larger than
+  RAM makes fsck minutes per million blobs.
+- **gc --dry-run** grows a little faster than the count (7.8x for 5x)
+  but stays far under fsck; it stats every file and reads none.
+
+One inode per blob is the second wall: 5M blobs spent 5M of the
+runner's 19.5M inodes. The inode budget and how to size it are in
+[operations.md](operations.md) (capacity, "The inode budget"); check a
+live filesystem with `df -i`.
+
+Past the supported count, nothing refuses: the costs are the table's,
+and the first cost to bite is fsck on a store larger than RAM. The
+remedy if a real workload needs more is the one the file-per-blob
+layout has always pointed at - packing small blobs into fewer files -
+tracked with the profile that names the cold-walk cost in
+[#824](https://github.com/bnsd55/openscion/issues/828).
