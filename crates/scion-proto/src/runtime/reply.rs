@@ -343,7 +343,7 @@ impl Parts {
 /// cache tier bounds its upstream fetches itself.
 ///
 /// The reply keeps up to `reads_in_flight` reads running ahead of the object
-/// it is sending, in a [`Window`] that hands out their results in the
+/// it is sending, in an ordered window that hands out their results in the
 /// request's order, whatever order they finish in. Each read holds its own
 /// share of the budget from the moment it takes it, so a window of `N` holds
 /// at most `N` shares for its reads, and the reply holds one more for the

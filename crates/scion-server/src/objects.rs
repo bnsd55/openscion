@@ -671,10 +671,12 @@ mod tests {
             .map(|data| Key::Blob(store.blobs().put(data).unwrap()))
             .collect();
         let second = packed_len(&store, keys[1]);
+        let third = packed_len(&store, keys[2]);
         // Files of two sizes, so the free budget shows which object holds a
         // share. With one size, the first object, before it is sent, looks
         // like the second.
         assert_ne!(packed_len(&store, keys[0]), second);
+        assert_ne!(second, third);
         let budget = 1000;
         let in_flight = Arc::new(Semaphore::new(budget));
         let stall = Duration::from_millis(50);
@@ -694,10 +696,12 @@ mod tests {
         );
         let mut stream = reply.await.unwrap();
 
-        // Nobody reads: the first object waits in the channel, and its share
-        // is back. The second holds its share while its send stalls, then
-        // the reply ends and gives it back.
-        until(|| in_flight.available_permits() == budget - second).await;
+        // Nobody reads: the first object waits in the channel, and its
+        // share is back. The second holds its share while its send stalls,
+        // and the third's read runs one ahead and holds its own share:
+        // reads in flight are shares held, exactly as the reply's doc
+        // says. The reply ends at the stall, and every share goes back.
+        until(|| in_flight.available_permits() == budget - second - third).await;
         until(|| in_flight.available_permits() == budget).await;
         let first = stream.next().await.unwrap().unwrap();
         let (header, data) = Assembler::new(Header::of(&first, true).unwrap(), first).finish();
