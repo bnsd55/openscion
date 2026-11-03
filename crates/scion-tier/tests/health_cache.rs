@@ -167,11 +167,20 @@ async fn ceiling<T>(step: &str, fut: impl std::future::Future<Output = T>) -> T 
 }
 
 /// Sends `SIGINT`, as Ctrl-C does.
-fn interrupt(child: &Child) {
-    Command::new("kill")
-        .args(["-INT", &child.id().to_string()])
-        .output()
-        .expect("kill runs");
+///
+/// Off the runtime: the call blocks its thread until kill exits, and a
+/// runtime thread that waits for a subprocess cannot run the cache's
+/// connection task (issue #795).
+async fn interrupt(child: &Child) {
+    let pid = child.id();
+    tokio::task::spawn_blocking(move || {
+        Command::new("kill")
+            .args(["-INT", &pid.to_string()])
+            .output()
+            .expect("kill runs");
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -193,7 +202,7 @@ async fn the_cache_serves_until_shutdown_starts() {
     // kill a draining cache. The named service is readiness; its flip is
     // the server suite's proof, and the same `listen::health` serves it
     // here.
-    interrupt(&cache.child);
+    interrupt(&cache.child).await;
     let quiet = tokio::time::timeout(Duration::from_millis(500), watcher.message()).await;
     assert!(
         quiet.is_err(),
