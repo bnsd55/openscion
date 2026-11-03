@@ -122,6 +122,21 @@ pub trait Meta: Send + Sync + 'static {
     /// What `f` returns, or a database error from taking the connection.
     fn read_unflushed<T>(&self, f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>) -> Result<T>;
 
+    /// A read that sees the newest committed state per statement, on a
+    /// client that no writer queues behind. The caller's writes happen
+    /// later, in their own transaction, and whatever guard its rows
+    /// carry is what stops a double write - not this read.
+    ///
+    /// The default runs a plain read: a backend whose reads already see
+    /// the newest committed state needs no override.
+    ///
+    /// # Errors
+    ///
+    /// What `f` returns, or a database error from taking the client.
+    fn read_latest<T>(&self, f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>) -> Result<T> {
+        self.read(f)
+    }
+
     /// Runs `f` in one write transaction. It commits when `f` returns `Ok`
     /// and rolls back otherwise, and returns before the commit is durable.
     /// Every backend runs `f` exactly once; a retryable error comes back
