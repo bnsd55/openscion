@@ -135,29 +135,36 @@ Size the process with the three connection caps: `--max-connections` (128)
 bounds the clients served at once, `--max-streams` (256) bounds the calls
 one client may hold open at once, and `--max-stalled-bytes` (64 MiB)
 bounds what the stalled replies of one connection may hold before the
-connection is closed. A cache and a daemon take the same three flags.
+connection is closed. The stalled replies of the whole process are
+bounded too, at 1 GiB over every connection (a connection whose count
+crosses that total is closed, like one over its own cap). A cache and a
+daemon take the same three flags.
 
 What one server process can hold for clients that never read, at the
 defaults, in the worst case:
 
-    128 connections x 64 MiB stalled bytes   8192 MiB
+    the stall total (every connection)        1024 MiB
     the read budget (whole-object replies)     256 MiB
     the reply budget (unary replies)           128 MiB
     ------------------------------------------ --------
-    about                                      8.4 GiB
+    about                                      1.4 GiB
 
-The first line is `--max-connections` x `--max-stalled-bytes`
-(`DEFAULT_CONNECTIONS`, `DEFAULT_STALLED_BYTES` in
+The first line is the process-wide stall total (`STALLED_TOTAL_BYTES` in
 crates/scion-proto/src/runtime/listen.rs): a connection whose stalled
-replies hold more than `--max-stalled-bytes` is closed, and what they
-hold goes free, so a slow client costs at most its own connection,
-not a share of the server. The second is the read budget that a
-whole-object reply's built body takes before the body is built
-(`READ_BUDGET_BYTES` in crates/scion-server/src/service.rs); the
-third is the unary-reply budget (`REPLY_MEMORY_BUDGET` in
-crates/scion-server/src/reply.rs). Size the server's memory from that
-sum: fewer connections, a smaller stall cap, or both, take the first
-line down linearly.
+replies hold more than `--max-stalled-bytes`, or whose hold crosses the
+process's 1 GiB total, is closed, and what it holds goes free, so a slow
+client costs at most its own connection, not a share of the server, and
+the stalled replies of every client together never hold more than the
+total. The second is the read budget that a whole-object reply's built
+body takes before the body is built (`READ_BUDGET_BYTES` in
+crates/scion-server/src/service.rs); the third is the unary-reply budget
+(`REPLY_MEMORY_BUDGET` in crates/scion-server/src/reply.rs). Size the
+server's memory from that sum plus its fixed shares (the blame, derive,
+land and gc budgets, the uploads in flight), which together make the
+memory floor (floor.rs): at start the server sets the floor and the
+host's limit as gauges, and an error line at start says when the host is
+under the floor. A larger `--max-stalled-bytes` changes which
+connections close first, not what the process can hold.
 
 
 Choose the tokens with care: `--token T` (or `SCION_TOKEN=T`) makes one
@@ -1289,10 +1296,11 @@ Proof: crates/scion-server/tests/docs_alerts.rs::view_memo_serves_the_second_rea
 `StalledRepliesHigh` fires when `scion_stalled_reply_bytes` has sat over
 48 MiB for 15 minutes: replies whose clients stopped reading mid-reply
 hold their buffers in the server. The cap is `--max-stalled-bytes`
-(default 64 MiB) per connection; a connection over it is closed with
-everything it holds, and the server logs
-`closing a connection: its stalled replies hold too much` once, with the
-bytes it held.
+(default 64 MiB) per connection, and 1 GiB over every connection
+(`STALLED_TOTAL_BYTES`); a connection over its own cap, or whose hold
+crosses the total, is closed with everything it holds, and the server
+logs `closing a connection: its stalled replies hold too much` once,
+with the bytes it held.
 
 Read the gauge and find the client that stopped:
 
@@ -1310,9 +1318,10 @@ Tell the causes apart:
   close notice names the peer address, and the calls of one client
   carry its `request_id` in both logs).
 - Many clients, bytes near the cap on several connections: the replies
-  are large and the clients are many — raise
-  `--max-stalled-bytes` only if the box has the memory for it, or add a
-  cache tier so the large replies do not all reach the server.
+  are large and the clients are many — once the process's 1 GiB stall
+  total is in play, connections close while the gauge sits near 1 GiB.
+  Raise `--max-stalled-bytes` only if the box has the memory for it, or
+  add a cache tier so the large replies do not all reach the server.
 
 - Many clients leave whole unary replies unread: they hold the server's
   reply budget (128 MiB), and further unary reads are refused
