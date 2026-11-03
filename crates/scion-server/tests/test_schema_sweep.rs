@@ -56,6 +56,34 @@ fn register(client: &mut postgres::Client, schema: &str, age_secs: i64) {
         .unwrap();
 }
 
+/// Waits for a closed client's server backend to leave
+/// `pg_stat_activity`: the client's drop returns before the server
+/// tears the backend down, so a sweep that runs at once can still see
+/// the closed connection's name and keep the schema. Twenty-millisecond
+/// ticks, a two-second bound; the panic prints what the database still
+/// sees.
+fn wait_unnamed(client: &mut postgres::Client, schema: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        let named: i64 = client
+            .query_one(
+                "SELECT count(*) FROM pg_catalog.pg_stat_activity
+                 WHERE application_name = $1",
+                &[&schema],
+            )
+            .unwrap()
+            .get(0);
+        if named == 0 {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!(
+        "the closed client's backend left pg_stat_activity within two seconds; it still sees: {}",
+        snapshot(client, schema)
+    );
+}
+
 /// A finished test's schema drops at a later sweep: the backend closed,
 /// its directory is gone, and no connection names the schema. The
 /// registry row goes with it.
@@ -73,8 +101,9 @@ fn a_finished_tests_schema_drops_at_a_later_sweep() {
         );
         drop(store);
     }
-    dir.close().unwrap();
     let mut client = connect();
+    wait_unnamed(&mut client, &schema);
+    dir.close().unwrap();
     // The run's own first-open sweep may drop it first; whichever sweep
     // runs, the finished test's schema is gone after this one.
     let _ = Backend::sweep_stale_test_schemas().unwrap();
@@ -141,10 +170,12 @@ fn a_schema_a_connection_still_names_survives_the_sweep() {
         );
     }
     drop(holder);
+    wait_unnamed(&mut client, &schema);
     Backend::sweep_stale_test_schemas().unwrap();
     assert!(
         !schema_exists(&mut client, &schema),
-        "the schema drops once its last connection is gone"
+        "the schema drops once its last connection is gone: {}",
+        snapshot(&mut client, &schema)
     );
 }
 
