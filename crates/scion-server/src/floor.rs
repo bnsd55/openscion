@@ -126,6 +126,7 @@ pub fn test_set_paths(paths: Option<Paths>) {
 /// # Panics
 ///
 /// Panics if the paths override lock is poisoned.
+#[must_use]
 pub fn production_paths() -> Paths {
     #[cfg(any(test, feature = "test-hooks"))]
     {
