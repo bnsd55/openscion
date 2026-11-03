@@ -7,6 +7,10 @@
 #![allow(unreachable_pub)]
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Bound;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use scion_core::{BlobId, Changeset, ChangesetId, Entry, FileState, PathElem, RepoPath, TreeId};
 
@@ -567,6 +571,190 @@ pub fn diff(
     )
 }
 
+/// The rename maps of the paged diffs: one entry per diff its pages
+/// share. The first page that can hold renames runs the one bounded
+/// search and stores the map here; the pages after it answer from the
+/// entry, so a paged diff costs one search, whatever its page count,
+/// and every page gives an entry the same rename.
+///
+/// The key carries the roots the walk actually used, the path scope,
+/// and the rename-entry bound. A caller whose view roots the walk (a
+/// partial reader, if a diff ever serves one) walks different trees
+/// from a whole reader, so its key differs and it never answers from a
+/// map a whole reader filled: a map holds only the paths its own walk
+/// saw. The bound rides the key because it alone changes what the
+/// search finds.
+///
+/// The cache is bounded by bytes, not by diffs: one map of a
+/// [`MAX_RENAME_ENTRIES`] diff costs about 150 MB, so the cap holds a
+/// few of those or many small ones, and an entry that no page has
+/// asked for within a call deadline's length (`RENAME_CACHE_TTL`:
+/// a client that stops at page 3 never comes back) ages out. Past the
+/// cap the oldest entries go first. A miss is always correct: the
+/// search is deterministic, so an evicted entry only costs the next
+/// page its own search, and it answers the same renames.
+///
+/// The map's size is the `scion_diff_rename_cache_bytes` gauge.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct RenameKey {
+    /// The old side's root tree, as the walk used it: a view's derived
+    /// root for a caller with a filtered view, the real root otherwise.
+    old: TreeId,
+    new: TreeId,
+    /// The diff's path scope.
+    path: Option<RepoPath>,
+    /// The entries the rename search may walk: it alone changes what
+    /// the search finds.
+    rename_entries: usize,
+}
+
+/// A stored rename map: the map, whether renames may be missing, its
+/// cost in bytes, and the last time a page asked for it.
+struct CachedRenames {
+    map: HashMap<RepoPath, Rename>,
+    incomplete: bool,
+    bytes: usize,
+    asked: Instant,
+}
+
+/// How long a stored map serves pages: one call deadline's length. A
+/// paged read's pages all land inside one call's deadline; a map that
+/// no page has asked for in that long is a paged read that stopped.
+const RENAME_CACHE_TTL: Duration = Duration::from_secs(600);
+
+/// The bytes the stored maps may hold. One map of a
+/// [`MAX_RENAME_ENTRIES`] diff costs about 150 MB (its own comment
+/// carries the arithmetic), so 512 MiB holds a few of the largest maps
+/// a server may see, or many more of the small ones most diffs are.
+const RENAME_CACHE_MAX_BYTES: usize = 512 << 20;
+
+static RENAME_CACHE: std::sync::LazyLock<Mutex<HashMap<RenameKey, CachedRenames>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static RENAME_CACHE_BYTES: AtomicU64 = AtomicU64::new(0);
+
+static RENAME_CACHE_METRICS: OnceLock<std::sync::Arc<crate::metrics::Metrics>> = OnceLock::new();
+
+/// Gives the cache the server's metrics registry, once, before the
+/// server serves: the gauge of the bytes the stored maps hold.
+pub(crate) fn set_rename_cache_metrics(metrics: std::sync::Arc<crate::metrics::Metrics>) {
+    let _ = RENAME_CACHE_METRICS.set(metrics);
+}
+
+fn rename_cache_lock() -> MutexGuard<'static, HashMap<RenameKey, CachedRenames>> {
+    RENAME_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A map's bytes: its paths twice (the entry's path and the other
+/// half's), the similarity, and the table's share.
+fn map_bytes(map: &HashMap<RepoPath, Rename>) -> usize {
+    map.iter()
+        .map(|(path, rename)| 2 * (path.as_bytes().len() + rename.path.as_bytes().len()) + 8 + 48)
+        .sum()
+}
+
+/// The bytes the stored maps hold, as the cache's gauge reads it.
+fn cache_bytes(maps: &HashMap<RenameKey, CachedRenames>) -> usize {
+    maps.values().map(|cached| cached.bytes).sum()
+}
+
+/// Tells the gauge the bytes the stored maps hold, when the registry
+/// is set.
+fn publish_cache_bytes(maps: &HashMap<RenameKey, CachedRenames>) {
+    let bytes = cache_bytes(maps) as u64;
+    RENAME_CACHE_BYTES.store(bytes, Ordering::Relaxed);
+    if let Some(metrics) = RENAME_CACHE_METRICS.get() {
+        metrics.set_diff_rename_cache_bytes(bytes);
+    }
+}
+
+/// Drops the entries that no page asked for within the TTL, unless
+/// `all`, which drops everything (the tests' reset).
+fn evict_expired(maps: &mut HashMap<RenameKey, CachedRenames>, all: bool) {
+    if all {
+        maps.clear();
+        return;
+    }
+    let now = Instant::now();
+    maps.retain(|_, cached| now.duration_since(cached.asked) < RENAME_CACHE_TTL);
+}
+
+/// Drops the oldest entries until the stored maps fit the cap.
+fn trim_to_cap(maps: &mut HashMap<RenameKey, CachedRenames>) {
+    while cache_bytes(maps) > RENAME_CACHE_MAX_BYTES {
+        let Some(oldest) = maps
+            .iter()
+            .min_by_key(|(_, cached)| cached.asked)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        maps.remove(&oldest);
+    }
+}
+
+/// The map for `key`, refreshing its stamp, or `None` when the cache
+/// holds none: the page then runs its own search.
+fn cached_renames(key: &RenameKey) -> Option<(HashMap<RepoPath, Rename>, bool)> {
+    let mut maps = rename_cache_lock();
+    evict_expired(&mut maps, false);
+    let cached = maps.get_mut(key)?;
+    cached.asked = Instant::now();
+    let map = cached.map.clone();
+    let incomplete = cached.incomplete;
+    publish_cache_bytes(&maps);
+    Some((map, incomplete))
+}
+
+/// Stores a whole diff's map, keeping the cache under its cap.
+fn store_renames(key: RenameKey, map: HashMap<RepoPath, Rename>, incomplete: bool) {
+    let mut maps = rename_cache_lock();
+    evict_expired(&mut maps, false);
+    maps.insert(
+        key,
+        CachedRenames {
+            bytes: map_bytes(&map),
+            map,
+            incomplete,
+            asked: Instant::now(),
+        },
+    );
+    trim_to_cap(&mut maps);
+    publish_cache_bytes(&maps);
+}
+
+/// Forgets one diff's map: the diff ended within the page that asks,
+/// so no page will ask for its map again.
+fn forget_renames(key: &RenameKey) {
+    let maps = rename_cache_lock();
+    if maps.contains_key(key) {
+        drop(maps);
+        let mut maps = rename_cache_lock();
+        maps.remove(key);
+        publish_cache_bytes(&maps);
+    }
+}
+
+/// The tests' reset of the cache: every map goes, so a page after it
+/// runs its own search.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn test_clear_rename_cache() {
+    let mut maps = rename_cache_lock();
+    evict_expired(&mut maps, true);
+    publish_cache_bytes(&maps);
+}
+
+/// The tests read the cache's size: the entries and the bytes, as the
+/// gauge would print them.
+#[cfg(any(test, feature = "test-hooks"))]
+#[must_use]
+pub fn test_rename_cache_size() -> (usize, u64) {
+    let maps = rename_cache_lock();
+    (maps.len(), cache_bytes(&maps) as u64)
+}
+
 /// [`diff`], with the entries that the rename pass may walk bounded by
 /// `rename_entries`. Tests use a small bound to reach it cheaply.
 ///
@@ -588,6 +776,12 @@ pub fn diff_with(
         root_tree(store, repo, old, deadline)?,
         root_tree(store, repo, new, deadline)?,
     );
+    let key = RenameKey {
+        old: roots.0,
+        new: roots.1,
+        path: path.cloned(),
+        rename_entries,
+    };
     let mut entries = diff_walk(store, roots, path, after, MAX_DIFF_ENTRIES)?;
     // The walk finds one entry more than a page, to know whether more follow.
     let next_after = if entries.len() > MAX_DIFF_ENTRIES {
@@ -599,27 +793,53 @@ pub fn diff_with(
     let mut renames_incomplete = false;
     if entries.iter().any(|e| e.old.is_none() || e.new.is_none()) {
         // The renames are among the adds and deletes of the whole diff, not
-        // of one page, so a page gives each entry the same rename. Exact
-        // renames cost no file reads, so the walk has no bound but the
-        // memory of holding the entries: up to [`MAX_RENAME_ENTRIES`] of
-        // them, the bound of one call.
-        let all = if after.is_none() && next_after.is_none() {
-            entries.clone()
-        } else {
-            diff_walk(store, roots, path, None, rename_entries)?
-        };
-        if all.len() > rename_entries {
-            tracing::debug!(
-                entries = all.len(),
-                "a diff with too many entries to find renames"
-            );
-            renames_incomplete = true;
-        } else {
-            let (renames, incomplete) = renames(store, &all)?;
+        // of one page, so a page gives each entry the same rename. The
+        // paged diffs share one search through the rename cache, so a
+        // diff costs one search, whatever its page count.
+        //
+        // A diff that ends in this page (no `after`, no page after) is
+        // one call: its search serves it alone, and the cache holds
+        // nothing for it - nor the stale map of a paged read that ended
+        // before it, which this page forgets.
+        if let Some((renames, incomplete)) = cached_renames(&key) {
             renames_incomplete = incomplete;
             for entry in &mut entries {
                 entry.rename = renames.get(&entry.path).cloned();
             }
+        } else {
+            // The renames are among the adds and deletes of the whole
+            // diff, not of one page. Exact renames cost no file reads,
+            // so the walk has no bound but the memory of holding the
+            // entries: up to [`MAX_RENAME_ENTRIES`] of them, the bound
+            // of one call.
+            let all = if after.is_none() && next_after.is_none() {
+                entries.clone()
+            } else {
+                diff_walk(store, roots, path, None, rename_entries)?
+            };
+            if all.len() > rename_entries {
+                tracing::debug!(
+                    entries = all.len(),
+                    "a diff with too many entries to find renames"
+                );
+                renames_incomplete = true;
+            } else {
+                let (renames, incomplete) = renames(store, &all)?;
+                renames_incomplete = incomplete;
+                for entry in &mut entries {
+                    entry.rename = renames.get(&entry.path).cloned();
+                }
+                // A diff whose pages go on stores its map for the pages
+                // after this one. An incomplete map would promise
+                // renames it did not find; the pages rerun the search
+                // instead.
+                if next_after.is_some() && !incomplete {
+                    store_renames(key.clone(), renames.clone(), incomplete);
+                }
+            }
+        }
+        if next_after.is_none() {
+            forget_renames(&key);
         }
     }
     Ok(DiffPage {

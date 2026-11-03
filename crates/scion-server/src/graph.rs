@@ -337,7 +337,7 @@ pub(crate) const GRAPH_QUERY_MAX_VISITS: usize = 1_000_000;
 /// [`set_visits_bound_for_tests`]; production walks always answer to
 /// [`GRAPH_QUERY_MAX_VISITS`].
 fn visits_bound() -> usize {
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(test)]
     {
         let small = VISITS_BOUND.load(std::sync::atomic::Ordering::Relaxed);
         if small != 0 {
