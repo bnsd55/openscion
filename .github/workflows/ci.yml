@@ -1070,24 +1070,30 @@ jobs:
   # support-matrix test holds every `test*` job to a matrix row, and
   # these are budget proofs, not support cells.
   #
-  # The measured walls, one proof per run, from the 11-02 nightly: the
-  # land path-history proof 82 min, the path-log proof 64 min, the
-  # graph-queries proof 33 min, the view proof 10 min. Per case the
+  # The measured walls are the 11-02 nightly's shared walls, from the
+  # one job that ran all four proofs together, before each proof got
+  # its ten concurrent workers - upper bounds for each proof alone,
+  # and the timeouts below are set from them: the land path-history
+  # proof 82 min, the path-log proof 64 min, the graph-queries proof
+  # 33 min, the view proof 10 min. The first nightly after the split
+  # measures each proof alone. Per case the
   # proofs cost a constant (measured at 32 and 64 cases, one proof per
   # run on a ten-reader pool: the land proof 1.26 s/case, the path-log
   # proof 0.75, the graph queries 1.35, the view 0.22), so the walls
   # scale with the case count alone, and the 11-03 nightly's doubling
   # was the four proofs contending for one Postgres and one runner.
-  # Each job below names its own measured minutes and the trigger that
-  # splits it further.
+  # Each job below names its own minutes and the trigger that splits
+  # it further.
   proof-land-path-history:
     name: proof (land path history)
     if: github.event_name == 'schedule'
     runs-on: ubuntu-24.04
-    # SHORTCUT: 150 min fits the proof alone (82 min on the 11-02
-    # nightly, 71% of a 120-minute window); 150 brings the worst case
-    # back under 60%. Split the proof by cases when the job passes 70%
-    # of this timeout.
+    # SHORTCUT: 150 min fits the proof. The 11-02 nightly measured the
+    # four proofs' shared wall at 82 min for the land proof, an upper
+    # bound for the proof alone and 71% of a 120-minute window; 150
+    # brings that worst case back under 60%. The first nightly after
+    # the split measures the proof alone. Split the proof by cases
+    # when the job passes 70% of this timeout.
     timeout-minutes: 150
     services:
       # The suite's Postgres tests read this database: the backend they
@@ -1135,9 +1141,11 @@ jobs:
     name: proof (path log)
     if: github.event_name == 'schedule'
     runs-on: ubuntu-24.04
-    # SHORTCUT: 120 min fits the proof alone (64 min on the 11-02
-    # nightly, 53% of the window). Split the proof by cases when the
-    # job passes 70% of this timeout.
+    # SHORTCUT: 120 min fits the proof. The 11-02 nightly measured the
+    # four proofs' shared wall at 64 min for the path-log proof, an
+    # upper bound for the proof alone; the first nightly after the
+    # split measures it alone. Split the proof by cases when the job
+    # passes 70% of this timeout.
     timeout-minutes: 120
     services:
       postgres:
@@ -1182,10 +1190,13 @@ jobs:
     name: proof (graph queries)
     if: github.event_name == 'schedule'
     runs-on: ubuntu-24.04
-    # SHORTCUT: 120 min fits the proof alone (33 min on the 11-02
-    # nightly; the 11-03 nightly's 102 was the four proofs contending
-    # for one Postgres, not the proof's own cost). Split the proof by
-    # cases when the job passes 70% of this timeout.
+    # SHORTCUT: 120 min fits the proof. The 11-02 nightly measured the
+    # four proofs' shared wall at 33 min for the graph-queries proof,
+    # an upper bound for the proof alone; the 11-03 nightly's 102
+    # minutes was the four proofs contending for one Postgres and one
+    # runner, not the proof's own cost. The first nightly after the
+    # split measures it alone. Split the proof by cases when the job
+    # passes 70% of this timeout.
     timeout-minutes: 120
     services:
       postgres:
@@ -1235,10 +1246,11 @@ jobs:
     # stays here; alone it is the cheapest of the four). The skip names
     # are checked first, so a renamed proof fails this job instead of
     # slipping back into the remainder and running twice - or never.
-    # SHORTCUT: 120 min fits the suite minus the three proofs (the
-    # 11-02 nightly's 118 minutes was the land proof's wall; the
-    # remainder's own proofs measure 33 min and less). Split a proof by
-    # cases when its job passes 70% of its timeout.
+    # SHORTCUT: 120 min fits the suite minus the three proofs. The
+    # 11-02 nightly's 118 minutes was the one shared job's wall, set by
+    # the land proof; the remainder's own proofs measure 33 min and
+    # less on that wall. Split a proof by cases when its job passes
+    # 70% of its timeout.
     timeout-minutes: 120
     services:
       # The suite's Postgres tests read this database: the backend they
@@ -1273,7 +1285,10 @@ jobs:
             land::tests::a_check_in_the_path_history_matches_the_index_and_a_walk \
             history::tests::a_path_log_matches_a_walk_of_first_parents \
             graph::tests::queries_match_the_graph; do
-            echo "$list" | grep -qx "$name: test"
+            echo "$list" | grep -qx "$name: test" || {
+              echo "::error::the proof $name is gone or renamed; update the proof jobs and this list"
+              exit 1
+            }
           done
       - run: |
           df -h /
