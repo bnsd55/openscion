@@ -65,6 +65,20 @@ for count in $COUNTS; do
     cargo test --release -p open-scion-server --test bench_blob_count \
     -- --ignored --nocapture 2>&1 | tee "/tmp/blob-bench-run-$count.txt"
 
+  # The walk's shape on the store just built, in a fresh process: an
+  # fsck-only pass with the CPU split and a second walk of the same
+  # store. One pass, on the largest store, where the growth shows.
+  largest=""
+  for c in $COUNTS; do largest="$c"; done
+  if [ "$count" = "$largest" ]; then
+    echo "fsck-only pass on store-$count"
+    SCION_BENCH_FSCK_ONLY=1 \
+      SCION_BENCH_DIR="$dir" \
+      SCION_TEST_POSTGRES_URL="${SCION_TEST_POSTGRES_URL:?the test database URL}" \
+      cargo test --release -p open-scion-server --test bench_blob_count \
+      -- --ignored --nocapture 2>&1 | tee "/tmp/blob-bench-fsckonly-$count.txt" | grep '^BENCH' || true
+  fi
+
   # The facts of the run, lifted from the test's BENCH lines. grep and
   # awk only: the runner has the image's own tools.
   facts() {

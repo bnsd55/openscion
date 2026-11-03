@@ -71,6 +71,27 @@ fn fill(backend: &Backend, count: u64) {
     );
 }
 
+/// This process's own CPU time (utime) and its kernel time (stime), in
+/// seconds, from `/proc/self/stat`. The split of the walk's wall time
+/// says whether a growing cost is the process's work or the kernel's.
+#[cfg(target_os = "linux")]
+fn cpu_seconds() -> (f64, f64) {
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+    let body = stat.rsplit_once(')').unwrap().1;
+    let fields: Vec<&str> = body.split_whitespace().collect();
+    // After the comm field, the tokens start at `state` (field 3), so
+    // utime (field 14) is token 11 and stime (field 15) is token 12.
+    const TICKS: f64 = 100.0;
+    let utime: f64 = fields[11].parse().unwrap();
+    let stime: f64 = fields[12].parse().unwrap();
+    (utime / TICKS, stime / TICKS)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cpu_seconds() -> (f64, f64) {
+    (0.0, 0.0)
+}
+
 /// The bytes this process asked of the storage device since the last
 /// call, from `/proc/self/io`'s `read_bytes`. A page-cache hit never
 /// reaches this counter, so against the blob count it says whether the
@@ -102,8 +123,11 @@ fn storage_read_delta() -> u64 {
 #[test]
 #[ignore = "a measurement, not a proof: run it in release mode with SCION_BENCH_BLOB_COUNT set"]
 fn blob_count_costs() {
-    let count = count();
     let dir = bench_dir();
+    // An fsck-only pass reuses a store the script already built: the
+    // walk's shape questions are answered on the same bytes.
+    let fsck_only = std::env::var("SCION_BENCH_FSCK_ONLY").is_ok_and(|v| v == "1");
+    let count = if fsck_only { 0 } else { count() };
     scion_proto::runtime::auth::create_private_dir_all(&dir).unwrap();
 
     // The open the server does: the store's open, whose Postgres half
@@ -114,7 +138,9 @@ fn blob_count_costs() {
     main_line("open_seconds", format!("{:.3}", open.as_secs_f64()));
     main_line("blob_count", count);
 
-    fill(&backend, count);
+    if count > 0 {
+        fill(&backend, count);
+    }
     main_line("blob_bytes", count * 64);
 
     drop(backend);
@@ -127,12 +153,16 @@ fn blob_count_costs() {
     main_line("reopen_seconds", format!("{:.3}", open.as_secs_f64()));
 
     // fsck walks every blob file, then the metadata tables.
+    let (u0, s0) = cpu_seconds();
     let started = Instant::now();
     let report = fsck::run(&backend, fsck::BATCH, &mut |_| {}).expect("fsck runs");
     main_line(
         "fsck_seconds",
         format!("{:.3}", started.elapsed().as_secs_f64()),
     );
+    let (u1, s1) = cpu_seconds();
+    main_line("fsck_utime_s", format!("{:.3}", u1 - u0));
+    main_line("fsck_stime_s", format!("{:.3}", s1 - s0));
     main_line("fsck_problems", report.problems.len());
     // The bytes the walk asked of the storage device, not the page
     // cache: /proc/self/io's read_bytes counts them on Linux, and the
@@ -158,4 +188,20 @@ fn blob_count_costs() {
     main_line("gc_storage_read_bytes", storage_read_delta());
     main_line("gc_dry_run_files_young", report.files_young);
     main_line("gc_dry_run_files_removed", report.files_removed);
+
+    // The same walk again, in the same process: a second run that
+    // matches the first says the cost follows the store's size, not
+    // this process's history; a second run that differs says the
+    // process carried state in.
+    let (u0, s0) = cpu_seconds();
+    let started = Instant::now();
+    let report = fsck::run(&backend, fsck::BATCH, &mut |_| {}).expect("the second fsck runs");
+    main_line(
+        "fsck2_seconds",
+        format!("{:.3}", started.elapsed().as_secs_f64()),
+    );
+    let (u1, s1) = cpu_seconds();
+    main_line("fsck2_utime_s", format!("{:.3}", u1 - u0));
+    main_line("fsck2_stime_s", format!("{:.3}", s1 - s0));
+    main_line("fsck2_problems", report.problems.len());
 }
