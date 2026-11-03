@@ -3,10 +3,10 @@
 # blobs at the counts the caller names, and for each records the
 # server's open time, the fill time, `fsck`'s and `gc --dry-run`'s
 # times, the bytes on disk against the blob bytes, and the inodes used
-# and left (`df -i`). Runs in release mode, on the fixed runner the
-# workflow dispatches: a run of millions of blobs takes tens of
-# minutes. Local runs stay under one million blobs - the disk this
-# runs on locally is small.
+# and left (`df -i`, printed before and after each count). Runs in
+# release mode, on the fixed runner the workflow dispatches: a run of
+# millions of blobs takes tens of minutes. Local runs stay under one
+# million blobs - the disk this runs on locally is small.
 #
 # SCION_BENCH_COUNTS names the counts, space-separated (default
 # "100000"). SCION_BENCH_WORK names a scratch directory for the stores
@@ -15,7 +15,6 @@ set -euo pipefail
 
 COUNTS="${SCION_BENCH_COUNTS:-100000}"
 WORK="${SCION_BENCH_WORK:-$(mktemp -d /tmp/scion-blob-bench.XXXXXX)}"
-ON_RUNNER="${CI:-}"
 
 mkdir -p "$WORK"
 cd "$(dirname "$0")/.."
@@ -41,27 +40,24 @@ summary_line() {
 step "blob-count costs (issue #823)"
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   summary_line ""
-  summary_line "| blobs | open (s) | reopen (s) | fill (s) | fsck (s) | gc --dry-run (s) | blob bytes | bytes on disk | inodes used | inodes free |"
+  summary_line "| blobs | open (s) | reopen (s) | fill (s) | fsck (s) | gc --dry-run (s) | blob bytes | objects bytes | inodes used | inodes free |"
   summary_line "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
 fi
+
+# The inode table row of the filesystem that holds the store, as one
+# line of names the caller can read. Printed to stdout, so it reaches
+# the run's output whatever drives the script.
+inode_row() {
+  df -i "$WORK"
+}
 
 for count in $COUNTS; do
   dir="$WORK/store-$count"
   rm -rf "$dir"
   mkdir -p "$dir"
 
-  # The inodes before: a store's cost is the filesystem's inode table,
-  # which can run out before its bytes do.
-  df -i "$WORK" | tee "/tmp/blob-bench-df-before-$count.txt"
-  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-    {
-      echo ""
-      echo '```'
-      echo "df -i before $count:"
-      df -i "$WORK"
-      echo '```'
-    } >> "$GITHUB_STEP_SUMMARY"
-  fi
+  echo "count $count: the inodes before"
+  inode_row | tee "/tmp/blob-bench-df-before-$count.txt"
 
   SCION_BENCH_BLOB_COUNT="$count" \
     SCION_BENCH_DIR="$dir" \
@@ -69,8 +65,10 @@ for count in $COUNTS; do
     cargo test --release -p open-scion-server --test bench_blob_count \
     -- --ignored --nocapture 2>&1 | tee "/tmp/blob-bench-run-$count.txt"
 
+  # The facts of the run, lifted from the test's BENCH lines. grep and
+  # awk only: the runner has the image's own tools.
   facts() {
-    rg '^BENCH ' "/tmp/blob-bench-run-$count.txt" | awk -v key="$1" '$2 == key { print $3 }'
+    grep '^BENCH ' "/tmp/blob-bench-run-$count.txt" | awk -v key="$1" '$2 == key { print $3 }'
   }
   open_s="$(facts open_seconds)"
   reopen_s="$(facts reopen_seconds)"
@@ -81,33 +79,25 @@ for count in $COUNTS; do
 
   # The bytes on disk against the blob bytes: the per-file overhead of
   # one file per blob (block rounding, the directory tree, the tmp
-  # folders).
-  disk_bytes="$(du -sk "$dir" | cut -f1)"
-  disk_bytes=$((disk_bytes * 1024))
+  # folders), measured on the objects folder the blobs live in.
+  objects_bytes="$(du -sk "$dir/objects" | cut -f1)"
+  objects_bytes=$((objects_bytes * 1024))
+  echo "count $count: the objects folder holds $objects_bytes bytes for $blob_bytes blob bytes"
 
-  df -i "$WORK" | tee "/tmp/blob-bench-df-after-$count.txt"
-  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-    {
-      echo ""
-      echo '```'
-      echo "df -i after $count:"
-      df -i "$WORK"
-      echo '```'
-    } >> "$GITHUB_STEP_SUMMARY"
-  fi
+  echo "count $count: the inodes after"
+  inode_row | tee "/tmp/blob-bench-df-after-$count.txt"
+
   # inodes: the used and free counts of the filesystem that holds the
   # store, before and after this run's fill.
-  inodes_before="$(awk 'NR==2 { print $2 }' "/tmp/blob-bench-df-before-$count.txt")"
   inodes_used_before="$(awk 'NR==2 { print $3 }' "/tmp/blob-bench-df-before-$count.txt")"
-  inodes_free_before="$(awk 'NR==2 { print $4 }' "/tmp/blob-bench-df-before-$count.txt")"
   inodes_used_after="$(awk 'NR==2 { print $3 }' "/tmp/blob-bench-df-after-$count.txt")"
   inodes_free_after="$(awk 'NR==2 { print $4 }' "/tmp/blob-bench-df-after-$count.txt")"
 
-  summary_line "| $count | $open_s | $reopen_s | $fill_s | $fsck_s | $gc_s | $blob_bytes | $disk_bytes | $((inodes_used_after - inodes_used_before)) | $inodes_free_after |"
+  summary_line "| $count | $open_s | $reopen_s | $fill_s | $fsck_s | $gc_s | $blob_bytes | $objects_bytes | $((inodes_used_after - inodes_used_before)) | $inodes_free_after |"
 
   # The store is the measurement's subject; the next count starts
   # clean. On the runner the whole scratch directory goes with the job.
-  if [ -z "$ON_RUNNER" ]; then
+  if [ -z "${CI:-}" ]; then
     echo "keeping $dir for inspection; delete it when done"
   fi
 done
