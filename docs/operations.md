@@ -677,9 +677,11 @@ it):
 Every flag that takes a secret's value also has a file form
 (`--x-file`) and an environment form. The file form is the deployment
 form: the owner alone may read it, and a symlink is refused. The
-environment value is visible to the same user and to root. The argv
-form is deprecated: it warns now and goes away in a later release, and
-its value is readable by every local account through `ps`.
+environment value is visible to the same user and to root. No binary
+takes a token on its command line: the token argv forms are refused at
+start (`ps` makes the command line public to every local account).
+The database URL's argv form is the last one left, and it is
+deprecated: it warns now and is removed in v0.2.0.
 
 | Variable | Flag | Read by | Notes |
 | --- | --- | --- | --- |
