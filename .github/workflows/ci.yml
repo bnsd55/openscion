@@ -1082,23 +1082,40 @@ jobs:
 
   # The nightly's proof that the whole proptest budget (2000 cases)
   # passes on Postgres: the per-job counts above keep the per-push jobs
-  # under their caps, and this job carries the full run once a night in
-  # its own longer window. The job id does not start with `test`: the
+  # under their caps, and the nightly carries the full run once a night
+  # in four jobs, each with its own Postgres service. One job proved
+  # too slow: the four slowest proofs share one runner and one
+  # database, and together they roughly double every wall (the 11-03
+  # nightly cancelled at its 2 h limit; alone, the same proofs measure
+  # half that). Each job id does not start with `test`: the
   # support-matrix test holds every `test*` job to a matrix row, and
-  # this one is a budget proof, not a support cell.
-  proptest-full:
-    name: test (proptest full)
+  # these are budget proofs, not support cells.
+  #
+  # The measured walls are the 11-02 nightly's shared walls, from the
+  # one job that ran all four proofs together, before each proof got
+  # its ten concurrent workers - upper bounds for each proof alone,
+  # and the timeouts below are set from them: the land path-history
+  # proof 82 min, the path-log proof 64 min, the graph-queries proof
+  # 33 min, the view proof 10 min. The first nightly after the split
+  # measures each proof alone. Per case the
+  # proofs cost a constant (measured at 32 and 64 cases, one proof per
+  # run on a ten-reader pool: the land proof 1.26 s/case, the path-log
+  # proof 0.75, the graph queries 1.35, the view 0.22), so the walls
+  # scale with the case count alone, and the 11-03 nightly's doubling
+  # was the four proofs contending for one Postgres and one runner.
+  # Each job below names its own minutes and the trigger that splits
+  # it further.
+  proof-land-path-history:
+    name: proof (land path history)
     if: github.event_name == 'schedule'
     runs-on: ubuntu-24.04
-    # SHORTCUT: one job. Split it in two, each with its own Postgres
-    # service and the same 2000 cases, when it passes 80 minutes. The
-    # two slowest proofs check their independent tips and pairs
-    # concurrently on ten fixed workers (`test_support::PROOF_READERS`):
-    # the 11-02 push runs measure the land proof 622.6 -> 388.6 s and the
-    # path-log proof 441.2 -> 213.5 s at 128 cases (runs 41412049300 and
-    # 41456136189), which projects this job at about 82 minutes; the next
-    # nightly measures it.
-    timeout-minutes: 120
+    # SHORTCUT: 150 min fits the proof. The 11-02 nightly measured the
+    # four proofs' shared wall at 82 min for the land proof, an upper
+    # bound for the proof alone and 71% of a 120-minute window; 150
+    # brings that worst case back under 60%. The first nightly after
+    # the split measures the proof alone. Split the proof by cases
+    # when the job passes 70% of this timeout.
+    timeout-minutes: 150
     services:
       # The suite's Postgres tests read this database: the backend they
       # choose is Postgres, and the URL names the database this service
@@ -1133,7 +1150,179 @@ jobs:
         run: scripts/ci-ensure-setfacl.sh
       - run: |
           df -h /
-          cargo test --workspace
+          cargo test -p open-scion-server --lib -- --exact \
+            land::tests::a_check_in_the_path_history_matches_the_index_and_a_walk
+          df -h /
+        env:
+          PROPTEST_CASES: "2000"
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+      - name: the work tree is still clean after the tests
+        run: |
+          dirty=$(git status --porcelain --untracked-files=all)
+          if [ -n "$dirty" ]; then
+            git diff --exit-code || true
+            echo "::error::the test suite left the work tree dirty: $dirty"
+            exit 1
+          fi
+  proof-path-log:
+    name: proof (path log)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    # SHORTCUT: 120 min fits the proof. The 11-02 nightly measured the
+    # four proofs' shared wall at 64 min for the path-log proof, an
+    # upper bound for the proof alone; the first nightly after the
+    # split measures it alone. Split the proof by cases when the job
+    # passes 70% of this timeout.
+    timeout-minutes: 120
+    services:
+      postgres:
+        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        env:
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: scion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: protoc
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-workspace-crates: true
+      - run: |
+          df -h /
+          cargo test -p open-scion-server --lib -- --exact \
+            history::tests::a_path_log_matches_a_walk_of_first_parents
+          df -h /
+        env:
+          PROPTEST_CASES: "2000"
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+      - name: the work tree is still clean after the tests
+        run: |
+          dirty=$(git status --porcelain --untracked-files=all)
+          if [ -n "$dirty" ]; then
+            git diff --exit-code || true
+            echo "::error::the test suite left the work tree dirty: $dirty"
+            exit 1
+          fi
+  proof-graph-queries:
+    name: proof (graph queries)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    # SHORTCUT: 120 min fits the proof. The 11-02 nightly measured the
+    # four proofs' shared wall at 33 min for the graph-queries proof,
+    # an upper bound for the proof alone; the 11-03 nightly's 102
+    # minutes was the four proofs contending for one Postgres and one
+    # runner, not the proof's own cost. The first nightly after the
+    # split measures it alone. Split the proof by cases when the job
+    # passes 70% of this timeout.
+    timeout-minutes: 120
+    services:
+      postgres:
+        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        env:
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: scion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: protoc
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-workspace-crates: true
+      - run: |
+          df -h /
+          cargo test -p open-scion-server --lib -- --exact \
+            graph::tests::queries_match_the_graph
+          df -h /
+        env:
+          PROPTEST_CASES: "2000"
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+      - name: the work tree is still clean after the tests
+        run: |
+          dirty=$(git status --porcelain --untracked-files=all)
+          if [ -n "$dirty" ]; then
+            git diff --exit-code || true
+            echo "::error::the test suite left the work tree dirty: $dirty"
+            exit 1
+          fi
+  proptest-full:
+    name: test (proptest full)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    # The remainder of the budget proof: the whole suite at the full
+    # 2000 cases, with the three proofs above skipped (the view proof
+    # stays here; alone it is the cheapest of the four). The skip names
+    # are checked first, so a renamed proof fails this job instead of
+    # slipping back into the remainder and running twice - or never.
+    # SHORTCUT: 120 min fits the suite minus the three proofs. The
+    # 11-02 nightly's 118 minutes was the one shared job's wall, set by
+    # the land proof; the remainder's own proofs measure 33 min and
+    # less on that wall. Split a proof by cases when its job passes
+    # 70% of its timeout.
+    timeout-minutes: 120
+    services:
+      # The suite's Postgres tests read this database: the backend they
+      # choose is Postgres, and the URL names the database this service
+      # runs.
+      postgres:
+        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        env:
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: scion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: protoc
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-workspace-crates: true
+      - name: the three skipped proof names still exist
+        run: |
+          list=$(cargo test -p open-scion-server --lib -- --list)
+          for name in \
+            land::tests::a_check_in_the_path_history_matches_the_index_and_a_walk \
+            history::tests::a_path_log_matches_a_walk_of_first_parents \
+            graph::tests::queries_match_the_graph; do
+            echo "$list" | grep -qx "$name: test" || {
+              echo "::error::the proof $name is gone or renamed; update the proof jobs and this list"
+              exit 1
+            }
+          done
+      - run: |
+          df -h /
+          cargo test --workspace -- --exact \
+            --skip land::tests::a_check_in_the_path_history_matches_the_index_and_a_walk \
+            --skip history::tests::a_path_log_matches_a_walk_of_first_parents \
+            --skip graph::tests::queries_match_the_graph
           df -h /
         env:
           PROPTEST_CASES: "2000"
