@@ -6,6 +6,8 @@
 //! disagrees with a stored row still refuses, whether the read that
 //! checks it answers from the transaction's memory or the database.
 
+use std::sync::{Mutex, MutexGuard};
+
 use scion_core::{BlobId, Changeset, FileState, IdentityTime, RepoPath};
 
 use scion_server::Backend;
@@ -13,6 +15,18 @@ use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use scion_server::test_support::tree;
 
 const REPO: &str = "write-flush";
+
+/// The statement log these tests read is one process-wide seam: the
+/// tests run in parallel, and a counting window that only this file
+/// held would catch another test's statements and count the wrong
+/// shapes. Every test in the file holds the lock for its whole body.
+static LOG_LOCK: Mutex<()> = Mutex::new(());
+
+fn log_guard() -> MutexGuard<'static, ()> {
+    LOG_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 fn changeset(message: &str, parent: Option<scion_core::ChangesetId>) -> Changeset {
     Changeset::new(
@@ -39,6 +53,7 @@ fn changeset(message: &str, parent: Option<scion_core::ChangesetId>) -> Changese
 
 #[test]
 fn the_old_rows_a_write_path_deletes_are_gone_after_its_commit() {
+    let _log = log_guard();
     let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     let repo = store.write(|c| c.create_repo(REPO)).unwrap();
@@ -75,6 +90,7 @@ fn the_old_rows_a_write_path_deletes_are_gone_after_its_commit() {
 
 #[test]
 fn a_write_that_disagrees_with_a_stored_row_still_refuses() {
+    let _log = log_guard();
     let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     let repo = store.write(|c| c.create_repo(REPO)).unwrap();
@@ -100,6 +116,7 @@ fn a_write_that_disagrees_with_a_stored_row_still_refuses() {
 
 #[test]
 fn the_write_paths_derived_reads_ride_one_preload() {
+    let _log = log_guard();
     let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     let repo = store.write(|c| c.create_repo(REPO)).unwrap();
