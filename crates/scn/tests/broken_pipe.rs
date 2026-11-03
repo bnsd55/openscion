@@ -61,11 +61,11 @@ fn start(store: &Backend) -> ChangesetId {
 
 #[test]
 fn a_closed_stdout_ends_the_command_quietly() {
-    let data = tempfile::tempdir().unwrap();
+    let data = common::private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
     let _tip = start(&store);
     let tiers = Tiers::start(data, store.clone());
-    let home = tempfile::tempdir().unwrap();
+    let home = common::private_tempdir();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_scn"))
         .args([

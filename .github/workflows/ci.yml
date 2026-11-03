@@ -39,6 +39,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # The test cells' builds keep only line tables in their debug info:
+  # backtraces keep file and line at a fraction of the size, so the
+  # work disk holds the workspace's whole build.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
   # The tier gate. It reads the pull request's own file list from the
@@ -310,8 +315,12 @@ jobs:
           for f in "${server_files[@]}"; do server_args+=(--test "$(basename "$f" .rs)"); done
           cli_args=()
           for f in "${cli_files[@]}"; do cli_args+=(--test "$(basename "$f" .rs)"); done
+          df -h /
           cargo test -p open-scion-server "${server_args[@]}"
+          df -h /
+          df -h /
           cargo test -p open-scion "${cli_args[@]}"
+          df -h /
         env:
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
 
@@ -412,7 +421,10 @@ jobs:
           shared-key: test-postgres
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
-      - run: cargo test --workspace
+      - run: |
+          df -h /
+          cargo test --workspace
+          df -h /
         env:
           # The fast tier: a pull request runs 64 cases, main, the
           # nightly and a dispatch 128; the nightly's own job below
@@ -448,7 +460,10 @@ jobs:
             exit 1
           fi
       - name: a real disk full (tmpfs)
-        run: cargo test -p open-scion-server --test disk_full
+        run: |
+          df -h /
+          cargo test -p open-scion-server --test disk_full
+          df -h /
         env:
           SCION_DISK_REQUIRE: "1"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
@@ -458,7 +473,9 @@ jobs:
           git clone https://github.com/josefbacik/log-writes "$RUNNER_TEMP/dlw"
           git -C "$RUNNER_TEMP/dlw" checkout 7b70d8a6863c5de30933d42a7672d35d01d2dc6c
           gcc -O2 -o "$RUNNER_TEMP/replay-log" "$RUNNER_TEMP/dlw/replay-log.c" "$RUNNER_TEMP/dlw/log-writes.c"
+          df -h /
           cargo test -p open-scion-server --test dm_log_writes
+          df -h /
         env:
           SCION_DMW_REQUIRE: "1"
           SCION_DMW_REPLAY: ${{ runner.temp }}/replay-log
@@ -510,7 +527,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
       - name: the streamed restore stays under its ceiling
-        run: cargo test --release -p open-scion-server --test archive_restore_stream a_big_restore -- --nocapture
+        run: |
+          df -h /
+          cargo test --release -p open-scion-server --test archive_restore_stream a_big_restore -- --nocapture
+          df -h /
         env:
           SCION_TEST_RESTORE_BIG: "1"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
@@ -522,6 +542,7 @@ jobs:
         # and the peak passed the bound. Any other failure shows the
         # output and fails the step.
         run: |
+          df -h /
           if out=$(cargo test --release -p open-scion-server --test archive_restore_stream a_big_restore -- --nocapture 2>&1); then
             echo "$out"
             echo "::error::the whole-file mutation passed the ceiling: the guard is vacuous"
@@ -534,6 +555,7 @@ jobs:
           fi
           printf '%s\n' "$out" | grep -oE "peak RSS \([0-9]+ kB\) passed the ceiling" | head -1
           echo "the whole-file mutation blew the ceiling, as it must"
+          df -h /
         env:
           SCION_TEST_RESTORE_BIG: "1"
           SCION_TEST_RESTORE_MUTATION: "whole_file"
@@ -606,7 +628,10 @@ jobs:
           shared-key: test-postgres
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
-      - run: cargo test --workspace
+      - run: |
+          df -h /
+          cargo test --workspace
+          df -h /
         env:
           # The Postgres majors prove version parity, not more cases;
           # the main job on 17 already runs 2000.
@@ -623,7 +648,10 @@ jobs:
       # data directory cannot cut the metadata. The SQLSTATE 53100 arm of
       # the disk-full mapping is a unit test of the run above.
       - name: a real disk full (tmpfs), on Postgres
-        run: cargo test -p open-scion-server --test disk_full
+        run: |
+          df -h /
+          cargo test -p open-scion-server --test disk_full
+          df -h /
         env:
           SCION_DISK_REQUIRE: "1"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
@@ -633,7 +661,9 @@ jobs:
           git clone https://github.com/josefbacik/log-writes "$RUNNER_TEMP/dlw"
           git -C "$RUNNER_TEMP/dlw" checkout 7b70d8a6863c5de30933d42a7672d35d01d2dc6c
           gcc -O2 -o "$RUNNER_TEMP/replay-log" "$RUNNER_TEMP/dlw/replay-log.c" "$RUNNER_TEMP/dlw/log-writes.c"
+          df -h /
           cargo test -p open-scion-server --test dm_log_writes
+          df -h /
         env:
           SCION_DMW_REQUIRE: "1"
           SCION_DMW_REPLAY: ${{ runner.temp }}/replay-log
@@ -673,9 +703,78 @@ jobs:
             exit 1
           fi
           container=$names
+          df -h /
           SCION_TEST_PG_CONTAINER="$container" \
           SCION_TEST_POSTGRES_URL=postgres://postgres:scion@localhost:5432/scion \
           cargo test -p open-scion-server --test backend_refusals -- --ignored
+          df -h /
+
+  # The suite under umask 002 (issue #699): a run whose files land
+  # group-writable must still pass, because an operator's umask is not
+  # the suite's to choose. The temp-directory helpers set 0700
+  # explicitly, and the product's parent-directory refusals stay
+  # refusals; this job proves both on the schedule. It owns its
+  # Postgres service (one runner, one database), so no other run's
+  # connections compete with it.
+  # SHORTCUT: the job runs the suite with the runner's default test
+  # parallelism. If a nightly shows Postgres E53300 ("too many
+  # clients"), cap this job's --test-threads first, and raise the
+  # service's max_connections only if a capped run still exhausts.
+  test-umask-002:
+    name: test (umask 002)
+    needs: tier
+    if: ${{ !cancelled() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-24.04
+    # SHORTCUT: 45 min fits the Postgres suite (17-30 min on main, Oct
+    # 2026) with margin; its cost is the same slow tail of
+    # whole-model oracles the main job's 50 min budget names. Bring it
+    # back toward 30 when that tail shrinks.
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        env:
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: scion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: protoc
+      # Same target (Linux x64, the same features) as the test job, so
+      # one shared entry serves both.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: test-postgres
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-workspace-crates: true
+      - name: the whole suite under umask 002
+        run: |
+          umask 002
+          umask  # one line of proof in the log: the run's mask is 0002
+          cargo test --workspace
+        env:
+          PROPTEST_CASES: "128"
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+          # The backup test dumps the live metadata with this job's own
+          # Postgres, so its tools match the server.
+          SCION_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
+      - name: the work tree is still clean after the tests
+        run: |
+          dirty=$(git status --porcelain --untracked-files=all)
+          if [ -n "$dirty" ]; then
+            git diff --exit-code || true
+            echo "::error::the test suite left the work tree dirty: $dirty"
+            exit 1
+          fi
 
   test-writable:
     name: test (the writable mount feature)
@@ -715,7 +814,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # The feature build's tests: the write-side unit tests of the VFS
       # and the from-mount suite, which the default build compiles out.
-      - run: cargo test -p open-scion --features unstable-writable-mount
+      - run: |
+          df -h /
+          cargo test -p open-scion --features unstable-writable-mount
+          df -h /
         env:
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
 
@@ -764,7 +866,10 @@ jobs:
       # everything, and no second macOS runner to book. --all-targets
       # covers the lib, the bins and the test code in one pass.
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: |
+          df -h /
+          cargo test --workspace
+          df -h /
         env:
           # A pull request runs 64 cases, main and the nightly 128;
           # the nightly's own job proves the full 2000.
@@ -847,7 +952,10 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo test -p open-scion-server
+      - run: |
+          df -h /
+          cargo test -p open-scion-server
+          df -h /
         env:
           PROPTEST_CASES: "256"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
@@ -855,7 +963,10 @@ jobs:
           # Postgres, so its tools match the server.
           SCION_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
       - name: a real disk full (tmpfs)
-        run: cargo test -p open-scion-server --test disk_full
+        run: |
+          df -h /
+          cargo test -p open-scion-server --test disk_full
+          df -h /
         env:
           SCION_DISK_REQUIRE: "1"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
@@ -891,7 +1002,10 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo test --workspace --exclude open-scion-server
+      - run: |
+          df -h /
+          cargo test --workspace --exclude open-scion-server
+          df -h /
         env:
           PROPTEST_CASES: "256"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
@@ -942,7 +1056,10 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
-      - run: cargo test --workspace
+      - run: |
+          df -h /
+          cargo test --workspace
+          df -h /
         env:
           PROPTEST_CASES: "2000"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
@@ -1099,7 +1216,10 @@ jobs:
         # One server of the database at a time: the binary's Postgres open
         # takes the database's one-server lock, so the suite runs serially
         # here.
-        run: cargo test -p open-scion-server --test power -- --test-threads=1
+        run: |
+          df -h /
+          cargo test -p open-scion-server --test power -- --test-threads=1
+          df -h /
       # The suite writes the LazyFS ops trace to
       # $SCION_LAZYFS_TRACE_DIR/lazyfs-r<N>.log; on a failure the trace
       # says what the cut actually persisted.

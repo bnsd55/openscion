@@ -273,7 +273,7 @@ fn damage(path: &Path) -> Vec<u8> {
 /// size (`common::files`), and a repo `other` that does not have `r`'s
 /// changesets.
 fn fixture() -> (Tiers, ChangesetId) {
-    let data = tempfile::tempdir().unwrap();
+    let data = common::private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
     let first = land(&store, &changeset(None, &common::files(&store).0));
     let other = FileState::Regular {
@@ -474,10 +474,12 @@ fn a_damaged_blob_on_the_server_never_passes_a_tier() {
             let call = objects(&refs, zstd, &ticket);
             // The server unpacks the blob for a RAW client and finds the
             // damage. It does not check what it sends ZSTD: the client does.
+            // The damaged blob is data loss from the server too: the tier
+            // fails the one object and asks again.
             let server = if zstd {
                 End::Refused
             } else {
-                End::Stream(Code::Internal)
+                End::Stream(Code::DataLoss)
             };
             let tier = End::Stream(Code::DataLoss);
             for (name, url, end) in [
