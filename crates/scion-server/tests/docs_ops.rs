@@ -11,11 +11,13 @@ use std::path::Path;
 use std::process::Command;
 
 /// The scion-server subcommands the guide's commands may use.
-const SUBCOMMANDS: [&str; 7] = [
+const SUBCOMMANDS: [&str; 9] = [
     "serve",
     "hash-token",
     "ticket-key",
     "import",
+    "create-repo",
+    "create-ref",
     "fsck",
     "gc",
     "derive",

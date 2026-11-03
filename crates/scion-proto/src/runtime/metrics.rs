@@ -939,6 +939,45 @@ type BoxedBody = std::pin::Pin<
     >,
 >;
 
+/// The request body the layer hands in: it counts the bytes of the data
+/// frames into a shared counter, so a request that streams without a
+/// content-length still reports its real size. Whoever reads the request
+/// body (its handler, the transport) makes the counter move.
+struct CountingFrames {
+    inner: BoxedBody,
+    counted_in: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl http_body::Body for CountingFrames {
+    type Data = bytes::Bytes;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        match this.inner.as_mut().poll_frame(cx) {
+            std::task::Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    this.counted_in
+                        .fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                }
+                std::task::Poll::Ready(Some(Ok(frame)))
+            }
+            other => other,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
 /// The reply body the layer hands back: it counts the bytes of the data
 /// frames, and on the trailers frame it counts the whole call, so a
 /// streaming reply's code and bytes arrive when its last frame does. A body
@@ -948,7 +987,10 @@ struct CountingBody {
     metrics: std::sync::Arc<Metrics>,
     rpc: Rpc,
     started: Instant,
+    /// The request's content-length, when the client sent one.
     bytes_in: u64,
+    /// The bytes its request body's frames carried.
+    bytes_in_frames: std::sync::Arc<std::sync::atomic::AtomicU64>,
     bytes_out: u64,
     /// Set once the call is counted, by the trailers or by the drop.
     counted: bool,
@@ -980,13 +1022,9 @@ impl http_body::Body for CountingBody {
                         .and_then(|v| v.to_str().ok())
                         .and_then(|v| v.parse::<u32>().ok())
                         .unwrap_or(0);
-                    this.metrics.request(
-                        this.rpc,
-                        code,
-                        this.started,
-                        this.bytes_in,
-                        this.bytes_out,
-                    );
+                    let (bytes_in, bytes_out) = this.moved_bytes();
+                    this.metrics
+                        .request(this.rpc, code, this.started, bytes_in, bytes_out);
                 }
                 std::task::Poll::Ready(Some(Ok(frame)))
             }
@@ -1003,14 +1041,29 @@ impl http_body::Body for CountingBody {
     }
 }
 
+impl CountingBody {
+    /// The bytes the call moved: the request's own frames when its body
+    /// flowed (the truth, whether or not the client sent a length), or
+    /// the client's content-length when it did not flow and the client
+    /// named one.
+    fn moved_bytes(&self) -> (u64, u64) {
+        let frames = self
+            .bytes_in_frames
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let bytes_in = if frames > 0 { frames } else { self.bytes_in };
+        (bytes_in, self.bytes_out)
+    }
+}
+
 impl Drop for CountingBody {
     fn drop(&mut self) {
         // The guard's drop gives the call back to the in-flight gauge,
         // whether the reply ended or the transport dropped the body.
         drop(self.guard.take());
         if !self.counted {
+            let (bytes_in, bytes_out) = self.moved_bytes();
             self.metrics
-                .cancelled(self.rpc, self.started, self.bytes_in, self.bytes_out);
+                .cancelled(self.rpc, self.started, bytes_in, bytes_out);
         }
     }
 }
@@ -1116,14 +1169,24 @@ where
             metrics: std::sync::Arc::clone(&metrics),
         };
         metrics.call_started();
-        // The bytes of a request: its content-length, or what its body
-        // hints, or nothing (a streaming request that sends no length).
+        // The bytes of a request: the frames of its body as they flow (a
+        // gRPC client sends no content-length), or the client's
+        // content-length when its body never flows and the client named
+        // one. The counter is shared with the reply's `CountingBody`,
+        // which reports when its own trailers arrive.
         let bytes_in = request
             .headers()
             .get(http::header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
+        let bytes_in_frames = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let request = request.map(|body| {
+            tonic::body::Body::new(CountingFrames {
+                inner: boxed(body),
+                counted_in: std::sync::Arc::clone(&bytes_in_frames),
+            })
+        });
         let future = self.inner.call(request);
         Box::pin(async move {
             // Every reply body goes through a `CountingBody` or, for a path
@@ -1144,6 +1207,8 @@ where
                 None => None,
             };
             if let (Some(rpc), Some(code)) = (rpc, code) {
+                let frames = bytes_in_frames.load(std::sync::atomic::Ordering::Relaxed);
+                let bytes_in = if frames > 0 { frames } else { bytes_in };
                 metrics.request(rpc, code, started, bytes_in, 0);
                 counted = true;
             }
@@ -1155,6 +1220,7 @@ where
                         rpc,
                         started,
                         bytes_in,
+                        bytes_in_frames,
                         bytes_out: 0,
                         counted,
                         guard: Some(guard),
@@ -1214,6 +1280,7 @@ mod tests {
             rpc,
             started: Instant::now(),
             bytes_in: 7,
+            bytes_in_frames: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             bytes_out: 0,
             counted: false,
             guard: None,
@@ -1257,6 +1324,7 @@ mod tests {
             rpc,
             started: Instant::now(),
             bytes_in: 0,
+            bytes_in_frames: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             bytes_out: 0,
             counted: false,
             guard: None,
@@ -1410,5 +1478,82 @@ mod tests {
         let text = empty.render();
         assert!(text.contains("scion_pg_tx_age_seconds 0"), "{text}");
         assert!(!text.contains("scion_pg_pool_wait_seconds_count"), "{text}");
+    }
+
+    /// A gRPC client streams its request without a content-length: the
+    /// counted request bytes are the frames its body carried, so the
+    /// metric is not pinned at zero.
+    #[tokio::test]
+    async fn a_streamed_request_counts_the_bytes_its_body_carried() {
+        let metrics = std::sync::Arc::new(Metrics::default());
+        let service = MetricsLayer::new(metrics.clone()).layer(tower::service_fn(
+            |req: http::Request<tonic::body::Body>| async move {
+                use http_body::Body as _;
+                // The handler reads the whole request body: the frames
+                // flow, and the counter they fill is the truth.
+                let (_, mut body) = req.into_parts();
+                loop {
+                    match std::pin::pin!(&mut body)
+                        .poll_frame(&mut std::task::Context::from_waker(Waker::noop()))
+                    {
+                        Poll::Ready(Some(Ok(_))) => {}
+                        Poll::Ready(None) => break,
+                        other => panic!("unexpected frame: {other:?}"),
+                    }
+                }
+                let mut reply = http::Response::new(tonic::body::Body::empty());
+                reply
+                    .headers_mut()
+                    .insert("grpc-status", "0".parse().unwrap());
+                Ok::<_, std::convert::Infallible>(reply.map(tonic::body::Body::new))
+            },
+        ));
+        let body = StreamBody::new(tokio_stream::iter([
+            Ok::<_, std::convert::Infallible>(http_body::Frame::data(bytes::Bytes::from_static(
+                b"ab",
+            ))),
+            Ok(http_body::Frame::data(bytes::Bytes::from_static(b"cd"))),
+        ]));
+        let request = http::Request::builder()
+            .method(http::Method::POST)
+            .uri("http://localhost/scion.v1.Scion/Blame")
+            .body(tonic::body::Body::new(body))
+            .unwrap();
+        let mut service = service;
+        tower::Service::call(&mut service, request).await.unwrap();
+        let text = metrics.render();
+        assert!(
+            text.contains("scion_rpc_bytes_total{rpc=\"Scion/Blame\",direction=\"in\"} 4\n"),
+            "{text}"
+        );
+    }
+
+    /// A client that named a content-length and whose body nobody reads
+    /// (a refusal) still counts what the client declared.
+    #[tokio::test]
+    async fn an_unread_request_counts_the_length_the_client_sent() {
+        let metrics = std::sync::Arc::new(Metrics::default());
+        let service = MetricsLayer::new(metrics.clone()).layer(tower::service_fn(
+            |_req: http::Request<tonic::body::Body>| async move {
+                let mut reply = http::Response::new(tonic::body::Body::empty());
+                reply
+                    .headers_mut()
+                    .insert("grpc-status", "7".parse().unwrap());
+                Ok::<_, std::convert::Infallible>(reply.map(tonic::body::Body::new))
+            },
+        ));
+        let request = http::Request::builder()
+            .method(http::Method::POST)
+            .uri("http://localhost/scion.v1.Scion/Blame")
+            .header(http::header::CONTENT_LENGTH, "9")
+            .body(tonic::body::Body::empty())
+            .unwrap();
+        let mut service = service;
+        tower::Service::call(&mut service, request).await.unwrap();
+        let text = metrics.render();
+        assert!(
+            text.contains("scion_rpc_bytes_total{rpc=\"Scion/Blame\",direction=\"in\"} 9\n"),
+            "{text}"
+        );
     }
 }
