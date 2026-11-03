@@ -618,11 +618,15 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// The second read's hold: the semaphore, the second's key, the three
+    /// shares (second, third, budget), so the read can wait for the exact
+    /// accounting.
+    type SecondHold = (Arc<Semaphore>, Key, usize, usize, usize);
+
     /// The second read's hold, for the cut-off test: the read waits until
     /// the third's share is taken, so the read-ahead is forced, not hoped
     /// for. A `Read` is a plain fn pointer, so the hold rides a static.
-    static SECOND_HOLD: Mutex<Option<(Arc<Semaphore>, Key, usize, usize, usize)>> =
-        Mutex::new(None);
+    static SECOND_HOLD: Mutex<Option<SecondHold>> = Mutex::new(None);
 
     /// The cut-off test's read: the second's key spins until the free
     /// budget names all three shares (the first is back, the second and
@@ -650,8 +654,6 @@ mod tests {
     use scion_proto::runtime::object::Assembler;
     use tokio_stream::StreamExt as _;
     use tonic::Code;
-
-    use super::*;
 
     /// Waits until `done` holds, at most 10 s.
     async fn until(done: impl Fn() -> bool) {
