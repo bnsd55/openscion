@@ -3539,9 +3539,9 @@ mod tests {
         f.land(f.commit(f.main().target, &[put("d", "1")]), "next");
         assert_eq!(stored(&f.get(recent.land_id).unwrap()), stored(&recent));
         // The pending land stays, whatever its age: the quota counts it
-        // until its caller finishes or the sweep rejects it.
-        let pending = f.get(pending.land_id).unwrap();
-        assert_eq!(pending.state, Pending);
+        // until its caller finishes or the sweep rejects it. Its row
+        // answers what the record answered: nothing aged into it.
+        assert_eq!(stored(&f.get(pending.land_id).unwrap()), stored(&pending));
     }
 
     #[test]

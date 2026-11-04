@@ -1764,15 +1764,6 @@ pub fn test_history_pending_peak_bytes() -> usize {
 }
 
 impl<'a> PgTx<'a> {
-    /// Writes the history nodes the transaction inserted while batching,
-    /// after the derived rows and before the `git_import` rows: one
-    /// statement per 1,000 rows. The nodes are content-addressed, so
-    /// their order does not matter; the ids are sorted for a
-    /// deterministic statement.
-    ///
-    /// # Errors
-    ///
-    /// Database errors.
     /// The pending-lands quota counts new pending rows. A retry of an
     /// existing key resumes its land and adds no row, so a client can
     /// always finish what it started. The count and the insert need no
@@ -1854,6 +1845,15 @@ impl<'a> PgTx<'a> {
         Ok(())
     }
 
+    /// Writes the history nodes the transaction inserted while batching,
+    /// after the derived rows and before the `git_import` rows: one
+    /// statement per 1,000 rows. The nodes are content-addressed, so
+    /// their order does not matter; the ids are sorted for a
+    /// deterministic statement.
+    ///
+    /// # Errors
+    ///
+    /// Database errors.
     fn flush_history_rows(&mut self) -> Result<()> {
         const CHUNK: usize = 1_000;
         let Some(history) = self.history_pending.as_deref_mut() else {
@@ -1971,13 +1971,43 @@ impl<'a> PgTx<'a> {
 
     /// Reads back the land another writer recorded for this request key
     /// first: its land wins, and its input must match this one's.
+    /// Reads the land a request key recorded back, for the ON CONFLICT
+    /// race: a twin recorded the same key in the same instant, so this
+    /// insert wrote nothing and the twin's row is the answer.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Corrupt`] when the row vanished or its bytes do not
+    /// decode.
     fn read_back_land(
         &mut self,
         repo: RepoId,
         caller: &Caller,
         req: &LandRequest,
     ) -> Result<LandOutcome> {
-        let (land_id, input, target, state, detail, result_cs, conflict_paths, reason) = self
+        self.land_by_key(repo, caller, req)?.ok_or_else(|| {
+            Error::Corrupt(format!(
+                "land {:?} of {:?} was recorded by another process and \
+                 then vanished",
+                req.request_key, caller.0
+            ))
+        })
+    }
+
+    /// The land a request key recorded, as its row answers it: the
+    /// record's first read and the read-back share this one shape.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when the key named a different land;
+    /// [`Error::Corrupt`] when the row's bytes do not decode.
+    fn land_by_key(
+        &mut self,
+        repo: RepoId,
+        caller: &Caller,
+        req: &LandRequest,
+    ) -> Result<Option<LandOutcome>> {
+        let row = self
             .c
             .query_opt(
                 "SELECT land_id, input_cs, target_ref, state, detail, result_cs,
@@ -2001,14 +2031,11 @@ impl<'a> PgTx<'a> {
                     row.get::<_, Vec<u8>>(6),
                     row.get::<_, String>(7),
                 )
-            })
-            .ok_or_else(|| {
-                Error::Corrupt(format!(
-                    "land {:?} of {:?} was recorded by another process and \
-                     then vanished",
-                    req.request_key, caller.0
-                ))
-            })?;
+            });
+        let Some((land_id, input, target, state, detail, result_cs, conflict_paths, reason)) = row
+        else {
+            return Ok(None);
+        };
         if input != req.changeset.as_bytes() || target != req.target_ref {
             return Err(Error::InvalidArgument(format!(
                 "request key {:?} was already used for a different land",
@@ -2019,7 +2046,7 @@ impl<'a> PgTx<'a> {
             .map(|bytes| ChangesetId::try_from(bytes.as_slice()))
             .transpose()
             .map_err(|e| Error::Corrupt(format!("land {land_id} result: {e}")))?;
-        Ok(LandOutcome {
+        Ok(Some(LandOutcome {
             moved: false,
             land_id,
             state: LandState::parse(&state)?,
@@ -2029,64 +2056,7 @@ impl<'a> PgTx<'a> {
             conflict_paths: decode_paths(&conflict_paths)
                 .ok_or_else(|| Error::Corrupt(format!("land {land_id} conflict paths")))?,
             reject_reason: LandRejectReason::parse(&reason)?,
-        })
-    }
-
-    /// Commits the transaction. The client runs again afterwards.
-    fn commit(&mut self) -> Result<()> {
-        self.ended = true;
-        self.c.execute("COMMIT", &[])?;
-        Ok(())
-    }
-
-    /// Rolls the transaction back. The client runs again afterwards.
-    fn rollback(&mut self) -> Result<()> {
-        if self.ended {
-            return Ok(());
-        }
-        self.ended = true;
-        self.c.execute("ROLLBACK", &[])?;
-        Ok(())
-    }
-    /// The outcome a settled twin's row answers from its own columns.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::InvalidArgument`] when the key named a different land;
-    /// [`Error::Corrupt`] when the row's bytes do not decode.
-    #[allow(clippy::too_many_arguments)] // the row's own columns
-    fn recorded_twin(
-        land_id: i64,
-        input: &[u8],
-        target: &str,
-        state: &str,
-        detail: &str,
-        result_cs: Option<&[u8]>,
-        conflict_paths: &[u8],
-        reason: &str,
-        req: &LandRequest,
-    ) -> Result<LandOutcome> {
-        if input != req.changeset.as_bytes() || target != req.target_ref {
-            return Err(Error::InvalidArgument(format!(
-                "request key {:?} was already used for a different land",
-                req.request_key
-            )));
-        }
-        let result = result_cs
-            .map(ChangesetId::try_from)
-            .transpose()
-            .map_err(|e| Error::Corrupt(format!("land {land_id} result: {e}")))?;
-        Ok(LandOutcome {
-            moved: false,
-            land_id,
-            state: LandState::parse(state)?,
-            result,
-            previous: None,
-            detail: detail.to_owned(),
-            conflict_paths: decode_paths(conflict_paths)
-                .ok_or_else(|| Error::Corrupt(format!("land {land_id} conflict paths")))?,
-            reject_reason: LandRejectReason::parse(reason)?,
-        })
+        }))
     }
 
     /// Records a land this record starts: the state the ref's existence
@@ -2115,7 +2085,7 @@ impl<'a> PgTx<'a> {
         } else {
             (LandState::Rejected, detail, LandRejectReason::MissingRef)
         };
-        PgTx::check_pending_lands_quota(self, caller, pending_limit)?;
+        self.check_pending_lands_quota(caller, pending_limit)?;
         let inserted = self
             .c
             .query_opt(
@@ -4644,61 +4614,16 @@ impl MetaTx for PgTx<'_> {
     ) -> Result<(RepoId, LandOutcome)> {
         let repo = self.repo_id(&req.repo)?;
         self.generation(repo, req.changeset)?;
-        let existing = self
-            .c
-            .query_opt(
-                "SELECT land_id, input_cs, target_ref, state, detail, result_cs,
-                        conflict_paths, reject_reason
-                 FROM lands
-                 WHERE repo_id = $1 AND caller = $2 AND request_key = $3",
-                &[
-                    P::i64(repo.0),
-                    P::text(&caller.0),
-                    P::text(&req.request_key),
-                ],
-            )?
-            .map(|row| {
-                (
-                    row.get::<_, i64>(0),
-                    row.get::<_, Vec<u8>>(1),
-                    row.get::<_, String>(2),
-                    row.get::<_, String>(3),
-                    row.get::<_, String>(4),
-                    row.get::<_, Option<Vec<u8>>>(5),
-                    row.get::<_, Vec<u8>>(6),
-                    row.get::<_, String>(7),
-                )
-            });
         // The outcome's columns ride the lookup the record already runs:
         // the caller learns a settled twin without a second read of the
         // row. A row that is still pending must be finished: the land's
         // own next step reads the outcome in its first transaction,
         // where a twin that settles between the record and the finish
         // answers.
-        let recorded = if let Some((
-            land_id,
-            input,
-            target,
-            state,
-            detail,
-            result_cs,
-            conflict_paths,
-            reason,
-        )) = existing
-        {
-            PgTx::recorded_twin(
-                land_id,
-                &input,
-                &target,
-                &state,
-                &detail,
-                result_cs.as_deref(),
-                &conflict_paths,
-                &reason,
-                req,
-            )?
+        let recorded = if let Some(recorded) = self.land_by_key(repo, caller, req)? {
+            recorded
         } else {
-            PgTx::record_new_land(self, repo, caller, req, pending_limit)?
+            self.record_new_land(repo, caller, req, pending_limit)?
         };
         Ok((repo, recorded))
     }
