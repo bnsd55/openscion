@@ -1551,7 +1551,7 @@ mod tests {
         let stored = store
             .read(|c| {
                 let mut count = 0_usize;
-                let below: [u8; 32] = context_digest(&[b"see".to_vec()]);
+                let below: [u8; 32] = context_digest(&vec![b"see".to_vec()]);
                 for id in &dir_ids {
                     if c.get_view_tree(repo, &digest, u32::from(PROJECTION_VERSION), *id, below)?
                         .is_some()
