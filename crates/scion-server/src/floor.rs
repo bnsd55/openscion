@@ -21,6 +21,16 @@
 
 use std::path::{Path, PathBuf};
 
+/// The test's injected memory probe: set before a test starts the
+/// server, cleared after. A blocking probe proves the server accepts
+/// while its start-up probe still runs (#795).
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+pub type MemsizeFn = fn() -> Option<u64>;
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+pub static MEMSIZE_PROBE: std::sync::Mutex<Option<MemsizeFn>> = std::sync::Mutex::new(None);
+
 /// What every `Blame` call together may hold
 /// (`BLAME_MEMORY_BUDGET` in service.rs).
 pub(crate) const BLAME: u64 = crate::service::BLAME_MEMORY_BUDGET as u64;
@@ -230,16 +240,7 @@ fn read_cgroup_limit(file: &Path) -> Option<u64> {
 /// macOS `hw.memsize`, the source a non-Linux host falls through to.
 #[cfg(target_os = "macos")]
 fn macos_memsize() -> Option<u64> {
-    let out = std::process::Command::new("sysctl")
-        .args(["-n", "hw.memsize"])
-        .output()
-        .ok()?;
-    std::str::from_utf8(&out.stdout)
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
-        .filter(|bytes| *bytes > 0)
+    scion_proto::runtime::host::memsize()
 }
 
 /// A non-Linux host without the sysctl answers nothing, so the start-up
@@ -262,7 +263,13 @@ pub(crate) fn check_startup_memory(
     paths: &Paths,
 ) {
     metrics.set_memory_floor_bytes(FLOOR);
-    if let Some(limit) = host_limit(paths, macos_memsize) {
+    #[cfg(feature = "test-hooks")]
+    let memsize: MemsizeFn = MEMSIZE_PROBE
+        .lock()
+        .map_or(macos_memsize, |probe| probe.unwrap_or(macos_memsize));
+    #[cfg(not(feature = "test-hooks"))]
+    let memsize = macos_memsize;
+    if let Some(limit) = host_limit(paths, memsize) {
         metrics.set_host_memory_bytes(limit.bytes);
         if limit.bytes < FLOOR {
             tracing::error!(
