@@ -1965,13 +1965,13 @@ mod tests {
             .unwrap();
         settled().await;
         assert_eq!(asked(), 3);
-        // A batch that starts at the first object leaves out the two stored.
+        // A read whose key the tiled batch already stored fetches nothing.
         f.tier
             .fetch(&ask(&f, &f.keys, "r"), 0, &Progress::default())
             .await
             .unwrap();
         settled().await;
-        assert_eq!(asked(), 4);
+        assert_eq!(asked(), 3);
         // A reply that missed an object just before its fetch stored it, and
         // asks after the fetch has ended, is sent to the store. This is the
         // window between a reply's store check and its fetch.
@@ -2003,7 +2003,7 @@ mod tests {
             assert_eq!(chunks, std::slice::from_ref(blob));
         }
         // 3 blobs from earlier fetches, plus the root tree of the walk.
-        assert_eq!(asked(), 4 + 1);
+        assert_eq!(asked(), 3 + 1);
     }
 
     #[tokio::test]
