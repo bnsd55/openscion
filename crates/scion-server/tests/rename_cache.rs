@@ -417,8 +417,9 @@ fn a_map_past_the_cap_evicts_the_oldest() {
     assert!(bytes > 0);
     // The cap sits just over the stored map: the next map cannot fit
     // beside it, and the stored one is the older.
-    let _cap =
-        scion_server::test_support::read::test_set_rename_cache_cap_for_tests(usize::try_from(bytes).unwrap() + 8);
+    let _cap = scion_server::test_support::read::test_set_rename_cache_cap_for_tests(
+        usize::try_from(bytes).unwrap() + 8,
+    );
     let (_dir, other_store, other_old, other_new) = seeded(&[1_000], &[], &[]);
     let other_one = page(&other_store, other_old, other_new, None);
     let other_after = other_one.next_after.clone().unwrap();
