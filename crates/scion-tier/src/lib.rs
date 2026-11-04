@@ -1052,44 +1052,58 @@ impl<S: Store> Tier<S> {
     /// Claims the keys after `i` for the fetch that this reply starts, and
     /// registers them in the flights table, under the one lock: a read
     /// ahead that misses cannot start its own fetch before this batch has
-    /// claimed the keys after it. Without the one lock, a read ahead whose
-    /// key the claim covers could see the claim and skip its own fetch
-    /// along, yet find no flight to join - the claim's registration had
-    /// not run yet - and start a flight of one, splitting the batch. The
-    /// count of upstream calls is then the same in every schedule: one
-    /// claim per batch, and the reads ahead join it.
+    /// claimed the keys after it. The reads' claims race on the runtime's
+    /// threads: a read that reaches the lock first claims from its own
+    /// index, which can leave the key of a read just before it outside
+    /// every flight - that read then starts a flight of one, and the
+    /// count of upstream calls depends on the schedule. The batch
+    /// therefore starts just after the last key some flight already
+    /// registered; if no flight registered anything in the ask before
+    /// this read, no claim raced this one, and the batch starts at its
+    /// own key. The count of upstream calls is then the same in every
+    /// schedule: one claim per batch, and the reads ahead join it.
     ///
-    /// The store's checks are sync file I/O, so they run before the lock:
-    /// under a shared std Mutex they would block every other claim on an
-    /// async worker, and a slow disk or a network mount would stall the
-    /// worker (the same class as #795). A key that lands in the store
-    /// between a check and the lock gets fetched once more, which is
-    /// harmless: the put is idempotent.
+    /// The store's checks for the window the claim may cover run before
+    /// the lock: they are sync file I/O, and under a shared std Mutex
+    /// they would block every other claim on an async worker, and a slow
+    /// disk or a network mount would stall the worker (the same class as
+    /// #795). A key that lands in the store between a check and the lock
+    /// gets fetched once more, which is harmless: the put is idempotent.
     ///
     /// Returns the keys along, which the caller passes to [`Self::
     /// fetch_for`] only to join the flight `claim` already started.
     fn claim(&self, ask: &Ask, i: usize, progress: &Progress) -> Vec<(Key, Vec<u8>)> {
         let keys = &ask.keys;
-        let (key, path) = &keys[i];
+        let (key, _) = &keys[i];
         let stored = |k: &Key| matches!(self.inner.store.size(*k), Ok(Some(_)));
         if stored(key) {
             return Vec::new();
         }
-        let end = keys.len().min(i + MAX_BATCH);
-        let candidates: Vec<(Key, Vec<u8>)> = iter::once((*key, path.clone()))
-            .chain(keys[i + 1..end].iter().cloned())
-            .filter(|(k, _)| !stored(k))
-            .collect();
+        let from = i.saturating_sub(MAX_BATCH - 1);
+        let to = keys.len().min(i + MAX_BATCH);
+        let has: Vec<bool> = (from..to).map(|j| stored(&keys[j].0)).collect();
         let mut flights = lock(&self.inner.flights);
         if flights.contains_key(key) {
             // Another reply's fetch got this key: join, and fetch nothing
             // along.
             return Vec::new();
         }
+        let mut start = i;
+        while start > from && !flights.contains_key(&keys[start - 1].0) {
+            start -= 1;
+        }
+        if start == from && start < i && !flights.contains_key(&keys[from].0) {
+            start = i;
+        }
+        let end = keys.len().min(start + MAX_BATCH);
         progress.fetched_to.store(end, Ordering::Relaxed);
         let later: Vec<_> = keys[i + 1..end].to_vec();
         let mut waiting = VecDeque::new();
-        for (k, p) in candidates {
+        for j in start..end {
+            if has[j - from] {
+                continue;
+            }
+            let (k, p) = keys[j].clone();
             if let Entry::Vacant(slot) = flights.entry(k) {
                 let (tx, rx) = watch::channel(None);
                 slot.insert(rx);
@@ -1610,6 +1624,7 @@ mod tests {
         root: TreeId,
         asked: Arc<AtomicUsize>,
         largest: Arc<AtomicUsize>,
+        calls: Arc<std::sync::Mutex<Vec<Vec<Vec<u8>>>>>,
     }
 
     type Replies = Pin<Box<dyn Stream<Item = Result<ObjectPart, Status>> + Send>>;
@@ -1652,6 +1667,10 @@ mod tests {
             let refs = request.into_inner().refs;
             self.asked.fetch_add(refs.len(), Ordering::SeqCst);
             self.largest.fetch_max(refs.len(), Ordering::SeqCst);
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(refs.iter().map(|r| r.id.clone()).collect());
             let replies: Vec<_> = refs
                 .into_iter()
                 .flat_map(|r| {
@@ -1714,6 +1733,7 @@ mod tests {
             root,
             asked: Arc::default(),
             largest: Arc::default(),
+            calls: Arc::default(),
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -1890,6 +1910,24 @@ mod tests {
     async fn an_object_that_a_fetch_has_stored_is_never_fetched_again() {
         let f = setup(3, 1 << 20).await;
         let asked = || f.fake.asked.load(Ordering::SeqCst);
+        let call_indexes = || {
+            f.fake
+                .calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .map(|call| {
+                    call.iter()
+                        .map(|id| {
+                            f.keys
+                                .iter()
+                                .position(|k| k.id().as_slice() == id.as_slice())
+                                .unwrap_or(9999)
+                        })
+                        .collect::<Vec<usize>>()
+                })
+                .collect::<Vec<Vec<usize>>>()
+        };
         let settled = || async {
             settled(&f.tier).await;
         };
@@ -1918,7 +1956,12 @@ mod tests {
                 .await;
             assert!(fetched.unwrap().is_none(), "read it from the store");
         }
-        assert_eq!(asked(), 3, "nothing was fetched twice");
+        assert_eq!(
+            asked(),
+            3,
+            "nothing was fetched twice; upstream calls by ask index: {:?}",
+            call_indexes()
+        );
         // Through a reply, the object comes from the store, with its share.
         // The first prove fetches the root tree of the ticket: one more ask.
         for (i, blob) in f.blobs.iter().enumerate() {
@@ -2012,7 +2055,30 @@ mod tests {
         // 300 blobs and the root tree of the ticket.
         assert_eq!(f.fake.asked.load(Ordering::SeqCst), 300 + 1);
         assert_eq!(f.fake.largest.load(Ordering::SeqCst), MAX_BATCH);
-        assert_eq!(f.tier.upstream_calls(), 4);
+        let call_indexes = || {
+            f.fake
+                .calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .map(|call| {
+                    call.iter()
+                        .map(|id| {
+                            f.keys
+                                .iter()
+                                .position(|k| k.id().as_slice() == id.as_slice())
+                                .unwrap_or(9999)
+                        })
+                        .collect::<Vec<usize>>()
+                })
+                .collect::<Vec<Vec<usize>>>()
+        };
+        assert_eq!(
+            f.tier.upstream_calls(),
+            4,
+            "upstream calls by ask index: {:?}",
+            call_indexes()
+        );
     }
 
     #[tokio::test]
