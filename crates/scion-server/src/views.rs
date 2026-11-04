@@ -158,8 +158,8 @@ pub fn test_set_view_part_bound(bytes: usize) -> impl Drop {
 fn tree_bytes(tree: &Tree) -> usize {
     64 + tree
         .entries()
-        .iter()
-        .map(|(name, _)| name.as_bytes().len() + 64)
+        .keys()
+        .map(|name| name.as_bytes().len() + 64)
         .sum::<usize>()
 }
 
@@ -311,6 +311,7 @@ fn write_memo_part(
 ///
 /// Store errors, [`crate::error::Error::DeadlineExceeded`] once `deadline`
 /// passes, or [`crate::error::Error::Cancelled`] once the call has gone.
+#[allow(clippy::too_many_arguments)] // the walk's knobs, one per caller choice
 fn project(
     store: &Backend,
     c: &mut dyn MetaTx,

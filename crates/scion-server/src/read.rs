@@ -794,9 +794,6 @@ fn forget_renames(key: &RenameKey) {
     }
 }
 
-/// The tests' reset of the cache: every map goes and the cap returns
-/// to the server's, so a page after it runs its own search and no
-/// test's small cap reaches another test's maps.
 /// Holds a small rename byte bound for the tests that pin it: a diff
 /// whose rename vector passes it says renames may be missing, and the
 /// bound returns when the guard drops.
@@ -812,6 +809,9 @@ pub fn test_set_rename_byte_bound(bytes: usize) -> impl Drop {
     Reset
 }
 
+/// The tests' reset of the cache: every map goes and the cap returns
+/// to the server's, so a page after it runs its own search and no
+/// test's small cap reaches another test's maps.
 #[cfg(any(test, feature = "test-hooks"))]
 pub fn test_clear_rename_cache() {
     let mut maps = rename_cache_lock();
