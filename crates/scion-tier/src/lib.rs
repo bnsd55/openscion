@@ -1059,25 +1059,38 @@ impl<S: Store> Tier<S> {
     /// count of upstream calls is then the same in every schedule: one
     /// claim per batch, and the reads ahead join it.
     ///
+    /// The store's checks are sync file I/O, so they run before the lock:
+    /// under a shared std Mutex they would block every other claim on an
+    /// async worker, and a slow disk or a network mount would stall the
+    /// worker (the same class as #795). A key that lands in the store
+    /// between a check and the lock gets fetched once more, which is
+    /// harmless: the put is idempotent.
+    ///
     /// Returns the keys along, which the caller passes to [`Self::
     /// fetch_for`] only to join the flight `claim` already started.
     fn claim(&self, ask: &Ask, i: usize, progress: &Progress) -> Vec<(Key, Vec<u8>)> {
         let keys = &ask.keys;
         let (key, path) = &keys[i];
-        let mut flights = lock(&self.inner.flights);
-        if flights.contains_key(key) || matches!(self.inner.store.size(*key), Ok(Some(_))) {
-            // Another reply's fetch got this key, or the store has it now:
-            // join, and fetch nothing along.
+        let stored = |k: &Key| matches!(self.inner.store.size(*k), Ok(Some(_)));
+        if stored(key) {
             return Vec::new();
         }
         let end = keys.len().min(i + MAX_BATCH);
+        let candidates: Vec<(Key, Vec<u8>)> = iter::once((*key, path.clone()))
+            .chain(keys[i + 1..end].iter().cloned())
+            .filter(|(k, _)| !stored(k))
+            .collect();
+        let mut flights = lock(&self.inner.flights);
+        if flights.contains_key(key) {
+            // Another reply's fetch got this key: join, and fetch nothing
+            // along.
+            return Vec::new();
+        }
         progress.fetched_to.store(end, Ordering::Relaxed);
         let later: Vec<_> = keys[i + 1..end].to_vec();
         let mut waiting = VecDeque::new();
-        for (k, p) in iter::once((*key, path.clone())).chain(later.iter().cloned()) {
-            if let Entry::Vacant(slot) = flights.entry(k)
-                && (k == *key || !matches!(self.inner.store.size(k), Ok(Some(_))))
-            {
+        for (k, p) in candidates {
+            if let Entry::Vacant(slot) = flights.entry(k) {
                 let (tx, rx) = watch::channel(None);
                 slot.insert(rx);
                 waiting.push_back((k, p, tx));
