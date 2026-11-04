@@ -1094,13 +1094,12 @@ impl<S: Store> Tier<S> {
             // along.
             return Vec::new();
         }
-        let mut start = i;
-        while start > from && !flights.contains_key(&keys[start - 1].0) {
-            start -= 1;
-        }
-        if start == from && start < i && !flights.contains_key(&keys[from].0) {
-            start = i;
-        }
+        let fetched = progress.fetched_to.load(Ordering::Relaxed);
+        let start = if fetched <= i && i - fetched < MAX_BATCH {
+            fetched
+        } else {
+            i
+        };
         let end = keys.len().min(start + MAX_BATCH);
         progress.fetched_to.store(end, Ordering::Relaxed);
         let later: Vec<_> = keys[i + 1..end].to_vec();
