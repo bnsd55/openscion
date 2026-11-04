@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Bound;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -642,7 +642,8 @@ fn rename_cache_max_bytes() -> usize {
 const RENAME_CACHE_MAX_BYTES: usize = 512 << 20;
 
 #[cfg(any(test, feature = "test-hooks"))]
-static RENAME_CACHE_MAX_BYTES_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+static RENAME_CACHE_MAX_BYTES_OVERRIDE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 static RENAME_CACHE: std::sync::LazyLock<Mutex<HashMap<RenameKey, CachedRenames>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
