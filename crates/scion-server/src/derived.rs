@@ -1431,8 +1431,12 @@ mod tests {
             let hold_for_first = Arc::clone(&hold);
             let store_ref = &store;
             let first = scope.spawn(move || {
-                store_ref
-                    .write(|_| {
+                // A writer whose write fails (the database can refuse a
+                // connection under the suite's load) retries a few times
+                // before giving up, so the forcing survives a transient
+                // refusal.
+                for _ in 0..10 {
+                    match store_ref.write(|_| {
                         for _ in 0..12_000 {
                             if !hold_for_first.load(Ordering::SeqCst) {
                                 break;
@@ -1440,8 +1444,11 @@ mod tests {
                             std::thread::sleep(Duration::from_millis(5));
                         }
                         Ok(())
-                    })
-                    .unwrap();
+                    }) {
+                        Ok(()) => break,
+                        Err(_) => std::thread::sleep(Duration::from_secs(1)),
+                    }
+                }
             });
             for _ in 0..2_000 {
                 if store.writers_waiting() >= 2 {
@@ -1453,7 +1460,14 @@ mod tests {
                 store.writers_waiting() >= 2,
                 "the first writer never waited"
             );
-            let second = scope.spawn(|| store.write(|_| Ok(())).unwrap());
+            let second = scope.spawn(|| {
+                for _ in 0..10 {
+                    match store.write(|_| Ok(())) {
+                        Ok(()) => break,
+                        Err(_) => std::thread::sleep(Duration::from_secs(1)),
+                    }
+                }
+            });
             for _ in 0..2_000 {
                 if store.writers_waiting() >= 3 {
                     break;
@@ -1488,12 +1502,14 @@ mod tests {
                 "the walk never took its turn behind the writer that holds the connection"
             );
             // The writers go; the walk's second step runs, and its derives
-            // pass the gate.
+            // pass the gate. The release comes before the joins: a writer
+            // that retries a refused connection holds the join up, and
+            // the walk's derives must not wait for that behind the gate.
             hold.store(false, Ordering::SeqCst);
-            first.join().unwrap();
-            second.join().unwrap();
             wait_entered(3);
             gate_release(2);
+            first.join().unwrap();
+            second.join().unwrap();
             assert_eq!(walker.join().unwrap(), 4);
         });
         assert_eq!(COLD_DERIVES.load(Ordering::Relaxed), 4);

@@ -375,6 +375,14 @@ impl Backend {
         self.pg.writers_waiting()
     }
 
+    /// The write lane's queue, for the lane's tests: the slot holders
+    /// and the other writers that wait, not granted yet.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn writer_lane_waiting(&self) -> (usize, usize) {
+        self.pg.writer_lane_waiting()
+    }
+
     /// Waits while writers wait for the write connection, until the
     /// deadline: a derivation step yields to a writer that waited.
     ///
@@ -450,6 +458,10 @@ impl Meta for Backend {
 
     fn write<T>(&self, f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>) -> Result<T> {
         self.pg.write(f)
+    }
+
+    fn write_slot_holder<T>(&self, f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>) -> Result<T> {
+        self.pg.commit_for_slot_holder(f)
     }
 
     fn flush(&self) -> Result<()> {
