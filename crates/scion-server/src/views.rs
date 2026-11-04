@@ -1656,7 +1656,7 @@ mod tests {
             .map(|i| RepoPath::new(format!("d{i:02}/see").as_str()).unwrap())
             .collect();
         let digest = crate::access::rule_set_digest(Some(&prefixes));
-        let _part = test_set_view_part_bound(1 << 10);
+        let part = test_set_view_part_bound(1 << 10);
         // A writer holds the store's write key, past the read
         // transaction's idle bound.
         let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
@@ -1704,7 +1704,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(view, again, "the same view");
-        drop(_part);
+        drop(part);
         holder.join().unwrap();
     }
 
