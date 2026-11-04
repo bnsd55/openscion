@@ -131,7 +131,7 @@ fn drop_stale_schemas(maker: &PgClient, automatic: bool, cap: usize) -> (usize, 
     // reached or a bounded number of pages is read, so one call's work
     // stays bounded whatever the registry holds; the next call
     // continues from the front.
-    let page_size = (cap * 2) as i64;
+    let page_size = cap * 2;
     let page_bound = 64_usize;
     let now = extract_epoch_now(maker);
     let mut dropped = 0_usize;
@@ -165,7 +165,7 @@ fn drop_stale_schemas(maker: &PgClient, automatic: bool, cap: usize) -> (usize, 
             let dir: Option<String> = row.get(1);
             let started: i64 = row.get(2);
             cursor_started = started;
-            cursor_schema = name.clone();
+            cursor_schema.clone_from(&name);
             // Only the names this backend makes: no other schema drops,
             // whatever a row of the registry names.
             if !name.starts_with(TEST_SCHEMA_PREFIX) {
@@ -219,7 +219,7 @@ fn drop_stale_schemas(maker: &PgClient, automatic: bool, cap: usize) -> (usize, 
             // next row's try decides on its own name.
             let _ = maker.query_opt("SELECT pg_advisory_unlock(hashtext($1))", &[P::text(&name)]);
         }
-        if dropped >= cap || (rows.len() as i64) < page_size {
+        if dropped >= cap || rows.len() < page_size {
             // The cap is reached, or the page was the registry's tail.
             break;
         }
