@@ -155,18 +155,19 @@ fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound()
     // windows would count each other's statements.
     // Today's count, with slack for one more plan attempt: each fold of
     // the round-trip card lowers this number, and a change that raises
-    // it must say why. The write path's derived reads ride one
-    // preloaded statement and its old-row deletes ride the commit's
-    // flush: 40 statements became 35. The record answers from its own
-    // row - the lookup's and the insert's columns - so it runs no
-    // second read: 35 became 34.
+    // it must say why. Measured in CI (probe run 41899707438): main's
+    // land over 3 paths costs 37; this branch costs 36. The one saved
+    // statement is the outcome read after the insert: main's record
+    // reads the row back, and this record answers from the columns its
+    // lookup and insert already carry, so the read runs once - the
+    // finish's - not twice.
     //
     // This run has no rival writer, so the land settles in one attempt;
     // the log's one verdict UPDATE proves it. On that run the count is
     // exact, so the read coming back fails the test here, and the bound
     // keeps guarding only the retried case it has slack for.
     const BOUND: u64 = 44;
-    const EXACT: u64 = 34;
+    const EXACT: u64 = 36;
     let count = land_statement_count(3);
     {
         let log = Backend::test_statement_log();
