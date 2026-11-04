@@ -464,7 +464,7 @@ fn a_diff_past_its_rename_byte_bound_says_renames_may_be_missing() {
         let _small = scion_server::test_support::read::test_set_rename_byte_bound(512);
         let page = page(&store, old, new, None);
         assert!(page.renames_incomplete, "the byte bound tripped");
-        assert!(renames_of(&page).is_empty());
+        assert_eq!(renames_of(&page), [] as [(Vec<u8>, Vec<u8>); 0]);
     }
     scion_server::test_support::read::test_clear_rename_cache();
 }
