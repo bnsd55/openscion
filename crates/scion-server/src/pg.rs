@@ -151,9 +151,86 @@ pub(crate) struct Pg {
     inner: Arc<PgInner>,
 }
 
+/// How many slot holders may take the write client ahead of other
+/// waiting writers before the lane must let one through: a stream of
+/// settles must not starve the record commits that feed it.
+const WRITER_LANE_AHEAD: usize = 4;
+
+/// The write lane's state: who holds the write client, who waits, and
+/// how the lane orders them. A land that holds its ref's lock (the
+/// settle's commit and the sweep's reject; the finish's reads ride the
+/// read pool now) enters ahead of other waiting writers, because its
+/// wait costs the whole queue of its ref; the bound keeps the other
+/// writers moving. Without a slot holder waiting, the lane is today's
+/// plain queue.
+#[derive(Default)]
+struct WriterGate {
+    /// The write client is out with a transaction.
+    taken: bool,
+    /// Takers not yet released: waiting or granted. The derivation
+    /// step's wait watches this one.
+    waiting: usize,
+    /// Slot holders that wait, not granted yet.
+    holders_waiting: usize,
+    /// Other writers that wait, not granted yet.
+    plain_waiting: usize,
+    /// Slot holders granted since the last other writer was.
+    holders_ahead: usize,
+}
+
+/// Whether a taker of this class may take the client now: a slot
+/// holder goes while the other writers have not earned the bound's
+/// mercy, and an other writer goes when no slot holder waits or after
+/// the bound's run of slot holders.
+fn lane_admits(gate: &WriterGate, slot_holder: bool) -> bool {
+    if slot_holder {
+        gate.plain_waiting == 0 || gate.holders_ahead < WRITER_LANE_AHEAD
+    } else {
+        gate.holders_waiting == 0 || gate.holders_ahead >= WRITER_LANE_AHEAD
+    }
+}
+
 struct PgInner {
-    /// The write client, for every commit and [`Pg::read_unflushed`].
+    /// The write client, for every commit and [`Pg::read_unflushed`]. The
+    /// gate below decides who holds it when; the invariants this one
+    /// client keeps are listed on [`WriterGate`], where the queue lives.
     writer: Mutex<PgClient>,
+    /// The write lane's gate: who may take the write client next, and
+    /// when it is out. The one write client keeps these invariants, in
+    /// words, so the next change to this lock reads them here:
+    ///
+    /// - Write transactions are serial. One client means two write
+    ///   transactions of this process never run their statements side by
+    ///   side, so they cannot deadlock on row locks and cannot read each
+    ///   other's uncommitted state. The gate grants one taker at a time.
+    /// - Every write transaction takes the collector's advisory key
+    ///   (`pg_advisory_xact_lock(hashtext(current_schema() || ':gc'))`)
+    ///   and holds it to the transaction's end, with the lock-timeout
+    ///   layering that rides it: the 60 s guard set before the key's
+    ///   statement, the 5 s writer clock set with it for the rest of the
+    ///   transaction. The collector's re-read pins the blobs a writer
+    ///   just put.
+    /// - A changeset's generation is computed inside the transaction
+    ///   that inserts it (the parents' generations read there, the
+    ///   child's written as their max + 1), so no other write can slip
+    ///   a sibling in between.
+    /// - The land's settle runs its row writes and the ref's CAS in one
+    ///   transaction, and the verdict path re-reads the ref in the same
+    ///   transaction as the land row's update: a ref that moved aborts
+    ///   the verdict and the land replans.
+    /// - The land row's update is guarded by `state = 'pending'`: a twin
+    ///   call that settles first is stopped there.
+    /// - The fence lives in this client's session: the process knows it
+    ///   still owns the store because this session holds the one-server
+    ///   lock, and every commit checks the fence before it runs.
+    /// - A transaction that held changeset or derived rows without the
+    ///   flush rolls back and refuses; the write order is changesets,
+    ///   parents, membership, derived, history, git imports.
+    /// - The waiting count lets a derivation step wait while writers
+    ///   wait, so a steady stream of writers delays a cold read up to
+    ///   its deadline, never a land.
+    writer_gate: Mutex<WriterGate>,
+    writer_woken: Condvar,
     /// Set when this process lost the one-server lock: every read and
     /// write of this backend fails from then on, and the server that
     /// holds the backend exits (the [`Fence`]).
@@ -169,11 +246,6 @@ struct PgInner {
     readers: Readers,
     /// The blob folder: blob files stay on local disk in every backend.
     blobs: Blobs,
-    /// Writers that wait for the write client: the derivation walk waits
-    /// while they wait, so a steady stream of writers delays a cold read
-    /// up to its deadline, never a land ([#142]).
-    writers: Mutex<usize>,
-    write_woken: Condvar,
     /// The walks in flight of this backend's derivations.
     derive: crate::derived::DeriveFlights,
     /// The import's test hooks and busy-retry count.
@@ -184,6 +256,11 @@ struct PgInner {
     /// database.
     #[cfg(any(test, feature = "test-hooks"))]
     committed: std::sync::atomic::AtomicU64,
+    /// How many deadline-less waits for writers ended - by the yield's
+    /// bound, or because the writers were done. The tests of the bound
+    /// read it: a retry of a refused write cannot bump it, so the turn
+    /// the bound grants is told apart from any writer's churn.
+    yield_turns: std::sync::atomic::AtomicU64,
     #[cfg(any(test, feature = "test-hooks"))]
     txes: std::sync::atomic::AtomicU64,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -975,8 +1052,8 @@ impl Pg {
             migrated,
             readers: Readers::new_with(readers, url, ca, &options, schema)?,
             blobs,
-            writers: Mutex::new(0),
-            write_woken: Condvar::new(),
+            writer_gate: Mutex::new(WriterGate::default()),
+            writer_woken: Condvar::new(),
             derive: flights.unwrap_or_else(|| {
                 crate::derived::DeriveFlights::new(crate::store::DERIVE_WALKS_CAP)
             }),
@@ -984,6 +1061,7 @@ impl Pg {
             hooks: crate::store::test_hooks::ImportHooks::default(),
             #[cfg(any(test, feature = "test-hooks"))]
             committed: std::sync::atomic::AtomicU64::new(0),
+            yield_turns: std::sync::atomic::AtomicU64::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
             txes: std::sync::atomic::AtomicU64::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -1092,12 +1170,14 @@ impl Pg {
     }
 
     /// A read on the write client, so it sees the caller's own commits.
+    /// The land's finish reads now ride the read pool (`read_latest`), so
+    /// the lane serves only the writes that hold their ref's slot.
     pub(crate) fn read_unflushed<T>(
         &self,
         f: impl FnOnce(&mut PgTx<'_>) -> Result<T>,
     ) -> Result<T> {
         self.check_fenced()?;
-        let (mut writer, _waiting) = self.lock_writer();
+        let (mut writer, _waiting) = self.lock_writer(false);
         let mut pending = Vec::new();
         let mut derived = DerivedPending::default();
         let mut preload = std::collections::HashMap::new();
@@ -1211,8 +1291,29 @@ impl Pg {
     ///
     /// What `f` returns, or a database error from begin or commit.
     pub(crate) fn commit<T>(&self, f: impl FnOnce(&mut PgTx<'_>) -> Result<T>) -> Result<T> {
+        self.commit_in_lane(f, false)
+    }
+
+    /// [`Pg::commit`], as a caller that holds its ref's slot: the
+    /// transaction enters the write lane ahead of other waiting
+    /// writers, within the lane's bound. What the slot holder writes is
+    /// what its ref's next land needs, and its wait costs the whole
+    /// queue of its ref, so it stops queueing behind writers it does
+    /// not depend on.
+    pub(crate) fn commit_for_slot_holder<T>(
+        &self,
+        f: impl FnOnce(&mut PgTx<'_>) -> Result<T>,
+    ) -> Result<T> {
+        self.commit_in_lane(f, true)
+    }
+
+    fn commit_in_lane<T>(
+        &self,
+        f: impl FnOnce(&mut PgTx<'_>) -> Result<T>,
+        slot_holder: bool,
+    ) -> Result<T> {
         self.check_fenced()?;
-        let (mut writer, _waiting) = self.lock_writer();
+        let (mut writer, _waiting) = self.lock_writer(slot_holder);
         // A write transaction runs at READ COMMITTED, the Postgres
         // default: every change of the caller checks the newest state of
         // the row it touches (the CAS predicates).
@@ -1318,41 +1419,12 @@ impl Pg {
                 }
                 #[cfg(any(test, feature = "test-hooks"))]
                 self.inner.committed.fetch_add(1, Ordering::Release);
-                // A write path that deferred its derived deletes hands
-                // them to the flush: one statement for the whole
-                // transaction, inside it, so a rollback takes the
-                // deletes with it and the end state is the one the
-                // per-call deletes would have reached.
-                if !tx.deferred_deletes.is_empty() {
-                    let kinds: Vec<String> = tx
-                        .deferred_deletes
-                        .iter()
-                        .map(|(k, _, _)| k.clone())
-                        .collect();
-                    let versions: Vec<i64> =
-                        tx.deferred_deletes.iter().map(|(_, v, _)| *v).collect();
-                    let steps: Vec<i64> = tx.deferred_deletes.iter().map(|(_, _, s)| *s).collect();
-                    let deleted = tx.c.execute(
-                        "WITH k AS (
-                             SELECT kind, version, SUM(step) AS step
-                             FROM unnest($1::text[], $2::int8[], $3::int8[]) AS t(kind, version, step)
-                             GROUP BY kind, version),
-                         v AS (
-                             SELECT d.ctid AS ctid, k.step AS step,
-                                    row_number() OVER (PARTITION BY d.kind
-                                                       ORDER BY d.version) AS rn
-                             FROM derived d JOIN k ON d.kind = k.kind
-                                                            AND d.version < k.version)
-                         DELETE FROM derived WHERE ctid IN (SELECT ctid FROM v WHERE rn <= step)",
-                        &[
-                            P::text_array(kinds),
-                            P::i64_array(versions),
-                            P::i64_array(steps),
-                        ],
-                    )?;
-                    if deleted > 0 {
-                        tracing::debug!(deleted, "flushed the transaction's derived deletes");
-                    }
+                // A write path that deferred its per-row flushes hands
+                // them to the commit, inside the transaction, so a
+                // rollback takes them with it and the end state is the
+                // one the per-call writes would have reached.
+                if tx.defer_derived {
+                    tx.flush_deferred()?;
                 }
                 let committed = tx.commit();
                 #[cfg(any(test, feature = "test-hooks"))]
@@ -1406,18 +1478,47 @@ impl Pg {
     /// writers delays a cold read up to its deadline, never a land
     /// ([#142]). The count falls when the client is back, so a walk step
     /// that ends hands the client to a writer, not to its own next step.
-    fn lock_writer(&self) -> (MutexGuard<'_, PgClient>, PgWriteWaiter<'_>) {
-        *self
+    /// Takes the write client for one transaction, through the lane:
+    /// `slot_holder` marks a caller that holds its ref's slot (the
+    /// settle's commit and the sweep's reject), which enters ahead of
+    /// other waiting writers, within the lane's bound. The invariants
+    /// the one client keeps are listed on [`PgInner`'s gate
+    /// field](Self::writer_gate).
+    fn lock_writer(&self, slot_holder: bool) -> (MutexGuard<'_, PgClient>, PgWriteWaiter<'_>) {
+        let mut gate = self
             .inner
-            .writers
+            .writer_gate
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) += 1;
+            .unwrap_or_else(PoisonError::into_inner);
+        gate.waiting += 1;
+        if slot_holder {
+            gate.holders_waiting += 1;
+        } else {
+            gate.plain_waiting += 1;
+        }
+        while gate.taken || !lane_admits(&gate, slot_holder) {
+            gate = self
+                .inner
+                .writer_woken
+                .wait(gate)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        gate.taken = true;
+        if slot_holder {
+            gate.holders_waiting -= 1;
+            gate.holders_ahead += 1;
+        } else {
+            gate.plain_waiting -= 1;
+            gate.holders_ahead = 0;
+        }
+        let writer = self
+            .inner
+            .writer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         (
-            self.inner
-                .writer
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-            PgWriteWaiter(&self.inner.writers, &self.inner.write_woken),
+            writer,
+            PgWriteWaiter(&self.inner.writer_gate, &self.inner.writer_woken),
         )
     }
 
@@ -1430,14 +1531,42 @@ impl Pg {
     #[cfg(test)]
     #[must_use]
     pub(crate) fn writers_waiting(&self) -> usize {
-        *self
-            .inner
-            .writers
+        self.inner
+            .writer_gate
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .waiting
+    }
+
+    /// How many deadline-less waits for writers ended.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn yield_turns(&self) -> u64 {
+        self.inner.yield_turns.load(Ordering::Relaxed)
+    }
+
+    /// The lane's queue, for the tests: the slot holders and the other
+    /// writers that wait, not granted yet.
+    #[cfg(test)]
+    #[allow(dead_code)] // the lane tests read it through Backend
+    #[must_use]
+    pub(crate) fn writer_lane_waiting(&self) -> (usize, usize) {
+        let gate = self
+            .inner
+            .writer_gate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        (gate.holders_waiting, gate.plain_waiting)
     }
 
     /// Waits while writers wait for the write client, until the deadline.
+    ///
+    /// Without a deadline the yield to writers is bounded: after
+    /// [`WRITE_YIELD_BOUND`] in total, across every wake-up, the caller
+    /// takes its turn, and the writers wait behind at most one of its
+    /// transactions. The bound is for the whole wait, not per wake-up: a
+    /// writer stream that keeps the count above zero only between two
+    /// wake-ups would otherwise reset the wait forever.
     ///
     /// # Errors
     ///
@@ -1446,27 +1575,44 @@ impl Pg {
         &self,
         deadline: Option<&crate::deadline::Deadline>,
     ) -> Result<()> {
-        let mut waiting = self
+        let mut gate = self
             .inner
-            .writers
+            .writer_gate
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        while *waiting > 0 {
-            let Some(deadline) = deadline else {
-                waiting = self
+        let Some(deadline) = deadline else {
+            let yielded_since = std::time::Instant::now();
+            while gate.waiting > 0 {
+                let bound_left = WRITE_YIELD_BOUND.saturating_sub(yielded_since.elapsed());
+                if bound_left.is_zero() {
+                    // The yield's bound passed with writers still waiting:
+                    // this caller takes its turn. The writers it passes
+                    // wait behind at most one of its transactions.
+                    self.inner.yield_turns.fetch_add(1, Ordering::Relaxed);
+                    return Ok(());
+                }
+                let (guard, timed_out) = self
                     .inner
-                    .write_woken
-                    .wait(waiting)
+                    .writer_woken
+                    .wait_timeout_while(gate, bound_left, |gate| gate.waiting > 0)
                     .unwrap_or_else(PoisonError::into_inner);
-                continue;
-            };
+                gate = guard;
+                if timed_out.timed_out() {
+                    self.inner.yield_turns.fetch_add(1, Ordering::Relaxed);
+                    return Ok(());
+                }
+            }
+            self.inner.yield_turns.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        };
+        while gate.waiting > 0 {
             let budget = deadline.remaining();
             let (guard, timed_out) = self
                 .inner
-                .write_woken
-                .wait_timeout_while(waiting, budget, |waiting| *waiting > 0)
+                .writer_woken
+                .wait_timeout_while(gate, budget, |gate| gate.waiting > 0)
                 .unwrap_or_else(PoisonError::into_inner);
-            waiting = guard;
+            gate = guard;
             if timed_out.timed_out() {
                 return Err(Error::DeadlineExceeded(
                     "the call ran past its deadline".to_owned(),
@@ -1477,14 +1623,24 @@ impl Pg {
     }
 }
 
+/// How long a call without a deadline yields to waiting writers before
+/// it takes its turn: the derivation walk's yield keeps #142's promise
+/// (writers first) for this long per step, then the step proceeds, and
+/// the writers it passed wait behind at most one step's transaction.
+const WRITE_YIELD_BOUND: Duration = Duration::from_secs(2);
+
 /// The count of a taken write client, while it is taken: it falls, and
 /// wakes the waiters, when the client is back.
-struct PgWriteWaiter<'a>(&'a Mutex<usize>, &'a Condvar);
+// SHORTCUT: one condvar, notify_all, so a release wakes every waiting
+// writer and a commit costs O(waiters) wake-ups. Per-class condvars if
+// waiting writers often pass ~50.
+struct PgWriteWaiter<'a>(&'a Mutex<WriterGate>, &'a Condvar);
 
 impl Drop for PgWriteWaiter<'_> {
     fn drop(&mut self) {
-        let mut waiting = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        *waiting -= 1;
+        let mut gate = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        gate.taken = false;
+        gate.waiting -= 1;
         self.1.notify_all();
     }
 }
@@ -1496,10 +1652,16 @@ type DerivedPending = Vec<(String, i64, ChangesetId, Vec<u8>)>;
 /// (kind, version, id).
 type DerivedPreload = std::collections::HashMap<(String, i64, Vec<u8>), Vec<u8>>;
 
-/// The history nodes a batching transaction holds for the flush, by id.
-/// The nodes are content-addressed, so a put of a node the transaction
-/// already holds is the same row.
-type HistoryPending = std::collections::HashMap<Vec<u8>, Vec<u8>>;
+/// The history nodes a batching transaction holds for the flush, by
+/// id, with their bytes. The nodes are content-addressed, so a put of
+/// a node the transaction already holds is the same row. The count
+/// rides the map, so every view of the buffer counts the same, and
+/// the flush can run mid-transaction when the count passes its bound.
+#[derive(Default)]
+struct HistoryPending {
+    rows: std::collections::HashMap<Vec<u8>, Vec<u8>>,
+    bytes: usize,
+}
 
 /// The isolation level of one read transaction. Repeatable read pins
 /// one snapshot for the whole read; read committed takes the newest
@@ -1573,17 +1735,75 @@ pub struct PgTx<'a> {
     /// commit deletes with one statement, honoring the summed limits per
     /// kind and version. Only `defer_derived_deletes` fills it.
     deferred_deletes: Vec<(String, i64, i64)>,
-    /// Whether `delete_derived_below` defers to the commit. Off for the
-    /// importer's batching (the flush owns those deletes) and for the
-    /// sweeps, which count the rows they removed.
+    /// Whether the write path's per-row flushes wait for the commit:
+    /// `delete_derived_below` collects its calls, and history node
+    /// writes collect in the buffer the commit writes with one
+    /// statement. Off for the importer's batching (its flush owns the
+    /// shapes) and for the sweeps, which count the rows they removed.
     defer_derived: bool,
     /// The history nodes the transaction inserted while batching: the
     /// flush writes them after the derived rows. Shared with the
-    /// reborrows.
+    /// reborrows; the bytes ride the map.
     history_pending: Option<&'a mut HistoryPending>,
     /// The transaction was ended by `commit` or `rollback`; a drop then
     /// leaves the client alone.
     ended: bool,
+}
+
+/// The bytes of history nodes one transaction's buffer may hold before
+/// the flush writes them mid-transaction. A transaction whose writes
+/// pack many commits - the archive restore packs up to 64 MiB of
+/// changeset bodies, tens of thousands of commits with a few nodes
+/// each - would otherwise hold the whole history's nodes in RAM until
+/// the commit, hundreds of MB, and copy them once more into the
+/// flush's chunk arrays. At the bound the flush runs inside the
+/// transaction: the rows land in the table, this transaction's reads
+/// of them read the table, and the commit writes only what came after.
+const HISTORY_PENDING_MAX_BYTES: usize = 16 << 20;
+
+#[cfg(any(test, feature = "test-hooks"))]
+static HISTORY_PENDING_MAX_BYTES_OVERRIDE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// The bound, as the tests' override holds it when one does.
+fn history_pending_max_bytes() -> usize {
+    #[cfg(any(test, feature = "test-hooks"))]
+    {
+        let small = HISTORY_PENDING_MAX_BYTES_OVERRIDE.load(Ordering::Relaxed);
+        if small != 0 {
+            return small;
+        }
+    }
+    HISTORY_PENDING_MAX_BYTES
+}
+
+/// The most bytes the buffer held at once. The restore test reads it:
+/// a restore that packs many commits per transaction must not hold the
+/// whole history's nodes.
+#[cfg(any(test, feature = "test-hooks"))]
+static HISTORY_PENDING_PEAK: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Holds a small buffer bound for the test that pins the restore's
+/// flush, and resets the peak. The guard puts the server's bound back.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn test_set_history_pending_bound_for_tests(bytes: usize) -> impl Drop {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            HISTORY_PENDING_MAX_BYTES_OVERRIDE.store(0, Ordering::Relaxed);
+        }
+    }
+    HISTORY_PENDING_MAX_BYTES_OVERRIDE.store(bytes, Ordering::Relaxed);
+    HISTORY_PENDING_PEAK.store(0, Ordering::Relaxed);
+    Reset
+}
+
+/// The most bytes the buffer held since the last reset.
+#[cfg(any(test, feature = "test-hooks"))]
+#[must_use]
+pub fn test_history_pending_peak_bytes() -> usize {
+    HISTORY_PENDING_PEAK.load(Ordering::Relaxed)
 }
 
 impl<'a> PgTx<'a> {
@@ -1596,12 +1816,60 @@ impl<'a> PgTx<'a> {
     /// # Errors
     ///
     /// Database errors.
+    /// Writes the per-row flushes a deferring write path collected: the
+    /// history nodes the build wrote, one statement per 1,000 rows, and
+    /// the derived old-row deletes, one statement for the whole
+    /// transaction honoring the summed limits per kind. Runs inside the
+    /// transaction at its commit, so a rollback takes the writes with
+    /// it and the end state is the one the per-call writes would have
+    /// reached.
+    ///
+    /// # Errors
+    ///
+    /// Database errors.
+    fn flush_deferred(&mut self) -> Result<()> {
+        self.flush_history_rows()?;
+        if self.deferred_deletes.is_empty() {
+            return Ok(());
+        }
+        let kinds: Vec<String> = self
+            .deferred_deletes
+            .iter()
+            .map(|(k, _, _)| k.clone())
+            .collect();
+        let versions: Vec<i64> = self.deferred_deletes.iter().map(|(_, v, _)| *v).collect();
+        let steps: Vec<i64> = self.deferred_deletes.iter().map(|(_, _, s)| *s).collect();
+        let deleted = self.c.execute(
+            "WITH k AS (
+                 SELECT kind, version, SUM(step) AS step
+                 FROM unnest($1::text[], $2::int8[], $3::int8[]) AS t(kind, version, step)
+                 GROUP BY kind, version),
+             v AS (
+                 SELECT d.ctid AS ctid, k.step AS step,
+                        row_number() OVER (PARTITION BY d.kind
+                                           ORDER BY d.version) AS rn
+                 FROM derived d JOIN k ON d.kind = k.kind
+                                                        AND d.version < k.version)
+             DELETE FROM derived WHERE ctid IN (SELECT ctid FROM v WHERE rn <= step)",
+            &[
+                P::text_array(kinds),
+                P::i64_array(versions),
+                P::i64_array(steps),
+            ],
+        )?;
+        if deleted > 0 {
+            tracing::debug!(deleted, "flushed the transaction's derived deletes");
+        }
+        Ok(())
+    }
+
     fn flush_history_rows(&mut self) -> Result<()> {
         const CHUNK: usize = 1_000;
         let Some(history) = self.history_pending.as_deref_mut() else {
             return Ok(());
         };
-        let mut node_rows: Vec<(Vec<u8>, Vec<u8>)> = history.drain().collect();
+        let mut node_rows: Vec<(Vec<u8>, Vec<u8>)> = history.rows.drain().collect();
+        history.bytes = 0;
         node_rows.sort();
         for chunk in node_rows.chunks(CHUNK) {
             let ids = chunk.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
@@ -1615,6 +1883,11 @@ impl<'a> PgTx<'a> {
                  ON CONFLICT (id) DO NOTHING",
                 &[P::bytea_array(ids), P::bytea_array(bodies)],
             )?;
+            #[cfg(test)]
+            {
+                let bytes: usize = chunk.iter().map(|(_, body)| body.len()).sum();
+                crate::history::note_flushed_node_bytes(bytes);
+            }
         }
         Ok(())
     }
@@ -1825,9 +2098,14 @@ impl Setup {
             // Every statement that follows resolves its unqualified names
             // inside the schema, and the cleanup of stale test schemas
             // sees the connection in `pg_stat_activity` under its name.
+            // The SHARED session lock on the schema's name is the
+            // cleanup's real check: a live connection holds it, so its
+            // schema never yields the cleanup's exclusive try, whatever
+            // a snapshot saw.
             if client
                 .batch_execute(&format!(
-                    "SET search_path TO {schema}; SET application_name TO '{schema}'"
+                    "SET search_path TO {schema}; SET application_name TO '{schema}';
+                     SELECT pg_advisory_lock_shared(hashtext('{schema}'))"
                 ))
                 .is_err()
             {
@@ -2389,8 +2667,124 @@ fn merged_options(from_url: Option<&str>, own: &str) -> String {
     }
 }
 
+/// The whole connect's deadline: the socket connect, its TLS, the
+/// startup message, the authentication. tokio-postgres's
+/// `connect_timeout` covers only the socket connect (the
+/// `connect_socket` step of `connect_once`); a database that accepts
+/// the connection and never answers its startup would hold the open,
+/// the readers' connect and every reconnect forever, so the connect
+/// runs on its own thread and the caller stops waiting at the
+/// deadline. `tcp_user_timeout` cannot cover the wait: a client that
+/// waits for an answer has no unacknowledged data, and the peer's
+/// kernel answers the keepalive probes. A connect past the deadline
+/// leaves its thread parked on the socket - tokio-postgres offers no
+/// cancel - so the connect registers itself as parked, and the server
+/// starts no new connect while
+/// [`CONNECT_PARKED_MAX`] of them are parked: a connect that would be
+/// the next fails at once, naming the host and how long the oldest has
+/// been parked. The cap ends the FD storm a reconnecting server would
+/// otherwise grow against a database that stalls its connects - one
+/// thread and socket a retry, forever - because once the cap fills,
+/// every new connect fails at once, and only the connects already in
+/// flight when it filled can park: a batch bounded by the worker
+/// count, not a thread an hour. The upgrade is a connector whose
+/// stream fails at the deadline, so no thread parks at all (SHORTCUT:
+/// a cap of [`CONNECT_PARKED_MAX`] registered parks, one socket and
+/// thread each, until a tokio-postgres that takes a deadline for the
+/// whole connect).
+const CONNECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How many connects may sit parked on silent sockets at once. Two:
+/// one for the writers' path, one for a reader, so an outage still
+/// names itself in the log twice before the calls fail fast.
+const CONNECT_PARKED_MAX: usize = 2;
+
+/// The connects parked on silent sockets: their tokens and the moments
+/// they started, so the next connect past the cap can name how long
+/// the oldest has waited.
+static PARKED_CONNECTS: std::sync::LazyLock<Mutex<Vec<(u64, std::time::Instant)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+
+static PARKED_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Refuses a new connect while the cap of parked connects is held: the
+/// error names the host and how long the oldest parked connect has
+/// waited.
+fn park_refuse(host: &str) -> Result<()> {
+    let parked = PARKED_CONNECTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if parked.len() >= CONNECT_PARKED_MAX {
+        let oldest = parked
+            .iter()
+            .map(|(_, since)| since.elapsed().as_secs())
+            .max()
+            .unwrap_or(0);
+        return Err(Error::Unavailable(format!(
+            "the database at {host} already has {} connects parked on a \
+             socket that never answers, the oldest for {oldest} s: not starting another",
+            parked.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Registers a connect whose caller gave up waiting: its thread is
+/// still parked on the socket. Past the cap the register keeps no row
+/// - the thread parks anyway, one of the batch the cap bounded.
+fn park_register(token: u64) {
+    let mut parked = PARKED_CONNECTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if parked.len() < CONNECT_PARKED_MAX {
+        parked.push((token, std::time::Instant::now()));
+    }
+}
+
+/// Gives a parked connect's row back: the connect's thread ended, so
+/// its socket is no longer held.
+fn park_release(token: u64) {
+    PARKED_CONNECTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retain(|(held, _)| *held != token);
+}
+
 /// [`connect_with`]'s work: parse, then connect.
 fn connect_on(url: &str, ca: Option<&Path>, options: &str) -> Result<Client> {
+    connect_on_deadline(url, ca, options, CONNECT_DEADLINE)
+}
+
+/// [`connect_on`], with the whole connect's deadline a parameter, so
+/// the test that pins it does not wait the server's thirty seconds.
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn connect_on_deadline_for_tests(
+    url: &str,
+    ca: Option<&Path>,
+    options: &str,
+    deadline: std::time::Duration,
+) -> Result<Client> {
+    connect_on_deadline(url, ca, options, deadline)
+}
+
+/// The tests' reset of the parked-connect slots: every slot goes back,
+/// so a test starts its count from empty.
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn test_reset_parked_connects() {
+    PARKED_CONNECTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
+fn connect_on_deadline(
+    url: &str,
+    ca: Option<&Path>,
+    options: &str,
+    deadline: std::time::Duration,
+) -> Result<Client> {
     let mut config: Config = url
         .parse()
         .map_err(|e| Error::InvalidArgument(format!("cannot parse the database URL: {e}")))?;
@@ -2427,14 +2821,46 @@ fn connect_on(url: &str, ca: Option<&Path>, options: &str) -> Result<Client> {
                 .to_owned(),
         ));
     }
+    // The host the error names: the first host of the URL, with the
+    // port, or the socket's path.
+    let host = match config.get_hosts().first() {
+        Some(postgres::config::Host::Tcp(host)) => {
+            let port = config.get_ports().first().copied().unwrap_or(5432);
+            format!("{host}:{port}")
+        }
+        Some(postgres::config::Host::Unix(path)) => path.display().to_string(),
+        None => "no host".to_owned(),
+    };
     // A connect that fails is a database the caller may wait for: the
     // same states a statement answers, mapped the same way, so a caller
-    // that retries a busy database retries a starting one too.
-    let client = match (local, ca) {
+    // that retries a busy database retries a starting one too. The
+    // connect runs on its own thread, and the caller stops waiting at
+    // `deadline`: a database that accepts the connection and never
+    // answers its startup fails here instead of holding the open, the
+    // readers' connect and every reconnect forever.
+    let (connected, wait) = std::sync::mpsc::channel();
+    park_refuse(&host)?;
+    let token = PARKED_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let attempt = match (local, ca) {
         // The connector upgrades every connection, and checks the
         // certificate the server presents against `ca`.
-        (_, Some(ca)) => config.connect(make_tls(ca)?).map_err(map_pg_error)?,
-        (true, None) => config.connect(NoTls).map_err(map_pg_error)?,
+        (_, Some(ca)) => {
+            let tls = make_tls(ca)?;
+            std::thread::Builder::new()
+                .name("postgres-connect".to_owned())
+                .spawn(move || {
+                    let answer = config.connect(tls);
+                    park_release(token);
+                    let _ = connected.send(answer);
+                })
+        }
+        (true, None) => std::thread::Builder::new()
+            .name("postgres-connect".to_owned())
+            .spawn(move || {
+                let answer = config.connect(NoTls);
+                park_release(token);
+                let _ = connected.send(answer);
+            }),
         (false, None) => {
             return Err(Error::InvalidArgument(
                 "the database host is off this machine: give --postgres-ca, \
@@ -2442,8 +2868,26 @@ fn connect_on(url: &str, ca: Option<&Path>, options: &str) -> Result<Client> {
                     .to_owned(),
             ));
         }
-    };
-    Ok(client)
+    }
+    .map_err(|e| Error::Internal(format!("could not start the connect thread: {e}")))?;
+    if let Ok(answer) = wait.recv_timeout(deadline) {
+        answer.map_err(map_pg_error)
+    } else {
+        // The connect's thread is now parked on the socket: registered,
+        // so the next connects past the cap refuse at once.
+        park_register(token);
+        let why = format!(
+            "the database at {host} did not finish its connect within {} s: \
+             the socket may have connected, but its startup, its TLS \
+             or its authentication never answered",
+            deadline.as_secs()
+        );
+        tracing::error!(
+            "{why}; the connect thread {} is left on the socket",
+            attempt.thread().name().unwrap_or("?")
+        );
+        Err(Error::DeadlineExceeded(why))
+    }
 }
 
 /// A database error that a caller may retry maps to a busy [`Storage`]:
@@ -3833,11 +4277,12 @@ impl MetaTx for PgTx<'_> {
         Ok(())
     }
 
-    /// Defers the write path's `delete_derived_below` to the commit:
-    /// the collected deletes wait for the commit's flush, and the
-    /// deferral lasts to the commit. One-way - there is no off, because
-    /// an off would silently drop deletes the transaction already
-    /// promised.
+    /// Defers the write path's per-row flushes to the commit: the
+    /// collected `delete_derived_below` calls wait for the commit's
+    /// one-statement flush, and the history nodes the write path
+    /// buffers do too. The deferral lasts to the commit. One-way -
+    /// there is no off, because an off would silently drop deletes the
+    /// transaction already promised.
     fn defer_derived_deletes(&mut self) {
         self.defer_derived = true;
     }
@@ -4342,22 +4787,35 @@ impl MetaTx for PgTx<'_> {
     }
 
     /// Stores a history node under its content address. Safe to repeat.
-    /// Returns whether the row was new.
-    fn put_history_node(&mut self, id: NodeId, body: Vec<u8>) -> Result<(NodeId, bool)> {
+    fn put_history_node(&mut self, id: NodeId, body: Vec<u8>) -> Result<NodeId> {
         // While the importer's batching is on, the row waits for the
         // flush, which writes it in batches after the derived rows; the
-        // buffer answers this transaction's reads of the same node.
-        if self.cs_batching
-            && let Some(pending) = self.history_pending.as_deref_mut()
+        // buffer answers this transaction's reads of the same node. A
+        // deferring write path collects the same way: its commit writes
+        // the transaction's nodes with one statement, however many
+        // levels the history tree grew. A row the buffer already holds
+        // takes the newer body, the same bytes under the same address:
+        // the content-addressed body makes the repeat free.
+        if let Some(pending) = self.history_pending.as_deref_mut()
+            && (self.cs_batching || self.defer_derived)
         {
-            pending.insert(id.0.to_vec(), body);
-            return Ok((id, true));
+            let added = body.len();
+            if let Some(old) = pending.rows.insert(id.0.to_vec(), body) {
+                pending.bytes -= old.len();
+            }
+            pending.bytes += added;
+            #[cfg(any(test, feature = "test-hooks"))]
+            HISTORY_PENDING_PEAK.fetch_max(pending.bytes, Ordering::Relaxed);
+            if pending.bytes > history_pending_max_bytes() {
+                self.flush_history_rows()?;
+            }
+            return Ok(id);
         }
-        let stored = self.c.execute(
+        self.c.execute(
             "INSERT INTO history_nodes (id, body) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING",
             &[P::bytes(&id.0), P::bytes(&body)],
         )?;
-        Ok((id, stored == 1))
+        Ok(id)
     }
 
     /// Reads a history node and checks it against its ID. Also returns the
@@ -4367,11 +4825,13 @@ impl MetaTx for PgTx<'_> {
     ///
     /// [`Error::Corrupt`] if absent or if it does not match its ID.
     fn get_history_node(&mut self, id: NodeId) -> Result<(Vec<u8>, usize)> {
-        if self.cs_batching
-            && let Some(body) = self
-                .history_pending
-                .as_deref()
-                .and_then(|pending| pending.get(id.0.as_slice()))
+        // A row the transaction holds for its flush answers from the
+        // buffer, batching or not: a deferred write is the transaction's
+        // own state.
+        if let Some(body) = self
+            .history_pending
+            .as_deref()
+            .and_then(|pending| pending.rows.get(id.0.as_slice()))
         {
             let len = body.len();
             return Ok((body.clone(), len));
@@ -5564,6 +6024,198 @@ pub(crate) mod pool_tests {
         let again = store.write(|c| c.insert_changeset(repo, &cs)).unwrap();
         assert_eq!(again, id);
     }
+
+    /// The lane's admission rule, on its own: a slot holder goes ahead
+    /// of other waiting writers, an other writer goes when no slot
+    /// holder waits or after the bound's run of slot holders, and with
+    /// no slot holder in the lane the rule is today's plain queue.
+    #[test]
+    fn the_write_lane_admits_by_the_bound() {
+        let gate = |holders_waiting: usize, plain_waiting: usize, holders_ahead: usize| {
+            super::WriterGate {
+                taken: false,
+                waiting: holders_waiting + plain_waiting,
+                holders_waiting,
+                plain_waiting,
+                holders_ahead,
+            }
+        };
+        // A slot holder passes queued other writers while the bound is
+        // not reached.
+        assert!(super::lane_admits(&gate(0, 3, 0), true));
+        assert!(super::lane_admits(&gate(0, 3, 3), true));
+        // At the bound, the next other writer goes first.
+        assert!(!super::lane_admits(
+            &gate(0, 1, super::WRITER_LANE_AHEAD),
+            true
+        ));
+        assert!(super::lane_admits(
+            &gate(1, 1, super::WRITER_LANE_AHEAD),
+            false
+        ));
+        // After that writer, the holders go on.
+        assert!(super::lane_admits(&gate(2, 0, 0), true));
+        // An other writer with no slot holder waiting goes at once: the
+        // lane is the plain queue when no land holds a slot.
+        assert!(super::lane_admits(&gate(0, 1, 0), false));
+        // A slot holder with no other writer waiting goes at once.
+        assert!(super::lane_admits(&gate(1, 0, 0), true));
+    }
+
+    /// A slot holder's commit enters ahead of the other writers that
+    /// wait for the write client: the write client is held by a slow
+    /// transaction, five other writers and one slot holder queue behind
+    /// it, and the slot holder's commit completes before any of the
+    /// five.
+    #[test]
+    fn a_slot_holders_commit_enters_ahead_of_the_write_queue() {
+        use crate::test_support::meta::Meta as _;
+        let _slot = super::damage::slot();
+        let dir = crate::test_support::private_tempdir();
+        let store = Arc::new(crate::Backend::open_test(dir.path()).unwrap());
+        let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let holder = {
+            let store = Arc::clone(&store);
+            let hold = Arc::clone(&hold);
+            let release = Arc::clone(&release);
+            std::thread::spawn(move || {
+                store
+                    .write(|_| {
+                        hold.store(true, std::sync::atomic::Ordering::Release);
+                        while !release.load(std::sync::atomic::Ordering::Acquire) {
+                            std::thread::sleep(std::time::Duration::from_millis(2));
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+            })
+        };
+        while !hold.load(std::sync::atomic::Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        // Five other writers and one slot holder queue; the slot holder
+        // goes first, then the other writers.
+        let order = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+        let mut threads = Vec::new();
+        for class in ["plain", "plain", "plain", "plain", "plain", "holder"] {
+            let store = Arc::clone(&store);
+            let order = Arc::clone(&order);
+            threads.push(std::thread::spawn(move || {
+                let done = |_c: &mut crate::pg::PgTx<'_>| -> crate::error::Result<()> {
+                    order
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(class);
+                    Ok(())
+                };
+                if class == "holder" {
+                    store.write_slot_holder(done).unwrap();
+                } else {
+                    store.write(done).unwrap();
+                }
+            }));
+        }
+        // All six wait: one slot holder and five other writers.
+        for _ in 0..2_000 {
+            let (holders, plain) = store.writer_lane_waiting();
+            if holders == 1 && plain == 5 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let (holders, plain) = store.writer_lane_waiting();
+        assert_eq!((holders, plain), (1, 5), "the six writers did not queue");
+        release.store(true, std::sync::atomic::Ordering::Release);
+        holder.join().unwrap();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let order = order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(order.len(), 6, "every writer ran: {order:?}");
+        assert_eq!(order[0], "holder", "the slot holder went first: {order:?}");
+    }
+
+    /// The bound: after four slot holders in a row, the next turn is
+    /// the other writer's, so a stream of settles cannot starve the
+    /// record commits that feed it.
+    #[test]
+    fn a_non_slot_writer_is_admitted_within_the_bound() {
+        use crate::test_support::meta::Meta as _;
+        let _slot = super::damage::slot();
+        let dir = crate::test_support::private_tempdir();
+        let store = Arc::new(crate::Backend::open_test(dir.path()).unwrap());
+        let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let holder = {
+            let store = Arc::clone(&store);
+            let hold = Arc::clone(&hold);
+            let release = Arc::clone(&release);
+            std::thread::spawn(move || {
+                store
+                    .write(|_| {
+                        hold.store(true, std::sync::atomic::Ordering::Release);
+                        while !release.load(std::sync::atomic::Ordering::Acquire) {
+                            std::thread::sleep(std::time::Duration::from_millis(2));
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+            })
+        };
+        while !hold.load(std::sync::atomic::Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        // Four slot holders, then one other writer, then one more slot
+        // holder, all queued before the held transaction ends.
+        let order = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+        let mut threads = Vec::new();
+        for class in ["holder", "holder", "holder", "holder", "plain", "holder"] {
+            let store = Arc::clone(&store);
+            let order = Arc::clone(&order);
+            threads.push(std::thread::spawn(move || {
+                let done = |_c: &mut crate::pg::PgTx<'_>| -> crate::error::Result<()> {
+                    order
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(class);
+                    Ok(())
+                };
+                if class == "holder" {
+                    store.write_slot_holder(done).unwrap();
+                } else {
+                    store.write(done).unwrap();
+                }
+            }));
+        }
+        for _ in 0..2_000 {
+            let (holders, plain) = store.writer_lane_waiting();
+            if holders == 5 && plain == 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let (holders, plain) = store.writer_lane_waiting();
+        assert_eq!((holders, plain), (5, 1), "the six writers did not queue");
+        release.store(true, std::sync::atomic::Ordering::Release);
+        holder.join().unwrap();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let order = order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The first four slot holders go, then the other writer, then
+        // the fifth slot holder: the bound held the fifth back.
+        assert_eq!(
+            order.as_slice(),
+            ["holder", "holder", "holder", "holder", "plain", "holder"],
+            "the lane ran the writers in the bound's order"
+        );
+    }
+
     /// A read that runs while a write transaction holds the write
     /// client: the land's outcome check and plan ride it, so a land in
     /// its slot must not wait for another writer's statements. The

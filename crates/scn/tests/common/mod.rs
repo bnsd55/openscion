@@ -290,7 +290,71 @@ pub(crate) fn land(store: &Backend, cs: &Changeset) -> ChangesetId {
 /// any wake-up over 1 s late, naming the test. The server's connection
 /// task shares the runtime, so a late wake-up is the keep-alive silence
 /// the client sees (issue #795).
+///
+/// The probe is itself a task of that runtime, and the runtime runs on
+/// several workers, so the probe's own timer is serviced by whichever
+/// worker is free: one blocked worker cannot report itself through it.
+/// That is the second probe's job: a plain OS thread, started beside
+/// the task, that ticks every second on its own and reports a gap over
+/// two seconds with the wall clock. The thread's sleep answers only to
+/// the OS scheduler, so a gap it sees is a process or a host pause,
+/// not one worker's queue - the two lines together tell which of the
+/// two the connection's silence was.
+///
+/// The probe is the one place every traced suite runs, so it also
+/// arms the process's tracing subscriber once, when `RUST_LOG` is set:
+/// the server and its hyper and h2 layers share the runtime and the
+/// process, so their events name what the connection saw - a request's
+/// arrival, a ping answered, the last frame written - while the
+/// probe's own lines name the runtime's silence. Without `RUST_LOG`
+/// nothing is installed, so the suites' output stays as it was.
+/// Stops the OS thread when the runtime drops the probe: the flag goes
+/// down, and the ticker's join waits for the sleep it sits in.
+struct StopTicker(
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    Option<std::thread::JoinHandle<()>>,
+);
+
+impl Drop for StopTicker {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handle) = self.1.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 pub(crate) async fn stall_probe(test: &'static str) {
+    init_trace();
+    // The OS thread ticks beside the task; the guard stops it when the
+    // runtime drops this probe, so a dead test's ticker does not report
+    // another suite's pause under its name.
+    let wall_running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let wall_test = test;
+    let wall_started = std::time::Instant::now();
+    let wall = {
+        let running = std::sync::Arc::clone(&wall_running);
+        std::thread::spawn(move || {
+            let mut last = std::time::Instant::now();
+            while running.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                let now = std::time::Instant::now();
+                let gap = now.duration_since(last);
+                last = now;
+                if gap > std::time::Duration::from_secs(2) {
+                    let wall = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or_else(|_| "?".to_owned(), |d| format!("{}s", d.as_secs()));
+                    eprintln!(
+                        "WALL-STALL in {wall_test} at +{:?}: no tick for {:?} (wall +{wall}s)",
+                        wall_started.elapsed(),
+                        gap
+                    );
+                }
+            }
+        })
+    };
+    let _ticker = StopTicker(wall_running, Some(wall));
     let mut last = tokio::time::Instant::now();
     let started = std::time::Instant::now();
     loop {
@@ -306,4 +370,27 @@ pub(crate) async fn stall_probe(test: &'static str) {
             );
         }
     }
+}
+
+/// Arms the process's log once, when `RUST_LOG` says how loud to be: a
+/// dispatch that wants the server's side of a connection sets it, and
+/// every binary the suite runs then reports through it. The worker
+/// count is the runtime's own default (one per CPU core), printed with
+/// the install so a rep's log names the room the tasks shared.
+fn init_trace() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if let Ok(filter) = std::env::var("RUST_LOG") {
+            eprintln!(
+                "the test runtime's workers: {} (one per core, the runtime's default)",
+                std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+            );
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+                .with_ansi(false)
+                .with_writer(std::io::stderr)
+                .try_init()
+                .ok();
+        }
+    });
 }

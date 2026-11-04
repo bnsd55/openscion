@@ -15,6 +15,9 @@ use std::{fs, io};
 #[cfg(target_os = "macos")]
 mod ffi;
 
+#[cfg(target_os = "macos")]
+pub(crate) use ffi::hw_memsize;
+
 pub mod removed;
 
 use rustix::fs::OFlags;

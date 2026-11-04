@@ -228,7 +228,7 @@ contract. A client MUST NOT depend on its text.
 | `CANCELLED` | The server's 600 s limit or the client's `grpc-timeout` ran out. A client library can report its own deadline as `DEADLINE_EXCEEDED`. | Yes. A `Land` retry uses the same request key, remembered for at least 7 days (section 6.3). |
 | `DEADLINE_EXCEEDED` | `ReadFile`: the client took no message for 120 s. `GetObjects`: the client took no part for 120 s in the middle of an object (section 7.3). `Land`: the land ran past 600 s from the start of the call. The land stays `PENDING`. `MergeBase`, `IsAncestor`, `Log` with a path: the call ran past its deadline, 600 s from its start or the caller's `grpc-timeout`. From a tier: the caller's deadline ran out while the tier waited for its first object (section 8). | Yes. A `Land` retry uses the same request key, remembered for at least 7 days (section 6.3). |
 | `UNAVAILABLE` | The server cannot be reached or is shutting down, or its database stayed busy for 5 s (another process, such as an import, held its write lock). A tier also replies `UNAVAILABLE` when its upstream does not answer in time, or when it finds no room to fetch an object from upstream within 30 s (section 8). | Yes |
-| `RESOURCE_EXHAUSTED` | A server limit stopped the call, and the message names it: a per-principal quota (section 2); a memory budget that the call's share does not fit, or did not get in time, such as `GetObjects` with no memory for the first object within 30 s or before the caller's deadline (section 7.3) and `Blame` (section 6.10); the server's budget of unary replies its clients have not read; a reply over its size cap; or a server out of disk space. | Yes, after a wait. A call whose share is more than the whole budget, or whose reply is over its cap, fails the same way again. |
+| `RESOURCE_EXHAUSTED` | A server limit stopped the call, and the message names it: a per-principal quota (section 2); a memory budget that the call's share does not fit, or did not get in time, such as `GetObjects` with no memory for the first object within 30 s or before the caller's deadline (section 7.3) and `Blame` (section 6.10); a graph query (`MergeBase`, `IsAncestor`) whose walk passed its million-visit bound (section 6.11); the server's budget of unary replies its clients have not read; a reply over its size cap; or a server out of disk space. | Yes, after a wait, except a graph query at its visit bound: its retry visits the same changesets and fails the same way. A call whose share is more than the whole budget, or whose reply is over its cap, fails the same way again. |
 | `DATA_LOSS` | Stored data is damaged: a tier's upstream sent bytes that are not the object asked for (section 8), or the server's stored copy failed its own check. The message is `damaged data`; the detail stays in the server log. | MAY |
 | `INTERNAL` | A database, I/O or Git error, or a server bug. The message is `internal error`; the detail stays in the server log. | MAY |
 | `UNIMPLEMENTED` | The server does not have the call, the request is compressed, or the caller is a partial reader of folder read rules and the call reads history or writes (section 2). | After the cause is fixed |
@@ -689,21 +689,27 @@ repository.
 - If one changeset is an ancestor of the other, the answer is that one.
   `changeset_ids` is empty when the two histories share no changeset.
 
-**Cost.** A call has no bound on its steps. A step reads one changeset's
-parents, or one entry of the server's commit-graph index. When neither
-first-parent history has a merge newer than where the two meet, the answer
-takes a few dozen steps, at any depth. Otherwise the server walks from both
-changesets, highest generation first, and stops once no other best common
-ancestor can follow. It reads each merge on the way, and the changesets
-where two parts of the walk are at the same generations. It jumps over the
-other runs of first parents, a few dozen steps for each run. A call stops at
-the 600 s limit (section 2), or when its client cancels it. There is no
-resume.
+**Cost.** A call takes at most a million visits. A visit is one move of
+the walk: a step reads one changeset's parents, or one entry of the
+server's commit-graph index; a move of the paint that finds the best
+common ancestors takes one merge. When neither first-parent history has a
+merge newer than where the two meet, the answer takes a few dozen steps,
+at any depth. Otherwise the server walks from both changesets, highest
+generation first, and stops once no other best common ancestor can follow.
+It reads each merge on the way, and the changesets where two parts of the
+walk are at the same generations. It jumps over the other runs of first
+parents, a few dozen steps for each run. A call that passes its million
+visits fails with `RESOURCE_EXHAUSTED` and names the bound in the error's
+message; a retry of the same query visits the same changesets and fails
+the same way, as a `Blame` call whose share does not fit the memory
+budget (section 6.10) does. A call also stops at the 600 s limit
+(section 2), or when its client cancels it. There is no resume.
 
 | Error | When |
 |---|---|
 | `INVALID_ARGUMENT` | A bad repo name or ID. |
 | `NOT_FOUND` | The repo or a changeset does not exist. |
+| `RESOURCE_EXHAUSTED` | The walk passed its million-visit bound. A retry of the same query fails the same way. |
 | `CANCELLED`, `DEADLINE_EXCEEDED` | The call ran past 600 s, or the client cancelled it. |
 
 ### 6.12 IsAncestor
@@ -712,12 +718,15 @@ resume.
 `is_ancestor` is true when `ancestor_id` is `descendant_id`, or is reached
 from it through parents. Ancestry follows every parent, as in `MergeBase`.
 
-**Cost.** A call has no bound on its steps, as in `MergeBase`, and never
-goes below the generation of `ancestor_id`. So when the two differ and
-`ancestor_id`'s generation is not lower, the answer is false. Without a
-merge between the two, the answer takes a few dozen steps, at any depth.
-Each merge newer than `ancestor_id` that the search reaches costs three
-steps. A call stops at the 600 s limit, or when its client cancels it.
+**Cost.** A call takes at most the same million visits a `MergeBase`
+call takes, and never goes below the generation of `ancestor_id`. So when
+the two differ and `ancestor_id`'s generation is not lower, the answer is
+false. Without a merge between the two, the answer takes a few dozen
+steps, at any depth. Each merge newer than `ancestor_id` that the search
+reaches costs three steps. A call that passes the bound fails with
+`RESOURCE_EXHAUSTED`, as a `MergeBase` call does, and a retry of the same
+query fails the same way. A call also stops at the 600 s limit, or when
+its client cancels it.
 
 | Error | When |
 |---|---|

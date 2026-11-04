@@ -164,6 +164,9 @@ pub struct Metrics {
     /// Derive walks in flight, and walks waiting for a permit.
     derive_walks_in_flight: AtomicU64,
     derive_walks_waiting: AtomicU64,
+    /// The bytes the paged diffs' rename maps hold in the read path's
+    /// cache, as its cap reports.
+    diff_rename_cache_bytes: AtomicU64,
     /// The Postgres reader pool: the time calls waited for a reader, as
     /// the same buckets as `latency`, with the sum and the count. The
     /// last two fields are the gauges: readers out of the pool, and the
@@ -346,6 +349,12 @@ impl Metrics {
     /// Counts one derive walk that gave its permit back.
     pub fn derive_walk_ended(&self) {
         self.derive_walks_in_flight.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Sets the bytes the paged diffs' rename maps hold in the read
+    /// path's cache.
+    pub fn set_diff_rename_cache_bytes(&self, bytes: u64) {
+        self.diff_rename_cache_bytes.store(bytes, Ordering::Relaxed);
     }
 
     /// Counts one walk that waits for a permit; the pair brackets each
@@ -661,6 +670,11 @@ impl Metrics {
                 "scion_derive_walks_waiting",
                 "Derive walks waiting for a permit.",
                 &self.derive_walks_waiting,
+            ),
+            (
+                "scion_diff_rename_cache_bytes",
+                "The bytes the paged diffs' rename maps hold in the read path's cache.",
+                &self.diff_rename_cache_bytes,
             ),
         ] {
             let value = gauge.load(Ordering::Relaxed);
