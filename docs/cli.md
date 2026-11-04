@@ -23,7 +23,7 @@ Every command takes the connection flags (`--server`, `--objects`,
 token flags sit before the subcommand only (they are flags of `scn`
 itself): `scn --token-file FILE cat main:src/lib.rs` parses;
 `scn cat --token-file FILE ...` does not. The server's own global flags
-(`--data`, `--postgres-url`, `--postgres-url-file`, `--postgres-ca`)
+(`--data`, `--postgres-url-file`, `--postgres-ca`)
 also parse before or after its subcommand: `scion-server --data D fsck`
 and `scion-server fsck --data D` are the same call.
 

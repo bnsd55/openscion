@@ -35,7 +35,7 @@ git init -q --bare --initial-branch=main "$WORK/src.git"
 git -C "$WORK/src.git" fetch -q "$WORK/src" main
 SEED_HEX=$(git -C "$WORK/src" rev-parse main)
 git -C "$WORK/src.git" update-ref refs/heads/main "$SEED_HEX"
-"$BIN/scion-server" --data "$WORK/server" --postgres-url "$PG_URL" import --rev main "$WORK/src.git" \
+SCION_POSTGRES_URL="$PG_URL" "$BIN/scion-server" --data "$WORK/server" import --rev main "$WORK/src.git" \
   > /dev/null 2> "$WORK/import.log" || {
   tail -n 20 "$WORK/import.log" >&2
   die "the import failed"

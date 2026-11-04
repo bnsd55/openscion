@@ -913,19 +913,12 @@ fn import_process_on_postgres(data: &Path, git: &Git, rev: &str, name: &str) -> 
     let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
     let schema = Backend::test_schema(data);
     let sep = if url.contains('?') { '&' } else { '?' };
-    // `--postgres-url` is a flag of the root command, so it goes before
-    // the subcommand.
-    let mut command = server_process(
-        data,
-        &[
-            "--postgres-url",
-            &format!("{url}{sep}options=--search_path%3D{schema}"),
-            "import",
-            "--repo",
-            "r",
-            "--rev",
-            rev,
-        ],
+    // The URL rides the environment (no binary takes a secret as a
+    // flag); its options carry this directory's schema.
+    let mut command = server_process(data, &["import", "--repo", "r", "--rev", rev]);
+    command.env(
+        "SCION_POSTGRES_URL",
+        format!("{url}{sep}options=--search_path%3D{schema}"),
     );
     command
         .args(["--ref", name, "--verify", "10"])
@@ -1124,19 +1117,14 @@ fn a_second_server_process_is_refused() {
     let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
     let schema = Backend::test_schema(dir.path());
     let sep = if url.contains('?') { '&' } else { '?' };
-    let extra = [
-        "--postgres-url".to_owned(),
-        format!("{url}{sep}options=--search_path%3D{schema}"),
-    ];
-    let args: Vec<&str> = ["serve", "--listen", "127.0.0.1:0"]
-        .into_iter()
-        .chain(extra.iter().map(String::as_str))
-        .collect();
+    let url = format!("{url}{sep}options=--search_path%3D{schema}");
+    let args: Vec<&str> = ["serve", "--listen", "127.0.0.1:0"].to_vec();
     let out = common::spawn_guard::across_spawn(|| {
         // A serve child held past a bounded wait is killed, not waited
         // on forever: the refusal exits by itself, and a server that
         // ever serves fails here instead of hanging the cell.
         let mut child = server_process(dir.path(), &args)
+            .env("SCION_POSTGRES_URL", &url)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()

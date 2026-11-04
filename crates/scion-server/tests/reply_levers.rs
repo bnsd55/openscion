@@ -111,9 +111,7 @@ fn spawn_server(data: &Path, token: &Path, lever: Option<&str>) -> (Child, Strin
     let mut command = Command::new(env!("CARGO_BIN_EXE_scion-server"));
     // The child needs the test database, under the data directory's
     // own schema.
-    command
-        .arg("--postgres-url")
-        .arg(common::postgres_url(data));
+    command.env("SCION_POSTGRES_URL", common::postgres_url(data));
     command
         .arg("--data")
         .arg(data)

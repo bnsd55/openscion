@@ -856,8 +856,8 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
         // holds the store it names: a store that ever served wrote
         // its repo rows, so a schema with no repos row was never
         // served by the directory's store, and adopting would give
-        // the marker's identity to an empty schema - a wrong
-        // --postgres-url, a typo in its search_path, or one never
+        // the marker's identity to an empty schema - a wrong URL in
+        // SCION_POSTGRES_URL, a typo in its search_path, or one never
         // served - and every caller would read "repo not found"
         // with no error at the start. An empty schema refuses while
         // the marker names a store, and mints when it names none.
@@ -866,7 +866,7 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
             return Err(Error::FailedPrecondition(format!(
                 "this data directory belongs to the store whose UUID \
                  is {}, but this database holds no store: check \
-                 --postgres-url and its search_path",
+                 SCION_POSTGRES_URL and its search_path",
                 hex16(&held)
             )));
         }
