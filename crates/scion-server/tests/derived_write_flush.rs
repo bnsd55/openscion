@@ -100,6 +100,10 @@ fn the_old_rows_a_write_path_deletes_are_gone_after_its_commit() {
 /// remain are read from two identical stores and compared.
 #[test]
 fn the_flush_deletes_what_the_per_call_deletes_delete_in_order() {
+    // This test does not count statements, but its own land on the
+    // process-wide seam would pollute a counting test's window: every
+    // test in the file holds the lock for its whole body.
+    let _log = log_guard();
     let mut remaining = Vec::new();
     for defer in [true, false] {
         let dir = scion_server::test_support::private_tempdir();
