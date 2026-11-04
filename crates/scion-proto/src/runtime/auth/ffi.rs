@@ -6,7 +6,7 @@
 
 #![allow(unsafe_code)]
 
-use std::os::raw::{c_int, c_void};
+use std::os::raw::{c_char, c_int, c_void};
 
 /// `ACL_TYPE_EXTENDED`, the only access-ACL kind macOS keeps on a
 /// descriptor (`sys/acl.h`).
@@ -287,4 +287,41 @@ mod tests {
             Verdict::Granting("an entry whose kind could not be read", None)
         );
     }
+}
+
+/// `hw.memsize`: the host's physical memory, in bytes.
+const HW_MEMSIZE: &[u8] = b"hw.memsize\0";
+
+unsafe extern "C" {
+    /// The BSD `sysctlbyname(3)`: the named value into `oldp`, its size
+    /// in `oldlenp`. No new value is set: `newp` is null and `newlen`
+    /// zero.
+    fn sysctlbyname(
+        name: *const c_char,
+        oldp: *mut c_void,
+        oldlenp: *mut usize,
+        newp: *mut c_void,
+        newlen: usize,
+    ) -> c_int;
+}
+
+/// The host's physical memory, in bytes: `hw.memsize`. `None` when the
+/// call fails. The start-up memory probe reads the host through this,
+/// never through a subprocess: a child's pipe once kept that probe
+/// waiting as long as a client stayed connected (#795).
+pub(crate) fn hw_memsize() -> Option<u64> {
+    let mut size: u64 = 0;
+    let mut len = std::mem::size_of::<u64>();
+    // SAFETY: the name is NUL-terminated, the buffer is as long as the
+    // call is told, and no value is asked back.
+    let ok = unsafe {
+        sysctlbyname(
+            HW_MEMSIZE.as_ptr().cast(),
+            (&raw mut size).cast(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (ok == 0 && size > 0).then_some(size)
 }

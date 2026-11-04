@@ -48,7 +48,8 @@ fn spawn() -> Server {
     let child = Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .arg("--data")
         .arg(data.path())
-        .args(["serve", "--token", "t", "--listen", "127.0.0.1:0"])
+        .args(["serve", "--listen", "127.0.0.1:0"])
+        .env("SCION_TOKEN", "t")
         // The serve opens the store: the URL rides the env, quietly,
         // and the schema is the data directory's own.
         .env(

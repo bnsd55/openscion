@@ -108,7 +108,7 @@ run_story() {
   # The server refuses a missing data directory (#578); create it here.
   install -d -m 0700 "$WORK/server"
   chmod 700 "$WORK/server"
-  step import "$BIN/scion-server" --data "$WORK/server" --postgres-url "$PG_URL" import "$WORK/src"
+  step import env SCION_POSTGRES_URL="$PG_URL" "$BIN/scion-server" --data "$WORK/server" import "$WORK/src"
 
   # The ticket key, as the README prints it: the server signs with the
   # private half, and every object read carries a ticket it minted.
@@ -118,7 +118,7 @@ run_story() {
   # The server on a port the OS chooses: `--listen 127.0.0.1:0`, and the
   # log's `serving listen=` line names the port, so the story never races
   # another test for a fixed port.
-  SCION_TOKEN=smoke "$BIN/scion-server" --data "$WORK/server" --postgres-url "$PG_URL" serve \
+  SCION_TOKEN=smoke SCION_POSTGRES_URL="$PG_URL" "$BIN/scion-server" --data "$WORK/server" serve \
     --listen 127.0.0.1:0 --ticket-key "$WORK/ticket.key" \
     >"$WORK/server.log" 2>&1 &
   SERVER_PID=$!
@@ -171,7 +171,7 @@ run_story() {
 
   # fsck while the server runs, as the README says is safe: it must be
   # clean. Its exit code says so (0 clean, 1 damage, 2 cannot run).
-  step fsck "$BIN/scion-server" --data "$WORK/server" --postgres-url "$PG_URL" fsck
+  step fsck env SCION_POSTGRES_URL="$PG_URL" "$BIN/scion-server" --data "$WORK/server" fsck
 
   # The backend the run really served, from the data dir: the smoke runs
   # the Postgres store, and served_backend refuses anything else (a no

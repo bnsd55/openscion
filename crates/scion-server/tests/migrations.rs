@@ -83,7 +83,7 @@ fn a_check_on_a_fresh_database_prints_the_steps_and_exits_3() {
     let dir = scion_server::test_support::private_tempdir();
     let run = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(["--data", dir.path().join("data").to_str().unwrap()])
-        .args(["--postgres-url", &url])
+        .env("SCION_POSTGRES_URL", &url)
         .args(["migrate", "--check"])
         .env("NO_COLOR", "1")
         .output()
@@ -107,7 +107,7 @@ fn a_migrate_applies_the_pending_steps_and_the_check_is_clean() {
     scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
     let run = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(["--data", data.to_str().unwrap()])
-        .args(["--postgres-url", &url_for(&base, "mig_apply")])
+        .env("SCION_POSTGRES_URL", url_for(&base, "mig_apply"))
         .args(["migrate", "--check"])
         .env("NO_COLOR", "1")
         .output()
@@ -122,7 +122,7 @@ fn a_migrate_applies_the_pending_steps_and_the_check_is_clean() {
 
     let moved = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(["--data", data.to_str().unwrap()])
-        .args(["--postgres-url", &url_for(&base, "mig_apply")])
+        .env("SCION_POSTGRES_URL", url_for(&base, "mig_apply"))
         .args(["migrate"])
         .env("NO_COLOR", "1")
         .output()
@@ -135,7 +135,7 @@ fn a_migrate_applies_the_pending_steps_and_the_check_is_clean() {
     );
     let check = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(["--data", data.to_str().unwrap()])
-        .args(["--postgres-url", &url_for(&base, "mig_apply")])
+        .env("SCION_POSTGRES_URL", url_for(&base, "mig_apply"))
         .args(["migrate", "--check"])
         .env("NO_COLOR", "1")
         .output()
@@ -157,7 +157,7 @@ fn a_serve_refuses_a_behind_database_until_asked_to_migrate() {
     scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
     let refused = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(["--data", data.to_str().unwrap()])
-        .args(["--postgres-url", &url])
+        .env("SCION_POSTGRES_URL", &url)
         .args(["serve", "--listen", "127.0.0.1:0", "--token-file"])
         .arg(ensure_token())
         .env("NO_COLOR", "1")
@@ -174,7 +174,7 @@ fn a_serve_refuses_a_behind_database_until_asked_to_migrate() {
     let log = dir.path().join("serve.log");
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(["--data", data.to_str().unwrap()])
-        .args(["--postgres-url", &url])
+        .env("SCION_POSTGRES_URL", &url)
         .args([
             "serve",
             "--listen",
@@ -218,7 +218,7 @@ fn a_serve_refuses_a_behind_database_until_asked_to_migrate() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     let check = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
-        .args(["--postgres-url", &url])
+        .env("SCION_POSTGRES_URL", &url)
         .args(["migrate", "--check"])
         .env("NO_COLOR", "1")
         .output()
@@ -247,7 +247,7 @@ fn a_serve_still_creates_a_fresh_database() {
     let log = dir.path().join("serve.log");
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(["--data", data.to_str().unwrap()])
-        .args(["--postgres-url", &url])
+        .env("SCION_POSTGRES_URL", &url)
         .args(["serve", "--listen", "127.0.0.1:0", "--token-file"])
         .arg(ensure_token())
         .env("NO_COLOR", "1")
@@ -305,7 +305,7 @@ fn a_migrate_beside_a_live_server_refuses_and_moves_nothing() {
     let log = dir.path().join("serve.log");
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(["--data", data.to_str().unwrap()])
-        .args(["--postgres-url", &url])
+        .env("SCION_POSTGRES_URL", &url)
         .args([
             "serve",
             "--listen",
@@ -356,7 +356,7 @@ fn a_migrate_beside_a_live_server_refuses_and_moves_nothing() {
     assert_eq!(version(), "6", "the serve migrated the store");
     let refused = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(["--data", data.to_str().unwrap()])
-        .args(["--postgres-url", &url])
+        .env("SCION_POSTGRES_URL", &url)
         .args(["migrate"])
         .env("NO_COLOR", "1")
         .output()
@@ -374,7 +374,7 @@ fn a_migrate_beside_a_live_server_refuses_and_moves_nothing() {
     // Stopped, the same migrate runs: nothing is pending.
     let clean = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(["--data", data.to_str().unwrap()])
-        .args(["--postgres-url", &url])
+        .env("SCION_POSTGRES_URL", &url)
         .args(["migrate"])
         .env("NO_COLOR", "1")
         .output()

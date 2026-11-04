@@ -17,6 +17,8 @@ fn spawn(cwd: &std::path::Path, args: &[&str]) -> Child {
         .args(args)
         .current_dir(cwd)
         .env("NO_COLOR", "1")
+        .env("SCION_TOKEN", "t")
+        .env("SCION_UPSTREAM_TOKEN", "t")
         .env_remove("RUST_LOG")
         .stderr(Stdio::piped())
         .stdout(Stdio::null())
@@ -28,8 +30,7 @@ fn spawn(cwd: &std::path::Path, args: &[&str]) -> Child {
 /// the missing directory must still be missing. A daemon that keeps
 /// running has created the directory and serves from it.
 fn refuses(cwd: &std::path::Path, missing: &str, args: &[&str]) {
-    let args = [&["--token", "t", "--upstream-token", "t"], args].concat();
-    let mut child = spawn(cwd, &args);
+    let mut child = spawn(cwd, args);
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
@@ -94,10 +95,6 @@ fn a_daemon_serves_a_data_directory_that_exists() {
     let short = short_dir.join("d.sock");
     let mut child = Command::new(env!("CARGO_BIN_EXE_scion-daemon"))
         .args([
-            "--token",
-            "t",
-            "--upstream-token",
-            "t",
             "--data",
             data.to_str().unwrap(),
             "--socket",
@@ -105,6 +102,8 @@ fn a_daemon_serves_a_data_directory_that_exists() {
         ])
         .current_dir(dir.path())
         .env("NO_COLOR", "1")
+        .env("SCION_TOKEN", "t")
+        .env("SCION_UPSTREAM_TOKEN", "t")
         .env_remove("RUST_LOG")
         .stderr(Stdio::piped())
         .spawn()

@@ -132,8 +132,7 @@ fn sh_commands_parse() {
     let commands = sh_commands(
         "before\n\
          \x60\x60\x60sh\n\
-         ./scion-cache --token <T> \\\n\
-         \x20 --upstream http://S:7878 \\\n\
+         ./scion-cache --upstream http://S:7878 \\\n\
          \x20 --ticket-public-key <K>\n\
          cp -R /srv /backups\n\
          \x60\x60\x60\n",
@@ -141,10 +140,10 @@ fn sh_commands_parse() {
     assert_eq!(commands.len(), 2, "{commands:?}");
     assert_eq!(
         commands[0],
-        "./scion-cache --token <T> --upstream http://S:7878 --ticket-public-key <K>"
+        "./scion-cache --upstream http://S:7878 --ticket-public-key <K>"
     );
     assert_eq!(
         used_flags(&commands[0]),
-        vec!["--token", "--upstream", "--ticket-public-key"]
+        vec!["--upstream", "--ticket-public-key"]
     );
 }

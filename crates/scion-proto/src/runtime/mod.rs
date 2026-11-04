@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod check;
 pub mod deadline;
+pub mod host;
 pub mod listen;
 pub mod metrics;
 pub mod object;

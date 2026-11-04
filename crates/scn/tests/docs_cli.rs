@@ -130,10 +130,11 @@ fn every_scn_command_and_flag_is_in_the_reference() {
 fn help_flags_parses() {
     let text = "Usage: scn [OPTIONS] cat <SPEC>\n\
                 \x20 --server <SERVER>  Address [env: SCION_SERVER=]\n\
+                \x20 --token-file <FILE>  The token [env: SCION_TOKEN=]\n\
                 \x20 -h, --help         Print help\n\
                 \x20 -V, --version      Print version\n\
-                Or `--token TOKEN` on the command line; pass it in SCION_TOKEN.\n";
-    assert_eq!(help_flags(text), vec!["--server", "--token"]);
+                Or pass it in SCION_TOKEN.\n";
+    assert_eq!(help_flags(text), vec!["--server", "--token-file"]);
 }
 
 /// `doc_names_flag` matches whole flag names only, at any position:

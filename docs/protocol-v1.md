@@ -90,7 +90,7 @@ upstream token that is not. Every call needs one — except
 `Objects.GetObjects` (section 7.3), whose permission is its read ticket, and
 which MUST carry none. On every call that needs one, a missing or wrong
 token fails with `UNAUTHENTICATED` before the request is read. A token names
-a principal. A server started with `--token T`
+a principal. A server started with `SCION_TOKEN=T` (or `--token-file`)
 has one principal, `default`, which may read and write every repo. A server
 started with `--access FILE` reads the principal of each token and its rules
 from the file; the file's format is a deployment matter and lives in the
@@ -137,7 +137,8 @@ server takes the call until its reply starts), `--max-principal-upload-bytes`
 after a restart). A call over a cap fails before any work with
 `RESOURCE_EXHAUSTED`, and the message names the flag of the cap it hit. A
 cap applies to one principal, so other principals are not slowed. A
-server started with `--token T` has one principal, so its quotas are off
+server with one token (`SCION_TOKEN` or `--token-file`) has one
+principal, so its quotas are off
 unless a flag sets one. An upload whose message would cross the byte cap
 fails with `RESOURCE_EXHAUSTED`, and the bytes it already sent do not count
 once the call ends.

@@ -451,6 +451,12 @@ jobs:
             exit 1
           fi
           echo "free on / before the tests: ${free_gb} GB"
+      # The checked open's real-ACL case must run in CI, not skip: the
+      # script installs the acl package when the image lacks it, and
+      # SCION_TEST_REQUIRE_SETFACL=1 below makes a missing setfacl fail
+      # the test instead of skipping it.
+      - name: the real-ACL case has setfacl
+        run: scripts/ci-ensure-setfacl.sh
       - run: |
           cargo test --workspace
           df -h /
@@ -459,6 +465,7 @@ jobs:
           # nightly and a dispatch 128; the nightly's own job below
           # still proves the full 2000 on Postgres.
           PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '64' || '128' }}
+          SCION_TEST_REQUIRE_SETFACL: "1"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           # The backup test dumps the live metadata with the job's own
           # Postgres, so its tools match the server: the container name
@@ -683,6 +690,12 @@ jobs:
             exit 1
           fi
           echo "free on / before the tests: ${free_gb} GB"
+      # The checked open's real-ACL case must run in CI, not skip: the
+      # script installs the acl package when the image lacks it, and
+      # SCION_TEST_REQUIRE_SETFACL=1 below makes a missing setfacl fail
+      # the test instead of skipping it.
+      - name: the real-ACL case has setfacl
+        run: scripts/ci-ensure-setfacl.sh
       - run: |
           cargo test --workspace
           df -h /
@@ -690,6 +703,7 @@ jobs:
           # The Postgres majors prove version parity, not more cases;
           # the main job on 17 already runs 2000.
           PROPTEST_CASES: "64"
+          SCION_TEST_REQUIRE_SETFACL: "1"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           # The backup test dumps the live metadata with the job's own
           # Postgres, so its tools match the server: the container name
@@ -804,6 +818,12 @@ jobs:
           shared-key: test-postgres
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
+      # The checked open's real-ACL case must run in CI, not skip: the
+      # script installs the acl package when the image lacks it, and
+      # SCION_TEST_REQUIRE_SETFACL=1 below makes a missing setfacl fail
+      # the test instead of skipping it.
+      - name: the real-ACL case has setfacl
+        run: scripts/ci-ensure-setfacl.sh
       - name: the whole suite under umask 002
         run: |
           umask 002
@@ -811,6 +831,7 @@ jobs:
           cargo test --workspace
         env:
           PROPTEST_CASES: "128"
+          SCION_TEST_REQUIRE_SETFACL: "1"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           # The backup test dumps the live metadata with this job's own
           # Postgres, so its tools match the server.
@@ -1121,6 +1142,12 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
+      # The checked open's real-ACL case must run in CI, not skip: the
+      # script installs the acl package when the image lacks it, and
+      # SCION_TEST_REQUIRE_SETFACL=1 below makes a missing setfacl fail
+      # the test instead of skipping it.
+      - name: the real-ACL case has setfacl
+        run: scripts/ci-ensure-setfacl.sh
       - run: |
           df -h /
           cargo test -p open-scion-server --lib -- --exact \
@@ -1299,6 +1326,7 @@ jobs:
           df -h /
         env:
           PROPTEST_CASES: "2000"
+          SCION_TEST_REQUIRE_SETFACL: "1"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           # The backup test dumps the live metadata with the job's own
           # Postgres, so its tools match the server.

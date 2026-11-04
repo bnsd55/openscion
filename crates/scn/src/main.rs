@@ -21,14 +21,9 @@ struct Cli {
         global = true
     )]
     server: String,
-    /// Bearer token for the server. Pass it in `SCION_TOKEN`, not here:
-    /// the command line is readable by every local user (`ps`), the
-    /// environment of your own process is not.
-    #[arg(long, value_name = "TOKEN")]
-    token: Option<String>,
     /// File with the bearer token, read with the checks of a secret
     /// file: the owner alone may read it, and a symlink is refused.
-    #[arg(long, conflicts_with = "token", value_name = "FILE")]
+    #[arg(long, value_name = "FILE")]
     token_file: Option<PathBuf>,
     /// Address of a scion-cache or scion-daemon that serves `GetObjects`
     /// with a ticket: `http://HOST:PORT` or `unix:///PATH`. Without it,
@@ -136,6 +131,19 @@ const ERROR_EXIT: u8 = 2;
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    if let Some(removed) = scion_proto::runtime::auth::removed::removed_flag_of(
+        std::env::args_os().skip(1).collect::<Vec<_>>().as_slice(),
+        &[scion_proto::runtime::auth::removed::RemovedFlag {
+            flag: "--token",
+            instead: "pass the token in SCION_TOKEN, or in a file with --token-file FILE",
+        }],
+    ) {
+        eprintln!(
+            "scn: {}",
+            scion_proto::runtime::auth::removed::refusal_text(removed)
+        );
+        return ExitCode::from(ERROR_EXIT);
+    }
     let cli = Cli::parse();
     match run(cli).await {
         Ok(code) => code,
@@ -159,7 +167,7 @@ fn hint(text: &str) -> Option<&'static str> {
     if text.contains("invalid peer certificate") {
         Some("--tls-ca must hold the CA (PEM) that signed the certificate of the server you trust")
     } else if text.contains("valid authentication credentials") || text.contains("wrong token") {
-        Some("compare --token (or SCION_TOKEN) with the token the server was given")
+        Some("compare SCION_TOKEN (or --token-file FILE) with the token the server was given")
     } else if text.contains("cannot connect") {
         Some("is a scion server or tier running at that address?")
     } else {
@@ -220,36 +228,22 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         ),
         _ => {}
     }
-    // The token's source: the checked file, the env, or the argv form,
-    // which warns that the process list shows it.
-    let token = match (&cli.token, &cli.token_file) {
-        (Some(_), Some(_)) => unreachable!("clap refuses --token with --token-file"),
-        (Some(_), None) => {
-            eprintln!(
-                "warning: --token put a secret on the command line, which ps and \
-                 /proc/$$/cmdline show to every local account; use --token-file \
-                 (or SCION_TOKEN) instead (the argv form is deprecated and goes \
-                 away in a later release)"
-            );
-            cli.token.clone().expect("the argv form is given")
-        }
-        (None, Some(file)) => {
-            let bytes = scion_proto::runtime::auth::read_secret_file(file)
-                .map_err(|why| scion_proto::runtime::auth::checked_read_error(file, why))?;
-            let text = String::from_utf8(bytes)
-                .map_err(|_| anyhow::anyhow!("{} is not UTF-8", file.display()))?;
-            let token = text.trim();
-            anyhow::ensure!(!token.is_empty(), "{} holds no token", file.display());
-            token.to_owned()
-        }
-        (None, None) => {
-            let from_env = std::env::var("SCION_TOKEN").unwrap_or_default();
-            anyhow::ensure!(
-                !from_env.is_empty(),
-                "give SCION_TOKEN, --token-file or --token"
-            );
-            from_env
-        }
+    // The token's source: the checked file, or the environment.
+    let token = if let Some(file) = &cli.token_file {
+        let bytes = scion_proto::runtime::auth::read_secret_file(file)
+            .map_err(|why| scion_proto::runtime::auth::checked_read_error(file, why))?;
+        let text = String::from_utf8(bytes)
+            .map_err(|_| anyhow::anyhow!("{} is not UTF-8", file.display()))?;
+        let token = text.trim();
+        anyhow::ensure!(!token.is_empty(), "{} holds no token", file.display());
+        token.to_owned()
+    } else {
+        let from_env = std::env::var("SCION_TOKEN").unwrap_or_default();
+        anyhow::ensure!(
+            !from_env.is_empty(),
+            "give SCION_TOKEN or --token-file FILE"
+        );
+        from_env
     };
     let mut ctx = Ctx::connect(
         &cli.server,

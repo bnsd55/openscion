@@ -119,9 +119,7 @@ async fn a_first_boot_serves_probes_and_reads_back() {
         // import needs the same URL the server got (common's rule), or
         // the open refuses it.
         let mut import = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"));
-        import
-            .arg("--postgres-url")
-            .arg(common::postgres_url(&data));
+        import.env("SCION_POSTGRES_URL", common::postgres_url(&data));
         import
             // `--repo` names the harness's repo (the runbook's
             // default is `main`).

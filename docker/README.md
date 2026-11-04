@@ -46,9 +46,9 @@ certificates and a real token for anything that matters.
 ## The database
 
 The demo's server keeps its metadata in a `postgres:17` container, which
-`docker/compose.yml` carries and points the server at with
-`--postgres-url`; the server's data directory keeps only the marker file
-and the ticket key.
+`docker/compose.yml` carries; the server reads the URL from
+`SCION_POSTGRES_URL`, which the file sets for the service. The server's
+data directory keeps only the marker file and the ticket key.
 
 The database's traffic leaves the machine, so #178's rule applies: the
 URL names `sslmode=require`, and `--postgres-ca` checks the database's

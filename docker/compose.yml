@@ -23,25 +23,27 @@ services:
     # frames while the demo is new.
     environment:
       RUST_BACKTRACE: full
+      # The URL and the token ride in the environment: a command line
+      # is public to every local account through ps, and the URL holds
+      # the database's credentials.
+      SCION_TOKEN: ${SCION_DEMO_TOKEN:?set by docker/demo.sh}
+      SCION_POSTGRES_URL: postgres://scion:${SCION_DEMO_DB_PASSWORD:?set by docker/demo.sh}@postgres:5432/scion?sslmode=require
     # The server reaches the database over the network, so #178's rule
     # applies: the URL says sslmode=require, and --postgres-ca names the
     # demo CA that signed the database's certificate.
     command:
       - --data
       - /data
-      - --postgres-url
-      - postgres://scion:${SCION_DEMO_DB_PASSWORD:?set by docker/demo.sh}@postgres:5432/scion?sslmode=require
       - --postgres-ca
       - /certs/ca.pem
       - serve
       - --listen
       - 0.0.0.0:7878
-      - --token
-      - ${SCION_DEMO_TOKEN:?set by docker/demo.sh}
       # The demo is an unattended start (section 4 of
       # docs/operations.md): a start moves the schema instead of
       # refusing to come up.
       - --migrate
+=======
       - --tls-cert
       - /certs/server.crt
       - --tls-key
@@ -102,19 +104,20 @@ services:
   cache:
     image: open-scion-demo
     entrypoint: scion-cache
+    environment:
+      # The cache's own token and the one it sends upstream, in the
+      # environment: the command line is public through ps.
+      SCION_TOKEN: ${SCION_DEMO_TOKEN:?set by docker/demo.sh}
+      SCION_UPSTREAM_TOKEN: ${SCION_DEMO_TOKEN:?set by docker/demo.sh}
     command:
       - --listen
       - 0.0.0.0:7879
-      - --token
-      - ${SCION_DEMO_TOKEN:?set by docker/demo.sh}
       - --tls-cert
       - /certs/cache.crt
       - --tls-key
       - /certs/cache.key
       - --upstream
       - https://server:7878
-      - --upstream-token
-      - ${SCION_DEMO_TOKEN:?set by docker/demo.sh}
       - --tls-ca
       - /certs/ca.pem
       - --ticket-public-key

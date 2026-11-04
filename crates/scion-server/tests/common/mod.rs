@@ -131,7 +131,7 @@ impl Server {
     /// Starts a server on `data` and waits until it listens. It appends its
     /// log to `log`. It proves the backend before it returns: the data
     /// directory carries the Postgres marker and no SQLite database, so
-    /// a run whose spawn lost its `--postgres-url` fails here, not as a
+    /// a run whose spawn lost its URL fails here, not as a
     /// server on some other database.
     pub(crate) fn start(data: &Path, log: &Path) -> Self {
         let mut server = Self::spawn(data, log);
@@ -266,7 +266,7 @@ impl Server {
     /// schema follows the store, not the path. It waits until the server
     /// listens, and proves the backend it was asked for before it
     /// returns: the data directory carries the Postgres marker and no
-    /// SQLite database, so a run whose spawn lost its `--postgres-url`
+    /// SQLite database, so a run whose spawn lost its URL
     /// fails here instead of serving the wrong database.
     pub(crate) fn start_reopened(data: &Path, schema_source: &Path, log: &Path) -> Self {
         // The reopen follows a cut or a kill, whose store lock can
@@ -378,10 +378,10 @@ impl Server {
             // `Backend::open_test` gives it. The URL carries the schema as a
             // libpq `options` parameter, which the open merges with its own
             // options, so the tables and rows of this directory land in it.
-            // It goes before the `serve` subcommand: the flag belongs to
-            // the program, not to the subcommand.
+            // It rides the environment (no binary takes a secret as a
+            // flag), so the spawn carries it whatever the subcommand.
             if let Some(url) = &postgres_url {
-                cmd.arg("--postgres-url").arg(url);
+                cmd.env("SCION_POSTGRES_URL", url);
             }
             cmd.args(serve_args);
             // Plain log lines, so the address parses without escape
@@ -404,7 +404,7 @@ impl Server {
     }
 }
 
-/// The `--postgres-url` of a server on `data`: the test database, with the
+/// The Postgres URL of a server on `data`: the test database, with the
 /// data directory's own schema as the search path, which this creates
 /// first. The name is the one `Backend::open_test` gives the same
 /// directory, so a pre-seeded store and the server that serves it share
