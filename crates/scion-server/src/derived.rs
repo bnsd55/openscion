@@ -96,7 +96,9 @@ pub(crate) trait Kind {
 /// [`get_by`] with no deadline: the caller has no request to serve, so
 /// nothing bounds the fill in time. For background and command callers
 /// only; a call that answers a request passes its deadline to
-/// [`get_by`] instead.
+/// [`get_by`] instead. Each step still yields to writers for at most
+/// the write yield's bound, so a load that never stops delays the
+/// walk, it does not stop it.
 ///
 /// # Errors
 ///
@@ -850,8 +852,16 @@ fn derive_steps<K: Kind>(
         // A writer that waited for the connection while this step held it
         // gets in before the next step takes it again: the walk waits
         // while writers wait, so the mutex handoff is deterministic, not
-        // a race the walker wins under load ([#142]).
+        // a race the walker wins under load ([#142]). The yield is
+        // bounded ([`Pg::wait_for_writers`]), so a load that never stops
+        // delays a step, it does not stop the walk.
         store.wait_for_writers(deadline)?;
+        // The command callers (no deadline) log each step, so an
+        // operator can tell a slow run from a stuck one; a request's
+        // fill stays quiet.
+        if deadline.is_none() {
+            tracing::info!(kind = K::NAME, written, "derive step stored its rows");
+        }
     }
     Ok(value.map(|v| (v, written)))
 }
@@ -1389,6 +1399,104 @@ mod tests {
     /// The rows of the test kind at `version`, as (changeset, value).
     fn kind_rows(store: &Backend, version: u32) -> Vec<(Vec<u8>, Vec<u8>)> {
         rows_of(store, ChangedPathsV1::NAME, version)
+    }
+
+    /// A derivation with no deadline takes its turn while a writer
+    /// holds the write connection: each step's yield to writers is
+    /// bounded, so the walk stops yielding and queues its next step
+    /// behind the writer that holds the connection. The forcing is
+    /// deterministic, not timed: the walk's first step holds the
+    /// connection inside the closed gate; the first writer takes the
+    /// connection when the step ends and holds it on the test's hold;
+    /// the second writer waits behind it. While the walk yields, the
+    /// gate's count reads two (the holder and the waiter) and never
+    /// reads zero; when the bound ends the yield, the walk's next step
+    /// queues too, and the count reads three. An unbounded yield would
+    /// never queue, and the test would fail at its ceilings instead of
+    /// passing.
+    #[test]
+    fn a_derivation_without_a_deadline_takes_its_turn_while_a_writer_holds_the_connection() {
+        let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        COLD_DERIVES.store(0, Ordering::Relaxed);
+        let (_dir, store, repo, ids) = store_with(&chain(4));
+        let tip = *ids.last().unwrap();
+        let hold = Arc::new(AtomicBool::new(true));
+        std::thread::scope(|scope| {
+            let _gate = gate_closed();
+            let walker = scope.spawn(|| fill::<Cold<1>>(&store, repo, tip).unwrap());
+            wait_entered(1);
+            // The first writer waits for the connection the walk's step
+            // holds, takes it when the step ends, and holds it until the
+            // test frees it. The second writer waits behind it.
+            let hold_for_first = Arc::clone(&hold);
+            let store_ref = &store;
+            let first = scope.spawn(move || {
+                store_ref
+                    .write(|_| {
+                        for _ in 0..12_000 {
+                            if !hold_for_first.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+            });
+            for _ in 0..2_000 {
+                if store.writers_waiting() >= 2 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(
+                store.writers_waiting() >= 2,
+                "the first writer never waited"
+            );
+            let second = scope.spawn(|| store.write(|_| Ok(())).unwrap());
+            for _ in 0..2_000 {
+                if store.writers_waiting() >= 3 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(
+                store.writers_waiting() >= 3,
+                "the second writer never waited"
+            );
+            // The walk's step ends: its count falls to the two writers'.
+            // The walk sees them and waits; the bound ends the yield, and
+            // the walk's next step queues behind the holder - the count
+            // rises to three again. A walk without the bound never
+            // queues: its yield has no end.
+            gate_release(2);
+            for _ in 0..2_000 {
+                if store.writers_waiting() <= 2 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(store.writers_waiting() <= 2, "the walk's step never ended");
+            for _ in 0..12_000 {
+                if store.writers_waiting() >= 3 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(
+                store.writers_waiting() >= 3,
+                "the walk never took its turn behind the writer that holds the connection"
+            );
+            // The writers go; the walk's second step runs, and its derives
+            // pass the gate.
+            hold.store(false, Ordering::SeqCst);
+            first.join().unwrap();
+            second.join().unwrap();
+            wait_entered(3);
+            gate_release(2);
+            assert_eq!(walker.join().unwrap(), 4);
+        });
+        assert_eq!(COLD_DERIVES.load(Ordering::Relaxed), 4);
     }
 
     #[test]

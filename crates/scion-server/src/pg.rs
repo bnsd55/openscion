@@ -1439,6 +1439,13 @@ impl Pg {
 
     /// Waits while writers wait for the write client, until the deadline.
     ///
+    /// Without a deadline the yield to writers is bounded: after
+    /// [`WRITE_YIELD_BOUND`] in total, across every wake-up, the caller
+    /// takes its turn, and the writers wait behind at most one of its
+    /// transactions. The bound is for the whole wait, not per wake-up: a
+    /// writer stream that keeps the count above zero only between two
+    /// wake-ups would otherwise reset the wait forever.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::DeadlineExceeded`] once the deadline has passed.
@@ -1451,15 +1458,29 @@ impl Pg {
             .writers
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        while *waiting > 0 {
-            let Some(deadline) = deadline else {
-                waiting = self
+        let Some(deadline) = deadline else {
+            let yielded_since = std::time::Instant::now();
+            while *waiting > 0 {
+                let bound_left = WRITE_YIELD_BOUND.saturating_sub(yielded_since.elapsed());
+                if bound_left.is_zero() {
+                    // The yield's bound passed with writers still waiting:
+                    // this caller takes its turn. The writers it passes
+                    // wait behind at most one of its transactions.
+                    return Ok(());
+                }
+                let (guard, timed_out) = self
                     .inner
                     .write_woken
-                    .wait(waiting)
+                    .wait_timeout_while(waiting, bound_left, |waiting| *waiting > 0)
                     .unwrap_or_else(PoisonError::into_inner);
-                continue;
-            };
+                waiting = guard;
+                if timed_out.timed_out() {
+                    return Ok(());
+                }
+            }
+            return Ok(());
+        };
+        while *waiting > 0 {
             let budget = deadline.remaining();
             let (guard, timed_out) = self
                 .inner
@@ -1476,6 +1497,12 @@ impl Pg {
         Ok(())
     }
 }
+
+/// How long a call without a deadline yields to waiting writers before
+/// it takes its turn: the derivation walk's yield keeps #142's promise
+/// (writers first) for this long per step, then the step proceeds, and
+/// the writers it passed wait behind at most one step's transaction.
+const WRITE_YIELD_BOUND: Duration = Duration::from_secs(2);
 
 /// The count of a taken write client, while it is taken: it falls, and
 /// wakes the waiters, when the client is back.
