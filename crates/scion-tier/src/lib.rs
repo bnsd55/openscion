@@ -80,6 +80,13 @@ pub use store::{DiskStore, MemoryStore, Store};
 /// 64 MiB, so fetching far ahead of it only fills the store.
 const MAX_BATCH: usize = 128;
 
+// A reply's reads run at most [`READS_IN_FLIGHT`] at a time, in order, so a
+// claim is never more than a batch behind the reply's tiling boundary and
+// the batches tile the ask without a gap. If READS_IN_FLIGHT ever passed
+// MAX_BATCH, a claim in the else branch would start a batch ahead of the
+// boundary and leave a gap behind it.
+const _: () = assert!(READS_IN_FLIGHT < MAX_BATCH);
+
 /// Most fetches that read from upstream at once. Each holds at most one
 /// message that the fetch budget has not counted yet: the first part of an
 /// object, before its header is read.
@@ -1095,13 +1102,21 @@ impl<S: Store> Tier<S> {
             return Vec::new();
         }
         let fetched = progress.fetched_to.load(Ordering::Relaxed);
+        // The else branch: a claim a batch ahead of the boundary. It cannot
+        // happen today - a reply reads at most [`READS_IN_FLIGHT`] keys at
+        // once, in order, so no claim is ever a batch behind the boundary
+        // (the const assertion above makes that loud) - but if it did,
+        // starting at `i` is the safe choice, and `fetch_max` below keeps
+        // the boundary from following it down.
         let start = if fetched <= i && i - fetched < MAX_BATCH {
             fetched
         } else {
             i
         };
         let end = keys.len().min(start + MAX_BATCH);
-        progress.fetched_to.store(end, Ordering::Relaxed);
+        // Another claim can have moved the boundary past this read between
+        // its caller's check and this lock; the boundary only grows.
+        progress.fetched_to.fetch_max(end, Ordering::Relaxed);
         let later: Vec<_> = keys[i + 1..end].to_vec();
         let mut waiting = VecDeque::new();
         for j in start..end {
