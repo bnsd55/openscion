@@ -100,7 +100,7 @@ struct Memo {
 /// The derivation reserves these bytes from a per-store pool of
 /// [`VIEW_DERIVES_MAX`] reservations, so at most that many derivations
 /// hold theirs at once and FLOOR can count the share.
-const VIEW_MEMO_BYTES: usize = 64 << 20;
+pub(crate) const VIEW_MEMO_BYTES: usize = 64 << 20;
 
 /// The pending trees and rows one part holds before its own short write
 /// stores them, mid-walk: about 32,000 rows, a few seconds in the write
@@ -135,7 +135,7 @@ fn view_part_bytes() -> usize {
 /// How many view derivations one store runs at once. A derivation beyond
 /// the cap waits for a reservation, under its call's deadline, with no
 /// store lock and no write lane held - it holds nothing the store needs.
-const VIEW_DERIVES_MAX: usize = 2;
+pub(crate) const VIEW_DERIVES_MAX: usize = 2;
 
 /// Holds a small part bound for the tests that pin the mid-walk flush:
 /// the next derivation writes parts at it, and the bound returns when the
