@@ -2389,8 +2389,46 @@ fn merged_options(from_url: Option<&str>, own: &str) -> String {
     }
 }
 
+/// The whole connect's deadline: the socket connect, its TLS, the
+/// startup message, the authentication. tokio-postgres's
+/// `connect_timeout` covers only the socket connect (the
+/// `connect_socket` step of `connect_once`); a database that accepts
+/// the connection and never answers its startup would hold the open,
+/// the readers' connect and every reconnect forever, so the connect
+/// runs on its own thread and the caller stops waiting at the
+/// deadline. `tcp_user_timeout` cannot cover the wait: a client that
+/// waits for an answer has no unacknowledged data, and the peer's
+/// kernel answers the keepalive probes. A connect past the deadline
+/// leaves its thread parked on the socket - tokio-postgres offers no
+/// cancel - so a database that hangs its connects leaks one parked
+/// thread a retry; the upgrade is a connector that takes a deadline
+/// (SHORTCUT, revisit on a tokio-postgres bump).
+const CONNECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// [`connect_with`]'s work: parse, then connect.
 fn connect_on(url: &str, ca: Option<&Path>, options: &str) -> Result<Client> {
+    connect_on_deadline(url, ca, options, CONNECT_DEADLINE)
+}
+
+/// [`connect_on`], with the whole connect's deadline a parameter, so
+/// the test that pins it does not wait the server's thirty seconds.
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub fn connect_on_deadline_for_tests(
+    url: &str,
+    ca: Option<&Path>,
+    options: &str,
+    deadline: std::time::Duration,
+) -> Result<Client> {
+    connect_on_deadline(url, ca, options, deadline)
+}
+
+fn connect_on_deadline(
+    url: &str,
+    ca: Option<&Path>,
+    options: &str,
+    deadline: std::time::Duration,
+) -> Result<Client> {
     let mut config: Config = url
         .parse()
         .map_err(|e| Error::InvalidArgument(format!("cannot parse the database URL: {e}")))?;
@@ -2427,14 +2465,40 @@ fn connect_on(url: &str, ca: Option<&Path>, options: &str) -> Result<Client> {
                 .to_owned(),
         ));
     }
+    // The host the error names: the first host of the URL, with the
+    // port, or the socket's path.
+    let host = match config.get_hosts().first() {
+        Some(postgres::config::Host::Tcp(host)) => {
+            let port = config.get_ports().first().copied().unwrap_or(5432);
+            format!("{host}:{port}")
+        }
+        Some(postgres::config::Host::Unix(path)) => path.display().to_string(),
+        None => "no host".to_owned(),
+    };
     // A connect that fails is a database the caller may wait for: the
     // same states a statement answers, mapped the same way, so a caller
-    // that retries a busy database retries a starting one too.
-    let client = match (local, ca) {
+    // that retries a busy database retries a starting one too. The
+    // connect runs on its own thread, and the caller stops waiting at
+    // `deadline`: a database that accepts the connection and never
+    // answers its startup fails here instead of holding the open, the
+    // readers' connect and every reconnect forever.
+    let (connected, wait) = std::sync::mpsc::channel();
+    let attempt = match (local, ca) {
         // The connector upgrades every connection, and checks the
         // certificate the server presents against `ca`.
-        (_, Some(ca)) => config.connect(make_tls(ca)?).map_err(map_pg_error)?,
-        (true, None) => config.connect(NoTls).map_err(map_pg_error)?,
+        (_, Some(ca)) => {
+            let tls = make_tls(ca)?;
+            std::thread::Builder::new()
+                .name("postgres-connect".to_owned())
+                .spawn(move || {
+                    let _ = connected.send(config.connect(tls));
+                })
+        }
+        (true, None) => std::thread::Builder::new()
+            .name("postgres-connect".to_owned())
+            .spawn(move || {
+                let _ = connected.send(config.connect(NoTls));
+            }),
         (false, None) => {
             return Err(Error::InvalidArgument(
                 "the database host is off this machine: give --postgres-ca, \
@@ -2442,8 +2506,23 @@ fn connect_on(url: &str, ca: Option<&Path>, options: &str) -> Result<Client> {
                     .to_owned(),
             ));
         }
-    };
-    Ok(client)
+    }
+    .map_err(|e| Error::Internal(format!("could not start the connect thread: {e}")))?;
+    if let Ok(answer) = wait.recv_timeout(deadline) {
+        answer.map_err(map_pg_error)
+    } else {
+        let why = format!(
+            "the database at {host} did not finish its connect within {} s: \
+             the socket may have connected, but its startup, its TLS \
+             or its authentication never answered",
+            deadline.as_secs()
+        );
+        tracing::error!(
+            "{why}; the connect thread {} is left on the socket",
+            attempt.thread().name().unwrap_or("?")
+        );
+        Err(Error::DeadlineExceeded(why))
+    }
 }
 
 /// A database error that a caller may retry maps to a busy [`Storage`]:
