@@ -550,6 +550,8 @@ impl Limits {
             wait: timers.wait,
             stalled_bytes: self.stalled_bytes.get(),
             total: Arc::new(TotalBytes::new(self.stalled_total.get())),
+            waits: WaitWarn::new(WAIT_WARN_INTERVAL),
+            refusals: WaitWarn::new(WAIT_WARN_INTERVAL),
         };
         if let Some(config) = tls {
             let incoming = accept_tls(
@@ -560,14 +562,30 @@ impl Limits {
                 config,
                 Arc::clone(&metrics),
             );
-            return router(server)
+            let outcome = router(server)
                 .serve_with_incoming_shutdown(incoming, watch_signal(stopped))
                 .await;
+            Self::warn_the_last(&accepting);
+            return outcome;
         }
         let incoming = accept(incoming, &accepting, stop, shutdown, metrics);
-        router(server)
+        let outcome = router(server)
             .serve_with_incoming_shutdown(incoming, watch_signal(stopped))
-            .await
+            .await;
+        Self::warn_the_last(&accepting);
+        outcome
+    }
+
+    /// Writes whatever the last interval gathered, before the serve
+    /// returns: the binaries exit soon after, and the flusher's detached
+    /// task may not run again.
+    fn warn_the_last(accepting: &Accepting) {
+        if let Some(waited) = accepting.waits.flush_all() {
+            warn_waited(accepting.max, waited);
+        }
+        if let Some(waited) = accepting.refusals.flush_all() {
+            warn_refusals(accepting.max, waited, accepting.wait);
+        }
     }
 }
 
@@ -597,11 +615,12 @@ const WAIT_WARN_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Milliseconds since the process started, as the rate limiter's clock: a
 /// wall-clock step cannot silence the warnings, and the clock never runs
-/// backwards.
+/// backwards. From one, so zero always means "never wrote": the first
+/// call's elapsed time can still read zero.
 fn now_millis() -> u64 {
     static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     let started = STARTED.get_or_init(std::time::Instant::now);
-    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX - 1) + 1
 }
 
 /// Counts the connections that wait for a place, or that a full cap
@@ -642,6 +661,14 @@ impl WaitWarn {
             return None;
         }
         self.write()
+    }
+
+    /// Writes whatever is left, without the interval check: the serve's
+    /// last line, called before the serve returns, when the accept side
+    /// has stopped and no new count can come.
+    fn flush_all(&self) -> Option<u64> {
+        let waited = self.since.swap(0, Ordering::Relaxed);
+        (waited != 0).then_some(waited)
     }
 
     fn write(&self) -> Option<u64> {
@@ -691,11 +718,6 @@ impl WaitWarn {
                     line(waited);
                 }
                 if over() {
-                    // The serve has ended: what is left goes out with the
-                    // last line.
-                    if let Some(waited) = warn.flush() {
-                        line(waited);
-                    }
                     break;
                 }
             }
@@ -753,6 +775,30 @@ struct Accepting {
     stalled_bytes: u64,
     /// The stalled-replies cap of the whole process.
     total: Arc<TotalBytes>,
+    /// The rate-limited line about connections that wait for a place.
+    waits: WaitWarn,
+    /// The rate-limited line about connections a full cap closed.
+    refusals: WaitWarn,
+}
+
+/// The waits line, with the count it covers.
+fn warn_waited(max: usize, waited: u64) {
+    tracing::warn!(
+        max,
+        waited,
+        "a connection waits: the most connections are open"
+    );
+}
+
+/// The refusals line, with the count it covers.
+fn warn_refusals(max: usize, waited: u64, wait: Duration) {
+    tracing::warn!(
+        max,
+        waited,
+        wait = ?wait,
+        "the most connections are open: a connection that did not \
+         get a place within its wait is closed"
+    );
 }
 
 /// Spawns the two rate-limited warnings' flushers of one accept path: the
@@ -765,34 +811,14 @@ fn spawn_cap_flushers(
     waits: &WaitWarn,
     refusals: &WaitWarn,
 ) {
-    waits.spawn_flusher(over.clone(), move |waited| {
-        tracing::warn!(
-            max,
-            waited,
-            "a connection waits: the most connections are open"
-        );
-    });
-    refusals.spawn_flusher(over, move |waited| {
-        tracing::warn!(
-            max,
-            waited,
-            wait = ?wait,
-            "the most connections are open: a connection that did not \
-             get a place within its wait is closed"
-        );
-    });
+    waits.spawn_flusher(over.clone(), move |waited| warn_waited(max, waited));
+    refusals.spawn_flusher(over, move |waited| warn_refusals(max, waited, wait));
 }
 
 /// Warns the rate-limited refusal line, with the count it covers.
 fn warn_refused(refusals: &WaitWarn, max: usize, wait: Duration) {
     if let Some(waited) = refusals.tick() {
-        tracing::warn!(
-            max,
-            waited,
-            wait = ?wait,
-            "the most connections are open: a connection \
-             that did not get a place within its wait is closed"
-        );
+        warn_refusals(max, waited, wait);
     }
 }
 
@@ -828,13 +854,13 @@ where
         wait,
         stalled_bytes,
         total,
+        waits,
+        refusals,
     } = accepting.clone();
     let places = Arc::new(Semaphore::new(max));
     let waiters = Arc::new(Semaphore::new(max));
     let (done, served) = mpsc::channel(max);
     let acceptor = tokio_rustls::TlsAcceptor::from(config);
-    let waits = WaitWarn::new(WAIT_WARN_INTERVAL);
-    let refusals = WaitWarn::new(WAIT_WARN_INTERVAL);
     spawn_cap_flushers(
         {
             let done = done.clone();
@@ -863,6 +889,10 @@ where
                     let _ = stop.send(true);
                     break;
                 }
+                // The serve was dropped or aborted without its signal: no
+                // answer would ever be taken, so stop, and drop the
+                // listener with this task.
+                () = done.closed() => break,
             };
             let io = match accepted {
                 Ok(io) => io,
@@ -958,11 +988,11 @@ where
         wait,
         stalled_bytes,
         total,
+        waits,
+        refusals,
     } = accepting.clone();
     let places = Arc::new(Semaphore::new(max));
     let waiters = Arc::new(Semaphore::new(max));
-    let waits = WaitWarn::new(WAIT_WARN_INTERVAL);
-    let refusals = WaitWarn::new(WAIT_WARN_INTERVAL);
     let (done, served) = mpsc::channel(max);
     spawn_cap_flushers(
         {
@@ -992,6 +1022,10 @@ where
                     let _ = stop.send(true);
                     break;
                 }
+                // The serve was dropped or aborted without its signal: no
+                // answer would ever be taken, so stop, and drop the
+                // listener with this task.
+                () = done.closed() => break,
             };
             let io = match accepted {
                 Ok(io) => io,
@@ -1853,9 +1887,13 @@ mod tests {
             }
         }
         assert_eq!(lines.len(), 1, "one line per interval, not one per task");
-        assert!(
-            (1..=50).contains(&lines[0]),
-            "the line carries the count it covers, got {}",
+        // A return to store-and-forget would lose the waits that raced the
+        // line: the line's count and what is left are the whole interval's.
+        let rest = warn.flush_all().unwrap_or_default();
+        assert_eq!(
+            lines[0] + rest,
+            50,
+            "every wait is counted once: line {} + left {rest}",
             lines[0]
         );
     }
@@ -1870,6 +1908,24 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(80)).await;
         assert_eq!(warn.flush(), Some(1), "the interval's count goes out");
         assert_eq!(warn.flush(), None, "nothing is left to flush");
+    }
+
+    /// The serve's last line writes what is left without the interval
+    /// check: a line at 3 s, two refusals at 5 s, the serve ends at 8 s -
+    /// the flusher's next tick would be too late, the 2 are not lost.
+    #[tokio::test]
+    async fn the_serve_writes_what_is_left_when_it_ends() {
+        let warn = WaitWarn::new(Duration::from_secs(60));
+        assert_eq!(warn.tick(), Some(1), "the first wait writes at once");
+        assert_eq!(warn.tick(), None, "counted for the last line");
+        assert_eq!(warn.tick(), None, "counted for the last line");
+        assert_eq!(warn.flush(), None, "the interval has not passed");
+        assert_eq!(
+            warn.flush_all(),
+            Some(2),
+            "the serve's last line carries them"
+        );
+        assert_eq!(warn.flush_all(), None, "nothing is left");
     }
 
     /// A peer that connects and sends nothing is closed: it gets no place
