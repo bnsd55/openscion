@@ -155,6 +155,20 @@ pub trait Meta: Send + Sync + 'static {
     /// As [`Meta::commit`] and [`Meta::flush`].
     fn write<T>(&self, f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>) -> Result<T>;
 
+    /// A write transaction for a caller that holds its ref's slot: a
+    /// land between taking and dropping the slot's lock (the settle's
+    /// commit, the sweep's reject), or the land's finish read while it
+    /// still rides the write client. The backend may let it enter ahead
+    /// of other waiting writers: what it writes is what its ref's next
+    /// land needs, and its wait costs the whole queue of its ref.
+    ///
+    /// # Errors
+    ///
+    /// As [`Meta::write`].
+    fn write_slot_holder<T>(&self, f: impl FnOnce(&mut Self::Tx<'_>) -> Result<T>) -> Result<T> {
+        self.write(f)
+    }
+
     /// Returns once every commit made before this call is durable. No
     /// reply shows a commit that is not durable.
     ///

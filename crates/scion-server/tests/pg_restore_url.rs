@@ -1,8 +1,8 @@
 //! A restore must honor the Postgres URL from every source it names:
-//! `--postgres-url`, `--postgres-url-file` and `SCION_POSTGRES_URL`. The
-//! bug this pins: `restore` took the URL from the argv flag only, so a
-//! URL from the file or the environment silently restored into SQLite,
-//! and `--postgres-ca` beside a file or env URL was refused by clap.
+//! `--postgres-url-file` and `SCION_POSTGRES_URL`. The bug this pins:
+//! `restore` took the URL from the argv flag only, so a URL from the
+//! file or the environment silently restored into SQLite, and
+//! `--postgres-ca` beside a file or env URL was refused by clap.
 //! These tests need the test database; they skip themselves when the
 //! environment does not name Postgres as the test backend.
 
@@ -229,9 +229,7 @@ fn a_postgres_ca_without_any_url_is_refused() {
     assert!(!out.status.success(), "a CA without a URL must be refused");
     let why = String::from_utf8_lossy(&out.stderr);
     assert!(
-        why.contains(
-            "no Postgres URL: give --postgres-url, --postgres-url-file or SCION_POSTGRES_URL"
-        ),
+        why.contains("no Postgres URL: give --postgres-url-file or SCION_POSTGRES_URL"),
         "{why}"
     );
 }

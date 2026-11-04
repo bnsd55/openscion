@@ -58,7 +58,7 @@ fn a_gc_of_a_postgres_backed_directory_removes_no_blob_file() {
     assert_eq!(blob_files(dir.path()), before);
     drop(store);
 
-    // Without --postgres-url the open is refused: the directory says its
+    // Without a URL from any source the open is refused: the directory says its
     // metadata lives in Postgres, and no file is touched.
     let out = Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .arg("--data")
@@ -69,7 +69,7 @@ fn a_gc_of_a_postgres_backed_directory_removes_no_blob_file() {
         .unwrap();
     assert!(
         !out.status.success(),
-        "gc without --postgres-url must be refused: {out:?}"
+        "gc with no URL must be refused: {out:?}"
     );
     assert_eq!(blob_files(dir.path()), before);
 }
@@ -534,7 +534,7 @@ fn hex16_of(bytes: &[u8; 16]) -> String {
 /// A data directory that names a store refuses a database schema that
 /// holds no store: the open would adopt the marker's UUID into an empty
 /// schema and serve nothing, and every caller would read "repo not
-/// found" with no error at the start. A `--postgres-url` that names the
+/// found" with no error at the start. A URL that names the
 /// wrong schema (a `search_path` typo, or a schema never served) must
 /// refuse at the open.
 #[test]

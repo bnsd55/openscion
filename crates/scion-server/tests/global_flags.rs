@@ -53,16 +53,16 @@ fn the_postgres_flags_parse_after_the_subcommand() {
     let (code_before, err_before) = run(&[
         "--data",
         missing,
-        "--postgres-url",
-        "postgres://localhost/scion_walk_parse",
+        "--postgres-url-file",
+        "/tmp/scion-no-such-url-file",
         "fsck",
     ]);
     let (code_after, err_after) = run(&[
         "fsck",
         "--data",
         missing,
-        "--postgres-url",
-        "postgres://localhost/scion_walk_parse",
+        "--postgres-url-file",
+        "/tmp/scion-no-such-url-file",
     ]);
     assert_eq!(code_before, code_after);
     assert!(

@@ -858,7 +858,7 @@ async fn run_script(script: &[Op]) -> RunSummary {
                 // way the server does: the schema follows the store, not
                 // the path.
                 {
-                    gc.arg("--postgres-url").arg(common::postgres_url(&data));
+                    gc.env("SCION_POSTGRES_URL", common::postgres_url(&data));
                 }
                 let mut child = gc
                     .args(["gc", "--grace-secs", "0"])
@@ -1024,7 +1024,7 @@ async fn run_script(script: &[Op]) -> RunSummary {
     // does: the schema follows the store, not the path.
     let mut fsck = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"));
     fsck.arg("--data").arg(&data);
-    fsck.arg("--postgres-url").arg(common::postgres_url(&data));
+    fsck.env("SCION_POSTGRES_URL", common::postgres_url(&data));
     let out = fsck.arg("fsck").output().unwrap();
     assert!(
         out.status.success(),

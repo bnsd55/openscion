@@ -249,17 +249,14 @@ fn seed_client_blob(
 /// directory's database corner and not beside it.
 fn gc_args(data: &std::path::Path, dry: bool) -> String {
     let mut args = vec!["--data".to_owned(), data.display().to_string()];
-    {
-        // The URL is a flag of the root command, so it goes before the
-        // subcommand; its options carry this directory's schema.
-        let schema = Backend::test_schema(data);
-        let url = std::env::var("SCION_TEST_POSTGRES_URL").expect("SCION_TEST_POSTGRES_URL");
-        args.push("--postgres-url".to_owned());
-        args.push(format!(
-            "{url}{}options=--search_path%3D{schema}",
-            if url.contains('?') { "&" } else { "?" }
-        ));
-    }
+    // The URL rides the environment (no binary takes a secret as a
+    // flag); its options carry this directory's schema.
+    let schema = Backend::test_schema(data);
+    let url = std::env::var("SCION_TEST_POSTGRES_URL").expect("SCION_TEST_POSTGRES_URL");
+    let url = format!(
+        "{url}{}options=--search_path%3D{schema}",
+        if url.contains('?') { "&" } else { "?" }
+    );
     args.extend(["gc".to_owned(), "--grace-secs".to_owned(), "0".to_owned()]);
     if dry {
         args.push("--dry-run".to_owned());
@@ -267,6 +264,7 @@ fn gc_args(data: &std::path::Path, dry: bool) -> String {
     let out = common::spawn_guard::across_spawn(|| {
         std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
             .args(&args)
+            .env("SCION_POSTGRES_URL", &url)
             .env("NO_COLOR", "1")
             .output()
             .expect("the gc command runs")
