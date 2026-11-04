@@ -1522,3 +1522,21 @@ that drifts far from them is a regression to look at, not a promise to
 restate here.
 
 Proof: crates/scion-server/tests/recovery_bench.rs::a_restart_after_a_kill_recovers_in_a_stated_time (measured, no command: the section's number is what the recovery-bench workflow measures - a kill, a restart, and the seconds to serving - which no shell command of the guide reproduces)
+
+### The inode budget
+
+The store keeps one file per blob, and every file needs the
+filesystem's own inode: a filesystem that holds the data directory
+spends one inode and one directory entry per blob, whatever the blob's
+size. Size the filesystem with more free inodes than the blob count
+you expect, or the store runs out of inodes while its bytes have room
+left - the filesystem then refuses every new file with "No space left
+on device", and the server reports the write failure, not the inode
+cause. Check the budget with `df -i` on the data directory's
+filesystem: the free-inode column is the count of blobs the
+filesystem can still take, less every other file it holds. A
+filesystem made with a smaller bytes-per-inode ratio (ext4's `mkfs -i`
+or `-T`) carries more inodes for the same bytes; xfs sizes its inode
+pool dynamically and grows it while the filesystem has space left.
+The measured costs of blob counts, and the supported count, are in
+[support.md](support.md).
