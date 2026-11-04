@@ -730,6 +730,21 @@ fn run_job(
     Flow::Go
 }
 
+/// Opens a transaction with `open`'s statements, in one round trip. A
+/// batch whose later command fails after its `BEGIN` ran leaves the
+/// session inside a transaction Postgres has marked aborted: the next
+/// holder of the client would meet "current transaction is aborted" on
+/// every statement until a rollback. So a failed open rolls back before
+/// the error returns; the rollback's own failure (a lost connection)
+/// is fine - the reconnect's setup handles that session.
+fn open_transaction(c: &PgClient, open: String) -> Result<()> {
+    if let Err(error) = c.batch(&open) {
+        let _ = c.execute("ROLLBACK", &[]);
+        return Err(error);
+    }
+    Ok(())
+}
+
 impl PgClient {
     /// Puts `client` on its own worker thread.
     ///
@@ -1367,6 +1382,7 @@ impl Pg {
             &mut derived,
             &mut preload,
             &mut history,
+            Some(LOCK_TIMEOUT_FOR_KEY),
         )?;
         // Every writer and the collector's batches of one schema order on
         // one advisory key, held to the end of the transaction: the
@@ -1968,14 +1984,25 @@ impl<'a> PgTx<'a> {
 
     /// Begins one transaction on the client, sharing `pending` with the
     /// caller, which flushes it and refuses to commit while it holds rows.
+    /// `lock_timeout` rides the BEGIN when the transaction's first lock
+    /// wait needs a guard of its own (the collector's key): one round
+    /// trip, and the guard is in force before the key's statement, which
+    /// `lock_timeout`'s read-at-wait rule requires.
     fn begin(
         c: &'a mut PgClient,
         pending: &'a mut Vec<(ChangesetId, Vec<ChangesetId>)>,
         derived: &'a mut DerivedPending,
         preload: &'a mut DerivedPreload,
         history: &'a mut HistoryPending,
+        lock_timeout: Option<&str>,
     ) -> Result<PgTx<'a>> {
-        c.execute("BEGIN", &[])?;
+        open_transaction(
+            c,
+            match lock_timeout {
+                Some(v) => format!("BEGIN; SET LOCAL lock_timeout = '{v}';"),
+                None => "BEGIN;".to_owned(),
+            },
+        )?;
         Ok(Self {
             c,
             gen_cache: std::collections::HashMap::new(),
@@ -2011,21 +2038,26 @@ impl<'a> PgTx<'a> {
         statement: Duration,
         idle: Duration,
     ) -> Result<PgTx<'a>> {
-        // Three statements, not one string: the client prepares its
-        // queries, and Postgres takes no second command in a prepared
-        // statement (E42601).
-        c.execute(
-            &format!(
-                "BEGIN TRANSACTION ISOLATION LEVEL {} READ ONLY",
-                isolation.as_sql()
+        // One round trip for the open: the three statements are
+        // parameterless strings (the durations are interpolated), and the
+        // client's prepared statements take no second command (E42601) -
+        // the batch is the simple protocol, which takes many. A batch
+        // whose SET LOCAL fails after its BEGIN ran leaves the session
+        // inside an aborted transaction: `open_transaction` rolls that
+        // back before it returns the error, so the pooled client is
+        // clean for its next holder.
+        open_transaction(
+            c,
+            format!(
+                "BEGIN TRANSACTION ISOLATION LEVEL {} READ ONLY; \
+                 SET LOCAL statement_timeout = {}; \
+                 SET LOCAL idle_in_transaction_session_timeout = {};",
+                isolation.as_sql(),
+                statement.as_millis(),
+                idle.as_millis()
             ),
-            &[],
         )?;
-        // The transaction exists from here on: a SET LOCAL that fails
-        // drops this `PgTx`, and its Drop rolls the transaction back, so
-        // the pooled client never stays inside one whose statements no
-        // longer run.
-        let tx = Self {
+        Ok(Self {
             c,
             gen_cache: std::collections::HashMap::new(),
             inserted_gens: std::collections::HashMap::new(),
@@ -2037,19 +2069,7 @@ impl<'a> PgTx<'a> {
             defer_derived: false,
             history_pending: None,
             ended: false,
-        };
-        tx.c.execute(
-            &format!("SET LOCAL statement_timeout = {}", statement.as_millis()),
-            &[],
-        )?;
-        tx.c.execute(
-            &format!(
-                "SET LOCAL idle_in_transaction_session_timeout = {}",
-                idle.as_millis()
-            ),
-            &[],
-        )?;
-        Ok(tx)
+        })
     }
 
     /// Reads back the land another writer recorded for this request key
@@ -3429,6 +3449,7 @@ fn migrate_under_lock(client: &mut PgClient, allow: bool) -> Result<Option<(u32,
             &mut derived,
             &mut preload,
             &mut history,
+            None,
         )?;
         tx.c.batch(&format!(
             "{sql}\nINSERT INTO schema_migrations (version, name) \
@@ -5839,6 +5860,40 @@ pub(crate) mod pool_tests {
 
     /// A Postgres backend of a test database, with the pool gate: the
     /// caller holds the pair for its whole test body.
+    /// An open whose batch fails after its BEGIN ran leaves no open
+    /// transaction behind: the helper rolls the aborted transaction back
+    /// before the error returns, and the client answers its next holder
+    /// cleanly. Without the rollback, the session would sit in an
+    /// aborted transaction - "current transaction is aborted" on every
+    /// statement until someone rolls it back.
+    #[test]
+    fn an_open_whose_set_local_failed_leaves_no_open_transaction() {
+        let (_pool, pg) = pg();
+        let mut reader = pg.inner.readers.take(READER_WAIT).unwrap();
+        let client = reader.client();
+        // A statement_timeout above the bigint range fails the batch's
+        // second command; the BEGIN in the same batch has already run.
+        let huge = std::time::Duration::from_millis(u64::MAX);
+        let error = PgTx::begin_read(
+            client,
+            ReadIsolation::ReadCommitted,
+            huge,
+            std::time::Duration::from_secs(30),
+        )
+        .expect_err("the out-of-range timeout fails the open");
+        assert!(
+            matches!(error, Error::InvalidArgument(_))
+                || matches!(error, Error::Internal(_))
+                || matches!(error, Error::Corrupt(_)),
+            "the open failed, not hung or panicked: {error}"
+        );
+        // The session answers its next holder: no aborted transaction.
+        let one: i32 = client.query("SELECT 1", &[]).unwrap()[0].get(0);
+        assert_eq!(one, 1);
+        client.execute("BEGIN", &[]).unwrap();
+        client.execute("COMMIT", &[]).unwrap();
+    }
+
     fn pg() -> (MutexGuard<'static, ()>, Pg) {
         let gate = server_sized_pool();
         let data = crate::test_support::private_tempdir();
