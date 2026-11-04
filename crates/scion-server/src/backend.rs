@@ -349,6 +349,7 @@ impl Backend {
     /// the derive-walk gauges and the collector-key wait. Without it,
     /// import, fsck and gc record nothing.
     pub fn set_metrics(&self, metrics: Arc<Metrics>) {
+        crate::read::set_rename_cache_metrics(Arc::clone(&metrics));
         self.pg.set_metrics(metrics);
     }
 
@@ -385,6 +386,13 @@ impl Backend {
     #[must_use]
     pub(crate) fn writers_waiting(&self) -> usize {
         self.pg.writers_waiting()
+    }
+
+    /// How many deadline-less waits for writers ended.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn yield_turns(&self) -> u64 {
+        self.pg.yield_turns()
     }
 
     /// The write lane's queue, for the lane's tests: the slot holders

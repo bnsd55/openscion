@@ -281,6 +281,9 @@ make_repo() {
 # is the server's, so every pair starts from what its own server wrote.
 # URL: the Postgres URL the last import made, global so the pair
 # functions' serve and fsck lines open the same schema the import did.
+# It rides the environment: SCION_POSTGRES_URL, exported here, so a
+# start's command substitution and the binary it runs inherit it, and no
+# command line carries it.
 URL=""
 import() {
   local dir=$1 srv=$2
@@ -288,6 +291,7 @@ import() {
   # directory, made if missing. Every server of every version here opens
   # its own schema, so the pairs never share rows.
   URL=$(pg_db_for "$dir/server")
+  export SCION_POSTGRES_URL="$URL"
   note "import into ${URL##*/}"
   # The server refuses a missing data directory (#578); create it here.
   mkdir -p "$dir/server"
@@ -456,7 +460,7 @@ pair_1() {
   dir=$(mktemp -d "$WORK/pair1-$side.XXXXXX")
   note "pair 1 ($side)"
   import "$dir" "$srv"
-  port=$(start server "$dir" env SCION_POSTGRES_URL="$URL" "$srv/scion-server" port --data "$dir/server" serve \
+  port=$(start server "$dir" "$srv/scion-server" port --data "$dir/server" serve \
     --listen 127.0.0.1:0 --ticket-key "$dir/ticket.key")
   story "$dir" "http://127.0.0.1:$port"
   stop "$dir"
@@ -471,7 +475,7 @@ pair_2() {
   dir=$(mktemp -d "$WORK/pair2-$side.XXXXXX")
   note "pair 2 ($side)"
   import "$dir" "$srv"
-  sport=$(start server "$dir" env SCION_POSTGRES_URL="$URL" "$srv/scion-server" port --data "$dir/server" serve \
+  sport=$(start server "$dir" "$srv/scion-server" port --data "$dir/server" serve \
     --listen 127.0.0.1:0 --ticket-key "$dir/ticket.key" \
     --metrics-listen 127.0.0.1:0)
   mport=$(metrics_port "$dir/server.log")
@@ -529,7 +533,7 @@ pair_3() {
   # exit unlink cannot remove the next daemon's live socket.
   sock="$SOCK-$side"
   rm -f "$sock"
-  sport=$(start server "$dir" env SCION_POSTGRES_URL="$URL" "$BIN/scion-server" port --data "$dir/server" serve \
+  sport=$(start server "$dir" "$BIN/scion-server" port --data "$dir/server" serve \
     --listen 127.0.0.1:0 --ticket-key "$dir/ticket.key")
   mkdir -p "$dir/daemon-data"
   chmod 700 "$dir/daemon-data"
@@ -568,7 +572,7 @@ pair_5() {
   # would catch it.
   "$cache/scion-server" --data "$dir/server" ticket-key --out "$dir/wrong.key" \
     >"$dir/wrong.pub" || die "pair '$PAIR' ($SIDE): the second ticket-key failed"
-  sport=$(start server "$dir" env SCION_POSTGRES_URL="$URL" "$srv/scion-server" port --data "$dir/server" serve \
+  sport=$(start server "$dir" "$srv/scion-server" port --data "$dir/server" serve \
     --listen 127.0.0.1:0 --ticket-key "$dir/ticket.key")
   # The positive: the server's ticket verifies on the other version's
   # tier, and the read matches the source.
@@ -614,7 +618,7 @@ pair_6() {
   dir=$(mktemp -d "$WORK/pair6-$side.XXXXXX")
   note "pair 6 ($side)"
   import "$dir" "$BIN"
-  sport=$(start server "$dir" env SCION_POSTGRES_URL="$URL" "$BIN/scion-server" port --data "$dir/server" serve \
+  sport=$(start server "$dir" "$BIN/scion-server" port --data "$dir/server" serve \
     --listen 127.0.0.1:0 --ticket-key "$dir/ticket.key")
   # The cache of one version writes the snapshot. Its memory store only
   # holds what went through it, so a checkout through the cache first,
@@ -700,15 +704,22 @@ pair_4() {
     die "pair '$PAIR' ($SIDE): the migrate of the N-1 store failed"
   SCION_POSTGRES_URL="$URL" "$BIN/scion-server" --data "$dir/server" fsck >/dev/null 2>&1 ||
     die "pair '$PAIR' ($SIDE): the N server cannot open the migrated store"
-  port=$(start server "$dir" env SCION_POSTGRES_URL="$URL" "$BIN/scion-server" port --data "$dir/server" serve \
+  port=$(start server "$dir" "$BIN/scion-server" port --data "$dir/server" serve \
     --listen 127.0.0.1:0 --ticket-key "$dir/ticket.key")
   story "$dir" "http://127.0.0.1:$port"
   stop "$dir"
   SIDE='N-1 refuses N'
   note "pair 4 ($SIDE)"
   URL=$(pg_db_for "$dir/server2")
-  SCION_POSTGRES_URL="$URL" "$BIN/scion-server" --data "$dir/server2" import "$dir/src" >/dev/null 2>&1 ||
+  # The server refuses a missing data directory (#578), as import() says:
+  # create this one too before the import opens it.
+  mkdir -p "$dir/server2"
+  chmod 700 "$dir/server2"
+  SCION_POSTGRES_URL="$URL" "$BIN/scion-server" --data "$dir/server2" import "$dir/src" \
+    >"$dir/import2.out" 2>"$dir/import2.log" || {
+    tail -n 5 "$dir/import2.log" >&2
     die "pair '$PAIR' ($SIDE): the import of the N store failed"
+  }
   if SCION_POSTGRES_URL="$URL" "$PREV_BIN/scion-server" --data "$dir/server2" fsck >"$dir/refuse.log" 2>&1; then
     die "pair '$PAIR' ($SIDE): the N-1 server accepted a store of N"
   fi

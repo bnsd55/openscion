@@ -294,10 +294,14 @@ pub mod test_support {
     pub mod error {
         pub use crate::error::ApplyError;
     }
-    /// The Postgres connect, so the test that pins its whole-connect
-    /// bound drives it with its own deadline, without a database.
+    /// The Postgres connect's bound and the write transaction's
+    /// history-node buffer: their seams, so a test drives them without
+    /// a database or reads the buffer's peak.
     pub mod pg {
-        pub use crate::pg::{connect_on_deadline_for_tests, test_reset_parked_connects};
+        pub use crate::pg::{
+            connect_on_deadline_for_tests, test_history_pending_peak_bytes,
+            test_reset_parked_connects, test_set_history_pending_bound_for_tests,
+        };
     }
     /// The counters the import tests read between retries.
     pub mod import {

@@ -422,7 +422,6 @@ pub trait MetaTx {
     fn inserted_this_tx(&self, _cs: ChangesetId) -> bool {
         false
     }
-
     /// Reads the derived values of the named kinds, at the kind's own
     /// version, for the named changesets into the transaction's own
     /// memory, one statement, so the write path's per-value reads answer
@@ -441,14 +440,16 @@ pub trait MetaTx {
         Ok(())
     }
 
-    /// Makes [`delete_derived_below`](Self::delete_derived_below) wait
-    /// for the commit: the transaction collects the calls and the commit
-    /// deletes with one statement, honoring each call's limit summed per
-    /// kind. The deferral lasts to the commit and is one-way - a
-    /// transaction that turns it on cannot turn it off, so a caller that
-    /// needs `delete_derived_below`'s count must not share a transaction
+    /// Makes the write path's per-row flushes wait for the commit:
+    /// [`delete_derived_below`](Self::delete_derived_below) collects
+    /// its calls and the commit deletes with one statement, honoring
+    /// each call's limit summed per kind, and the history nodes the
+    /// write path buffers wait for the commit's own flush. The
+    /// deferral lasts to the commit and is one-way - a transaction
+    /// that turns it on cannot turn it off, so a caller that needs
+    /// `delete_derived_below`'s count must not share a transaction
     /// with a write path that defers. A backend that does not defer
-    /// keeps deleting per call, which is also right.
+    /// keeps writing per call, which is also right.
     fn defer_derived_deletes(&mut self) {}
 
     /// The view that a rule-set digest of `version` derives for the real
@@ -600,9 +601,8 @@ pub trait MetaTx {
     ) -> Result<std::collections::HashMap<ObjectId, ChangesetId>>;
 
     /// Stores a node of a path history under its content address. Safe to
-    /// repeat. Returns whether the row was new, so a caller can charge only
-    /// bytes that actually landed.
-    fn put_history_node(&mut self, id: NodeId, body: Vec<u8>) -> Result<(NodeId, bool)>;
+    /// repeat.
+    fn put_history_node(&mut self, id: NodeId, body: Vec<u8>) -> Result<NodeId>;
 
     /// Reads a history node's stored bytes, and returns them with the
     /// length of their stored form.

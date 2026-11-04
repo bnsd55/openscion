@@ -7,6 +7,13 @@ name: bench
 # output are how that shows.
 on:
   workflow_dispatch:
+    inputs:
+      # The blob-count measurement (issue #823): a space-separated list
+      # of blob counts. When it is set, the checkout and capacity jobs
+      # are skipped and the blob-count job runs the stores' costs.
+      blob_counts:
+        description: blob counts to measure (space-separated); set to run the blob-count job
+        default: ""
 
 permissions:
   contents: read
@@ -20,6 +27,7 @@ env:
 
 jobs:
   checkout:
+    if: github.event.inputs.blob_counts == ''
     name: checkout vs git clone
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -82,6 +90,7 @@ jobs:
   # Postgres cells need SCION_PG_URL, which the service container
   # below provides.
   capacity:
+    if: github.event.inputs.blob_counts == ''
     name: capacity envelope
     runs-on: ubuntu-24.04
     timeout-minutes: 240
@@ -126,4 +135,60 @@ jobs:
         with:
           name: capacity-artifacts
           path: ${{ runner.temp }}/capacity-artifacts/
+          if-no-files-found: error
+
+  # The blob-count costs (issue #823): stores of small blobs at the
+  # counts the dispatch input names, each measured for the server's
+  # open, fsck, gc --dry-run, bytes on disk and inodes. Dispatch only:
+  # a run of millions of blobs takes tens of minutes on a fixed runner.
+  blob-count:
+    if: github.event.inputs.blob_counts != ''
+    name: blob-count costs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    services:
+      # The stores open through the test backend, whose Postgres half
+      # reads this database.
+      postgres:
+        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        env:
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: scion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: protoc
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: the facts of the run
+        run: |
+          {
+            echo "scion commit: $(git rev-parse HEAD)"
+            echo "cores: $(nproc)"
+            echo "kernel: $(uname -r)"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: the blob-count costs
+        env:
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+          SCION_BENCH_COUNTS: ${{ github.event.inputs.blob_counts }}
+          SCION_BENCH_WORK: ${{ runner.temp }}/blob-bench
+        run: |
+          set -o pipefail
+          scripts/bench-blob-count.sh 2>&1 | tee "$RUNNER_TEMP/blob-count-output.txt" >> "$GITHUB_STEP_SUMMARY"
+      - name: upload the raw output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: blob-count-output
+          path: ${{ runner.temp }}/blob-count-output.txt
           if-no-files-found: error

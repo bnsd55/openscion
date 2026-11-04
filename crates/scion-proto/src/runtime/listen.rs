@@ -639,6 +639,8 @@ where
                                 _place: place,
                                 preface,
                                 stalled: Stalled::new(peer, stalled_bytes, metrics, total),
+                                born: std::time::Instant::now(),
+                                first_poll: true,
                             }))
                             .await;
                     }
@@ -672,6 +674,7 @@ fn accept<I, IO, E>(
 where
     I: Stream<Item = Result<IO, E>>,
     IO: PeerOf,
+    E: std::fmt::Debug,
 {
     let max = max.get();
     let stalled_bytes = stalled_bytes.get();
@@ -681,7 +684,25 @@ where
         let metrics = Arc::clone(&metrics);
         let total = Arc::clone(&total);
         async move {
-            let io = accepted?;
+            // The accept's marks (issue #795): the moment the listener's
+            // socket reaches this task, on the thread that saw it, and -
+            // on the connection's first read - the wait it had. The gap
+            // between a client's connect and the first line is the
+            // accept's delay; the gap to the second is the connection
+            // task's start delay. An accept error is logged here too:
+            // tonic logs it at trace only, below every default filter.
+            let born = std::time::Instant::now();
+            let io = match accepted {
+                Ok(io) => io,
+                Err(error) => {
+                    tracing::debug!(
+                        error = ?error,
+                        thread = ?std::thread::current().id(),
+                        "the listener failed to yield a socket"
+                    );
+                    return Err(error);
+                }
+            };
             let place = if let Ok(place) = Arc::clone(&places).try_acquire_owned() {
                 place
             } else {
@@ -692,12 +713,20 @@ where
                     .expect("the semaphore of places is never closed")
             };
             let peer = io.peer_of();
+            tracing::debug!(
+                listener = ?io.local_of(),
+                peer = ?peer,
+                thread = ?std::thread::current().id(),
+                "the listener yielded a socket"
+            );
             let total = Arc::clone(&total);
             Ok(Connection {
                 io,
                 _place: place,
                 preface: Some((PREFACE_BYTES, Box::pin(tokio::time::sleep(handshake)))),
                 stalled: Stalled::new(peer, stalled_bytes, metrics, total),
+                born,
+                first_poll: true,
             })
         }
     })
@@ -710,17 +739,32 @@ where
 pub trait PeerOf {
     /// The peer of the stream, when it is a socket.
     fn peer_of(&self) -> Option<SocketAddr>;
+
+    /// The stream's own address, when it is a socket: for an accepted
+    /// TCP socket this is the listener's, which names the server. A Unix
+    /// socket names none.
+    fn local_of(&self) -> Option<SocketAddr> {
+        None
+    }
 }
 
 impl PeerOf for tokio::net::TcpStream {
     fn peer_of(&self) -> Option<SocketAddr> {
         self.peer_addr().ok()
     }
+
+    fn local_of(&self) -> Option<SocketAddr> {
+        self.local_addr().ok()
+    }
 }
 
 impl<IO: PeerOf> PeerOf for TlsStream<IO> {
     fn peer_of(&self) -> Option<SocketAddr> {
         self.get_ref().0.peer_of()
+    }
+
+    fn local_of(&self) -> Option<SocketAddr> {
+        self.get_ref().0.local_of()
     }
 }
 
@@ -741,6 +785,11 @@ struct Connection<IO> {
     preface: Option<(usize, Pin<Box<Sleep>>)>,
     /// What the stalled replies of this connection hold, and their limit.
     stalled: Stalled,
+    /// When the socket reached the accept's task, for the first-poll mark.
+    born: std::time::Instant,
+    /// Whether the server has read the connection yet: the first read
+    /// logs itself once, with the wait it had.
+    first_poll: bool,
 }
 
 impl<IO> Connected for Connection<IO> {
@@ -751,13 +800,21 @@ impl<IO> Connected for Connection<IO> {
     }
 }
 
-impl<IO: AsyncRead + Unpin> AsyncRead for Connection<IO> {
+impl<IO: AsyncRead + PeerOf + Unpin> AsyncRead for Connection<IO> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = &mut *self;
+        if std::mem::take(&mut this.first_poll) {
+            tracing::debug!(
+                listener = ?this.io.local_of(),
+                waited = ?this.born.elapsed(),
+                thread = ?std::thread::current().id(),
+                "the server read the connection for the first time"
+            );
+        }
         // Over the limit, the connection is closed, so hyper frees what its
         // stalled streams hold.
         if this.stalled.over() {
