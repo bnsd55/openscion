@@ -454,14 +454,14 @@ fn a_diff_past_its_rename_byte_bound_says_renames_may_be_missing() {
     scion_server::test_support::read::test_clear_rename_cache();
     let (_dir, store, old, new) = seeded(&[1, 2], &[], &[]);
     // With the server's bound, the exact renames are found.
-    let found = page(&store, old, new);
+    let found = page(&store, old, new, None);
     assert!(!found.renames_incomplete);
     assert_eq!(renames_of(&found), vec![deleted_half(1), deleted_half(2)]);
     scion_server::test_support::read::test_clear_rename_cache();
     // With a half-kilobyte bound, the same diff's vector passes it: the
     // reply says renames may be missing, and none are answered.
     let _small = scion_server::test_support::read::test_set_rename_byte_bound(512);
-    let small = page(&store, old, new);
+    let small = page(&store, old, new, None);
     assert!(small.renames_incomplete, "the byte bound tripped");
     assert!(renames_of(&small).is_empty());
     drop(_small);
