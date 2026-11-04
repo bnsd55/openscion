@@ -1492,27 +1492,20 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(5));
             }
             assert!(store.writers_waiting() <= 2, "the walk's step never ended");
-            // The count now reads whoever holds or waits for the
-            // connection: the holder, and the second writer until its own
-            // write gets the connection and ends. The bound ends the
-            // walk's yield, and its next step queues too - the count
-            // rises above the lowest it has read since the step ended.
-            // An unbounded yield never adds to the count.
-            let mut floor = store.writers_waiting();
-            let mut rose = false;
+            // The walk's turn is its wait's end, and the wait counts its
+            // own ends: the walk's step-1 wait is the only deadline-less
+            // one on this backend, so one end means the bound granted the
+            // turn. A writer's retry of a refused connection cannot bump
+            // the count, so the turn is told apart from any writer's
+            // churn. An unbounded yield never ends, and never bumps it.
             for _ in 0..12_000 {
-                let now = store.writers_waiting();
-                if now < floor {
-                    floor = now;
-                }
-                if now > floor {
-                    rose = true;
+                if store.yield_turns() >= 1 {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
             assert!(
-                rose,
+                store.yield_turns() >= 1,
                 "the walk never took its turn behind the writer that holds the connection"
             );
             // The writers go; the walk's second step runs, and its derives

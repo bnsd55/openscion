@@ -256,6 +256,11 @@ struct PgInner {
     /// database.
     #[cfg(any(test, feature = "test-hooks"))]
     committed: std::sync::atomic::AtomicU64,
+    /// How many deadline-less waits for writers ended - by the yield's
+    /// bound, or because the writers were done. The tests of the bound
+    /// read it: a retry of a refused write cannot bump it, so the turn
+    /// the bound grants is told apart from any writer's churn.
+    yield_turns: std::sync::atomic::AtomicU64,
     #[cfg(any(test, feature = "test-hooks"))]
     txes: std::sync::atomic::AtomicU64,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -1056,6 +1061,7 @@ impl Pg {
             hooks: crate::store::test_hooks::ImportHooks::default(),
             #[cfg(any(test, feature = "test-hooks"))]
             committed: std::sync::atomic::AtomicU64::new(0),
+            yield_turns: std::sync::atomic::AtomicU64::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
             txes: std::sync::atomic::AtomicU64::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -1561,6 +1567,13 @@ impl Pg {
             .waiting
     }
 
+    /// How many deadline-less waits for writers ended.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn yield_turns(&self) -> u64 {
+        self.inner.yield_turns.load(Ordering::Relaxed)
+    }
+
     /// The lane's queue, for the tests: the slot holders and the other
     /// writers that wait, not granted yet.
     #[cfg(test)]
@@ -1604,6 +1617,7 @@ impl Pg {
                     // The yield's bound passed with writers still waiting:
                     // this caller takes its turn. The writers it passes
                     // wait behind at most one of its transactions.
+                    self.inner.yield_turns.fetch_add(1, Ordering::Relaxed);
                     return Ok(());
                 }
                 let (guard, timed_out) = self
@@ -1613,9 +1627,11 @@ impl Pg {
                     .unwrap_or_else(PoisonError::into_inner);
                 gate = guard;
                 if timed_out.timed_out() {
+                    self.inner.yield_turns.fetch_add(1, Ordering::Relaxed);
                     return Ok(());
                 }
             }
+            self.inner.yield_turns.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         };
         while gate.waiting > 0 {
