@@ -1163,7 +1163,7 @@ mod tests {
                         panic!("{child_path} is a directory in the view");
                     };
                     w.tree_ids.push(*id);
-                    walk(w, Some(*id), &child_path)?;
+                    walk_model(w, Some(*id), &child_path)?;
                 }
                 DirState::Hidden => unreachable!("hidden entries are not shown"),
             }
