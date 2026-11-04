@@ -253,7 +253,8 @@ mod tests {
                 // header's, which took the pause out of the margin.
                 grpc_timeout(request.metadata()).expect("the header parses back")
             });
-            left.map_or(Until::NONE, |left| Until::after_at(left, now)).at()
+            left.map_or(Until::NONE, |left| Until::after_at(left, now))
+                .at()
         };
         let first = Until::after(Duration::from_millis(200)).at();
         let second = pass(first);
