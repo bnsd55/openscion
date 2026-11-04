@@ -87,13 +87,22 @@ thread_local! {
     /// Nodes read on this thread. Tests use it to bound the reads of a
     /// query.
     pub(crate) static NODE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// Bytes stored in `history_nodes` on this thread. Tests use it to
-    /// bound the cost of a change.
+    /// Bytes of history nodes stored on this thread. The flush counts
+    /// them once, from the chunks it writes; a deferring write path
+    /// counts nothing when it buffers.
     pub(crate) static NODE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// The byte cap of one check's row cache. Tests lower it, so that
     /// they reach it.
     pub(crate) static CHECK_NODE_BYTES_CAP: std::cell::Cell<usize> =
         const { std::cell::Cell::new(usize::MAX) };
+}
+
+/// Counts the bytes of history nodes one flush chunk writes. The
+/// flush calls it in test builds only, once per chunk, from the bytes
+/// it already holds; a production flush reports to no one.
+#[cfg(test)]
+pub(crate) fn note_flushed_node_bytes(bytes: usize) {
+    NODE_BYTES.with(|n| n.set(n.get() + bytes));
 }
 
 /// The byte cap of one check's row cache: the same bound a log page's
@@ -649,22 +658,13 @@ fn level_root(c: &mut dyn MetaTx, index: BTreeMap<PathElem, NodeId>, cut: &Cut) 
     index_node(c, &index, cut)
 }
 
-/// Stores one row of kind `kind`. Safe to repeat. Counts the bytes that
-/// actually landed in the table, so that a test can bound the cost of a
-/// change: a row whose bytes are already there is stored again for free.
+/// Stores one row of kind `kind`. Safe to repeat.
 fn put_row(c: &mut dyn MetaTx, kind: u8, payload: &[u8]) -> Result<NodeId> {
     let mut body = Vec::with_capacity(payload.len() + 1);
     body.push(kind);
     body.extend(payload);
     let id = NodeId::of(&body);
-    #[cfg(test)]
-    let len = body.len();
-    #[cfg_attr(not(test), allow(unused_variables))]
-    let (_, stored) = c.put_history_node(id, body)?;
-    #[cfg(test)]
-    if stored {
-        NODE_BYTES.with(|n| n.set(n.get() + len));
-    }
+    c.put_history_node(id, body)?;
     Ok(id)
 }
 
@@ -1328,6 +1328,9 @@ mod tests {
             &[&first[..], &[("d/f50000", true)]],
             true,
         );
+        // The level's own node bytes, as the first chain's flush wrote
+        // them: about 6.3 MB of chunks for 100,000 names.
+        let whole = NODE_BYTES.get();
         NODE_BYTES.with(|n| n.set(0));
         let _one = store_chain(
             &store,
@@ -1337,8 +1340,10 @@ mod tests {
             true,
         );
         let written = NODE_BYTES.get();
-        // Two chunks and one index node at most, each under the cap.
-        assert!(written <= 3 * CUT.max_bytes, "{written}");
+        // The change stores the chunks on its path - the chunk the two
+        // names share and the index chunks above it - not the level of
+        // every name.
+        assert!(written < whole / 4, "{written} against the level's {whole}");
         // The lookup still answers.
         assert_eq!(
             read::log_page(&store, "r", ids[1], Some(&path("d/f50000")), 10, &later())

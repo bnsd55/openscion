@@ -1413,41 +1413,12 @@ impl Pg {
                 }
                 #[cfg(any(test, feature = "test-hooks"))]
                 self.inner.committed.fetch_add(1, Ordering::Release);
-                // A write path that deferred its derived deletes hands
-                // them to the flush: one statement for the whole
-                // transaction, inside it, so a rollback takes the
-                // deletes with it and the end state is the one the
-                // per-call deletes would have reached.
-                if !tx.deferred_deletes.is_empty() {
-                    let kinds: Vec<String> = tx
-                        .deferred_deletes
-                        .iter()
-                        .map(|(k, _, _)| k.clone())
-                        .collect();
-                    let versions: Vec<i64> =
-                        tx.deferred_deletes.iter().map(|(_, v, _)| *v).collect();
-                    let steps: Vec<i64> = tx.deferred_deletes.iter().map(|(_, _, s)| *s).collect();
-                    let deleted = tx.c.execute(
-                        "WITH k AS (
-                             SELECT kind, version, SUM(step) AS step
-                             FROM unnest($1::text[], $2::int8[], $3::int8[]) AS t(kind, version, step)
-                             GROUP BY kind, version),
-                         v AS (
-                             SELECT d.ctid AS ctid, k.step AS step,
-                                    row_number() OVER (PARTITION BY d.kind
-                                                       ORDER BY d.version) AS rn
-                             FROM derived d JOIN k ON d.kind = k.kind
-                                                            AND d.version < k.version)
-                         DELETE FROM derived WHERE ctid IN (SELECT ctid FROM v WHERE rn <= step)",
-                        &[
-                            P::text_array(kinds),
-                            P::i64_array(versions),
-                            P::i64_array(steps),
-                        ],
-                    )?;
-                    if deleted > 0 {
-                        tracing::debug!(deleted, "flushed the transaction's derived deletes");
-                    }
+                // A write path that deferred its per-row flushes hands
+                // them to the commit, inside the transaction, so a
+                // rollback takes them with it and the end state is the
+                // one the per-call writes would have reached.
+                if tx.defer_derived {
+                    tx.flush_deferred()?;
                 }
                 let committed = tx.commit();
                 #[cfg(any(test, feature = "test-hooks"))]
@@ -1638,10 +1609,16 @@ type DerivedPending = Vec<(String, i64, ChangesetId, Vec<u8>)>;
 /// (kind, version, id).
 type DerivedPreload = std::collections::HashMap<(String, i64, Vec<u8>), Vec<u8>>;
 
-/// The history nodes a batching transaction holds for the flush, by id.
-/// The nodes are content-addressed, so a put of a node the transaction
-/// already holds is the same row.
-type HistoryPending = std::collections::HashMap<Vec<u8>, Vec<u8>>;
+/// The history nodes a batching transaction holds for the flush, by
+/// id, with their bytes. The nodes are content-addressed, so a put of
+/// a node the transaction already holds is the same row. The count
+/// rides the map, so every view of the buffer counts the same, and
+/// the flush can run mid-transaction when the count passes its bound.
+#[derive(Default)]
+struct HistoryPending {
+    rows: std::collections::HashMap<Vec<u8>, Vec<u8>>,
+    bytes: usize,
+}
 
 /// The isolation level of one read transaction. Repeatable read pins
 /// one snapshot for the whole read; read committed takes the newest
@@ -1715,17 +1692,75 @@ pub struct PgTx<'a> {
     /// commit deletes with one statement, honoring the summed limits per
     /// kind and version. Only `defer_derived_deletes` fills it.
     deferred_deletes: Vec<(String, i64, i64)>,
-    /// Whether `delete_derived_below` defers to the commit. Off for the
-    /// importer's batching (the flush owns those deletes) and for the
-    /// sweeps, which count the rows they removed.
+    /// Whether the write path's per-row flushes wait for the commit:
+    /// `delete_derived_below` collects its calls, and history node
+    /// writes collect in the buffer the commit writes with one
+    /// statement. Off for the importer's batching (its flush owns the
+    /// shapes) and for the sweeps, which count the rows they removed.
     defer_derived: bool,
     /// The history nodes the transaction inserted while batching: the
     /// flush writes them after the derived rows. Shared with the
-    /// reborrows.
+    /// reborrows; the bytes ride the map.
     history_pending: Option<&'a mut HistoryPending>,
     /// The transaction was ended by `commit` or `rollback`; a drop then
     /// leaves the client alone.
     ended: bool,
+}
+
+/// The bytes of history nodes one transaction's buffer may hold before
+/// the flush writes them mid-transaction. A transaction whose writes
+/// pack many commits - the archive restore packs up to 64 MiB of
+/// changeset bodies, tens of thousands of commits with a few nodes
+/// each - would otherwise hold the whole history's nodes in RAM until
+/// the commit, hundreds of MB, and copy them once more into the
+/// flush's chunk arrays. At the bound the flush runs inside the
+/// transaction: the rows land in the table, this transaction's reads
+/// of them read the table, and the commit writes only what came after.
+const HISTORY_PENDING_MAX_BYTES: usize = 16 << 20;
+
+#[cfg(any(test, feature = "test-hooks"))]
+static HISTORY_PENDING_MAX_BYTES_OVERRIDE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// The bound, as the tests' override holds it when one does.
+fn history_pending_max_bytes() -> usize {
+    #[cfg(any(test, feature = "test-hooks"))]
+    {
+        let small = HISTORY_PENDING_MAX_BYTES_OVERRIDE.load(Ordering::Relaxed);
+        if small != 0 {
+            return small;
+        }
+    }
+    HISTORY_PENDING_MAX_BYTES
+}
+
+/// The most bytes the buffer held at once. The restore test reads it:
+/// a restore that packs many commits per transaction must not hold the
+/// whole history's nodes.
+#[cfg(any(test, feature = "test-hooks"))]
+static HISTORY_PENDING_PEAK: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Holds a small buffer bound for the test that pins the restore's
+/// flush, and resets the peak. The guard puts the server's bound back.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn test_set_history_pending_bound_for_tests(bytes: usize) -> impl Drop {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            HISTORY_PENDING_MAX_BYTES_OVERRIDE.store(0, Ordering::Relaxed);
+        }
+    }
+    HISTORY_PENDING_MAX_BYTES_OVERRIDE.store(bytes, Ordering::Relaxed);
+    HISTORY_PENDING_PEAK.store(0, Ordering::Relaxed);
+    Reset
+}
+
+/// The most bytes the buffer held since the last reset.
+#[cfg(any(test, feature = "test-hooks"))]
+#[must_use]
+pub fn test_history_pending_peak_bytes() -> usize {
+    HISTORY_PENDING_PEAK.load(Ordering::Relaxed)
 }
 
 impl<'a> PgTx<'a> {
@@ -1738,12 +1773,60 @@ impl<'a> PgTx<'a> {
     /// # Errors
     ///
     /// Database errors.
+    /// Writes the per-row flushes a deferring write path collected: the
+    /// history nodes the build wrote, one statement per 1,000 rows, and
+    /// the derived old-row deletes, one statement for the whole
+    /// transaction honoring the summed limits per kind. Runs inside the
+    /// transaction at its commit, so a rollback takes the writes with
+    /// it and the end state is the one the per-call writes would have
+    /// reached.
+    ///
+    /// # Errors
+    ///
+    /// Database errors.
+    fn flush_deferred(&mut self) -> Result<()> {
+        self.flush_history_rows()?;
+        if self.deferred_deletes.is_empty() {
+            return Ok(());
+        }
+        let kinds: Vec<String> = self
+            .deferred_deletes
+            .iter()
+            .map(|(k, _, _)| k.clone())
+            .collect();
+        let versions: Vec<i64> = self.deferred_deletes.iter().map(|(_, v, _)| *v).collect();
+        let steps: Vec<i64> = self.deferred_deletes.iter().map(|(_, _, s)| *s).collect();
+        let deleted = self.c.execute(
+            "WITH k AS (
+                 SELECT kind, version, SUM(step) AS step
+                 FROM unnest($1::text[], $2::int8[], $3::int8[]) AS t(kind, version, step)
+                 GROUP BY kind, version),
+             v AS (
+                 SELECT d.ctid AS ctid, k.step AS step,
+                        row_number() OVER (PARTITION BY d.kind
+                                           ORDER BY d.version) AS rn
+                 FROM derived d JOIN k ON d.kind = k.kind
+                                                        AND d.version < k.version)
+             DELETE FROM derived WHERE ctid IN (SELECT ctid FROM v WHERE rn <= step)",
+            &[
+                P::text_array(kinds),
+                P::i64_array(versions),
+                P::i64_array(steps),
+            ],
+        )?;
+        if deleted > 0 {
+            tracing::debug!(deleted, "flushed the transaction's derived deletes");
+        }
+        Ok(())
+    }
+
     fn flush_history_rows(&mut self) -> Result<()> {
         const CHUNK: usize = 1_000;
         let Some(history) = self.history_pending.as_deref_mut() else {
             return Ok(());
         };
-        let mut node_rows: Vec<(Vec<u8>, Vec<u8>)> = history.drain().collect();
+        let mut node_rows: Vec<(Vec<u8>, Vec<u8>)> = history.rows.drain().collect();
+        history.bytes = 0;
         node_rows.sort();
         for chunk in node_rows.chunks(CHUNK) {
             let ids = chunk.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
@@ -1757,6 +1840,11 @@ impl<'a> PgTx<'a> {
                  ON CONFLICT (id) DO NOTHING",
                 &[P::bytea_array(ids), P::bytea_array(bodies)],
             )?;
+            #[cfg(test)]
+            {
+                let bytes: usize = chunk.iter().map(|(_, body)| body.len()).sum();
+                crate::history::note_flushed_node_bytes(bytes);
+            }
         }
         Ok(())
     }
@@ -4146,11 +4234,12 @@ impl MetaTx for PgTx<'_> {
         Ok(())
     }
 
-    /// Defers the write path's `delete_derived_below` to the commit:
-    /// the collected deletes wait for the commit's flush, and the
-    /// deferral lasts to the commit. One-way - there is no off, because
-    /// an off would silently drop deletes the transaction already
-    /// promised.
+    /// Defers the write path's per-row flushes to the commit: the
+    /// collected `delete_derived_below` calls wait for the commit's
+    /// one-statement flush, and the history nodes the write path
+    /// buffers do too. The deferral lasts to the commit. One-way -
+    /// there is no off, because an off would silently drop deletes the
+    /// transaction already promised.
     fn defer_derived_deletes(&mut self) {
         self.defer_derived = true;
     }
@@ -4655,22 +4744,35 @@ impl MetaTx for PgTx<'_> {
     }
 
     /// Stores a history node under its content address. Safe to repeat.
-    /// Returns whether the row was new.
-    fn put_history_node(&mut self, id: NodeId, body: Vec<u8>) -> Result<(NodeId, bool)> {
+    fn put_history_node(&mut self, id: NodeId, body: Vec<u8>) -> Result<NodeId> {
         // While the importer's batching is on, the row waits for the
         // flush, which writes it in batches after the derived rows; the
-        // buffer answers this transaction's reads of the same node.
-        if self.cs_batching
-            && let Some(pending) = self.history_pending.as_deref_mut()
+        // buffer answers this transaction's reads of the same node. A
+        // deferring write path collects the same way: its commit writes
+        // the transaction's nodes with one statement, however many
+        // levels the history tree grew. A row the buffer already holds
+        // takes the newer body, the same bytes under the same address:
+        // the content-addressed body makes the repeat free.
+        if let Some(pending) = self.history_pending.as_deref_mut()
+            && (self.cs_batching || self.defer_derived)
         {
-            pending.insert(id.0.to_vec(), body);
-            return Ok((id, true));
+            let added = body.len();
+            if let Some(old) = pending.rows.insert(id.0.to_vec(), body) {
+                pending.bytes -= old.len();
+            }
+            pending.bytes += added;
+            #[cfg(any(test, feature = "test-hooks"))]
+            HISTORY_PENDING_PEAK.fetch_max(pending.bytes, Ordering::Relaxed);
+            if pending.bytes > history_pending_max_bytes() {
+                self.flush_history_rows()?;
+            }
+            return Ok(id);
         }
-        let stored = self.c.execute(
+        self.c.execute(
             "INSERT INTO history_nodes (id, body) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING",
             &[P::bytes(&id.0), P::bytes(&body)],
         )?;
-        Ok((id, stored == 1))
+        Ok(id)
     }
 
     /// Reads a history node and checks it against its ID. Also returns the
@@ -4680,11 +4782,13 @@ impl MetaTx for PgTx<'_> {
     ///
     /// [`Error::Corrupt`] if absent or if it does not match its ID.
     fn get_history_node(&mut self, id: NodeId) -> Result<(Vec<u8>, usize)> {
-        if self.cs_batching
-            && let Some(body) = self
-                .history_pending
-                .as_deref()
-                .and_then(|pending| pending.get(id.0.as_slice()))
+        // A row the transaction holds for its flush answers from the
+        // buffer, batching or not: a deferred write is the transaction's
+        // own state.
+        if let Some(body) = self
+            .history_pending
+            .as_deref()
+            .and_then(|pending| pending.rows.get(id.0.as_slice()))
         {
             let len = body.len();
             return Ok((body.clone(), len));

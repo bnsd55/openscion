@@ -294,7 +294,8 @@ pub fn store_changeset(
     // two round trips on both together instead of one per kind. The
     // changeset's own rows ride along: a land rebases onto the head its
     // input changeset already hangs from, so its derived rows exist and
-    // the build finds them instead of deriving them again. The import's
+    // the build finds them instead of deriving them again. The history
+    // nodes the build writes ride the same flush. The import's
     // batching owns both shapes already — its pending buffer answers
     // the reads and its flush deletes once per kind — so it keeps them.
     if !c.changeset_batching() {
