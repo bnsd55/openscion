@@ -1806,6 +1806,30 @@ pub fn test_history_pending_peak_bytes() -> usize {
     HISTORY_PENDING_PEAK.load(Ordering::Relaxed)
 }
 
+/// The length of the prefix of one kind's rows that the transaction's
+/// deletes take: each call, in call order, adds what its step leaves of
+/// the rows its version still sees, after the calls before it took
+/// theirs from the same low end. Returns one (kind, total) per kind
+/// with calls, in first-call order, for the flush's one delete
+/// statement. `belows` is one count per call, in call order: how many
+/// rows of the kind were still below the call's version.
+fn delete_prefixes(calls: &[(String, i64)], belows: &[i64]) -> (Vec<String>, Vec<i64>) {
+    let mut kinds: Vec<String> = Vec::new();
+    let mut totals: Vec<i64> = Vec::new();
+    for ((kind, step), below) in calls.iter().zip(belows) {
+        let i = match kinds.iter().position(|k| k == kind) {
+            Some(i) => i,
+            None => {
+                kinds.push(kind.clone());
+                totals.push(0);
+                totals.len() - 1
+            }
+        };
+        totals[i] += (*step).min((*below - totals[i]).max(0));
+    }
+    (kinds, totals)
+}
+
 impl<'a> PgTx<'a> {
     /// Writes the history nodes the transaction inserted while batching,
     /// after the derived rows and before the `git_import` rows: one
@@ -1818,11 +1842,16 @@ impl<'a> PgTx<'a> {
     /// Database errors.
     /// Writes the per-row flushes a deferring write path collected: the
     /// history nodes the build wrote, one statement per 1,000 rows, and
-    /// the derived old-row deletes, one statement for the whole
-    /// transaction honoring the summed limits per kind. Runs inside the
-    /// transaction at its commit, so a rollback takes the writes with
-    /// it and the end state is the one the per-call writes would have
-    /// reached.
+    /// the derived old-row deletes, one query for the counts and one
+    /// statement for the whole transaction. The deletes of one kind, in
+    /// call order, take a prefix of the kind's rows: each call takes up
+    /// to its step from the rows still there below its version, and the
+    /// calls before it took theirs from the same low end. The prefix's
+    /// length folds over the calls in order, so the end state is what
+    /// the per-call deletes would have reached, in order, for any mix
+    /// of kinds and versions - the per-call deletes pick the same low
+    /// end, by version and changeset. Runs inside the transaction at
+    /// its commit, so a rollback takes the writes with it.
     ///
     /// # Errors
     ///
@@ -1839,23 +1868,31 @@ impl<'a> PgTx<'a> {
             .collect();
         let versions: Vec<i64> = self.deferred_deletes.iter().map(|(_, v, _)| *v).collect();
         let steps: Vec<i64> = self.deferred_deletes.iter().map(|(_, _, s)| *s).collect();
+        // How many rows each call still had below its version, one row
+        // per call in call order.
+        let belows = self.c.query(
+            "SELECT c.kind, count(d.cs)
+             FROM unnest($1::text[], $2::int8[]) WITH ORDINALITY AS c(kind, version, i)
+             LEFT JOIN derived d ON d.kind = c.kind AND d.version < c.version
+             GROUP BY c.i, c.kind ORDER BY c.i",
+            &[P::text_array(kinds.clone()), P::i64_array(versions)],
+        )?;
+        let belows: Vec<i64> = belows
+            .iter()
+            .map(|row| row.try_get(1))
+            .collect::<std::result::Result<_, _>>()?;
+        let calls: Vec<(String, i64)> = kinds.iter().cloned().zip(steps).collect();
+        let (kinds, totals) = delete_prefixes(&calls, &belows);
         let deleted = self.c.execute(
-            "WITH k AS (
-                 SELECT kind, version, SUM(step) AS step
-                 FROM unnest($1::text[], $2::int8[], $3::int8[]) AS t(kind, version, step)
-                 GROUP BY kind, version),
-             v AS (
-                 SELECT d.ctid AS ctid, k.step AS step,
+            "WITH rank AS (
+                 SELECT d.ctid, t.total,
                         row_number() OVER (PARTITION BY d.kind
-                                           ORDER BY d.version) AS rn
-                 FROM derived d JOIN k ON d.kind = k.kind
-                                                        AND d.version < k.version)
-             DELETE FROM derived WHERE ctid IN (SELECT ctid FROM v WHERE rn <= step)",
-            &[
-                P::text_array(kinds),
-                P::i64_array(versions),
-                P::i64_array(steps),
-            ],
+                                           ORDER BY d.version, d.cs) AS rn
+                 FROM derived d
+                 JOIN unnest($1::text[], $2::int8[]) AS t(kind, total)
+                                                      ON d.kind = t.kind)
+             DELETE FROM derived WHERE ctid IN (SELECT ctid FROM rank WHERE rn <= total)",
+            &[P::text_array(kinds), P::i64_array(totals)],
         )?;
         if deleted > 0 {
             tracing::debug!(deleted, "flushed the transaction's derived deletes");
@@ -4221,7 +4258,7 @@ impl MetaTx for PgTx<'_> {
         let deleted = self.c.execute(
             "DELETE FROM derived WHERE (kind, version, cs) IN (
                  SELECT kind, version, cs FROM derived
-                 WHERE kind = $1 AND version < $2 LIMIT $3)",
+                 WHERE kind = $1 AND version < $2 ORDER BY version, cs LIMIT $3)",
             &[
                 P::text(kind),
                 P::i64(version64),
@@ -5330,9 +5367,37 @@ impl Meta for Pg {
 
 #[cfg(test)]
 mod tests {
-    use super::{Client, NoTls, merged_options};
+    use super::{Client, NoTls, delete_prefixes, merged_options};
     use crate::pg::Pg;
     use std::sync::Arc;
+
+    #[test]
+    fn the_delete_prefix_folds_the_calls_of_one_kind_in_order() {
+        // Two versions of one kind, the higher version called first:
+        // the first call takes 2 of the 6 rows below it, the second 1
+        // of the 3 rows its lower version still sees. The per-call
+        // deletes would leave 6 - 2 - 1 = 3 rows.
+        let kind = "k".to_owned();
+        let (kinds, totals) = delete_prefixes(&[(kind.clone(), 2), (kind, 2)], &[6, 3]);
+        assert_eq!(kinds, vec!["k"]);
+        assert_eq!(totals, vec![3]);
+        // Kinds interleave in the call order; each kind folds alone.
+        let (kinds, totals) = delete_prefixes(
+            &[
+                ("a".to_owned(), 5),
+                ("b".to_owned(), 1),
+                ("a".to_owned(), 5),
+            ],
+            &[2, 0, 10],
+        );
+        assert_eq!(kinds, vec!["a", "b"]);
+        assert_eq!(totals, vec![10, 0]);
+        // A later call's version sees fewer rows than the calls before
+        // it took: its share is nothing.
+        let kind = "k".to_owned();
+        let (_, totals) = delete_prefixes(&[(kind.clone(), 5), (kind, 5)], &[10, 2]);
+        assert_eq!(totals, vec![5]);
+    }
 
     #[test]
     fn a_worker_panic_logs_its_payload_and_the_error_names_the_log() {

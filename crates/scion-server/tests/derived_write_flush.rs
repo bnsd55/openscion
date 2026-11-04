@@ -139,7 +139,7 @@ fn the_flush_deletes_what_the_per_call_deletes_delete_in_order() {
             ids.iter()
                 .enumerate()
                 .map(|(i, id)| {
-                    let version = i as u32 + 1;
+                    let version = u32::try_from(i).unwrap() + 1;
                     let present = store
                         .read(|c| c.get_derived("test_kind", version, *id))
                         .unwrap()
