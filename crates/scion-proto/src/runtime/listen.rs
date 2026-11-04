@@ -2316,6 +2316,7 @@ mod tests {
             keepalive_timeout: Duration::from_millis(500),
             age: Duration::from_secs(3600),
             grace: Duration::from_secs(3600),
+            wait: Duration::from_secs(3600),
         };
         let (addr, metrics) = serve(limits, timers).await;
         let mut first = a_stalling_client(addr).await;
