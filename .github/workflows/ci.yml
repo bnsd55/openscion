@@ -407,10 +407,7 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
-        # The database's parallel plans and its cumulative statistics
-        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
-        # pile-up filled it and the database crashed (#849). 256 MB is
-        # the headroom the plans need.
+        # headroom, see the first postgres service (#849)
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
@@ -553,10 +550,7 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
-        # The database's parallel plans and its cumulative statistics
-        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
-        # pile-up filled it and the database crashed (#849). 256 MB is
-        # the headroom the plans need.
+        # headroom, see the first postgres service (#849)
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
@@ -657,10 +651,7 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
-        # The database's parallel plans and its cumulative statistics
-        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
-        # pile-up filled it and the database crashed (#849). 256 MB is
-        # the headroom the plans need.
+        # headroom, see the first postgres service (#849)
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
@@ -888,10 +879,7 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
-        # The database's parallel plans and its cumulative statistics
-        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
-        # pile-up filled it and the database crashed (#849). 256 MB is
-        # the headroom the plans need.
+        # headroom, see the first postgres service (#849)
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
@@ -1033,10 +1021,7 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
-        # The database's parallel plans and its cumulative statistics
-        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
-        # pile-up filled it and the database crashed (#849). 256 MB is
-        # the headroom the plans need.
+        # headroom, see the first postgres service (#849)
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
@@ -1088,10 +1073,7 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
-        # The database's parallel plans and its cumulative statistics
-        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
-        # pile-up filled it and the database crashed (#849). 256 MB is
-        # the headroom the plans need.
+        # headroom, see the first postgres service (#849)
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
@@ -1163,10 +1145,7 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
-        # The database's parallel plans and its cumulative statistics
-        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
-        # pile-up filled it and the database crashed (#849). 256 MB is
-        # the headroom the plans need.
+        # headroom, see the first postgres service (#849)
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
@@ -1223,10 +1202,7 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
-        # The database's parallel plans and its cumulative statistics
-        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
-        # pile-up filled it and the database crashed (#849). 256 MB is
-        # the headroom the plans need.
+        # headroom, see the first postgres service (#849)
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
@@ -1279,10 +1255,7 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
-        # The database's parallel plans and its cumulative statistics
-        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
-        # pile-up filled it and the database crashed (#849). 256 MB is
-        # the headroom the plans need.
+        # headroom, see the first postgres service (#849)
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
@@ -1341,10 +1314,7 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
-        # The database's parallel plans and its cumulative statistics
-        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
-        # pile-up filled it and the database crashed (#849). 256 MB is
-        # the headroom the plans need.
+        # headroom, see the first postgres service (#849)
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
@@ -1420,10 +1390,7 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
-        # The database's parallel plans and its cumulative statistics
-        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
-        # pile-up filled it and the database crashed (#849). 256 MB is
-        # the headroom the plans need.
+        # headroom, see the first postgres service (#849)
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
@@ -1488,10 +1455,7 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
-        # The database's parallel plans and its cumulative statistics
-        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
-        # pile-up filled it and the database crashed (#849). 256 MB is
-        # the headroom the plans need.
+        # headroom, see the first postgres service (#849)
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
@@ -1586,10 +1550,7 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
-        # The database's parallel plans and its cumulative statistics
-        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
-        # pile-up filled it and the database crashed (#849). 256 MB is
-        # the headroom the plans need.
+        # headroom, see the first postgres service (#849)
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
@@ -1672,10 +1633,7 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
-        # The database's parallel plans and its cumulative statistics
-        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
-        # pile-up filled it and the database crashed (#849). 256 MB is
-        # the headroom the plans need.
+        # headroom, see the first postgres service (#849)
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
@@ -1742,10 +1700,7 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
-        # The database's parallel plans and its cumulative statistics
-        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
-        # pile-up filled it and the database crashed (#849). 256 MB is
-        # the headroom the plans need.
+        # headroom, see the first postgres service (#849)
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s

@@ -348,3 +348,62 @@ fn the_recorded_directory_is_the_one_the_name_hashes() {
     assert!(Path::new(dir.path()).exists());
     let _store = Backend::open_test(dir.path()).unwrap();
 }
+
+/// The drain reaches past the schemas it keeps: a head of kept rows
+/// (directories that exist) must not hide the stale row behind it.
+/// A read that stops at the oldest rows reads the same kept rows at
+/// every call, drops nothing, and the pile-up behind the head never
+/// drains. The kept rows here are far older than any other registry
+/// row, so the oldest-rows window of a read without paging holds only
+/// them - and this test fails on such a read.
+#[test]
+fn the_drain_reaches_past_the_schemas_it_keeps() {
+    let mut client = connect();
+    let pid = std::process::id();
+    // A failed earlier run of this test must not shape this one.
+    client
+        .batch_execute(&format!(
+            "DELETE FROM public.scion_test_schemas WHERE schema LIKE 'scion_test_stall{pid}_%'"
+        ))
+        .unwrap();
+    // One directory that exists: every kept schema's comment names it,
+    // so the sweep keeps them whatever their age. Their registrations
+    // are older than any other row the database can hold, so a read
+    // without paging sees them first, all of them.
+    let dir = private_tempdir();
+    let recorded = dir.path().to_string_lossy().replace('\'', "''");
+    let kept: Vec<String> = (0..20)
+        .map(|i| {
+            let name = format!("scion_test_stall{pid}_kept{i}");
+            client
+                .batch_execute(&format!(
+                    "CREATE SCHEMA IF NOT EXISTS {name};
+                     COMMENT ON SCHEMA {name} IS '{recorded}'"
+                ))
+                .unwrap();
+            register(&mut client, &name, 86_400_000 * 10 - i);
+            name
+        })
+        .collect();
+    // The stale one: its directory never existed, and it registered
+    // behind every kept row.
+    let gone = format!("scion_test_stall{pid}_gone");
+    client
+        .batch_execute(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {gone};
+             COMMENT ON SCHEMA {gone} IS '/the/directory/is/gone'"
+        ))
+        .unwrap();
+    register(&mut client, &gone, 86_400_000 * 10 - 100);
+    Backend::sweep_stale_test_schemas().unwrap();
+    assert!(
+        !schema_exists(&mut client, &gone),
+        "the drain drops the stale schema behind the kept head"
+    );
+    for name in &kept {
+        assert!(
+            schema_exists(&mut client, name),
+            "a schema whose directory exists never drops: {name}"
+        );
+    }
+}

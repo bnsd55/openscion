@@ -121,30 +121,51 @@ fn drop_stale_schemas(maker: &PgClient, automatic: bool, cap: usize) -> (usize, 
     // database's default, and no test schema holds the table. A
     // connection whose `application_name` is the schema's name keeps
     // its schema; so does a schema whose recorded directory exists.
-    // The read stops at twice the cap: a caller that drains at every
-    // open reads the head of the queue, not the whole registry.
-    let read_limit = (cap * 2) as i64;
-    let eligible = maker.query(
-        &format!(
-            "SELECT r.schema, obj_description(n.oid, 'pg_namespace'), r.started
-             FROM public.scion_test_schemas AS r
-             JOIN pg_catalog.pg_namespace AS n ON n.nspname = r.schema
-             WHERE r.schema NOT IN (
-                 SELECT application_name FROM pg_catalog.pg_stat_activity
-                 WHERE application_name LIKE 'scion_test_%')
-             ORDER BY r.started ASC
-             LIMIT {read_limit}"
-        ),
-        &[],
-    );
+    //
+    // The read pages past the schemas it keeps: a head that stops at
+    // the oldest rows would read the same kept rows at every call and
+    // never reach the stale ones behind them - a developer database
+    // with a few dozen live directories would stall every drain (#849
+    // review). Each page starts strictly after the last row the page
+    // before read, kept or dropped, and the walk stops when the cap is
+    // reached or a bounded number of pages is read, so one call's work
+    // stays bounded whatever the registry holds; the next call
+    // continues from the front.
+    let page_size = (cap * 2) as i64;
+    let page_bound = 64_usize;
     let now = extract_epoch_now(maker);
     let mut dropped = 0_usize;
     let mut left = 0_usize;
-    if let Ok(rows) = &eligible {
-        for row in rows {
+    let mut cursor_started = i64::MIN;
+    let mut cursor_schema = String::new();
+    for _page in 0..page_bound {
+        let eligible = maker.query(
+            &format!(
+                "SELECT r.schema, obj_description(n.oid, 'pg_namespace'), r.started
+                 FROM public.scion_test_schemas AS r
+                 JOIN pg_catalog.pg_namespace AS n ON n.nspname = r.schema
+                 WHERE r.schema NOT IN (
+                     SELECT application_name FROM pg_catalog.pg_stat_activity
+                     WHERE application_name LIKE 'scion_test_%')
+                   AND (r.started, r.schema) > ($1, $2)
+                 ORDER BY r.started ASC, r.schema ASC
+                 LIMIT {page_size}"
+            ),
+            &[P::i64(cursor_started), P::text(&cursor_schema)],
+        );
+        let Ok(rows) = eligible else {
+            // The registry cannot be read: the next open tries again.
+            break;
+        };
+        if rows.is_empty() {
+            break;
+        }
+        for row in &rows {
             let name: String = row.get(0);
             let dir: Option<String> = row.get(1);
             let started: i64 = row.get(2);
+            cursor_started = started;
+            cursor_schema = name.clone();
             // Only the names this backend makes: no other schema drops,
             // whatever a row of the registry names.
             if !name.starts_with(TEST_SCHEMA_PREFIX) {
@@ -197,6 +218,10 @@ fn drop_stale_schemas(maker: &PgClient, automatic: bool, cap: usize) -> (usize, 
             // The lock was this session's own try: release it, so the
             // next row's try decides on its own name.
             let _ = maker.query_opt("SELECT pg_advisory_unlock(hashtext($1))", &[P::text(&name)]);
+        }
+        if dropped >= cap || (rows.len() as i64) < page_size {
+            // The cap is reached, or the page was the registry's tail.
+            break;
         }
     }
     tracing::info!(
