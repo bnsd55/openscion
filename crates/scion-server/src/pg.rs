@@ -2132,6 +2132,23 @@ impl<'a> PgTx<'a> {
         self.expire_lands()?;
         Ok(recorded)
     }
+
+    /// Commits the transaction. The client runs again afterwards.
+    fn commit(&mut self) -> Result<()> {
+        self.ended = true;
+        self.c.execute("COMMIT", &[])?;
+        Ok(())
+    }
+
+    /// Rolls the transaction back. The client runs again afterwards.
+    fn rollback(&mut self) -> Result<()> {
+        if self.ended {
+            return Ok(());
+        }
+        self.ended = true;
+        self.c.execute("ROLLBACK", &[])?;
+        Ok(())
+    }
 }
 
 impl Drop for PgTx<'_> {
@@ -5937,9 +5954,10 @@ pub(crate) mod pool_tests {
             thread.join().unwrap();
         }
         let results = std::mem::take(&mut *results.lock().unwrap_or_else(PoisonError::into_inner));
-        // The record returns the land's id; the cap's verdict is the
-        // Ok-or-refused of the record itself.
-        let recorded = results.iter().filter(|out| out.is_ok()).count();
+        let recorded = results
+            .iter()
+            .filter(|out| matches!(out, Ok((_, row)) if row.state == LandState::Pending))
+            .count();
         let refused = results
             .iter()
             .filter(|out| matches!(out, Err(Error::ResourceExhausted(_))))
