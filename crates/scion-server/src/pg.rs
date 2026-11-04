@@ -1967,9 +1967,14 @@ impl Setup {
             // Every statement that follows resolves its unqualified names
             // inside the schema, and the cleanup of stale test schemas
             // sees the connection in `pg_stat_activity` under its name.
+            // The SHARED session lock on the schema's name is the
+            // cleanup's real check: a live connection holds it, so its
+            // schema never yields the cleanup's exclusive try, whatever
+            // a snapshot saw.
             if client
                 .batch_execute(&format!(
-                    "SET search_path TO {schema}; SET application_name TO '{schema}'"
+                    "SET search_path TO {schema}; SET application_name TO '{schema}';
+                     SELECT pg_advisory_lock_shared(hashtext('{schema}'))"
                 ))
                 .is_err()
             {

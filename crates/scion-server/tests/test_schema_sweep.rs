@@ -156,7 +156,10 @@ fn a_schema_a_connection_still_names_survives_the_sweep() {
     register(&mut client, &schema, 86_400);
     let mut holder = connect();
     holder
-        .batch_execute(&format!("SET application_name TO '{schema}'"))
+        .batch_execute(&format!(
+            "SET application_name TO '{schema}';
+             SELECT pg_advisory_lock_shared(hashtext('{schema}'))"
+        ))
         .unwrap();
     dir.close().unwrap();
     Backend::sweep_stale_test_schemas().unwrap();
