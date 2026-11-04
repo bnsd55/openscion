@@ -154,6 +154,17 @@ bounded too, at 1 GiB over every connection (a connection whose count
 crosses that total is closed, like one over its own cap). A cache and a
 daemon take the same three flags.
 
+A client over the connection cap waits 5 seconds for a place
+(`CONNECTION_WAIT` in crates/scion-proto/src/runtime/listen.rs), and the
+server closes it when none frees in time, so a failed client learns at
+once instead of waiting unread for up to half an hour. The server counts
+every such close in the `scion_connections_refused_total` metric, and
+writes one warning line per 10 seconds at most, with the number of
+connections the line covers. A few refusals in a burst are a client that
+retried; a steady count means the cap is too low for the load: raise
+`--max-connections` (and the host's memory, by the floor below) or add
+caches in front.
+
 What one server process can hold for clients that never read, at the
 defaults, in the worst case:
 
@@ -1248,7 +1259,10 @@ log.
   access rules. Expected if your rules are strict; look at the `principal`
   field to see who.
 - `a connection waits: the most connections are open` — the server is at
-  `--max-connections` and new clients queue. Raise the cap or add caches.
+  `--max-connections` and new clients wait up to 5 seconds for a place,
+  then the server closes them. The refused count is the
+  `scion_connections_refused_total` metric; a steady count means the cap
+  is too low. Raise the cap or add caches.
 - `the database stayed busy` / `the database stayed busy; the batch
   retries` — a lock or connection the caller could not get inside the
   clock, usually an import beside a live server. Rare bursts are fine;
