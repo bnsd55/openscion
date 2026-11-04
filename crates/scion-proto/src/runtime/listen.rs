@@ -51,7 +51,7 @@ use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
 use std::path::Path;
 use std::pin::{Pin, pin};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
@@ -1188,6 +1188,13 @@ impl<IO> Connected for Connection<IO> {
     }
 }
 
+/// The read-path marks the stall-close probe reads: how many times the
+/// server polled a connection for a read, how many bytes arrived, and how
+/// many times the over-limit check fired. Test-only.
+pub(crate) static READ_POLLS: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static READ_BYTES: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static OVER_FIRED: AtomicUsize = AtomicUsize::new(0);
+
 impl<IO: AsyncRead + PeerOf + Unpin> AsyncRead for Connection<IO> {
     fn poll_read(
         mut self: Pin<&mut Self>,
@@ -1195,6 +1202,7 @@ impl<IO: AsyncRead + PeerOf + Unpin> AsyncRead for Connection<IO> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = &mut *self;
+        READ_POLLS.fetch_add(1, Ordering::Relaxed);
         if std::mem::take(&mut this.first_poll) {
             tracing::debug!(
                 listener = ?this.io.local_of(),
@@ -1206,6 +1214,7 @@ impl<IO: AsyncRead + PeerOf + Unpin> AsyncRead for Connection<IO> {
         // Over the limit, the connection is closed, so hyper frees what its
         // stalled streams hold.
         if this.stalled.over() {
+            OVER_FIRED.fetch_add(1, Ordering::Relaxed);
             return Poll::Ready(Err(this.stalled.error()));
         }
         // The waker, so a crossing of the limit is seen without a frame from
@@ -1213,6 +1222,9 @@ impl<IO: AsyncRead + PeerOf + Unpin> AsyncRead for Connection<IO> {
         this.stalled.register(cx.waker());
         let before = buf.filled().len();
         let polled = Pin::new(&mut this.io).poll_read(cx, buf);
+        if let Poll::Ready(Ok(())) = &polled {
+            READ_BYTES.fetch_add(buf.filled().len() - before, Ordering::Relaxed);
+        }
         if let Some((left, wait)) = &mut this.preface {
             match polled {
                 Poll::Ready(Ok(())) => {
