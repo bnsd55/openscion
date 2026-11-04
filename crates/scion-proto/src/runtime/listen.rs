@@ -2329,7 +2329,15 @@ mod tests {
         // The gauge settles at the two replies' estimates: the
         // connection's own count (8 MiB) is over the process total (6
         // MiB) and under its own cap.
-        until(|| stalled_gauge(&metrics) == 2 * reply::STALLED_REPLY_BYTES).await;
+        let started = tokio::time::Instant::now();
+        while stalled_gauge(&metrics) != 2 * reply::STALLED_REPLY_BYTES {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the two stalled replies never settled the gauge at {}",
+                stalled_gauge(&metrics)
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
 
         // The marks: the probe reads them after a few keepalive intervals,
         // so a failure names what the server did see.
