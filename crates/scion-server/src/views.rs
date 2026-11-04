@@ -531,10 +531,13 @@ mod tests {
         Deadline::new(Instant::now() + Duration::from_secs(600))
     }
 
-    /// A derivation against no repo of the store: the per-tree memo holds
-    /// no rows for it, so every walk does the work.
-    fn bare() -> (RepoId, [u8; 32]) {
-        (RepoId(0), [0; 32])
+    /// A derivation against a repo of the store that holds no rows yet:
+    /// every walk does the work. The repo is real, so a part flush's rows
+    /// name a key that is there, whatever other tests do to the shared
+    /// part bound.
+    fn bare(store: &Backend) -> (RepoId, [u8; 32]) {
+        let repo = store.write(|c| c.create_repo("bare")).unwrap();
+        (repo, [0; 32])
     }
 
     fn file(store: &Backend, content: &[u8]) -> Entry {
@@ -563,7 +566,7 @@ mod tests {
     fn a_view_keeps_visible_files_whole_subtrees_and_drops_hidden_ones() {
         let (_dir, store) = store();
 
-        let (repo, digest) = bare();
+        let (repo, digest) = bare(&store);
         // /README, /src/public, /src/secret, /docs/note, /ops/only-hidden
         let src = Tree::new(
             [
@@ -656,7 +659,7 @@ mod tests {
     fn one_derivation_serves_shared_subtrees_once() {
         let (_dir, store) = store();
 
-        let (repo, digest) = bare();
+        let (repo, digest) = bare(&store);
         // Two directories with the same content: one visible, one not.
         let inner = Tree::new(
             [
@@ -741,7 +744,7 @@ mod tests {
     fn a_fully_visible_folder_keeps_the_real_tree_id() {
         let (_dir, store) = store();
 
-        let (repo, digest) = bare();
+        let (repo, digest) = bare(&store);
         let docs = Tree::new([(name(b"note"), file(&store, b"note\n"))].into())
             .expect("tree fits the format");
         let (docs_id, root_id) = store
@@ -1011,7 +1014,7 @@ mod tests {
             prop_assume!(!rules.is_empty(), "every rule was covered by another");
             let (_dir, store) = store();
 
-            let (repo, digest) = bare();
+            let (repo, digest) = bare(&store);
             let (dirs, root_id) = build_trees(&store, &paths);
 
             // The rule set, in the canonical form the caller passes.
@@ -1570,8 +1573,8 @@ mod tests {
         // stays there, and the parts still run at the pending bound.
         let before = store.commits();
         let first = {
-            let _part = part_guard();
-            test_set_view_part_bound(4 << 10);
+            let _lock = part_guard();
+            let _bound = test_set_view_part_bound(4 << 10);
             derive(
                 &store,
                 repo,
@@ -1593,8 +1596,8 @@ mod tests {
         // the pending never grows - no parts, whatever the map's size.
         let before = store.commits();
         let second = {
-            let _part = part_guard();
-            test_set_view_part_bound(4 << 10);
+            let _lock = part_guard();
+            let _bound = test_set_view_part_bound(4 << 10);
             derive(
                 &store,
                 repo,
