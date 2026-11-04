@@ -149,17 +149,22 @@ fn drop_stale_schemas(maker: &PgClient, automatic: bool) -> (usize, usize) {
             }
             // The snapshot's connection check is stale by drop time: a
             // test may have named the schema after the read, while this
-            // sweep worked through its list. The drop asks again, so a
-            // schema a live connection names now never drops.
-            let named = maker
+            // sweep worked through its list. The lock closes that
+            // window: every connection that names a schema holds a
+            // SHARED session lock on it (hashtext of the name), so a
+            // schema a live connection names never yields the
+            // EXCLUSIVE try below, whatever the snapshot saw. A failed
+            // check keeps the schema: a check that cannot answer never
+            // drops.
+            let free = maker
                 .query_opt(
-                    "SELECT 1 FROM pg_catalog.pg_stat_activity
-                     WHERE application_name = $1 LIMIT 1",
+                    "SELECT pg_try_advisory_lock(hashtext($1))",
                     &[P::text(&name)],
                 )
                 .ok()
-                .flatten();
-            if named.is_some() {
+                .flatten()
+                .map(|row| row.get::<_, bool>(0));
+            if free != Some(true) {
                 left += 1;
                 continue;
             }
@@ -172,6 +177,9 @@ fn drop_stale_schemas(maker: &PgClient, automatic: bool) -> (usize, usize) {
             } else {
                 dropped += 1;
             }
+            // The lock was this session's own try: release it, so the
+            // next row's try decides on its own name.
+            let _ = maker.query_opt("SELECT pg_advisory_unlock(hashtext($1))", &[P::text(&name)]);
         }
     }
     tracing::info!(
@@ -252,7 +260,10 @@ fn prepare_test_schema(url: &str, schema: &str, dir: &Path) -> Result<()> {
         let name = schema.to_owned();
         move |client| {
             client
-                .batch_execute(&format!("SET application_name TO '{name}'"))
+                .batch_execute(&format!(
+                    "SET application_name TO '{name}';
+                     SELECT pg_advisory_lock_shared(hashtext('{name}'))"
+                ))
                 .map_err(map_pg_error)
         }
     })?;
