@@ -270,11 +270,16 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
+        # The database's parallel plans and its cumulative statistics
+        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
+        # pile-up filled it and the database crashed (#849). 256 MB is
+        # the headroom the plans need.
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+          --shm-size 256mb
     steps:
       # Full history: the capacity footer names a commit of main, and
       # docs_capacity.rs checks it is an ancestor of origin/main - a
@@ -402,11 +407,16 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
+        # The database's parallel plans and its cumulative statistics
+        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
+        # pile-up filled it and the database crashed (#849). 256 MB is
+        # the headroom the plans need.
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+          --shm-size 256mb
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: free the runner's unused SDKs
@@ -543,11 +553,16 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
+        # The database's parallel plans and its cumulative statistics
+        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
+        # pile-up filled it and the database crashed (#849). 256 MB is
+        # the headroom the plans need.
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+          --shm-size 256mb
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -642,11 +657,16 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
+        # The database's parallel plans and its cumulative statistics
+        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
+        # pile-up filled it and the database crashed (#849). 256 MB is
+        # the headroom the plans need.
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+          --shm-size 256mb
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: free the runner's unused SDKs
@@ -805,6 +825,7 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+          --shm-size 256mb
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -867,11 +888,16 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
+        # The database's parallel plans and its cumulative statistics
+        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
+        # pile-up filled it and the database crashed (#849). 256 MB is
+        # the headroom the plans need.
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+          --shm-size 256mb
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -1007,11 +1033,16 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
+        # The database's parallel plans and its cumulative statistics
+        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
+        # pile-up filled it and the database crashed (#849). 256 MB is
+        # the headroom the plans need.
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+          --shm-size 256mb
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -1057,11 +1088,16 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
+        # The database's parallel plans and its cumulative statistics
+        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
+        # pile-up filled it and the database crashed (#849). 256 MB is
+        # the headroom the plans need.
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+          --shm-size 256mb
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -1127,11 +1163,16 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
+        # The database's parallel plans and its cumulative statistics
+        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
+        # pile-up filled it and the database crashed (#849). 256 MB is
+        # the headroom the plans need.
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+          --shm-size 256mb
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -1182,11 +1223,16 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
+        # The database's parallel plans and its cumulative statistics
+        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
+        # pile-up filled it and the database crashed (#849). 256 MB is
+        # the headroom the plans need.
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+          --shm-size 256mb
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -1233,11 +1279,16 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
+        # The database's parallel plans and its cumulative statistics
+        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
+        # pile-up filled it and the database crashed (#849). 256 MB is
+        # the headroom the plans need.
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+          --shm-size 256mb
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -1290,11 +1341,16 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
+        # The database's parallel plans and its cumulative statistics
+        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
+        # pile-up filled it and the database crashed (#849). 256 MB is
+        # the headroom the plans need.
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+          --shm-size 256mb
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -1364,11 +1420,16 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
+        # The database's parallel plans and its cumulative statistics
+        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
+        # pile-up filled it and the database crashed (#849). 256 MB is
+        # the headroom the plans need.
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+          --shm-size 256mb
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -1427,11 +1488,16 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
+        # The database's parallel plans and its cumulative statistics
+        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
+        # pile-up filled it and the database crashed (#849). 256 MB is
+        # the headroom the plans need.
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+          --shm-size 256mb
     env:
       SCION_POWER_REQUIRE: "1"
     steps:
@@ -1520,11 +1586,16 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
+        # The database's parallel plans and its cumulative statistics
+        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
+        # pile-up filled it and the database crashed (#849). 256 MB is
+        # the headroom the plans need.
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+          --shm-size 256mb
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -1601,11 +1672,16 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
+        # The database's parallel plans and its cumulative statistics
+        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
+        # pile-up filled it and the database crashed (#849). 256 MB is
+        # the headroom the plans need.
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+          --shm-size 256mb
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -1666,11 +1742,16 @@ jobs:
           POSTGRES_DB: scion
         ports:
           - 5432:5432
+        # The database's parallel plans and its cumulative statistics
+        # share /dev/shm, which Docker caps at 64 MB; the suite's schema
+        # pile-up filled it and the database crashed (#849). 256 MB is
+        # the headroom the plans need.
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+          --shm-size 256mb
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@2c76c034f9e32a5d6e2c104dc4df23a22476db04 # nightly

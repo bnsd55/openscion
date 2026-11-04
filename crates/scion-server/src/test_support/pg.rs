@@ -58,6 +58,17 @@ const CLEAN_LOCK: i64 = 0x5343_494F_4E53_5445;
 #[cfg(any(test, feature = "test-hooks"))]
 const SWEEP_CAP: usize = 50;
 
+/// How many stale schemas one test-schema preparation drops, oldest
+/// registration first: the suite's cases churn directories faster
+/// than the once-per-process sweep ever could, and a schema whose
+/// directory is gone serves nothing (#849). The cap bounds one
+/// preparation's work; the next preparation, the next case, continues,
+/// so the suite's leftover schemas drain at the rate the cases make
+/// them and the database's population follows the suite's concurrency
+/// instead of its case count.
+#[cfg(any(test, feature = "test-hooks"))]
+const DRAIN_CAP: usize = 8;
+
 /// Whether this process has swept: the sweep runs at the start of the
 /// run, on the first test open, and not again.
 #[cfg(any(test, feature = "test-hooks"))]
@@ -75,10 +86,10 @@ static SWEPT: AtomicBool = AtomicBool::new(false);
 /// directory in a later run keeps its data. Schemas registered before
 /// the comment existed carry no directory: for those, the old rule
 /// holds - older than ten minutes and no live connection. At most
-/// [`SWEEP_CAP`] drops per sweep, oldest registration first, and one
-/// line says what dropped and what stayed.
+/// `cap` drops per call, oldest registration first, and one line says
+/// what dropped and what stayed.
 #[cfg(any(test, feature = "test-hooks"))]
-fn drop_stale_schemas(maker: &PgClient, automatic: bool) -> (usize, usize) {
+fn drop_stale_schemas(maker: &PgClient, automatic: bool, cap: usize) -> (usize, usize) {
     if automatic && SWEPT.swap(true, Ordering::SeqCst) {
         return (0, 0);
     }
@@ -110,14 +121,20 @@ fn drop_stale_schemas(maker: &PgClient, automatic: bool) -> (usize, usize) {
     // database's default, and no test schema holds the table. A
     // connection whose `application_name` is the schema's name keeps
     // its schema; so does a schema whose recorded directory exists.
+    // The read stops at twice the cap: a caller that drains at every
+    // open reads the head of the queue, not the whole registry.
+    let read_limit = (cap * 2) as i64;
     let eligible = maker.query(
-        "SELECT r.schema, obj_description(n.oid, 'pg_namespace'), r.started
-         FROM public.scion_test_schemas AS r
-         JOIN pg_catalog.pg_namespace AS n ON n.nspname = r.schema
-         WHERE r.schema NOT IN (
-             SELECT application_name FROM pg_catalog.pg_stat_activity
-             WHERE application_name LIKE 'scion_test_%')
-         ORDER BY r.started ASC",
+        &format!(
+            "SELECT r.schema, obj_description(n.oid, 'pg_namespace'), r.started
+             FROM public.scion_test_schemas AS r
+             JOIN pg_catalog.pg_namespace AS n ON n.nspname = r.schema
+             WHERE r.schema NOT IN (
+                 SELECT application_name FROM pg_catalog.pg_stat_activity
+                 WHERE application_name LIKE 'scion_test_%')
+             ORDER BY r.started ASC
+             LIMIT {read_limit}"
+        ),
         &[],
     );
     let now = extract_epoch_now(maker);
@@ -143,7 +160,7 @@ fn drop_stale_schemas(maker: &PgClient, automatic: bool) -> (usize, usize) {
                 Some(recorded) => !Path::new(recorded).exists(),
                 None => now.is_some_and(|now| started < now.saturating_sub(600)),
             };
-            if !stale || dropped >= SWEEP_CAP {
+            if !stale || dropped >= cap {
                 left += 1;
                 continue;
             }
@@ -267,7 +284,11 @@ fn prepare_test_schema(url: &str, schema: &str, dir: &Path) -> Result<()> {
                 .map_err(map_pg_error)
         }
     })?;
-    drop_stale_schemas(&preparer, true);
+    // The run's own sweep runs once; every preparation then drains a
+    // few stale schemas, so the suite's leftovers never outgrow its
+    // concurrency (#849).
+    drop_stale_schemas(&preparer, true, SWEEP_CAP);
+    drop_stale_schemas(&preparer, false, DRAIN_CAP);
     preparer.as_raw({
         let name = schema.to_owned();
         let dir = dir.to_path_buf();
@@ -298,7 +319,7 @@ pub(crate) fn sweep_stale_test_schemas(url: &str) -> Result<(usize, usize)> {
             .batch_execute("SET application_name TO ''")
             .map_err(map_pg_error)
     })?;
-    Ok(drop_stale_schemas(&preparer, false))
+    Ok(drop_stale_schemas(&preparer, false, SWEEP_CAP))
 }
 
 impl Pg {

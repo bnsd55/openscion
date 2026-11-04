@@ -669,6 +669,14 @@ through the cache. It is the quickest end-to-end look at a two-tier
 deployment, and a template for the real files (the secrets are made at
 compose time, the server's data lives in a volume).
 
+A Postgres container needs shared memory beyond Docker's default: the
+database keeps its cumulative statistics (one entry per table) in
+`/dev/shm`, and a parallel plan asks it for tens of megabytes more in
+one segment. A full device ends with the database in crash recovery,
+and every connection it served with it. Give the container 256 MB
+(compose's `shm_size`, `docker run`'s `--shm-size`); more tables want
+more. The compose file in this repository already sets it.
+
 ### Environment variables
 
 Several flags can be set with an environment variable instead: the
