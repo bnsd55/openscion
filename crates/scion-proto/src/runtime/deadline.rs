@@ -43,11 +43,23 @@ impl Until {
     /// For a call whose caller gives up `timeout` from now.
     #[must_use]
     pub fn after(timeout: Duration) -> Self {
+        Self::after_at(timeout, Instant::now())
+    }
+
+    /// For a call whose caller gives up `timeout` from `now`: the same
+    /// margin as [`Until::after`], but the instant is measured from the
+    /// `now` the caller holds, not from a second read of the clock. A
+    /// hop that builds its header and its deadline from one `now` keeps
+    /// its whole margin, whatever a pause between the two work items
+    /// takes - a pause after `now` moves the header and the deadline
+    /// together.
+    #[must_use]
+    pub fn after_at(timeout: Duration, now: Instant) -> Self {
         let margin = (timeout / 10)
             .max(MIN_MARGIN)
             .min(MAX_MARGIN)
             .min(timeout / 2);
-        Self(Instant::now().checked_add(timeout.saturating_sub(margin)))
+        Self(now.checked_add(timeout.saturating_sub(margin)))
     }
 
     /// The instant, if there is a deadline.
@@ -217,18 +229,31 @@ mod tests {
     /// A 200 ms deadline through three processes: each keeps its margin,
     /// capped at half of what it got, so the deepest answers with 50 ms
     /// of the caller's 200 ms still ahead of it.
+    ///
+    /// Each hop reads the clock once: the header's value and the hop's
+    /// deadline both come from that one `now` (`Until::after_at`), so a
+    /// pause anywhere inside the hop moves the header and the deadline
+    /// together and changes no margin. Only a pause between the hops
+    /// moves the instants apart, and the margins are read as deltas
+    /// between them, which such a pause cannot change either.
     #[test]
     fn a_200ms_deadline_reaches_the_deepest_of_three_with_time_to_spare() {
         let pass = |left: Option<Instant>| {
+            let now = Instant::now();
             let mut request = Request::new(());
-            if let Some(at) = left {
-                let left = at.saturating_duration_since(Instant::now());
+            let left = left.map(|at| {
+                let left = at.saturating_duration_since(now);
                 let value = format!("{}m", left.as_millis());
                 request
                     .metadata_mut()
                     .insert("grpc-timeout", value.parse().unwrap());
-            }
-            Until::of(&request).at()
+                // The header parses back to what it was made from, and
+                // the deadline is measured from the same `now`: a second
+                // read of the clock is the one a pause can split from the
+                // header's, which took the pause out of the margin.
+                grpc_timeout(request.metadata()).expect("the header parses back")
+            });
+            left.map_or(Until::NONE, |left| Until::after_at(left, now)).at()
         };
         let first = Until::after(Duration::from_millis(200)).at();
         let second = pass(first);
