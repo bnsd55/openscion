@@ -152,10 +152,11 @@ fn drop_stale_schemas(maker: &PgClient, automatic: bool) -> (usize, usize) {
             // sweep worked through its list. The drop asks again, so a
             // schema a live connection names now never drops.
             let named = maker
+            let named = maker
                 .query_opt(
                     "SELECT 1 FROM pg_catalog.pg_stat_activity
                      WHERE application_name = $1 LIMIT 1",
-                    &[&name],
+                    &[P::text(&name)],
                 )
                 .ok()
                 .flatten();
