@@ -248,6 +248,11 @@ struct PgInner {
     blobs: Blobs,
     /// The walks in flight of this backend's derivations.
     derive: crate::derived::DeriveFlights,
+    /// The RAM the view derivations of this backend reserve their memos
+    /// from: [`crate::views::VIEW_DERIVES_MAX`] reservations of
+    /// [`crate::views::VIEW_MEMO_BYTES`], so at most that many derivations
+    /// hold a memo at once and FLOOR counts the share.
+    view_memo: crate::memory::Bytes,
     /// The import's test hooks and busy-retry count.
     #[cfg(any(test, feature = "test-hooks"))]
     hooks: crate::store::test_hooks::ImportHooks,
@@ -1057,6 +1062,10 @@ impl Pg {
             derive: flights.unwrap_or_else(|| {
                 crate::derived::DeriveFlights::new(crate::store::DERIVE_WALKS_CAP)
             }),
+            view_memo: crate::memory::Bytes::named(
+                crate::views::VIEW_MEMO_BYTES * crate::views::VIEW_DERIVES_MAX,
+                "view memo",
+            ),
             #[cfg(any(test, feature = "test-hooks"))]
             hooks: crate::store::test_hooks::ImportHooks::default(),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -1525,6 +1534,14 @@ impl Pg {
     /// The walks in flight of this backend's derivations.
     pub(crate) fn derive_flights(&self) -> &crate::derived::DeriveFlights {
         &self.inner.derive
+    }
+
+    /// The pool the view derivations reserve their memos from: the cap is
+    /// [`crate::views::VIEW_DERIVES_MAX`] reservations of
+    /// [`crate::views::VIEW_MEMO_BYTES`], and a derivation beyond it waits
+    /// for a place under its call's deadline.
+    pub(crate) fn view_memo_budget(&self) -> &crate::memory::Bytes {
+        &self.inner.view_memo
     }
 
     /// How many writers wait for the write client right now.
