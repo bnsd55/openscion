@@ -1456,7 +1456,7 @@ checking out through a cache and a daemon beside it.
 
 | | |
 |---|---|
-| Commit | `7609d66851c7fc844c8b3eb3a8bc40ba0bd1a17b`, the main commit the run measured (the run's own HEAD), at [run 41811605641](https://github.com/bnsd55/openscion/actions/runs/41811605641) |
+| Commit | 7609d66851c7fc844c8b3eb3a8bc40ba0bd1a17b the main commit the run measured (the run's own HEAD), at [run 41811605641](https://github.com/bnsd55/openscion/actions/runs/41811605641) |
 | Runner | GitHub-hosted `ubuntu-24.04`: 4 vCPU, 16 GiB RAM, ext4 on a ~144 GiB SSD, runner image `ubuntu24 20261026.354.1`, kernel `7.0.0-1017-azure` (the run's `machine.txt` artifact) |
 | Filesystem | the filesystem the run measured, from the run's `machine.txt` artifact (`df -T` on the work directory); the `ubuntu-24.04` class's root disk is ext4 ([support.md](support.md)) |
 | Repetitions | 2 per cell; the table reports the cell's whole run, and the run's raw samples are the workflow run's `capacity.csv` artifact |
