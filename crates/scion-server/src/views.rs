@@ -1497,7 +1497,9 @@ mod tests {
     #[test]
     fn a_derivation_past_its_part_bound_writes_parts_and_answers_the_same_view() {
         let (_dir, store) = store();
-        let (repo, digest) = bare();
+        // A real repo: the parts' rows name it, and its key must be there.
+        let repo = store.write(|c| c.create_repo("parts")).unwrap();
+        let digest = [7; 32];
         // Two hundred directories of one file each, all visible: the walk
         // derives two hundred view trees, far past a four-kilobyte part.
         let mut dir_ids = Vec::new();
@@ -1635,7 +1637,9 @@ mod tests {
     #[test]
     fn a_part_writes_its_trees_before_its_rows_and_leaves_no_root_row() {
         let (_dir, store) = store();
-        let (repo, digest) = bare();
+        // A real repo: the part's row names it, and its key must be there.
+        let repo = store.write(|c| c.create_repo("parts")).unwrap();
+        let digest = [9; 32];
         let real =
             Tree::new([(name(b"f"), file(&store, b"x\n"))].into()).expect("tree fits the format");
         let view =
