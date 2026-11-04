@@ -297,7 +297,7 @@ pub mod test_support {
     /// The Postgres connect, so the test that pins its whole-connect
     /// bound drives it with its own deadline, without a database.
     pub mod pg {
-        pub use crate::pg::connect_on_deadline_for_tests;
+        pub use crate::pg::{connect_on_deadline_for_tests, test_reset_parked_connects};
     }
     /// The counters the import tests read between retries.
     pub mod import {

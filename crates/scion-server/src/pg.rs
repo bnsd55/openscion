@@ -2400,10 +2400,77 @@ fn merged_options(from_url: Option<&str>, own: &str) -> String {
 /// waits for an answer has no unacknowledged data, and the peer's
 /// kernel answers the keepalive probes. A connect past the deadline
 /// leaves its thread parked on the socket - tokio-postgres offers no
-/// cancel - so a database that hangs its connects leaks one parked
-/// thread a retry; the upgrade is a connector that takes a deadline
-/// (SHORTCUT, revisit on a tokio-postgres bump).
+/// cancel - so the connect registers itself as parked, and the server
+/// starts no new connect while
+/// [`CONNECT_PARKED_MAX`] of them are parked: a connect that would be
+/// the next fails at once, naming the host and how long the oldest has
+/// been parked. The cap ends the FD storm a reconnecting server would
+/// otherwise grow against a database that stalls its connects - one
+/// thread and socket a retry, forever - because once the cap fills,
+/// every new connect fails at once, and only the connects already in
+/// flight when it filled can park: a batch bounded by the worker
+/// count, not a thread an hour. The upgrade is a connector whose
+/// stream fails at the deadline, so no thread parks at all (SHORTCUT:
+/// a cap of [`CONNECT_PARKED_MAX`] registered parks, one socket and
+/// thread each, until a tokio-postgres that takes a deadline for the
+/// whole connect).
 const CONNECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How many connects may sit parked on silent sockets at once. Two:
+/// one for the writers' path, one for a reader, so an outage still
+/// names itself in the log twice before the calls fail fast.
+const CONNECT_PARKED_MAX: usize = 2;
+
+/// The connects parked on silent sockets: their tokens and the moments
+/// they started, so the next connect past the cap can name how long
+/// the oldest has waited.
+static PARKED_CONNECTS: std::sync::LazyLock<Mutex<Vec<(u64, std::time::Instant)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+
+static PARKED_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Refuses a new connect while the cap of parked connects is held: the
+/// error names the host and how long the oldest parked connect has
+/// waited.
+fn park_refuse(host: &str) -> Result<()> {
+    let parked = PARKED_CONNECTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if parked.len() >= CONNECT_PARKED_MAX {
+        let oldest = parked
+            .iter()
+            .map(|(_, since)| since.elapsed().as_secs())
+            .max()
+            .unwrap_or(0);
+        return Err(Error::Unavailable(format!(
+            "the database at {host} already has {} connects parked on a \
+             socket that never answers, the oldest for {oldest} s: not starting another",
+            parked.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Registers a connect whose caller gave up waiting: its thread is
+/// still parked on the socket. Past the cap the register keeps no row
+/// - the thread parks anyway, one of the batch the cap bounded.
+fn park_register(token: u64) {
+    let mut parked = PARKED_CONNECTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if parked.len() < CONNECT_PARKED_MAX {
+        parked.push((token, std::time::Instant::now()));
+    }
+}
+
+/// Gives a parked connect's row back: the connect's thread ended, so
+/// its socket is no longer held.
+fn park_release(token: u64) {
+    PARKED_CONNECTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retain(|(held, _)| *held != token);
+}
 
 /// [`connect_with`]'s work: parse, then connect.
 fn connect_on(url: &str, ca: Option<&Path>, options: &str) -> Result<Client> {
@@ -2421,6 +2488,17 @@ pub fn connect_on_deadline_for_tests(
     deadline: std::time::Duration,
 ) -> Result<Client> {
     connect_on_deadline(url, ca, options, deadline)
+}
+
+/// The tests' reset of the parked-connect slots: every slot goes back,
+/// so a test starts its count from empty.
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub fn test_reset_parked_connects() {
+    PARKED_CONNECTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
 }
 
 fn connect_on_deadline(
@@ -2483,6 +2561,8 @@ fn connect_on_deadline(
     // answers its startup fails here instead of holding the open, the
     // readers' connect and every reconnect forever.
     let (connected, wait) = std::sync::mpsc::channel();
+    park_refuse(&host)?;
+    let token = PARKED_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let attempt = match (local, ca) {
         // The connector upgrades every connection, and checks the
         // certificate the server presents against `ca`.
@@ -2491,13 +2571,17 @@ fn connect_on_deadline(
             std::thread::Builder::new()
                 .name("postgres-connect".to_owned())
                 .spawn(move || {
-                    let _ = connected.send(config.connect(tls));
+                    let answer = config.connect(tls);
+                    park_release(token);
+                    let _ = connected.send(answer);
                 })
         }
         (true, None) => std::thread::Builder::new()
             .name("postgres-connect".to_owned())
             .spawn(move || {
-                let _ = connected.send(config.connect(NoTls));
+                let answer = config.connect(NoTls);
+                park_release(token);
+                let _ = connected.send(answer);
             }),
         (false, None) => {
             return Err(Error::InvalidArgument(
@@ -2511,6 +2595,9 @@ fn connect_on_deadline(
     if let Ok(answer) = wait.recv_timeout(deadline) {
         answer.map_err(map_pg_error)
     } else {
+        // The connect's thread is now parked on the socket: registered,
+        // so the next connects past the cap refuse at once.
+        park_register(token);
         let why = format!(
             "the database at {host} did not finish its connect within {} s: \
              the socket may have connected, but its startup, its TLS \
