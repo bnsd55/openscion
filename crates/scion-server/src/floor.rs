@@ -21,6 +21,20 @@
 
 use std::path::{Path, PathBuf};
 
+/// The test's injected host probe: set before a test starts the
+/// server, cleared after. When it is set, it IS the host probe: it
+/// blocks and then answers with the limit, so a test proves the
+/// server accepts while the probe still runs. It replaces the whole
+/// reading, not one source of it: the cgroup and /proc files exist on
+/// Linux, and a probe at one source would never be called there
+/// (#795).
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-hooks"))]
+pub type HostProbeFn = fn() -> Option<u64>;
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-hooks"))]
+pub static HOST_PROBE: std::sync::Mutex<Option<HostProbeFn>> = std::sync::Mutex::new(None);
+
 /// What every `Blame` call together may hold
 /// (`BLAME_MEMORY_BUDGET` in service.rs).
 pub(crate) const BLAME: u64 = crate::service::BLAME_MEMORY_BUDGET as u64;
@@ -230,16 +244,7 @@ fn read_cgroup_limit(file: &Path) -> Option<u64> {
 /// macOS `hw.memsize`, the source a non-Linux host falls through to.
 #[cfg(target_os = "macos")]
 fn macos_memsize() -> Option<u64> {
-    let out = std::process::Command::new("sysctl")
-        .args(["-n", "hw.memsize"])
-        .output()
-        .ok()?;
-    std::str::from_utf8(&out.stdout)
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
-        .filter(|bytes| *bytes > 0)
+    scion_proto::runtime::host::memsize()
 }
 
 /// A non-Linux host without the sysctl answers nothing, so the start-up
@@ -262,7 +267,22 @@ pub(crate) fn check_startup_memory(
     paths: &Paths,
 ) {
     metrics.set_memory_floor_bytes(FLOOR);
-    if let Some(limit) = host_limit(paths, macos_memsize) {
+    #[cfg(any(test, feature = "test-hooks"))]
+    let injected = match HOST_PROBE.lock() {
+        Ok(guard) => *guard,
+        Err(poisoned) => *poisoned.into_inner(),
+    };
+    #[cfg(any(test, feature = "test-hooks"))]
+    let limit = match injected {
+        Some(probe) => probe().map(|bytes| HostLimit {
+            bytes,
+            source: "the test's probe",
+        }),
+        None => host_limit(paths, macos_memsize),
+    };
+    #[cfg(not(any(test, feature = "test-hooks")))]
+    let limit = host_limit(paths, macos_memsize);
+    if let Some(limit) = limit {
         metrics.set_host_memory_bytes(limit.bytes);
         if limit.bytes < FLOOR {
             tracing::error!(

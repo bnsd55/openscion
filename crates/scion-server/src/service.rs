@@ -296,7 +296,16 @@ pub async fn serve(
     // sees a full drive before the server hits it.
     // What the host has against the process's memory floor: both numbers
     // as gauges, and one error line when the host is under the floor.
-    crate::floor::check_startup_memory(&metrics, &crate::floor::production_paths());
+    // Off this task: the probe is sync work, and a probe that waits
+    // would hold the accept loop with it - the listener is already
+    // bound, so a client's connect succeeds from the backlog while
+    // nothing serves it (#795).
+    {
+        let metrics = Arc::clone(&metrics);
+        tokio::task::spawn_blocking(move || {
+            crate::floor::check_startup_memory(&metrics, &crate::floor::production_paths());
+        });
+    }
     spawn_free_space_poll(data, Arc::clone(&metrics), stop_rx.clone());
     // Refused authentication is counted per peer and flushed as one
     // line per peer, so a stranger who spams bad tokens cannot fill the
