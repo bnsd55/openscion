@@ -179,6 +179,10 @@ pub struct Metrics {
     /// counted by [`crate::runtime::listen::Stalled`] and given back when
     /// the stalled reply's stream ends.
     stalled_reply_bytes: AtomicU64,
+    /// Connections the server closed because no place freed within its
+    /// wait at the connection cap (`CONNECTION_WAIT` in
+    /// [`crate::runtime::listen`]), counted by the accept paths.
+    connections_refused: AtomicU64,
     /// Calls the counting layer has seen whose reply body it has not
     /// given back yet: the calls a drain still waits for, as the
     /// [`scion_calls_in_flight`] gauge. A call that never reaches a
@@ -433,6 +437,13 @@ impl Metrics {
         self.stalled_reply_bytes.load(Ordering::Relaxed)
     }
 
+    /// Counts a connection the cap refused: it waited for a place past
+    /// the wait and the server closed it. The export renders it as
+    /// `scion_connections_refused_total`.
+    pub(crate) fn connection_refused(&self) {
+        self.connections_refused.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Renders the registry as the Prometheus text format.
     #[must_use]
     pub fn render(&self) -> String {
@@ -475,8 +486,24 @@ impl Metrics {
         }
         self.render_derive_walks(&mut text);
         self.render_pg(&mut text);
+        self.render_connections(&mut text);
         self.render_stalled(&mut text);
         text
+    }
+
+    /// The connections a full cap closed: the series an operator reads to
+    /// tell a storm from a cap set too low. A client that left while it
+    /// waited counts here too: the server learns of the leaving only when
+    /// the wait ends.
+    fn render_connections(&self, text: &mut String) {
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            text,
+            "# HELP scion_connections_refused_total Connections the server closed because no place freed within its wait at the connection cap; a client that left while it waited counts here too.\n\
+             # TYPE scion_connections_refused_total counter\n\
+             scion_connections_refused_total {}",
+            self.connections_refused.load(Ordering::Relaxed)
+        );
     }
 
     /// The per-RPC latency histograms, one series per RPC that counted.
