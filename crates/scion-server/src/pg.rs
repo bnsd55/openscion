@@ -1847,15 +1847,40 @@ pub fn test_history_pending_peak_bytes() -> usize {
 }
 
 impl<'a> PgTx<'a> {
-    /// Writes the history nodes the transaction inserted while batching,
-    /// after the derived rows and before the `git_import` rows: one
-    /// statement per 1,000 rows. The nodes are content-addressed, so
-    /// their order does not matter; the ids are sorted for a
-    /// deterministic statement.
+    /// The pending-lands quota counts new pending rows. A retry of an
+    /// existing key resumes its land and adds no row, so a client can
+    /// always finish what it started. The count and the insert need no
+    /// lock of their own: every write transaction of the schema holds
+    /// the schema's one advisory key (see `commit`) until it commits, so
+    /// two lands that record at the same time, even from two processes,
+    /// run one after the other, and the second counts the first one's
+    /// row. The one writer serializes them.
     ///
     /// # Errors
     ///
-    /// Database errors.
+    /// [`Error::ResourceExhausted`] when the principal is over its cap.
+    fn check_pending_lands_quota(&mut self, caller: &Caller, limit: Option<usize>) -> Result<()> {
+        let Some(limit) = limit else {
+            return Ok(());
+        };
+        let pending: i64 = self
+            .c
+            .query_opt(
+                "SELECT count(*) FROM lands WHERE caller = $1 AND state = 'pending'",
+                &[P::text(&caller.0)],
+            )?
+            .and_then(|row| row.get(0))
+            .unwrap_or(0);
+        if pending >= i64::try_from(limit).unwrap_or(i64::MAX) {
+            return Err(Error::ResourceExhausted(format!(
+                "principal {:?} has its {limit} lands pending \
+                 (--max-principal-pending-lands {limit}); wait for one to finish",
+                caller.0
+            )));
+        }
+        Ok(())
+    }
+
     /// Writes the per-row flushes a deferring write path collected: the
     /// history nodes the build wrote, one statement per 1,000 rows, and
     /// the derived old-row deletes, one statement for the whole
@@ -1903,6 +1928,15 @@ impl<'a> PgTx<'a> {
         Ok(())
     }
 
+    /// Writes the history nodes the transaction inserted while batching,
+    /// after the derived rows and before the `git_import` rows: one
+    /// statement per 1,000 rows. The nodes are content-addressed, so
+    /// their order does not matter; the ids are sorted for a
+    /// deterministic statement.
+    ///
+    /// # Errors
+    ///
+    /// Database errors.
     fn flush_history_rows(&mut self) -> Result<()> {
         const CHUNK: usize = 1_000;
         let Some(history) = self.history_pending.as_deref_mut() else {
@@ -2020,11 +2054,48 @@ impl<'a> PgTx<'a> {
 
     /// Reads back the land another writer recorded for this request key
     /// first: its land wins, and its input must match this one's.
-    fn read_back_land(&mut self, repo: RepoId, caller: &Caller, req: &LandRequest) -> Result<i64> {
-        let (land_id, input, target) = self
+    /// Reads the land a request key recorded back, for the ON CONFLICT
+    /// race: a twin recorded the same key in the same instant, so this
+    /// insert wrote nothing and the twin's row is the answer.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Corrupt`] when the row vanished or its bytes do not
+    /// decode.
+    fn read_back_land(
+        &mut self,
+        repo: RepoId,
+        caller: &Caller,
+        req: &LandRequest,
+    ) -> Result<LandOutcome> {
+        self.land_by_key(repo, caller, req)?.ok_or_else(|| {
+            Error::Corrupt(format!(
+                "land {:?} of {:?} was recorded by another process and \
+                 then vanished",
+                req.request_key, caller.0
+            ))
+        })
+    }
+
+    /// The land a request key recorded, as its row answers it: the
+    /// record's first read and the read-back share this one shape.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when the key named a different land;
+    /// [`Error::Corrupt`] when the row's bytes do not decode.
+    fn land_by_key(
+        &mut self,
+        repo: RepoId,
+        caller: &Caller,
+        req: &LandRequest,
+    ) -> Result<Option<LandOutcome>> {
+        let row = self
             .c
             .query_opt(
-                "SELECT land_id, input_cs, target_ref FROM lands
+                "SELECT land_id, input_cs, target_ref, state, detail, result_cs,
+                        conflict_paths, reject_reason
+                 FROM lands
                  WHERE repo_id = $1 AND caller = $2 AND request_key = $3",
                 &[
                     P::i64(repo.0),
@@ -2037,22 +2108,112 @@ impl<'a> PgTx<'a> {
                     row.get::<_, i64>(0),
                     row.get::<_, Vec<u8>>(1),
                     row.get::<_, String>(2),
+                    row.get::<_, String>(3),
+                    row.get::<_, String>(4),
+                    row.get::<_, Option<Vec<u8>>>(5),
+                    row.get::<_, Vec<u8>>(6),
+                    row.get::<_, String>(7),
                 )
-            })
-            .ok_or_else(|| {
-                Error::Corrupt(format!(
-                    "land {:?} of {:?} was recorded by another process and \
-                     then vanished",
-                    req.request_key, caller.0
-                ))
-            })?;
+            });
+        let Some((land_id, input, target, state, detail, result_cs, conflict_paths, reason)) = row
+        else {
+            return Ok(None);
+        };
         if input != req.changeset.as_bytes() || target != req.target_ref {
             return Err(Error::InvalidArgument(format!(
                 "request key {:?} was already used for a different land",
                 req.request_key
             )));
         }
-        Ok(land_id)
+        let result = result_cs
+            .map(|bytes| ChangesetId::try_from(bytes.as_slice()))
+            .transpose()
+            .map_err(|e| Error::Corrupt(format!("land {land_id} result: {e}")))?;
+        Ok(Some(LandOutcome {
+            moved: false,
+            land_id,
+            state: LandState::parse(&state)?,
+            result,
+            previous: None,
+            detail,
+            conflict_paths: decode_paths(&conflict_paths)
+                .ok_or_else(|| Error::Corrupt(format!("land {land_id} conflict paths")))?,
+            reject_reason: LandRejectReason::parse(&reason)?,
+        }))
+    }
+
+    /// Records a land this record starts: the state the ref's existence
+    /// gives it, the quota, the insert, the expiry. A row this insert
+    /// wrote answers from its own columns; a twin that recorded the same
+    /// key in the same instant answers from its read-back.
+    ///
+    /// # Errors
+    ///
+    /// Database errors.
+    fn record_new_land(
+        &mut self,
+        repo: RepoId,
+        caller: &Caller,
+        req: &LandRequest,
+        pending_limit: Option<usize>,
+    ) -> Result<LandOutcome> {
+        // A land to a ref that does not exist is rejected at once.
+        let detail = format!("ref {:?} does not exist", req.target_ref);
+        let (state, detail, reason) = if self.get_ref(repo, &req.target_ref)?.is_some() {
+            (
+                LandState::Pending,
+                String::new(),
+                LandRejectReason::Unspecified,
+            )
+        } else {
+            (LandState::Rejected, detail, LandRejectReason::MissingRef)
+        };
+        self.check_pending_lands_quota(caller, pending_limit)?;
+        let inserted = self
+            .c
+            .query_opt(
+                "INSERT INTO lands
+                     (repo_id, caller, request_key, target_ref, input_cs, state, detail,
+                      reject_reason, finished_at, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+                         CASE WHEN $6 = 'pending' THEN NULL ELSE now_epoch() END,
+                         now_epoch())
+                     ON CONFLICT DO NOTHING
+                     RETURNING land_id",
+                &[
+                    P::i64(repo.0),
+                    P::text(&caller.0),
+                    P::text(&req.request_key),
+                    P::text(&req.target_ref),
+                    P::bytes(&id_bytes(req.changeset.as_bytes())),
+                    P::text(state.as_str()),
+                    P::text(&detail),
+                    P::text(reason.as_str()),
+                ],
+            )?
+            .map(|row| row.get::<_, i64>(0));
+        let recorded = match inserted {
+            Some(land_id) => {
+                // A row this record wrote: nothing is settled yet.
+                LandOutcome {
+                    moved: false,
+                    land_id,
+                    state,
+                    result: None,
+                    previous: None,
+                    detail,
+                    conflict_paths: Vec::new(),
+                    reject_reason: reason,
+                }
+            }
+            None => {
+                // A twin recorded the same key in the same instant: read
+                // its row back.
+                self.read_back_land(repo, caller, req)?
+            }
+        };
+        self.expire_lands()?;
+        Ok(recorded)
     }
 
     /// Commits the transaction. The client runs again afterwards.
@@ -4709,100 +4870,18 @@ impl MetaTx for PgTx<'_> {
     ) -> Result<(RepoId, LandOutcome)> {
         let repo = self.repo_id(&req.repo)?;
         self.generation(repo, req.changeset)?;
-        let existing = self
-            .c
-            .query_opt(
-                "SELECT land_id, input_cs, target_ref FROM lands
-                 WHERE repo_id = $1 AND caller = $2 AND request_key = $3",
-                &[
-                    P::i64(repo.0),
-                    P::text(&caller.0),
-                    P::text(&req.request_key),
-                ],
-            )?
-            .map(|row| {
-                (
-                    row.get::<_, i64>(0),
-                    row.get::<_, Vec<u8>>(1),
-                    row.get::<_, String>(2),
-                )
-            });
-        let land_id = if let Some((land_id, input, target)) = existing {
-            if input != req.changeset.as_bytes() || target != req.target_ref {
-                return Err(Error::InvalidArgument(format!(
-                    "request key {:?} was already used for a different land",
-                    req.request_key
-                )));
-            }
-            land_id
+        // The outcome's columns ride the lookup the record already runs:
+        // the caller learns a settled twin without a second read of the
+        // row. A row that is still pending must be finished: the land's
+        // own next step reads the outcome in its first transaction,
+        // where a twin that settles between the record and the finish
+        // answers.
+        let recorded = if let Some(recorded) = self.land_by_key(repo, caller, req)? {
+            recorded
         } else {
-            let (state, detail, reason) = if self.get_ref(repo, &req.target_ref)?.is_some() {
-                (
-                    LandState::Pending,
-                    String::new(),
-                    LandRejectReason::Unspecified,
-                )
-            } else {
-                let detail = format!("ref {:?} does not exist", req.target_ref);
-                (LandState::Rejected, detail, LandRejectReason::MissingRef)
-            };
-            if let Some(limit) = pending_limit {
-                // The pending-lands quota counts new pending rows. A retry
-                // of an existing key resumes its land and adds no row, so a
-                // client can always finish what it started. The count and
-                // the insert need no lock of their own: every write
-                // transaction of the schema holds the schema's one advisory
-                // key (see `commit`) until it commits, so two lands that
-                // record at the same time, even from two processes, run
-                // one after the other, and the second counts the first
-                // one's row. The one writer serializes them.
-                let pending: i64 = self
-                    .c
-                    .query_opt(
-                        "SELECT count(*) FROM lands WHERE caller = $1 AND state = 'pending'",
-                        &[P::text(&caller.0)],
-                    )?
-                    .and_then(|row| row.get(0))
-                    .unwrap_or(0);
-                if pending >= i64::try_from(limit).unwrap_or(i64::MAX) {
-                    return Err(Error::ResourceExhausted(format!(
-                        "principal {:?} has its {limit} lands pending \
-                         (--max-principal-pending-lands {limit}); wait for one to finish",
-                        caller.0
-                    )));
-                }
-            }
-            let inserted = self
-                .c
-                .query_opt(
-                    "INSERT INTO lands
-                     (repo_id, caller, request_key, target_ref, input_cs, state, detail,
-                      reject_reason, finished_at, created_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-                         CASE WHEN $6 = 'pending' THEN NULL ELSE now_epoch() END,
-                         now_epoch())
-                     ON CONFLICT DO NOTHING
-                     RETURNING land_id",
-                    &[
-                        P::i64(repo.0),
-                        P::text(&caller.0),
-                        P::text(&req.request_key),
-                        P::text(&req.target_ref),
-                        P::bytes(&id_bytes(req.changeset.as_bytes())),
-                        P::text(state.as_str()),
-                        P::text(&detail),
-                        P::text(reason.as_str()),
-                    ],
-                )?
-                .map(|row| row.get::<_, i64>(0));
-            let land_id = match inserted {
-                Some(land_id) => land_id,
-                None => self.read_back_land(repo, caller, req)?,
-            };
-            self.expire_lands()?;
-            land_id
+            self.record_new_land(repo, caller, req, pending_limit)?
         };
-        Ok((repo, self.land_outcome(repo, caller, land_id)?))
+        Ok((repo, recorded))
     }
 
     /// The pending lands that started more than `stale_secs` ago.
