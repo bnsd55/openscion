@@ -2479,8 +2479,8 @@ fn connect_on(url: &str, ca: Option<&Path>, options: &str) -> Result<Client> {
 
 /// [`connect_on`], with the whole connect's deadline a parameter, so
 /// the test that pins it does not wait the server's thirty seconds.
-#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub fn connect_on_deadline_for_tests(
     url: &str,
     ca: Option<&Path>,
@@ -2492,8 +2492,8 @@ pub fn connect_on_deadline_for_tests(
 
 /// The tests' reset of the parked-connect slots: every slot goes back,
 /// so a test starts its count from empty.
-#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub fn test_reset_parked_connects() {
     PARKED_CONNECTS
         .lock()
