@@ -298,15 +298,9 @@ fn write_memo_part(
     memo.bytes = memo.derived.len() * DERIVED_BYTES;
     Ok(())
 }
-}
 
 /// Projects the tree `id` under `ctx`, the visible suffixes below it.
 /// Returns `None` when nothing below is visible, so the caller hides the
-/// entry that holds it. Stores nothing: the derived trees wait in `memo`
-/// for the caller's one write.
-///
-/// # Errors
-///
 /// entry that holds it. Stores nothing: the derived trees and their rows
 /// wait in `memo` for the caller's one write. A row in the store's
 /// per-tree memo serves the whole subtree without a walk.
