@@ -1436,17 +1436,19 @@ mod tests {
                 // its count in the gate never disappears for long: the
                 // test reads the count to tell the walk's turn.
                 for _ in 0..10 {
-                    match store_ref.write(|_| {
-                        for _ in 0..12_000 {
-                            if !hold_for_first.load(Ordering::SeqCst) {
-                                break;
+                    if store_ref
+                        .write(|_| {
+                            for _ in 0..12_000 {
+                                if !hold_for_first.load(Ordering::SeqCst) {
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_millis(5));
                             }
-                            std::thread::sleep(Duration::from_millis(5));
-                        }
-                        Ok(())
-                    }) {
-                        Ok(()) => break,
-                        Err(_) => continue,
+                            Ok(())
+                        })
+                        .is_ok()
+                    {
+                        break;
                     }
                 }
             });
@@ -1462,9 +1464,8 @@ mod tests {
             );
             let second = scope.spawn(|| {
                 for _ in 0..10 {
-                    match store.write(|_| Ok(())) {
-                        Ok(()) => break,
-                        Err(_) => continue,
+                    if store.write(|_| Ok(())).is_ok() {
+                        break;
                     }
                 }
             });
@@ -1504,7 +1505,7 @@ mod tests {
                 if now < floor {
                     floor = now;
                 }
-                if now >= floor + 1 {
+                if now > floor {
                     rose = true;
                     break;
                 }
