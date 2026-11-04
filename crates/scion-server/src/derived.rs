@@ -1432,9 +1432,9 @@ mod tests {
             let store_ref = &store;
             let first = scope.spawn(move || {
                 // A writer whose write fails (the database can refuse a
-                // connection under the suite's load) retries a few times
-                // before giving up, so the forcing survives a transient
-                // refusal.
+                // connection under the suite's load) retries at once, so
+                // its count in the gate never disappears for long: the
+                // test reads the count to tell the walk's turn.
                 for _ in 0..10 {
                     match store_ref.write(|_| {
                         for _ in 0..12_000 {
@@ -1446,7 +1446,7 @@ mod tests {
                         Ok(())
                     }) {
                         Ok(()) => break,
-                        Err(_) => std::thread::sleep(Duration::from_secs(1)),
+                        Err(_) => continue,
                     }
                 }
             });
@@ -1464,7 +1464,7 @@ mod tests {
                 for _ in 0..10 {
                     match store.write(|_| Ok(())) {
                         Ok(()) => break,
-                        Err(_) => std::thread::sleep(Duration::from_secs(1)),
+                        Err(_) => continue,
                     }
                 }
             });
@@ -1491,14 +1491,27 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(5));
             }
             assert!(store.writers_waiting() <= 2, "the walk's step never ended");
+            // The count now reads whoever holds or waits for the
+            // connection: the holder, and the second writer until its own
+            // write gets the connection and ends. The bound ends the
+            // walk's yield, and its next step queues too - the count
+            // rises above the lowest it has read since the step ended.
+            // An unbounded yield never adds to the count.
+            let mut floor = store.writers_waiting();
+            let mut rose = false;
             for _ in 0..12_000 {
-                if store.writers_waiting() >= 3 {
+                let now = store.writers_waiting();
+                if now < floor {
+                    floor = now;
+                }
+                if now >= floor + 1 {
+                    rose = true;
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
             assert!(
-                store.writers_waiting() >= 3,
+                rose,
                 "the walk never took its turn behind the writer that holds the connection"
             );
             // The writers go; the walk's second step runs, and its derives
