@@ -512,7 +512,19 @@ mod tests {
     use proptest::test_runner::TestCaseError;
     use scion_core::{Changeset, FileEntry, FileState, PathElem};
     use std::path::Path;
+    use std::sync::{Mutex, MutexGuard};
     use std::time::{Duration, Instant};
+
+    /// The part bound is one process-wide seam, and the tests that pin
+    /// it count the writes it causes: every such test holds the lock for
+    /// its whole body, so a bound window holds only its own derivation.
+    static PART_LOCK: Mutex<()> = Mutex::new(());
+
+    fn part_guard() -> MutexGuard<'static, ()> {
+        PART_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     /// A deadline that no test outlives.
     fn alive() -> Deadline {
@@ -1558,7 +1570,8 @@ mod tests {
         // stays there, and the parts still run at the pending bound.
         let before = store.commits();
         let first = {
-            let _part = test_set_view_part_bound(4 << 10);
+            let _part = part_guard();
+            test_set_view_part_bound(4 << 10);
             derive(
                 &store,
                 repo,
@@ -1580,7 +1593,8 @@ mod tests {
         // the pending never grows - no parts, whatever the map's size.
         let before = store.commits();
         let second = {
-            let _part = test_set_view_part_bound(4 << 10);
+            let _part = part_guard();
+            test_set_view_part_bound(4 << 10);
             derive(
                 &store,
                 repo,
@@ -1656,6 +1670,7 @@ mod tests {
             .map(|i| RepoPath::new(format!("d{i:02}/see").as_str()).unwrap())
             .collect();
         let digest = crate::access::rule_set_digest(Some(&prefixes));
+        let _log = part_guard();
         let part = test_set_view_part_bound(1 << 10);
         // A writer holds the store's write key, past the read
         // transaction's idle bound.
