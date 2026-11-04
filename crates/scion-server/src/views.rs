@@ -240,9 +240,11 @@ pub(crate) fn view_root(
     // may cover only paths that this changeset's tree does not have: then
     // the view is the empty tree, which is a valid root. The root is never
     // dropped.
-    let view = if let Some(view) =
-        store.read(|c| project(store, &mut *c, repo, digest, real, &context, &mut memo, deadline))?
-    {
+    let view = if let Some(view) = store.read(|c| {
+        project(
+            store, &mut *c, repo, digest, real, &context, &mut memo, deadline,
+        )
+    })? {
         view
     } else {
         let empty = Tree::default();
@@ -490,7 +492,18 @@ mod tests {
         let ctx: Context = vec![b"README".to_vec(), b"docs".to_vec(), b"ops/public".to_vec()];
         let mut memo = Memo::default();
         let view = store
-            .read(|c| project(&store, &mut *c, repo, &digest, root_id, &ctx, &mut memo, &alive()))
+            .read(|c| {
+                project(
+                    &store,
+                    &mut *c,
+                    repo,
+                    &digest,
+                    root_id,
+                    &ctx,
+                    &mut memo,
+                    &alive(),
+                )
+            })
             .unwrap()
             .expect("the root keeps a visible path");
         store
@@ -528,7 +541,18 @@ mod tests {
         let ctx: Context = vec![b"absent".to_vec()];
         let mut memo = Memo::default();
         let none = store
-            .read(|c| project(&store, &mut *c, repo, &digest, root_id, &ctx, &mut memo, &alive()))
+            .read(|c| {
+                project(
+                    &store,
+                    &mut *c,
+                    repo,
+                    &digest,
+                    root_id,
+                    &ctx,
+                    &mut memo,
+                    &alive(),
+                )
+            })
             .unwrap();
         assert!(none.is_none());
 
@@ -587,14 +611,36 @@ mod tests {
         let ctx: Context = vec![b"left/a".to_vec()];
         let mut memo = Memo::default();
         let view = store
-            .read(|c| project(&store, &mut *c, repo, &digest, root_id, &ctx, &mut memo, &alive()))
+            .read(|c| {
+                project(
+                    &store,
+                    &mut *c,
+                    repo,
+                    &digest,
+                    root_id,
+                    &ctx,
+                    &mut memo,
+                    &alive(),
+                )
+            })
             .unwrap()
             .unwrap();
         // The same real tree under the other context derives a second,
         // different view: one tree, two views.
         let ctx2: Context = vec![b"right/b".to_vec()];
         let view2 = store
-            .read(|c| project(&store, &mut *c, repo, &digest, root_id, &ctx2, &mut memo, &alive()))
+            .read(|c| {
+                project(
+                    &store,
+                    &mut *c,
+                    repo,
+                    &digest,
+                    root_id,
+                    &ctx2,
+                    &mut memo,
+                    &alive(),
+                )
+            })
             .unwrap()
             .unwrap();
         assert_ne!(view, view2, "one real tree, two contexts, two views");
@@ -658,7 +704,18 @@ mod tests {
         let ctx: Context = vec![b"docs".to_vec()];
         let mut memo = Memo::default();
         let view = store
-            .read(|c| project(&store, &mut *c, repo, &digest, root_id, &ctx, &mut memo, &alive()))
+            .read(|c| {
+                project(
+                    &store,
+                    &mut *c,
+                    repo,
+                    &digest,
+                    root_id,
+                    &ctx,
+                    &mut memo,
+                    &alive(),
+                )
+            })
             .unwrap()
             .unwrap();
         let shown = store.read(|c| c.get_tree(view)).unwrap();
@@ -1448,9 +1505,8 @@ mod tests {
                 let mut entries = std::collections::BTreeMap::new();
                 for i in 0..200 {
                     let d = name(format!("d{i:03}").as_bytes());
-                    let inner =
-                        Tree::new([(d.clone(), file(&store, b"body\n"))].into())
-                            .expect("tree fits the format");
+                    let inner = Tree::new([(d.clone(), file(&store, b"body\n"))].into())
+                        .expect("tree fits the format");
                     let id = c.put_tree(&inner)?;
                     dir_ids.push(id);
                     entries.insert(d, Entry::Dir(id));
@@ -1485,14 +1541,7 @@ mod tests {
                 let mut count = 0_usize;
                 let below: [u8; 32] = context_digest(&Context::new());
                 for id in &dir_ids {
-                    if c
-                        .get_view_tree(
-                            repo,
-                            &digest,
-                            u32::from(PROJECTION_VERSION),
-                            *id,
-                            below,
-                        )?
+                    if c.get_view_tree(repo, &digest, u32::from(PROJECTION_VERSION), *id, below)?
                         .is_some()
                     {
                         count += 1;
@@ -1538,7 +1587,10 @@ mod tests {
         let live = [digest];
         let metrics = crate::metrics::Metrics::default();
         // Both places go to the test's hands.
-        let first = store.view_memo_budget().take(VIEW_MEMO_BYTES, None).unwrap();
+        let first = store
+            .view_memo_budget()
+            .take(VIEW_MEMO_BYTES, None)
+            .unwrap();
         let second = store
             .view_memo_budget()
             .take(VIEW_MEMO_BYTES, None)
@@ -1547,7 +1599,9 @@ mod tests {
         // the deadline's error.
         let started = std::time::Instant::now();
         let short = Deadline::new(started + Duration::from_millis(100));
-        let answer = view_root(&store, repo, &digest, tip, &prefixes, &live, &metrics, &short);
+        let answer = view_root(
+            &store, repo, &digest, tip, &prefixes, &live, &metrics, &short,
+        );
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "the waiter ended late: {:?}",
@@ -1559,7 +1613,16 @@ mod tests {
         );
         // A place frees: the same derivation runs whole.
         drop(first);
-        let answer = view_root(&store, repo, &digest, tip, &prefixes, &live, &metrics, &alive());
+        let answer = view_root(
+            &store,
+            repo,
+            &digest,
+            tip,
+            &prefixes,
+            &live,
+            &metrics,
+            &alive(),
+        );
         assert!(answer.is_ok(), "the waiter ran once a place freed");
         drop(second);
     }
@@ -1572,25 +1635,29 @@ mod tests {
     fn a_part_writes_its_trees_before_its_rows_and_leaves_no_root_row() {
         let (_dir, store) = store();
         let (repo, digest) = bare();
-        let real = Tree::new([(name(b"f"), file(&store, b"x\n"))].into())
-            .expect("tree fits the format");
-        let view = Tree::new([(name(b"f"), file(&store, b"x\n"))].into())
-            .expect("tree fits the format");
+        let real =
+            Tree::new([(name(b"f"), file(&store, b"x\n"))].into()).expect("tree fits the format");
+        let view =
+            Tree::new([(name(b"f"), file(&store, b"x\n"))].into()).expect("tree fits the format");
         let (real_id, view_id) = store
             .write(|c| Ok((c.put_tree(&real)?, c.put_tree(&view)?)))
             .unwrap();
         // A memo the walk could have been carrying when it failed: its
         // rows' trees are only in the memo, never yet in the store.
-        let deeper = Tree::new([(name(b"g"), file(&store, b"y\n"))].into())
-            .expect("tree fits the format");
+        let deeper =
+            Tree::new([(name(b"g"), file(&store, b"y\n"))].into()).expect("tree fits the format");
         let mut memo = Memo::default();
         memo.trees.push(deeper);
         memo.trees.push(view);
-        memo.rows.push((real_id, context_digest(&Context::new()), view_id));
+        memo.rows
+            .push((real_id, context_digest(&Context::new()), view_id));
         store
             .write(|c| write_memo_part(c, repo, &digest, &mut memo))
             .unwrap();
-        assert!(memo.trees.is_empty() && memo.rows.is_empty(), "the part cleared");
+        assert!(
+            memo.trees.is_empty() && memo.rows.is_empty(),
+            "the part cleared"
+        );
         // The part's row is readable, and its view tree is in the store.
         let row = store
             .read(|c| {
