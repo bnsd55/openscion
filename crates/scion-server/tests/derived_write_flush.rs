@@ -105,9 +105,9 @@ fn the_flush_deletes_what_the_per_call_deletes_delete_in_order() {
         let dir = scion_server::test_support::private_tempdir();
         let store = Backend::open_test(dir.path()).unwrap();
         let repo = store.write(|c| c.create_repo(REPO)).unwrap();
-        // Six rows of one kind, one version each, one changeset each:
-        // three below the lower delete's version, three between the two
-        // versions.
+        // Six rows of one kind no write path owns, one version each,
+        // one changeset each: three below the lower delete's version,
+        // three between the two versions.
         let mut ids = Vec::new();
         for i in 1..=6u32 {
             let cs = changeset(&format!("cs-{i}\n"), ids.last().copied());
@@ -115,7 +115,7 @@ fn the_flush_deletes_what_the_per_call_deletes_delete_in_order() {
                 .write(|c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0))
                 .unwrap();
             store
-                .write(|c| c.put_derived("root_tree", i, id, format!("v{i}").as_bytes()))
+                .write(|c| c.put_derived("test_kind", i, id, format!("v{i}").as_bytes()))
                 .unwrap();
             ids.push(id);
         }
@@ -127,8 +127,8 @@ fn the_flush_deletes_what_the_per_call_deletes_delete_in_order() {
                 if defer {
                     c.defer_derived_deletes();
                 }
-                c.delete_derived_below("root_tree", 7, 2)?;
-                c.delete_derived_below("root_tree", 4, 2)
+                c.delete_derived_below("test_kind", 7, 2)?;
+                c.delete_derived_below("test_kind", 4, 2)
             })
             .unwrap();
         remaining.push(
@@ -137,7 +137,7 @@ fn the_flush_deletes_what_the_per_call_deletes_delete_in_order() {
                 .map(|(i, id)| {
                     let version = i as u32 + 1;
                     let present = store
-                        .read(|c| c.get_derived("root_tree", version, *id))
+                        .read(|c| c.get_derived("test_kind", version, *id))
                         .unwrap()
                         .is_some();
                     (version, present)
