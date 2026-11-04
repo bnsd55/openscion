@@ -157,8 +157,10 @@ fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound()
     // one plan attempt. Each fold of the round-trip card lowers this
     // number; a change that raises it must say why. The write path's
     // derived reads ride one preloaded statement and its old-row
-    // deletes ride the commit's flush: 40 statements became 35.
-    const BOUND: u64 = 45;
+    // deletes ride the commit's flush: 40 statements became 35. The
+    // record answers from its own row - the lookup's and the insert's
+    // columns - so it runs no second read: 35 became 34.
+    const BOUND: u64 = 44;
     let count = land_statement_count(3);
     assert!(
         count <= BOUND,
