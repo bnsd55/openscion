@@ -147,6 +147,22 @@ fn drop_stale_schemas(maker: &PgClient, automatic: bool) -> (usize, usize) {
                 left += 1;
                 continue;
             }
+            // The snapshot's connection check is stale by drop time: a
+            // test may have named the schema after the read, while this
+            // sweep worked through its list. The drop asks again, so a
+            // schema a live connection names now never drops.
+            let named = maker
+                .query_opt(
+                    "SELECT 1 FROM pg_catalog.pg_stat_activity
+                     WHERE application_name = $1 LIMIT 1",
+                    &[&name],
+                )
+                .ok()
+                .flatten();
+            if named.is_some() {
+                left += 1;
+                continue;
+            }
             if let Err(why) = maker.batch(&format!(
                 "DROP SCHEMA IF EXISTS {name} CASCADE;
                  DELETE FROM public.scion_test_schemas WHERE schema = '{name}'"
