@@ -1513,7 +1513,7 @@ mod tests {
                     entries.insert(d, Entry::Dir(id));
                 }
                 let root = Tree::new(entries).expect("tree fits the format");
-                Ok(c.put_tree(&root)?)
+                c.put_tree(&root)
             })
             .unwrap();
         let ctx: Context = (0..200).map(|i| format!("d{i:03}").into_bytes()).collect();

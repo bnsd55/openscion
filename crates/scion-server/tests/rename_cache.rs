@@ -461,7 +461,7 @@ fn a_diff_past_its_rename_byte_bound_says_renames_may_be_missing() {
     // With a half-kilobyte bound, the same diff's vector passes it: the
     // reply says renames may be missing, and none are answered.
     {
-        let small = scion_server::test_support::read::test_set_rename_byte_bound(512);
+        let _small = scion_server::test_support::read::test_set_rename_byte_bound(512);
         let page = page(&store, old, new, None);
         assert!(page.renames_incomplete, "the byte bound tripped");
         assert!(renames_of(&page).is_empty());
