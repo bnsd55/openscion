@@ -5,4 +5,3 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 13d8626f6fde6106653d82bf5bcbb9ad6eaed8d1028719305cbc1fa78c173892 # shrinks to history = [{"a/b/d": Some(0)}, {"a/b/d": None}, {"a": Some(0)}]
-cc 1119d5e7bc4747dd2fe5424557d267f920738dd049a7af89ff38a6ad64f12db7 # shrinks to history = [{"a": None}]
