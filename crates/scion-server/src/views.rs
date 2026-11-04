@@ -442,9 +442,7 @@ fn walk(
                             // earlier call - or an earlier part of this
                             // derivation - serves the subtree whole.
                             memo.derived.insert(key, Some(hit));
-                            if let Some(view) = hit {
-                                stack[top].kept.insert(name, Entry::Dir(view));
-                            }
+                            stack[top].kept.insert(name, Entry::Dir(hit));
                         } else {
                             stack.push(Frame {
                                 id: child,
