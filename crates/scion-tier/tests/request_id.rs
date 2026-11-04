@@ -161,6 +161,8 @@ fn spawn(bin: &str, args: &[&str], log: &PathBuf) -> Bin {
     let child = Command::new(bin)
         .args(args)
         .env("NO_COLOR", "1")
+        .env("SCION_TOKEN", "t")
+        .env("SCION_UPSTREAM_TOKEN", "t")
         // GetObjects logs at DEBUG (its per-call line at INFO was
         // 7.7 GB in the soak's 66 h), and the id rides that line.
         .env("RUST_LOG", "debug")
@@ -208,10 +210,6 @@ async fn chain(fake: &Fake) -> (ObjectsClient<tonic::transport::Channel>, TempDi
         &[
             "--listen",
             "127.0.0.1:0",
-            "--token",
-            "t",
-            "--upstream-token",
-            "t",
             "--upstream",
             &format!("http://{upstream_addr}"),
             "--ticket-public-key",
@@ -241,10 +239,6 @@ async fn chain(fake: &Fake) -> (ObjectsClient<tonic::transport::Channel>, TempDi
             &daemon_data.display().to_string(),
             "--upstream",
             &format!("http://{cache_addr}"),
-            "--token",
-            "t",
-            "--upstream-token",
-            "t",
         ],
         &daemon_log,
     );

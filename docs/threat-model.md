@@ -118,8 +118,12 @@ Out of profile. Any of these voids the model:
 4. **Between tiers.** A daemon trusts its upstream and its socket user;
    a cache trusts the public keys it was given. Neither decides who may
    read: the ticket does, wherever it is checked.
-5. **The client machine.** `scn` keeps the token out of files and logs,
-   but the command line is public through `ps`; the environment is not.
+5. **The client machine.** `scn` keeps the token out of files and
+   logs, and refuses the command-line form at start, before any
+   parsing (`ps` makes the command line public); the checked file form
+   and the environment remain
+   (`scn/tests/argv_token.rs::a_command_line_token_is_refused_and_leaks_nowhere_scn_writes`,
+   `scn/tests/argv_secrets.rs::the_argv_form_refuses_and_names_the_file_and_env_forms`).
 6. **The data directory.** Local files answer who may read what only
    through the server; every open refuses a directory that group or
    others can write, and one under a directory another user can change.

@@ -296,7 +296,7 @@ pub mod test_support {
     }
     /// The counters the import tests read between retries.
     pub mod import {
-        pub use crate::import::{BUSY_TRIES, CHECKS, STRUCTURE_CAPS};
+        pub use crate::import::{BUSY_TRIES, CHECKS, ROLLED_CHECKS, STRUCTURE_CAPS, TX_CHECKS};
     }
     /// The write transaction's history-node buffer: its bound and the
     /// peak a restore test reads.

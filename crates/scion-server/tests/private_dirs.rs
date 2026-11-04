@@ -51,6 +51,7 @@ fn server(umask: &str, args: &[&OsStr]) -> Command {
         .arg(env!("CARGO_BIN_EXE_scion-server"))
         .args(args)
         .env("NO_COLOR", "1")
+        .env("SCION_TOKEN", "t")
         .env("SCION_POSTGRES_URL", url_of(&data));
     command
 }
@@ -191,8 +192,6 @@ fn serve_starts_with_its_ticket_key_in_a_data_directory_that_it_made() {
             "--data".as_ref(),
             data.as_os_str(),
             "serve".as_ref(),
-            "--token".as_ref(),
-            "t".as_ref(),
             "--listen".as_ref(),
             "127.0.0.1:0".as_ref(),
             "--ticket-key".as_ref(),

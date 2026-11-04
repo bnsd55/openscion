@@ -59,7 +59,7 @@ only on Linux is marked **(Linux)**.
 2. Start the server again with the key, the runbook's line:
 
    ```sh
-   ./scion-server --data /srv/scion serve --token <TOKEN> \
+   SCION_TOKEN=<TOKEN> ./scion-server --data /srv/scion serve \
      --ticket-key /srv/scion-keys/ticket.key
    ```
 

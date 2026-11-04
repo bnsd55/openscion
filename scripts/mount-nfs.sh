@@ -92,9 +92,9 @@ chmod 700 "$WORK/server"
 # The server serves its metadata from Postgres: one schema for this run's
 # data directory, made if missing. The data directory keeps the marker and
 # the blob files, and the checks below prove which backend served.
-PG_ARG="--postgres-url $(pg_url_for "$WORK/server")"
-# shellcheck disable=SC2086 # the URL holds no spaces
-"$BIN/scion-server" --data "$WORK/server" $PG_ARG serve \
+export SCION_POSTGRES_URL
+SCION_POSTGRES_URL="$(pg_url_for "$WORK/server")"
+"$BIN/scion-server" --data "$WORK/server" serve \
   --listen "127.0.0.1:$SERVER_PORT" \
   --ticket-key "$WORK/ticket.key" \
   > "$WORK/server.log" 2>&1 &
@@ -103,7 +103,7 @@ echo $! > "$WORK/server.pid"
   || { tail -n 20 "$WORK/server.log"; die "the server did not start"; }
 # The run proves the backend it was asked for: a Postgres-backed server
 # writes the marker and no SQLite database, so a spawn that lost its
-# --postgres-url fails here, not vacuously as a second SQLite run.
+# a URL from no source fails here, not vacuously as a second SQLite run.
 test -f "$WORK/server/backend" || die "the data directory has no backend marker"
 test "$(head -n 1 "$WORK/server/backend")" = postgres \
   || die "the server is not Postgres-backed"
@@ -119,11 +119,9 @@ printf 'hello from the mount test\n' > "$WORK/src/README.md"
 git -C "$WORK/src" add README.md
 git -C "$WORK/src" -c user.name=mount-nfs -c user.email=mount-nfs@localhost \
   commit -qm "seed the repo"
-# The import opens the same backend beside the serving one, so it takes
-# the same `--postgres-url` in the same schema, before the subcommand: the
-# flag belongs to the root command.
-# shellcheck disable=SC2086 # the URL holds no spaces
-"$TIMEOUT" 120 "$BIN/scion-server" --data "$WORK/server" $PG_ARG import \
+# The import opens the same backend beside the serving one, so it reads
+# the same URL in the same schema: the variable the export above carries.
+"$TIMEOUT" 120 "$BIN/scion-server" --data "$WORK/server" import \
   --repo main --rev main "$WORK/src" \
   > "$WORK/import.out" 2> "$WORK/import.log" || {
   tail -n 20 "$WORK/import.log" >&2

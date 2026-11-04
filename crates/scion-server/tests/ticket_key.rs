@@ -21,6 +21,7 @@ fn run(data: &Path, args: &[&std::ffi::OsStr]) -> Output {
         .arg(data)
         .args(args)
         .env("NO_COLOR", "1")
+        .env("SCION_TOKEN", "t")
         .output()
         .unwrap()
 }
@@ -105,18 +106,11 @@ fn serve_refuses_a_seed_that_group_or_others_can_read() {
 
     // 0644: everyone on the machine can read the seed, so serve refuses it.
     fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
-    let args: Vec<std::ffi::OsString> = [
-        "serve",
-        "--token",
-        "t",
-        "--listen",
-        "127.0.0.1:0",
-        "--ticket-key",
-    ]
-    .iter()
-    .map(std::ffi::OsString::from)
-    .chain(std::iter::once(key.as_os_str().to_owned()))
-    .collect();
+    let args: Vec<std::ffi::OsString> = ["serve", "--listen", "127.0.0.1:0", "--ticket-key"]
+        .iter()
+        .map(std::ffi::OsString::from)
+        .chain(std::iter::once(key.as_os_str().to_owned()))
+        .collect();
     let out = run(
         &data,
         &args
@@ -139,13 +133,12 @@ fn serve_refuses_a_seed_that_group_or_others_can_read() {
             "--data",
             data2.to_str().unwrap(),
             "serve",
-            "--token",
-            "t",
             "--listen",
             "127.0.0.1:0",
             "--ticket-key",
             key.to_str().unwrap(),
         ])
+        .env("SCION_TOKEN", "t")
         // The serve opens the store: the URL rides the env, quietly.
         .env(
             "SCION_POSTGRES_URL",
@@ -231,8 +224,6 @@ fn public_key_of(dir: &Path) -> String {
 fn serve_with_old(dir: &Path, seed: &Path, old: &Path) -> Output {
     let args: Vec<std::ffi::OsString> = [
         "serve",
-        "--token",
-        "t",
         "--listen",
         "127.0.0.1:0",
         "--ticket-key",
@@ -268,8 +259,6 @@ fn an_old_public_key_is_readable_by_anyone_but_writable_by_its_owner_alone() {
             "--data",
             dir.path().join("data").to_str().unwrap(),
             "serve",
-            "--token",
-            "t",
             "--listen",
             "127.0.0.1:0",
             "--ticket-key",
@@ -277,6 +266,7 @@ fn an_old_public_key_is_readable_by_anyone_but_writable_by_its_owner_alone() {
             "--ticket-key-old",
             old.to_str().unwrap(),
         ])
+        .env("SCION_TOKEN", "t")
         // The serve opens the store: the URL rides the env, quietly.
         .env(
             "SCION_POSTGRES_URL",

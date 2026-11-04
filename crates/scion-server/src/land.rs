@@ -355,7 +355,7 @@ impl Lands {
                 "stale: pending for more than {stale_secs} s, so the server stopped \
                      before it finished; retry with a new request key"
             );
-            let changed = store.write(|c| c.reject_stale_land(land_id, detail))?;
+            let changed = store.write_slot_holder(|c| c.reject_stale_land(land_id, detail))?;
             drop(index);
             // The index is unaffected: the sweep moves no ref.
             rejected += changed;
@@ -886,7 +886,7 @@ fn settle(
         Plan::Derive(head) => return Ok(Finished::Derive(head)),
         Plan::Reject { reason, detail } => {
             return store
-                .commit(|c| {
+                .write_slot_holder(|c| {
                     c.set_land_state(
                         repo,
                         land_id,
@@ -901,7 +901,7 @@ fn settle(
         }
         Plan::Verdict(verdict) => {
             return store
-                .commit(|c| record_verdict(c, repo, target, land_id, verdict))
+                .write_slot_holder(|c| record_verdict(c, repo, target, land_id, verdict))
                 .map(Finished::Outcome);
         }
         Plan::Land { rebased, head } => (rebased, head),
@@ -912,7 +912,7 @@ fn settle(
     // The blob lengths the tree build needs, read before the write
     // transaction, so the write connection does no file I/O.
     let lens = tree::lens_of_puts(store, crate::meta::puts(&rebased).map(|(_, blob)| blob))?;
-    let landed = store.commit(|c| {
+    let landed = store.write_slot_holder(|c| {
         let (id, _) = tree::store_changeset(c, repo, &rebased, &mut tree::lens_from(&lens))?;
         if !c.cas_ref(repo, target, Some(head.version), id)? {
             // The error rolls back the transaction, rebased changeset included.
@@ -970,7 +970,7 @@ fn settle(
         Err(Error::Apply(e)) => {
             let detail = format!("does not apply to {target:?}: {e}");
             store
-                .commit(|c| {
+                .write_slot_holder(|c| {
                     record_verdict(
                         c,
                         repo,
