@@ -58,6 +58,17 @@ const CLEAN_LOCK: i64 = 0x5343_494F_4E53_5445;
 #[cfg(any(test, feature = "test-hooks"))]
 const SWEEP_CAP: usize = 50;
 
+/// How many stale schemas one test-schema preparation drops, oldest
+/// registration first: the suite's cases churn directories faster
+/// than the once-per-process sweep ever could, and a schema whose
+/// directory is gone serves nothing (#849). The cap bounds one
+/// preparation's work; the next preparation, the next case, continues,
+/// so the suite's leftover schemas drain at the rate the cases make
+/// them and the database's population follows the suite's concurrency
+/// instead of its case count.
+#[cfg(any(test, feature = "test-hooks"))]
+const DRAIN_CAP: usize = 8;
+
 /// Whether this process has swept: the sweep runs at the start of the
 /// run, on the first test open, and not again.
 #[cfg(any(test, feature = "test-hooks"))]
@@ -75,10 +86,10 @@ static SWEPT: AtomicBool = AtomicBool::new(false);
 /// directory in a later run keeps its data. Schemas registered before
 /// the comment existed carry no directory: for those, the old rule
 /// holds - older than ten minutes and no live connection. At most
-/// [`SWEEP_CAP`] drops per sweep, oldest registration first, and one
-/// line says what dropped and what stayed.
+/// `cap` drops per call, oldest registration first, and one line says
+/// what dropped and what stayed.
 #[cfg(any(test, feature = "test-hooks"))]
-fn drop_stale_schemas(maker: &PgClient, automatic: bool) -> (usize, usize) {
+fn drop_stale_schemas(maker: &PgClient, automatic: bool, cap: usize) -> (usize, usize) {
     if automatic && SWEPT.swap(true, Ordering::SeqCst) {
         return (0, 0);
     }
@@ -110,24 +121,51 @@ fn drop_stale_schemas(maker: &PgClient, automatic: bool) -> (usize, usize) {
     // database's default, and no test schema holds the table. A
     // connection whose `application_name` is the schema's name keeps
     // its schema; so does a schema whose recorded directory exists.
-    let eligible = maker.query(
-        "SELECT r.schema, obj_description(n.oid, 'pg_namespace'), r.started
-         FROM public.scion_test_schemas AS r
-         JOIN pg_catalog.pg_namespace AS n ON n.nspname = r.schema
-         WHERE r.schema NOT IN (
-             SELECT application_name FROM pg_catalog.pg_stat_activity
-             WHERE application_name LIKE 'scion_test_%')
-         ORDER BY r.started ASC",
-        &[],
-    );
+    //
+    // The read pages past the schemas it keeps: a head that stops at
+    // the oldest rows would read the same kept rows at every call and
+    // never reach the stale ones behind them - a developer database
+    // with a few dozen live directories would stall every drain (#849
+    // review). Each page starts strictly after the last row the page
+    // before read, kept or dropped, and the walk stops when the cap is
+    // reached or a bounded number of pages is read, so one call's work
+    // stays bounded whatever the registry holds; the next call
+    // continues from the front.
+    let page_size = cap * 2;
+    let page_bound = 64_usize;
     let now = extract_epoch_now(maker);
     let mut dropped = 0_usize;
     let mut left = 0_usize;
-    if let Ok(rows) = &eligible {
-        for row in rows {
+    let mut cursor_started = i64::MIN;
+    let mut cursor_schema = String::new();
+    for _page in 0..page_bound {
+        let eligible = maker.query(
+            &format!(
+                "SELECT r.schema, obj_description(n.oid, 'pg_namespace'), r.started
+                 FROM public.scion_test_schemas AS r
+                 JOIN pg_catalog.pg_namespace AS n ON n.nspname = r.schema
+                 WHERE r.schema NOT IN (
+                     SELECT application_name FROM pg_catalog.pg_stat_activity
+                     WHERE application_name LIKE 'scion_test_%')
+                   AND (r.started, r.schema) > ($1, $2)
+                 ORDER BY r.started ASC, r.schema ASC
+                 LIMIT {page_size}"
+            ),
+            &[P::i64(cursor_started), P::text(&cursor_schema)],
+        );
+        let Ok(rows) = eligible else {
+            // The registry cannot be read: the next open tries again.
+            break;
+        };
+        if rows.is_empty() {
+            break;
+        }
+        for row in &rows {
             let name: String = row.get(0);
             let dir: Option<String> = row.get(1);
             let started: i64 = row.get(2);
+            cursor_started = started;
+            cursor_schema.clone_from(&name);
             // Only the names this backend makes: no other schema drops,
             // whatever a row of the registry names.
             if !name.starts_with(TEST_SCHEMA_PREFIX) {
@@ -143,7 +181,7 @@ fn drop_stale_schemas(maker: &PgClient, automatic: bool) -> (usize, usize) {
                 Some(recorded) => !Path::new(recorded).exists(),
                 None => now.is_some_and(|now| started < now.saturating_sub(600)),
             };
-            if !stale || dropped >= SWEEP_CAP {
+            if !stale || dropped >= cap {
                 left += 1;
                 continue;
             }
@@ -180,6 +218,10 @@ fn drop_stale_schemas(maker: &PgClient, automatic: bool) -> (usize, usize) {
             // The lock was this session's own try: release it, so the
             // next row's try decides on its own name.
             let _ = maker.query_opt("SELECT pg_advisory_unlock(hashtext($1))", &[P::text(&name)]);
+        }
+        if dropped >= cap || rows.len() < page_size {
+            // The cap is reached, or the page was the registry's tail.
+            break;
         }
     }
     tracing::info!(
@@ -267,7 +309,11 @@ fn prepare_test_schema(url: &str, schema: &str, dir: &Path) -> Result<()> {
                 .map_err(map_pg_error)
         }
     })?;
-    drop_stale_schemas(&preparer, true);
+    // The run's own sweep runs once; every preparation then drains a
+    // few stale schemas, so the suite's leftovers never outgrow its
+    // concurrency (#849).
+    drop_stale_schemas(&preparer, true, SWEEP_CAP);
+    drop_stale_schemas(&preparer, false, DRAIN_CAP);
     preparer.as_raw({
         let name = schema.to_owned();
         let dir = dir.to_path_buf();
@@ -298,7 +344,7 @@ pub(crate) fn sweep_stale_test_schemas(url: &str) -> Result<(usize, usize)> {
             .batch_execute("SET application_name TO ''")
             .map_err(map_pg_error)
     })?;
-    Ok(drop_stale_schemas(&preparer, false))
+    Ok(drop_stale_schemas(&preparer, false, SWEEP_CAP))
 }
 
 impl Pg {
