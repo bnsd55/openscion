@@ -21,15 +21,19 @@
 
 use std::path::{Path, PathBuf};
 
-/// The test's injected memory probe: set before a test starts the
-/// server, cleared after. A blocking probe proves the server accepts
-/// while its start-up probe still runs (#795).
+/// The test's injected host probe: set before a test starts the
+/// server, cleared after. When it is set, it IS the host probe: it
+/// blocks and then answers with the limit, so a test proves the
+/// server accepts while the probe still runs. It replaces the whole
+/// reading, not one source of it: the cgroup and /proc files exist on
+/// Linux, and a probe at one source would never be called there
+/// (#795).
 #[cfg(feature = "test-hooks")]
 #[doc(hidden)]
-pub type MemsizeFn = fn() -> Option<u64>;
+pub type HostProbeFn = fn() -> Option<u64>;
 #[cfg(feature = "test-hooks")]
 #[doc(hidden)]
-pub static MEMSIZE_PROBE: std::sync::Mutex<Option<MemsizeFn>> = std::sync::Mutex::new(None);
+pub static HOST_PROBE: std::sync::Mutex<Option<HostProbeFn>> = std::sync::Mutex::new(None);
 
 /// What every `Blame` call together may hold
 /// (`BLAME_MEMORY_BUDGET` in service.rs).
@@ -264,12 +268,20 @@ pub(crate) fn check_startup_memory(
 ) {
     metrics.set_memory_floor_bytes(FLOOR);
     #[cfg(feature = "test-hooks")]
-    let memsize: MemsizeFn = MEMSIZE_PROBE
-        .lock()
-        .map_or(macos_memsize, |probe| probe.unwrap_or(macos_memsize));
+    let injected = match HOST_PROBE.lock() {
+        Ok(guard) => *guard,
+        Err(poisoned) => *poisoned.into_inner(),
+    };
+    let limit = match injected {
+        Some(probe) => probe().map(|bytes| HostLimit {
+            bytes,
+            source: "the test's probe",
+        }),
+        None => host_limit(paths, macos_memsize),
+    };
     #[cfg(not(feature = "test-hooks"))]
-    let memsize = macos_memsize;
-    if let Some(limit) = host_limit(paths, memsize) {
+    let limit = host_limit(paths, macos_memsize);
+    if let Some(limit) = limit {
         metrics.set_host_memory_bytes(limit.bytes);
         if limit.bytes < FLOOR {
             tracing::error!(

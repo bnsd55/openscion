@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use scion_proto::runtime::listen::Limits;
-use scion_server::floor::MEMSIZE_PROBE;
+use scion_server::floor::HOST_PROBE;
 use scion_server::test_support::service;
 use scion_server::{Backend, Quotas};
 use tonic::transport::Channel;
@@ -25,9 +25,11 @@ const TOKEN: &str = "secret";
 async fn the_server_serves_while_the_startup_memory_probe_blocks() {
     // The probe blocks well past the assertion's second: without the
     // fix it runs inline in the serve task, and the health call below
-    // cannot be served inside it. The gauges may name any host: only
-    // the wait matters here.
-    MEMSIZE_PROBE.lock().unwrap().replace(|| {
+    // cannot be served inside it. The injected probe IS the host
+    // probe - it replaces the whole reading, so it blocks on every
+    // platform, whatever cgroup or /proc files the host has. The
+    // gauges may name any host: only the wait matters here.
+    HOST_PROBE.lock().unwrap().replace(|| {
         std::thread::sleep(Duration::from_secs(2));
         Some(64 << 30)
     });
@@ -76,7 +78,7 @@ async fn the_server_serves_while_the_startup_memory_probe_blocks() {
         ServingStatus::try_from(reply.status).expect("a known status")
     })
     .await;
-    MEMSIZE_PROBE.lock().unwrap().take();
+    HOST_PROBE.lock().unwrap().take();
     let status = served.expect("the server serves inside the probe's wait");
     assert_eq!(status, ServingStatus::Serving);
     assert!(
