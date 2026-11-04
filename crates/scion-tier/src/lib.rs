@@ -643,7 +643,7 @@ impl<S: Store> Tier<S> {
         incoming: I,
         limits: Limits,
         tls: Option<ServerTls>,
-        shutdown: impl Future<Output = ()>,
+        shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> Result<(), tonic::transport::Error>
     where
         I: Stream<Item = io::Result<IO>> + Send + 'static,

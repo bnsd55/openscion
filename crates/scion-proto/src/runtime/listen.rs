@@ -163,7 +163,9 @@ pub const CONNECTION_GRACE: Duration = Duration::from_secs(600);
 /// before the server closes it. Long enough that a place freed by a
 /// connection that was ending anyway still serves the waiter; short enough
 /// that a client under a connection storm learns at once, instead of
-/// waiting unread for up to `MAX_CONNECTION_AGE`.
+/// waiting unread for up to `MAX_CONNECTION_AGE`. The waiters are capped
+/// at the same size as the places, so a storm holds at most twice
+/// [`Limits::connections`] sockets, not one per connect.
 pub const CONNECTION_WAIT: Duration = Duration::from_secs(5);
 
 /// The default of `--drain-timeout-secs`: how long the in-flight calls
@@ -195,7 +197,8 @@ pub struct Limits {
     /// accepted, and waits at most [`CONNECTION_WAIT`] for another
     /// connection to close; if none frees in time, the server closes it and
     /// counts it in the refused-connections metric
-    /// (`scion_connections_refused_total`).
+    /// (`scion_connections_refused_total`). At most this many connections
+    /// wait at once: one over that is closed at once, and counts too.
     pub connections: NonZeroUsize,
     /// Most streams (calls) that one connection may have open at once, as
     /// HTTP/2 `SETTINGS_MAX_CONCURRENT_STREAMS`. A client that has this many
@@ -474,7 +477,7 @@ impl Limits {
         router: impl FnOnce(Server) -> Router,
         incoming: I,
         tls: Option<Arc<ServerConfig>>,
-        shutdown: impl Future<Output = ()>,
+        shutdown: impl Future<Output = ()> + Send + 'static,
         metrics: Arc<Metrics>,
     ) -> Result<(), tonic::transport::Error>
     where
@@ -491,7 +494,7 @@ impl Limits {
         router: impl FnOnce(Server) -> Router,
         incoming: I,
         tls: Option<Arc<ServerConfig>>,
-        shutdown: impl Future<Output = ()>,
+        shutdown: impl Future<Output = ()> + Send + 'static,
         metrics: Arc<Metrics>,
     ) -> Result<(), tonic::transport::Error>
     where
@@ -537,31 +540,45 @@ impl Limits {
             .http2_keepalive_timeout(Some(timers.keepalive_timeout))
             .max_connection_age(timers.age)
             .max_connection_age_grace(timers.grace);
+        // The accept path owns the shutdown future and sets the watch when
+        // it resolves (or when the listener ends); the serve below reads
+        // the same watch, so the drain starts at the signal itself.
+        let (stop, stopped) = watch::channel(false);
+        let accepting = Accepting {
+            max: self.connections.get(),
+            handshake: timers.handshake,
+            wait: timers.wait,
+            stalled_bytes: self.stalled_bytes.get(),
+            total: Arc::new(TotalBytes::new(self.stalled_total.get())),
+        };
         if let Some(config) = tls {
             let incoming = accept_tls(
                 incoming,
-                self.connections,
-                timers,
-                self.stalled_bytes,
-                Arc::new(TotalBytes::new(self.stalled_total.get())),
+                &accepting,
+                stop,
+                shutdown,
                 config,
                 Arc::clone(&metrics),
             );
             return router(server)
-                .serve_with_incoming_shutdown(incoming, shutdown)
+                .serve_with_incoming_shutdown(incoming, watch_signal(stopped))
                 .await;
         }
-        let incoming = accept(
-            incoming,
-            self.connections,
-            timers,
-            self.stalled_bytes,
-            Arc::new(TotalBytes::new(self.stalled_total.get())),
-            metrics,
-        );
+        let incoming = accept(incoming, &accepting, stop, shutdown, metrics);
         router(server)
-            .serve_with_incoming_shutdown(incoming, shutdown)
+            .serve_with_incoming_shutdown(incoming, watch_signal(stopped))
             .await
+    }
+}
+
+/// A shutdown for the serve that completes when the accept side stopped:
+/// the accept task sets the watch when the shutdown resolves, or when the
+/// listener ends, and this reads it.
+async fn watch_signal(mut stopped: watch::Receiver<bool>) {
+    while !*stopped.borrow_and_update() {
+        if stopped.changed().await.is_err() {
+            return;
+        }
     }
 }
 
@@ -578,10 +595,20 @@ pub fn tcp(listener: TcpListener) -> TcpIncoming {
 /// per connection.
 const WAIT_WARN_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Milliseconds since the process started, as the rate limiter's clock: a
+/// wall-clock step cannot silence the warnings, and the clock never runs
+/// backwards.
+fn now_millis() -> u64 {
+    static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let started = STARTED.get_or_init(std::time::Instant::now);
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 /// Counts the connections that wait for a place, or that a full cap
-/// refused, and lets one line through per interval, with the count since
-/// the last one. Shared by the accept paths of a server; each accepts
-/// whole storms.
+/// refused, and lets one line through per interval, carrying the count
+/// since the last line. `Clone` shares the counts. A flusher task
+/// ([`Self::spawn_flusher`]) writes the last interval's count even when
+/// no new connection comes, so a count never sits stale.
 #[derive(Clone)]
 struct WaitWarn {
     interval_millis: u64,
@@ -603,13 +630,26 @@ impl WaitWarn {
     /// line covers. `last` starts at zero, so the first wait writes at
     /// once.
     fn tick(&self) -> Option<u64> {
-        let since = self.since.fetch_add(1, Ordering::Relaxed) + 1;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|age| u64::try_from(age.as_millis()).unwrap_or(u64::MAX))
-            .unwrap_or_default();
+        self.since.fetch_add(1, Ordering::Relaxed);
+        self.write()
+    }
+
+    /// Writes the accumulated count when the interval has passed, without
+    /// counting a new event: the flusher calls this, so a count never
+    /// sits past its interval.
+    fn flush(&self) -> Option<u64> {
+        if self.since.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        self.write()
+    }
+
+    fn write(&self) -> Option<u64> {
+        let now = now_millis();
         let last = self.last.load(Ordering::Relaxed);
-        if now.saturating_sub(last) < self.interval_millis {
+        // `last == 0` is "never wrote": the process clock may still read
+        // zero in the first millisecond, and the first wait writes then.
+        if last != 0 && now.saturating_sub(last) < self.interval_millis {
             return None;
         }
         // Only the winner writes, so a burst writes one line, not one per
@@ -619,20 +659,60 @@ impl WaitWarn {
             .compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            self.since.store(0, Ordering::Relaxed);
-            Some(since)
+            // Swap, not store-and-forget: a count another task added while
+            // this one wrote goes out with this line, not into the next.
+            Some(self.since.swap(0, Ordering::Relaxed))
         } else {
             None
         }
+    }
+
+    /// Spawns the flusher: every interval it writes the count that
+    /// interval gathered, even when no new connection came, and when
+    /// `over` says the serve has ended it writes what is left and stops.
+    /// `line` writes the message with the count.
+    fn spawn_flusher(
+        &self,
+        over: impl Fn() -> bool + Send + 'static,
+        line: impl Fn(u64) + Send + 'static,
+    ) {
+        if self.interval_millis == 0 {
+            return; // the flusher's timer needs an interval
+        }
+        let warn = self.clone();
+        let interval = Duration::from_millis(self.interval_millis);
+        tokio::spawn(async move {
+            let mut timer = tokio::time::interval(interval);
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            timer.tick().await; // the first tick completes at once
+            loop {
+                timer.tick().await;
+                if let Some(waited) = warn.flush() {
+                    line(waited);
+                }
+                if over() {
+                    // The serve has ended: what is left goes out with the
+                    // last line.
+                    if let Some(waited) = warn.flush() {
+                        line(waited);
+                    }
+                    break;
+                }
+            }
+        });
     }
 }
 
 /// Takes a place, waiting at most `wait` past a full cap: `None` when the
 /// wait ran out, and the caller closes the connection and counts the
-/// refusal. `max` is for the warning line; a closed semaphore reads as no
-/// place, and the accept paths never close theirs.
+/// refusal. The waiters are capped too (`waiters`, the same size as the
+/// places): a connection over that cap is closed at once, so a storm
+/// holds at most `max` sockets waiting, not one per connect. `max` is for
+/// the warning line; a closed semaphore reads as no place, and the accept
+/// paths never close theirs.
 async fn place_within(
     places: &Arc<Semaphore>,
+    waiters: &Arc<Semaphore>,
     max: usize,
     wait: Duration,
     waits: &WaitWarn,
@@ -640,14 +720,79 @@ async fn place_within(
     if let Ok(place) = places.clone().try_acquire_owned() {
         return Some(place);
     }
-    if waits.tick().is_some() {
-        tracing::warn!(max, "a connection waits: the most connections are open");
+    // A waiter's slot, taken at once: a connection over this cap is
+    // closed here, before it can hold a socket for the whole wait.
+    let slot = waiters.clone().try_acquire_owned().ok()?;
+    if let Some(waited) = waits.tick() {
+        tracing::warn!(
+            max,
+            waited,
+            "a connection waits: the most connections are open"
+        );
     }
-    match tokio::time::timeout(wait, places.clone().acquire_owned()).await {
+    let place = match tokio::time::timeout(wait, places.clone().acquire_owned()).await {
         Ok(Ok(place)) => Some(place),
         // The accept paths never close their semaphore; a close reads as
         // no place.
         _ => None,
+    };
+    drop(slot);
+    place
+}
+
+/// What the accept paths share, fixed when the serve starts.
+#[derive(Clone)]
+struct Accepting {
+    /// Most connections served at once, and most waiting at once.
+    max: usize,
+    /// The handshake and preface deadline of a connection with its place.
+    handshake: Duration,
+    /// How long a connection over the cap waits for a place.
+    wait: Duration,
+    /// The stalled-replies cap of one connection.
+    stalled_bytes: u64,
+    /// The stalled-replies cap of the whole process.
+    total: Arc<TotalBytes>,
+}
+
+/// Spawns the two rate-limited warnings' flushers of one accept path: the
+/// waits line and the refusals line, each at most one per interval, and
+/// each writing its last count when the serve ends (`over` says so).
+fn spawn_cap_flushers(
+    over: impl Fn() -> bool + Send + Clone + 'static,
+    max: usize,
+    wait: Duration,
+    waits: &WaitWarn,
+    refusals: &WaitWarn,
+) {
+    waits.spawn_flusher(over.clone(), move |waited| {
+        tracing::warn!(
+            max,
+            waited,
+            "a connection waits: the most connections are open"
+        );
+    });
+    refusals.spawn_flusher(over, move |waited| {
+        tracing::warn!(
+            max,
+            waited,
+            wait = ?wait,
+            "the most connections are open: a connection that did not \
+             get a place within its wait is closed"
+        );
+    });
+}
+
+/// Warns the rate-limited refusal line, with the count it covers.
+fn warn_refused(refusals: &WaitWarn, max: usize, wait: Duration) {
+    if let Some(waited) = refusals.tick() {
+        tracing::warn!(
+            max,
+            waited,
+            wait = ?wait,
+            "the most connections are open: a connection \
+             that did not get a place within its wait is closed"
+        );
     }
 }
 
@@ -667,10 +812,9 @@ async fn place_within(
 /// unix listener yields.
 fn accept_tls<I, IO>(
     incoming: I,
-    max: NonZeroUsize,
-    timers: &Timers,
-    stalled_bytes: NonZeroU64,
-    total: Arc<TotalBytes>,
+    accepting: &Accepting,
+    stop: watch::Sender<bool>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
     config: Arc<ServerConfig>,
     metrics: Arc<Metrics>,
 ) -> ReceiverStream<io::Result<Connection<TlsStream<IO>>>>
@@ -678,19 +822,48 @@ where
     I: Stream<Item = io::Result<IO>> + Send + 'static,
     IO: AsyncRead + AsyncWrite + Connected + PeerOf + Unpin + Send + 'static,
 {
-    let handshake = timers.handshake;
-    let wait = timers.wait;
-    let places = Arc::new(Semaphore::new(max.get()));
-    let (done, served) = mpsc::channel(max.get());
+    let Accepting {
+        max,
+        handshake,
+        wait,
+        stalled_bytes,
+        total,
+    } = accepting.clone();
+    let places = Arc::new(Semaphore::new(max));
+    let waiters = Arc::new(Semaphore::new(max));
+    let (done, served) = mpsc::channel(max);
     let acceptor = tokio_rustls::TlsAcceptor::from(config);
     let waits = WaitWarn::new(WAIT_WARN_INTERVAL);
     let refusals = WaitWarn::new(WAIT_WARN_INTERVAL);
+    spawn_cap_flushers(
+        {
+            let done = done.clone();
+            move || done.is_closed()
+        },
+        max,
+        wait,
+        &waits,
+        &refusals,
+    );
     tokio::spawn(async move {
         let mut incoming = pin!(incoming);
-        while let Some(accepted) = incoming.next().await {
-            if done.is_closed() {
-                break;
-            }
+        let mut shutdown = pin!(shutdown);
+        loop {
+            // The shutdown signal itself stops the accept: a client that
+            // reconnects after the GOAWAY is refused by its connect, not
+            // counted through a drain. The listener drops with this task.
+            let accepted = tokio::select! {
+                accepted = incoming.next() => if let Some(accepted) = accepted {
+                    accepted
+                } else {
+                    let _ = stop.send(true);
+                    break;
+                },
+                () = &mut shutdown => {
+                    let _ = stop.send(true);
+                    break;
+                }
+            };
             let io = match accepted {
                 Ok(io) => io,
                 Err(error) => {
@@ -701,11 +874,11 @@ where
                 }
             };
             let places = Arc::clone(&places);
+            let waiters = Arc::clone(&waiters);
             let acceptor = acceptor.clone();
             let waits = waits.clone();
             let refusals = refusals.clone();
             let sender = done.clone();
-            let stalled_bytes = stalled_bytes.get();
             let metrics = Arc::clone(&metrics);
             let total = Arc::clone(&total);
             tokio::spawn(async move {
@@ -713,17 +886,12 @@ where
                 // at most `wait`, then the server closes it, so a storm
                 // fails fast instead of queueing behind
                 // `MAX_CONNECTION_AGE`. The wait runs in the connection's
-                // own task, so one waiter never holds the accept loop.
-                let Some(place) = place_within(&places, max.into(), wait, &waits).await else {
+                // own task, so one waiter never holds the accept loop, and
+                // the waiters are capped, so a storm holds at most `max`
+                // waiting sockets.
+                let Some(place) = place_within(&places, &waiters, max, wait, &waits).await else {
                     metrics.connection_refused();
-                    if refusals.tick().is_some() {
-                        tracing::warn!(
-                            max,
-                            wait = ?wait,
-                            "the most connections are open: a connection \
-                             that did not get a place within its wait is closed"
-                        );
-                    }
+                    warn_refused(&refusals, max, wait);
                     // The io drops here: the client sees the connection
                     // close before any reply.
                     return;
@@ -775,30 +943,56 @@ where
 /// within `handshake` once it has its place.
 fn accept<I, IO>(
     incoming: I,
-    max: NonZeroUsize,
-    timers: &Timers,
-    stalled_bytes: NonZeroU64,
-    total: Arc<TotalBytes>,
+    accepting: &Accepting,
+    stop: watch::Sender<bool>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
     metrics: Arc<Metrics>,
 ) -> ReceiverStream<io::Result<Connection<IO>>>
 where
     I: Stream<Item = io::Result<IO>> + Send + 'static,
     IO: PeerOf + Send + 'static,
 {
-    let max = max.get();
-    let handshake = timers.handshake;
-    let wait = timers.wait;
-    let stalled_bytes = stalled_bytes.get();
+    let Accepting {
+        max,
+        handshake,
+        wait,
+        stalled_bytes,
+        total,
+    } = accepting.clone();
     let places = Arc::new(Semaphore::new(max));
+    let waiters = Arc::new(Semaphore::new(max));
     let waits = WaitWarn::new(WAIT_WARN_INTERVAL);
     let refusals = WaitWarn::new(WAIT_WARN_INTERVAL);
     let (done, served) = mpsc::channel(max);
+    spawn_cap_flushers(
+        {
+            let done = done.clone();
+            move || done.is_closed()
+        },
+        max,
+        wait,
+        &waits,
+        &refusals,
+    );
     tokio::spawn(async move {
         let mut incoming = pin!(incoming);
-        while let Some(accepted) = incoming.next().await {
-            if done.is_closed() {
-                break;
-            }
+        let mut shutdown = pin!(shutdown);
+        loop {
+            // The shutdown signal itself stops the accept: a client that
+            // reconnects after the GOAWAY is refused by its connect, not
+            // counted through a drain. The listener drops with this task.
+            let accepted = tokio::select! {
+                accepted = incoming.next() => if let Some(accepted) = accepted {
+                    accepted
+                } else {
+                    let _ = stop.send(true);
+                    break;
+                },
+                () = &mut shutdown => {
+                    let _ = stop.send(true);
+                    break;
+                }
+            };
             let io = match accepted {
                 Ok(io) => io,
                 Err(error) => {
@@ -809,6 +1003,7 @@ where
                 }
             };
             let places = Arc::clone(&places);
+            let waiters = Arc::clone(&waiters);
             let waits = waits.clone();
             let refusals = refusals.clone();
             let sender = done.clone();
@@ -820,17 +1015,11 @@ where
                 // server closes it, so a storm fails fast instead of
                 // queueing behind `MAX_CONNECTION_AGE`. The wait runs in
                 // the connection's own task, so one waiter never holds the
-                // accept loop.
-                let Some(place) = place_within(&places, max, wait, &waits).await else {
+                // accept loop, and the waiters are capped, so a storm
+                // holds at most `max` waiting sockets.
+                let Some(place) = place_within(&places, &waiters, max, wait, &waits).await else {
                     metrics.connection_refused();
-                    if refusals.tick().is_some() {
-                        tracing::warn!(
-                            max,
-                            wait = ?wait,
-                            "the most connections are open: a connection \
-                             that did not get a place within its wait is closed"
-                        );
-                    }
+                    warn_refused(&refusals, max, wait);
                     // The io drops here: the client sees the connection
                     // close before any reply.
                     return;
@@ -1591,6 +1780,98 @@ mod tests {
         drop(old);
     }
 
+    /// The TLS path refuses under the cap the same way: the second
+    /// connection's handshake does not complete inside the bound, while
+    /// the first keeps working, and the refusal is counted.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_connection_over_the_tls_cap_fails_fast() {
+        let wait = Duration::from_millis(500);
+        let limits = Limits {
+            connections: NonZeroUsize::MIN,
+            ..Limits::default()
+        };
+        let certs = test_certs();
+        let dir = crate::runtime::private_tempdir();
+        let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
+        // The handshake deadline is the real one (a cold mTLS handshake
+        // does not finish in a test instant); the place wait stays short,
+        // the refusal is what the test watches.
+        let (addr, metrics) = serve_tls(
+            limits,
+            cap_timers(wait),
+            &server_tls,
+            Duration::from_secs(20),
+        )
+        .await;
+        // The first connection is served and holds the only place.
+        let mut first = client(addr, &certs.authority.cert(), Some(&certs.client))
+            .await
+            .unwrap();
+        assert_eq!(quick(&mut first).await, Code::NotFound);
+        // A second mTLS client connects: served or refused, the handshake
+        // ends inside the bound either way; the refused count tells which.
+        let started = tokio::time::Instant::now();
+        let second = tokio::time::timeout(
+            wait * 3,
+            raw_connect(addr, &certs.authority.cert(), Some(&certs.client)),
+        )
+        .await
+        .expect("the second handshake ends inside the bound");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < wait * 3,
+            "the second handshake ends inside the bound, took {elapsed:?}"
+        );
+        assert!(
+            second.is_err(),
+            "the second connection is refused, not served"
+        );
+        assert_eq!(quick(&mut first).await, Code::NotFound);
+        assert_eq!(refused_total(&metrics), 1, "the refusal is counted");
+    }
+
+    /// A wait warning is one line per interval under concurrency: of many
+    /// tasks ticking together, exactly one writes, and every wait is
+    /// counted once across the line and the flush.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_wait_warning_is_one_line_under_concurrency() {
+        let warn = WaitWarn::new(Duration::from_secs(3600));
+        let barrier = Arc::new(tokio::sync::Barrier::new(50));
+        let mut waits = Vec::new();
+        for _ in 0..50 {
+            let warn = warn.clone();
+            let barrier = Arc::clone(&barrier);
+            waits.push(tokio::spawn(async move {
+                barrier.wait().await;
+                warn.tick()
+            }));
+        }
+        let mut lines = Vec::new();
+        for wait in waits {
+            if let Some(count) = wait.await.unwrap() {
+                lines.push(count);
+            }
+        }
+        assert_eq!(lines.len(), 1, "one line per interval, not one per task");
+        assert!(
+            (1..=50).contains(&lines[0]),
+            "the line carries the count it covers, got {}",
+            lines[0]
+        );
+    }
+
+    /// The flusher writes the last interval's count even when no new
+    /// connection came, so a count never sits stale.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_wait_count_is_flushed_when_the_interval_passes() {
+        let warn = WaitWarn::new(Duration::from_millis(50));
+        assert_eq!(warn.tick(), Some(1), "the first wait writes at once");
+        assert_eq!(warn.tick(), None, "a wait within the interval is counted");
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(warn.flush(), Some(1), "the interval's count goes out");
+        assert_eq!(warn.flush(), None, "nothing is left to flush");
+    }
+
     /// A peer that connects and sends nothing is closed: it gets no place
     /// for life, though keepalive never starts without the preface.
     #[tokio::test]
@@ -1661,8 +1942,9 @@ mod tests {
         let mut buf = [0u8; 16];
         let ended = tokio::time::timeout(wait * 3, second.read(&mut buf)).await;
         let elapsed = started.elapsed();
-        // Refused: the connection closes with no byte served. (If the
-        // server had served it, the read would still be open here.)
+        // The read ends inside the bound either way: a served connection
+        // also answers its preface at once, so the read alone does not
+        // tell a refusal from a serve. The refused count below does.
         assert!(
             ended.is_ok() && elapsed < wait * 3,
             "the second connection is closed inside the bound, took {elapsed:?}"

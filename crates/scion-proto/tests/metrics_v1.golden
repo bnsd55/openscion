@@ -323,7 +323,7 @@ scion_pg_readers_busy
 # HELP scion_pg_tx_age_seconds Age of the oldest open Postgres read transaction, in seconds.
 # TYPE scion_pg_tx_age_seconds gauge
 scion_pg_tx_age_seconds
-# HELP scion_connections_refused_total Connections the server closed because no place freed within its wait at the connection cap.
+# HELP scion_connections_refused_total Connections the server closed because no place freed within its wait at the connection cap; a client that left while it waited counts here too.
 # TYPE scion_connections_refused_total counter
 scion_connections_refused_total
 # HELP scion_calls_in_flight Calls whose reply body has not ended, as the count a drain still waits for.

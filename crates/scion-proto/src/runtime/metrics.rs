@@ -483,12 +483,14 @@ impl Metrics {
     }
 
     /// The connections a full cap closed: the series an operator reads to
-    /// tell a storm from a cap set too low.
+    /// tell a storm from a cap set too low. A client that left while it
+    /// waited counts here too: the server learns of the leaving only when
+    /// the wait ends.
     fn render_connections(&self, text: &mut String) {
         use std::fmt::Write as _;
         let _ = writeln!(
             text,
-            "# HELP scion_connections_refused_total Connections the server closed because no place freed within its wait at the connection cap.\n\
+            "# HELP scion_connections_refused_total Connections the server closed because no place freed within its wait at the connection cap; a client that left while it waited counts here too.\n\
              # TYPE scion_connections_refused_total counter\n\
              scion_connections_refused_total {}",
             self.connections_refused.load(Ordering::Relaxed)
