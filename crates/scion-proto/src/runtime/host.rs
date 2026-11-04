@@ -25,14 +25,12 @@ pub fn memsize() -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::memsize;
-
     /// The host reports a plausible physical memory: more than a
     /// gigabyte. Where the platform has no such value, nothing is
     /// claimed and the check is empty.
     #[test]
     fn the_host_reports_a_plausible_memory() {
         #[cfg(target_os = "macos")]
-        assert!(memsize().is_some_and(|bytes| bytes > 1 << 30));
+        assert!(super::memsize().is_some_and(|bytes| bytes > 1 << 30));
     }
 }
