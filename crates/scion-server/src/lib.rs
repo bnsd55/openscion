@@ -298,6 +298,13 @@ pub mod test_support {
     pub mod import {
         pub use crate::import::{BUSY_TRIES, CHECKS, STRUCTURE_CAPS};
     }
+    /// The write transaction's history-node buffer: its bound and the
+    /// peak a restore test reads.
+    pub mod pg {
+        pub use crate::pg::{
+            test_history_pending_peak_bytes, test_set_history_pending_bound_for_tests,
+        };
+    }
     /// The memory floor: the check and the path override a test points
     /// at a temporary directory.
     pub mod floor {

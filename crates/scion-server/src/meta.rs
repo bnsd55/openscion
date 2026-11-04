@@ -587,9 +587,8 @@ pub trait MetaTx {
     ) -> Result<std::collections::HashMap<ObjectId, ChangesetId>>;
 
     /// Stores a node of a path history under its content address. Safe to
-    /// repeat. Returns whether the row was new, so a caller can charge only
-    /// bytes that actually landed.
-    fn put_history_node(&mut self, id: NodeId, body: Vec<u8>) -> Result<(NodeId, bool)>;
+    /// repeat.
+    fn put_history_node(&mut self, id: NodeId, body: Vec<u8>) -> Result<NodeId>;
 
     /// Reads a history node's stored bytes, and returns them with the
     /// length of their stored form.

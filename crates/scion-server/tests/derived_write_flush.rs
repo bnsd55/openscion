@@ -326,10 +326,46 @@ fn a_rebasing_lands_history_nodes_ride_the_commit_flush() {
         direct, 0,
         "the rebase's history nodes must wait for the commit flush"
     );
-    assert!(
-        flushed >= 1,
-        "the commit must write the transaction's history nodes with one statement"
+    assert_eq!(
+        flushed, 1,
+        "the commit must write the transaction's history nodes with exactly one statement, \
+         not {flushed}"
     );
+    // The rows are there, not only the statement: the flush wrote the
+    // rebase's nodes into the table, more than the import and the
+    // first land left.
+    let schema = Backend::test_schema(dir.path());
+    let mut client = postgres::Client::connect(
+        &std::env::var("SCION_TEST_POSTGRES_URL").unwrap(),
+        postgres::NoTls,
+    )
+    .unwrap();
+    let count = |client: &mut postgres::Client| -> i64 {
+        let rows = client
+            .query(&format!("SELECT count(*) FROM {schema}.history_nodes"), &[])
+            .unwrap();
+        rows[0].get(0)
+    };
+    let third = make_changeset(&store, repo, tip, "c.txt");
+    let before = count(&mut client);
+    Backend::test_reset_statement_count();
+    let outcome = land_once(&lands, &store, third, "third");
+    assert_eq!(outcome.state, LandState::Landed, "{}", outcome.detail);
+    let flushed_third = Backend::test_statement_log()
+        .iter()
+        .filter(|sql| sql.contains("INSERT INTO history_nodes") && sql.contains("unnest"))
+        .count();
+    let after = count(&mut client);
+    assert!(
+        after > before,
+        "the land's commit flush stored no history nodes: {after} against {before}"
+    );
+    assert_eq!(
+        flushed_third, 1,
+        "the third land's commit wrote its history nodes with exactly one statement, \
+         not {flushed_third}"
+    );
+
     // The landed head's history answers: the flush ran inside the
     // transaction, so a rollback would have kept the rows.
     let head = store
