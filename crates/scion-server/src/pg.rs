@@ -1817,13 +1817,12 @@ fn delete_prefixes(calls: &[(String, i64)], belows: &[i64]) -> (Vec<String>, Vec
     let mut kinds: Vec<String> = Vec::new();
     let mut totals: Vec<i64> = Vec::new();
     for ((kind, step), below) in calls.iter().zip(belows) {
-        let i = match kinds.iter().position(|k| k == kind) {
-            Some(i) => i,
-            None => {
-                kinds.push(kind.clone());
-                totals.push(0);
-                totals.len() - 1
-            }
+        let i = if let Some(i) = kinds.iter().position(|k| k == kind) {
+            i
+        } else {
+            kinds.push(kind.clone());
+            totals.push(0);
+            totals.len() - 1
         };
         totals[i] += (*step).min((*below - totals[i]).max(0));
     }
