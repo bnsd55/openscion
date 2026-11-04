@@ -29,7 +29,7 @@
 //! server's access file knows. A row a second server still needs is
 //! re-derived, at that server's next read.
 
-use scion_core::{ChangesetId, Entry, RepoPath, Tree, TreeId};
+use scion_core::{ChangesetId, Entry, PathElem, RepoPath, Tree, TreeId};
 
 use crate::backend::Backend;
 use crate::deadline::Deadline;
@@ -74,19 +74,21 @@ fn below(ctx: &[Vec<u8>], name: &[u8]) -> Below {
 /// The subtrees derived so far, by (tree ID, context digest), so shared
 /// subtrees are derived once per derivation; the new view trees it built;
 /// and the (real tree, context digest, view) rows it found or derived, for
-/// the one short write that stores them. `bytes` counts the memo's RAM at
-/// every push: past [`VIEW_PART_BYTES`] the pending trees and rows leave
-/// for the store as a part, and past [`VIEW_MAP_BYTES`] the dedupe map
-/// clears, so the memo's RAM at any moment stays under
-/// [`VIEW_MEMO_BYTES`], the share it reserved.
+/// the one short write that stores them. Two counters bound the memo's
+/// RAM under [`VIEW_MEMO_BYTES`], the share it reserved: `pending` counts
+/// the trees and rows a part has not written yet, and past
+/// [`VIEW_PART_BYTES`] they leave for the store as a part; the dedupe
+/// map's cost is its entry count, and past [`VIEW_MAP_BYTES`] it clears.
 #[derive(Default)]
 struct Memo {
     derived: std::collections::HashMap<(TreeId, [u8; 32]), Option<TreeId>>,
     trees: Vec<Tree>,
     rows: Vec<(TreeId, [u8; 32], TreeId)>,
-    /// The memo's RAM, estimated at every push: the pending trees, rows,
-    /// and the dedupe map together.
-    bytes: usize,
+    /// The bytes of the pending trees and rows, estimated at every push.
+    /// The dedupe map's bytes are its entry count times the entry
+    /// estimate, read where the bound is checked - one counter per thing
+    /// that resets, so a part never leaves the map's cost behind.
+    pending: usize,
     /// Real trees the walk opened, one per directory. A per-tree memo hit
     /// skips its whole subtree, so the count says how much the derivation
     /// really read.

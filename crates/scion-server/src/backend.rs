@@ -376,14 +376,6 @@ impl Backend {
         self.pg.view_memo_budget()
     }
 
-    /// The write transactions this store has run: the tests that count
-    /// the view derivation's part writes read it between derivations.
-    #[cfg(any(test, feature = "test-hooks"))]
-    #[must_use]
-    pub(crate) fn commits(&self) -> u64 {
-        self.pg.commits()
-    }
-
     /// How many writers wait for the write connection.
     #[cfg(test)]
     #[must_use]
