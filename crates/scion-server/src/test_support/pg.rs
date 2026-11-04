@@ -321,7 +321,17 @@ impl Pg {
         // The test store is the one server of its schema: it takes the
         // per-schema one-server lock, and its loss fences the process,
         // exactly as a serve does on the database key.
-        Self::open_in(url, None, readers, data, Some(schema), true, marker, None)
+        Self::open_in(
+            url,
+            None,
+            readers,
+            data,
+            Some(schema),
+            true,
+            marker,
+            None,
+            true,
+        )
     }
     /// [`Pg::open_test`], as a process that does not land: it makes the
     /// schema the same way and takes no one-server lock, and its loss
@@ -336,7 +346,17 @@ impl Pg {
         marker: Marker,
     ) -> Result<Self> {
         prepare_test_schema(url, schema, data)?;
-        Self::open_in(url, None, readers, data, Some(schema), false, marker, None)
+        Self::open_in(
+            url,
+            None,
+            readers,
+            data,
+            Some(schema),
+            false,
+            marker,
+            None,
+            true,
+        )
     }
     /// [`PgClient::open_test_shared`], with the derive walks built for
     /// `flights`: the tests of the walk caps, which change the numbers,
@@ -359,6 +379,7 @@ impl Pg {
             false,
             marker,
             Some(flights),
+            true,
         )
     }
     /// The import's test hooks and busy-retry count.

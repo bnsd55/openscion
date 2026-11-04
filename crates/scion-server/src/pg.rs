@@ -110,6 +110,18 @@ const PG_MIGRATIONS: [&str; PG_SCHEMA_VERSION as usize] = [
     include_str!("../migrations/postgres/0006_land_reason.sql"),
 ];
 
+/// The name of every migration, in the order [`PG_MIGRATIONS`] runs
+/// them: what `migrate --check` prints as the pending steps. One test
+/// keeps the two tables the same length.
+pub(crate) const PG_MIGRATION_NAMES: [&str; PG_SCHEMA_VERSION as usize] = [
+    "0001_init",
+    "0002_view_roots",
+    "0003_view_trees",
+    "0004_store_uuid",
+    "0005_parent_numbering",
+    "0006_land_reason",
+];
+
 /// The fence of a process that lost the one-server lock. The worker of
 /// the exclusive client trips it when a setup that once held the lock no
 /// longer does: another process may serve the database now, while this
@@ -969,10 +981,15 @@ impl Pg {
     /// is checked against this CA (PEM); a CA is required for a host that
     /// is not on this machine.
     ///
+    /// The open does not move the schema: a database that is behind this
+    /// build is refused with the fix named (`scion-server migrate`, or
+    /// `serve --migrate`). A fresh database is created, as before.
+    ///
     /// # Errors
     ///
     /// A URL that does not parse, a database that does not connect, a
-    /// schema of a newer build, or a migration that fails.
+    /// schema of a newer build, a database that is behind this build, or
+    /// a migration that fails.
     pub(crate) fn open(
         url: &str,
         ca: Option<&Path>,
@@ -980,17 +997,18 @@ impl Pg {
         data: &Path,
         marker: Marker,
     ) -> Result<Self> {
-        Self::open_in(url, ca, readers, data, None, false, marker, None)
+        Self::open_in(url, ca, readers, data, None, false, marker, None, false)
     }
 
     /// [`Pg::open`], as the one server process of the database: a second
     /// `serve` or `derive` on the same URL is refused. Import runs beside a
-    /// server, so it opens without the lock.
+    /// server, so it opens without the lock. This is the migrating shape:
+    /// `serve --migrate` runs it, and the schema moves here on purpose.
     ///
     /// # Errors
     ///
     /// As [`Pg::open`], and another process holds the one-server lock.
-    pub(crate) fn open_exclusive(
+    pub(crate) fn open_exclusive_migrating(
         url: &str,
         ca: Option<&Path>,
         readers: usize,
@@ -1001,7 +1019,25 @@ impl Pg {
         // setup asks the database `current_schema()` and locks that, so
         // parallel servers of distinct schemas do not fence each other,
         // and a plain URL fences the whole default schema.
-        Self::open_in(url, ca, readers, data, None, true, marker, None)
+        Self::open_in(url, ca, readers, data, None, true, marker, None, true)
+    }
+
+    /// [`Pg::open_exclusive_migrating`], without the right to move the
+    /// schema: `serve` and `derive` refuse a database that is behind
+    /// this build, with the fix named.
+    ///
+    /// # Errors
+    ///
+    /// As [`Pg::open_exclusive_migrating`], and another process holds
+    /// the one-server lock.
+    pub(crate) fn open_exclusive(
+        url: &str,
+        ca: Option<&Path>,
+        readers: usize,
+        data: &Path,
+        marker: Marker,
+    ) -> Result<Self> {
+        Self::open_in(url, ca, readers, data, None, true, marker, None, false)
     }
 
     /// [`Pg::open`], in the search path of `schema` when it is set.
@@ -1017,6 +1053,10 @@ impl Pg {
         // The derive walks to run with, or the default cap when `None`.
         // The test constructor of the walk caps passes its own.
         flights: Option<crate::derived::DeriveFlights>,
+        // Whether this open may move the schema: true for `serve
+        // --migrate`, `migrate`, and the test openers, false for
+        // everything else.
+        allow_migrate: bool,
     ) -> Result<Self> {
         let options = base_options();
         let fence = Arc::new(Fence::new());
@@ -1029,7 +1069,7 @@ impl Pg {
         } else {
             connect_with(url, ca, &options, schema)?
         };
-        let migrated = migrate(&mut writer)?;
+        let migrated = migrate(&mut writer, allow_migrate)?;
         // The durability of a commit is a promise of this backend: check
         // that the server kept its side of it.
         let on: String = writer.query("SHOW synchronous_commit", &[])?[0].get(0);
@@ -2994,21 +3034,166 @@ fn make_tls(ca: &Path) -> Result<MakeRustlsConnect> {
     Ok(MakeRustlsConnect::new(config))
 }
 
+/// What every store opener answers when the database is behind this
+/// build and the opener may not migrate: the fix is named.
+fn pending_migration_message(db: u32, build: u32) -> String {
+    format!(
+        "the database is at schema version {db}, this build ships {build}; \
+         run `scion-server migrate` first, or pass --migrate to serve"
+    )
+}
+
+/// The schema version the database stands at, read without writing:
+/// version 0 is a database with no schema yet. The check and the open's
+/// pending-migration refusal read it; the migration itself runs under
+/// the schema's lock, and its first step makes the ledger.
+fn schema_version(client: &mut PgClient) -> Result<u32> {
+    let ledger: Option<String> = client
+        .query_opt("SELECT to_regclass('schema_migrations')::text", &[])?
+        .and_then(|row| row.get(0));
+    if ledger.is_none() {
+        return Ok(0);
+    }
+    let version: i64 = client
+        .query("SELECT max(version) FROM schema_migrations", &[])?
+        .first()
+        .and_then(|row| row.get::<_, Option<i64>>(0))
+        .unwrap_or(0);
+    u32::try_from(version).map_err(|_| {
+        Error::FailedPrecondition(format!(
+            "database schema version {version} is not a version"
+        ))
+    })
+}
+
+/// What `migrate --check` reports: the version the database stands at,
+/// this build's version, and the names of the migrations the build
+/// would run. Read without the schema's lock and without writing, so a
+/// check is safe beside a live server.
+pub struct SchemaCheck {
+    db_version: u32,
+    pending: &'static [&'static str],
+}
+
+impl SchemaCheck {
+    /// Whether the database is behind this build: `migrate --check`
+    /// exits non-zero on it, and the names are the steps it would run.
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// The pending migrations' names, in the order `migrate` runs them.
+    #[must_use]
+    pub fn pending(&self) -> &[&'static str] {
+        self.pending
+    }
+
+    /// The version the database stands at.
+    #[must_use]
+    pub fn db_version(&self) -> u32 {
+        self.db_version
+    }
+
+    /// The version this build ships.
+    #[must_use]
+    pub fn build_version(&self) -> u32 {
+        PG_SCHEMA_VERSION
+    }
+}
+
+/// Reads the schema state for `migrate --check`, without the schema's
+/// lock and without writing.
+///
+/// # Errors
+///
+/// What the database returns, and the newer-schema refusal a newer
+/// database gives every opener.
+pub fn check_schema(url: &str, ca: Option<&Path>) -> Result<SchemaCheck> {
+    let mut client = connect_with(url, ca, &base_options(), None)?;
+    let db_version = schema_version(&mut client)?;
+    if db_version > PG_SCHEMA_VERSION {
+        return Err(Error::FailedPrecondition(format!(
+            "database schema version {db_version} is newer than this build \
+             ({PG_SCHEMA_VERSION}); run this build's older server, or upgrade it"
+        )));
+    }
+    Ok(SchemaCheck {
+        db_version,
+        pending: &PG_MIGRATION_NAMES[db_version as usize..],
+    })
+}
+
+/// Runs the migrations on purpose: the same path the open runs, with
+/// the same logs and the same schema lock. The caller records the move
+/// in its audit log.
+///
+/// The schema's one-server lock comes first, held for the migration on
+/// this connection: a live server holds it for its life, so a migrate
+/// beside one refuses before the schema can move under it - a migration
+/// an old server does not know (a rename, a drop) would break the
+/// process that serves. The wait is none: the operator's next step is
+/// stopping the server, not queuing behind it. `serve --migrate` holds
+/// the same lock by its open, so an unattended start keeps working.
+///
+/// # Errors
+///
+/// What the database returns, the newer-schema refusal, the
+/// no-schema refusal, or the one-server lock held by a live server.
+pub fn migrate_store(url: &str, ca: Option<&Path>) -> Result<Option<(u32, u32)>> {
+    let mut client = connect_with(url, ca, &base_options(), None)?;
+    // What the connection actually writes into, whatever the URL
+    // spelled: the same current-schema read the open's exclusive setup
+    // makes, so a plain URL and one that rides `--search_path=public`
+    // take the same lock.
+    let current = client
+        .query("SELECT current_schema()::text", &[])?
+        .into_iter()
+        .next()
+        .and_then(|row| row.get::<_, Option<String>>(0))
+        .ok_or_else(|| {
+            Error::FailedPrecondition(
+                "the URL's search_path names no existing schema; create it first".into(),
+            )
+        })?;
+    // The one-server lock, tried, not waited on: the operator's next
+    // step is stopping the server, not queuing behind it.
+    let held = client
+        .query(
+            "SELECT pg_try_advisory_lock($1)",
+            &[P::i64(schema_lock_key(&current))],
+        )?
+        .into_iter()
+        .next()
+        .is_some_and(|row| row.get::<_, bool>(0));
+    if !held {
+        return Err(Error::FailedPrecondition(format!(
+            "{HOLDER_MESSAGE}; stop the server first"
+        )));
+    }
+    migrate(&mut client, true)
+}
+
 /// Brings the database to this build's schema: runs every migration it has
 /// not run yet, in one transaction each, and refuses a schema of a newer
 /// build. Returns the `(from, to)` versions when it migrated, and `None`
 /// when the database was at this build's version already. A database of
 /// version 0 was no schema at all: the first open creates one, and a
 /// creation moves nothing.
+///
+/// When `allow` is false, a database that is behind this build is
+/// refused instead of migrated: every store opener but `migrate` and
+/// `serve --migrate` passes false, so an upgrade happens when the
+/// operator asks for it.
 #[allow(clippy::needless_pass_by_ref_mut)]
-fn migrate(client: &mut PgClient) -> Result<Option<(u32, u32)>> {
+fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
     // One process at a time migrates: a lock of the session, held across
     // the migrations, so a server and an import started together take
     // turns while the migrations are quick, and the version the loser
     // reads is the one the winner left. A lock past its 5 s clock leaves
     // the taker busy: an open that hits one waits and tries again.
     client.query_opt("SELECT pg_advisory_lock($1)", &[P::i64(SCHEMA_LOCK)])?;
-    let outcome = migrate_under_lock(client);
+    let outcome = migrate_under_lock(client, allow);
     // The lock lives on the client's session: it goes back whatever the
     // migrations did. A client that died mid-migration lost the lock with
     // its connection, and the unlock names a lock the new connection
@@ -3017,8 +3202,10 @@ fn migrate(client: &mut PgClient) -> Result<Option<(u32, u32)>> {
     outcome
 }
 
-/// The migrations themselves, under the session's schema lock.
-fn migrate_under_lock(client: &mut PgClient) -> Result<Option<(u32, u32)>> {
+/// The migrations themselves, under the session's schema lock. `allow`
+/// is the opener's right to move the schema: false turns a behind
+/// database into the refusal that names `scion-server migrate`.
+fn migrate_under_lock(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
     // The ledger of the versions, made first, in its own transaction: a
     // migration that fails leaves the ledger and every version before it.
     client.batch(
@@ -3041,6 +3228,15 @@ fn migrate_under_lock(client: &mut PgClient) -> Result<Option<(u32, u32)>> {
         return Err(Error::FailedPrecondition(format!(
             "database schema version {version} is newer than this build \
              ({PG_SCHEMA_VERSION}); run this build's older server, or upgrade it"
+        )));
+    }
+    // A fresh database (version 0) is made by whatever opens it, as
+    // before; a database that is behind this build moves only when the
+    // opener asked to migrate.
+    if !allow && version != 0 && version < PG_SCHEMA_VERSION {
+        return Err(Error::FailedPrecondition(pending_migration_message(
+            version,
+            PG_SCHEMA_VERSION,
         )));
     }
     if version == PG_SCHEMA_VERSION {
