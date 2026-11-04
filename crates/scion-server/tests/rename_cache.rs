@@ -88,13 +88,29 @@ fn seeded(
     scion_core::ChangesetId,
     scion_core::ChangesetId,
 ) {
+    seeded_sized(3_501, moved, dropped, added)
+}
+
+/// The same, over `files` files: the tests that pin the trim hold
+/// small maps, so the cap is a few hundred bytes, not half a gigabyte.
+fn seeded_sized(
+    files: usize,
+    moved: &[usize],
+    dropped: &[usize],
+    added: &[&str],
+) -> (
+    tempfile::TempDir,
+    Backend,
+    scion_core::ChangesetId,
+    scion_core::ChangesetId,
+) {
     let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     let repo = store.write(|c| c.create_repo(REPO)).unwrap();
     // The blobs the files name exist: the rename search reads the
     // files' bytes to score a pair.
     let mut stored = std::collections::HashSet::new();
-    for i in 0..3_501 {
+    for i in 0..files {
         for content in [format!("first-{i}\n"), format!("second-{i}\n")] {
             let id = BlobId::of(content.as_bytes());
             if stored.insert(id) {
@@ -107,7 +123,7 @@ fn seeded(
         .blobs()
         .put(b"nothing like any file it could pair with\n")
         .unwrap();
-    let mut new_files = snapshot_files(3_501, "second", moved, dropped);
+    let mut new_files = snapshot_files(files, "second", moved, dropped);
     for name in added {
         new_files.insert(
             RepoPath::new(*name).unwrap(),
@@ -232,20 +248,73 @@ fn a_paged_diff_runs_its_rename_search_once() {
 /// A diff never answers from another diff's map: a second diff that
 /// shares the old root but has its own new root runs its own search,
 /// carries none of the first diff's renames, and then answers its own
-/// pages from its own map.
+/// pages from its own map. The checks can fail: the delete the second
+/// diff carries is a path the first diff's map holds a rename for.
 #[test]
 fn a_diff_never_answers_from_another_diffs_map() {
     let _log = log_guard();
     scion_server::test_support::read::test_clear_rename_cache();
-    // The first diff's search fills the cache with its map.
-    let (_dir, store, old_id, renames_id) = seeded(&[1_000], &[], &[]);
+    let dir = scion_server::test_support::private_tempdir();
+    let store = Backend::open_test(dir.path()).unwrap();
+    let repo = store.write(|c| c.create_repo(REPO)).unwrap();
+    // One old root; two new roots over it.
+    let old = Changeset::new(
+        vec![],
+        identity(),
+        None,
+        b"old\n".to_vec(),
+        snapshot_files(3_501, "first", &[], &[]),
+    )
+    .unwrap();
+    // The first diff: `d/0001.txt` becomes `e/0001.txt`, so its map
+    // holds that pair - a pair whose deleted path sits on the second
+    // diff's first page.
+    let renames = Changeset::new(
+        vec![],
+        identity(),
+        None,
+        b"renames\n".to_vec(),
+        snapshot_files(3_501, "second", &[1], &[]),
+    )
+    .unwrap();
+    // The second diff: same old root, its own new root, the same file
+    // deleted with no add to pair with, and an unrelated add.
+    let mut files = snapshot_files(3_501, "second", &[], &[1]);
+    files.insert(
+        RepoPath::new("e/zz.txt").unwrap(),
+        Some(FileState::Regular {
+            content: BlobId::of(b"nothing like any file it could pair with\n"),
+            executable: false,
+        }),
+    );
+    let other = Changeset::new(vec![], identity(), None, b"other\n".to_vec(), files).unwrap();
+    // The blobs the files name exist: the rename search reads the
+    // files' bytes to score a pair.
+    for i in 0..3_501 {
+        for content in [format!("first-{i}\n"), format!("second-{i}\n")] {
+            store.blobs().put(content.as_bytes()).unwrap();
+        }
+    }
+    store
+        .blobs()
+        .put(b"nothing like any file it could pair with\n")
+        .unwrap();
+    let (old_id, renames_id, other_id) = store
+        .write(|c| {
+            let old = tree::store_changeset(c, repo, &old, &mut |_| Ok(0))?.0;
+            let renames = tree::store_changeset(c, repo, &renames, &mut |_| Ok(0))?.0;
+            let other = tree::store_changeset(c, repo, &other, &mut |_| Ok(0))?.0;
+            Ok((old, renames, other))
+        })
+        .unwrap();
+    // The first diff's page with the delete runs its search and
+    // answers the rename; the map is stored for its later pages.
     let first = page(&store, old_id, renames_id, None);
-    let after = first.next_after.clone().unwrap();
-    let second = page(&store, old_id, renames_id, Some(&after));
-    assert_eq!(renames_of(&second), vec![deleted_half(1_000)]);
-    // The second diff: same old root, its own new root, a delete with
-    // no add to pair with and an unrelated add.
-    let (_dir, store, old_id, other_id) = seeded(&[], &[1], &["e/zz.txt"]);
+    assert_eq!(renames_of(&first), vec![deleted_half(1)]);
+    // The second diff's page with the delete asks the cache: its key
+    // carries its own roots, so the cache holds no answer for it, and
+    // its own search runs. The delete carries no rename, though the
+    // first diff's map has one for that path.
     Backend::test_reset_statement_count();
     let own = page(&store, old_id, other_id, None);
     let own_search = Backend::test_statement_count();
@@ -254,7 +323,8 @@ fn a_diff_never_answers_from_another_diffs_map() {
         "the second diff's entries carry none of the first diff's renames"
     );
     // The same diff again: it answers from its own map, which the
-    // first page stored, and never from the first diff's map.
+    // first page stored, and never from the first diff's map. The
+    // saved statements are the proof a map answered.
     Backend::test_reset_statement_count();
     let again = page(&store, old_id, other_id, None);
     let own_map = Backend::test_statement_count();
@@ -279,14 +349,96 @@ fn an_evicted_map_costs_a_search_and_answers_the_same() {
     let searched = page(&store, old_id, new_id, Some(&after_first));
     assert_eq!(renames_of(&searched), vec![deleted_half(1_000)]);
     // The cache forgets: the page runs its own search, and answers the
-    // same renames.
+    // same renames. The proof it searched is that the same page with
+    // its map present ran fewer statements.
+    Backend::test_reset_statement_count();
+    let with_map = page(&store, old_id, new_id, Some(&after_first));
+    let hit = Backend::test_statement_count();
+    assert_eq!(renames_of(&with_map), renames_of(&searched));
     scion_server::test_support::read::test_clear_rename_cache();
     Backend::test_reset_statement_count();
     let again = page(&store, old_id, new_id, Some(&after_first));
     let searched_again = Backend::test_statement_count();
     assert_eq!(renames_of(&again), renames_of(&searched));
     assert!(
-        searched_again > 0,
-        "the page after the eviction ran its own search"
+        searched_again > hit,
+        "the page after the eviction ran its own search: {searched_again} \
+         against the map's {hit}"
+    );
+}
+
+/// The key's path part keeps two scopes' maps apart: the page scoped
+/// to `d` stores its own map, and the unscoped diff still finds the
+/// rename whose added half sits outside `d`.
+#[test]
+fn a_scope_and_the_whole_diff_hold_different_maps() {
+    let _log = log_guard();
+    scion_server::test_support::read::test_clear_rename_cache();
+    let (_dir, store, old_id, new_id) = seeded(&[1_000], &[], &[]);
+    let scope = RepoPath::new("d").unwrap();
+    // The scoped page: the deleted half sits below `d`, its added half
+    // above it, so the scoped search finds no pair and stores a map
+    // with no renames.
+    let scoped = scion_server::test_support::read::diff(
+        &store,
+        REPO,
+        old_id,
+        new_id,
+        Some(&scope),
+        None,
+        &later(),
+    )
+    .unwrap();
+    assert!(scoped.entries.iter().all(|entry| entry.rename.is_none()));
+    // The unscoped diff: its map is its own, so the rename answers.
+    let whole = page(&store, old_id, new_id, None);
+    let after = whole.next_after.clone().unwrap();
+    let second = page(&store, old_id, new_id, Some(&after));
+    assert_eq!(renames_of(&second), vec![deleted_half(1_000)]);
+}
+
+/// The cap trims the oldest map when a new one passes it: the newest
+/// map survives, the oldest goes, and a page after it runs its own
+/// search. The cap rides the first map's measured bytes, so the test
+/// pins the trim at any map size.
+#[test]
+fn a_map_past_the_cap_evicts_the_oldest() {
+    let _log = log_guard();
+    scion_server::test_support::read::test_clear_rename_cache();
+    let (_dir, store, old_id, new_id) = seeded(&[1_000, 3_000], &[], &[]);
+    let page_one = page(&store, old_id, new_id, None);
+    let after_one = page_one.next_after.clone().unwrap();
+    // The page with the first rename's deleted half: its search runs
+    // and its map is stored for the pages after it.
+    let first = page(&store, old_id, new_id, Some(&after_one));
+    assert_eq!(renames_of(&first), vec![deleted_half(1_000)]);
+    let (maps, bytes) = scion_server::test_support::read::test_rename_cache_size();
+    assert_eq!(maps, 1);
+    assert!(bytes > 0);
+    // The cap sits just over the stored map: the next map cannot fit
+    // beside it, and the stored one is the older.
+    let _cap =
+        scion_server::test_support::read::test_set_rename_cache_cap_for_tests(usize::try_from(bytes).unwrap() + 8);
+    let (_dir, other_store, other_old, other_new) = seeded(&[1_000], &[], &[]);
+    let other_one = page(&other_store, other_old, other_new, None);
+    let other_after = other_one.next_after.clone().unwrap();
+    let other = page(&other_store, other_old, other_new, Some(&other_after));
+    assert_eq!(renames_of(&other), vec![deleted_half(1_000)]);
+    // The newest map survived; the oldest went.
+    let (maps, _) = scion_server::test_support::read::test_rename_cache_size();
+    assert_eq!(maps, 1);
+    // A page of the evicted diff runs its own search: more statements
+    // than the survivor's hit.
+    Backend::test_reset_statement_count();
+    let _survivor = page(&other_store, other_old, other_new, Some(&other_after));
+    let survivor_hit = Backend::test_statement_count();
+    Backend::test_reset_statement_count();
+    let evicted = page(&store, old_id, new_id, Some(&after_one));
+    let evicted_search = Backend::test_statement_count();
+    assert_eq!(renames_of(&evicted), renames_of(&first));
+    assert!(
+        survivor_hit < evicted_search,
+        "the survivor's map answers and the evicted diff's does not: \
+         {survivor_hit} against {evicted_search}"
     );
 }

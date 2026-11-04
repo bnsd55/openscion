@@ -330,13 +330,13 @@ const STEPS: Steps = Steps {
 
 /// How many changesets one graph query may visit before it fails with
 /// [`Error::ResourceExhausted`]. A visit is one move of the walk: the
-/// search taking a link or a history, the paint taking a merge. The
-/// measured cost of a visit is a line in the changesets - the woven
-/// history on the runner read 50 statements over 10,001 changesets in
-/// 67.8 ms, about 6.8 microseconds a visit - so a million visits is
-/// about seven seconds of walk: far above what any honest query here
-/// spends, and far below the 600 s call deadline. A query past the
-/// bound stops instead of holding a read slot to its deadline.
+/// search taking a link or a history, the paint taking a merge. A
+/// move takes at least one changeset, so a query at this bound has
+/// visited at least a million changesets - at the runner's measured
+/// 6.8 microseconds a changeset on the woven history, about seven
+/// seconds of walk: far above what any honest query here spends, and
+/// far below the 600 s call deadline. A query past the bound stops
+/// instead of holding a read slot to its deadline.
 pub(crate) const GRAPH_QUERY_MAX_VISITS: usize = 1_000_000;
 
 /// Makes the moves of a walk with `next` until it gives the answer, in
@@ -381,7 +381,11 @@ fn in_steps<T>(
     // As `Store::read`: the reply waits until each commit that a step could
     // see is durable, with one flush for all steps.
     store.wait_durable(seen)?;
-    let Cost { reads, steps, .. } = cost;
+    let Cost {
+        reads,
+        steps,
+        visits,
+    } = cost;
     match &result {
         Err(Error::DeadlineExceeded(why)) => {
             tracing::info!(reads, steps, %why, "a graph query stopped at its deadline");
@@ -389,7 +393,10 @@ fn in_steps<T>(
         Err(Error::Cancelled(why)) => {
             tracing::info!(reads, steps, %why, "a graph query stopped: its call went");
         }
-        _ => tracing::debug!(reads, steps, "graph query"),
+        Err(Error::ResourceExhausted(why)) => {
+            tracing::info!(reads, steps, visits, %why, "a graph query stopped at its bound");
+        }
+        _ => tracing::debug!(reads, steps, visits, "graph query"),
     }
     result.map(|answer| (answer, cost))
 }
@@ -923,7 +930,7 @@ mod tests {
         // bound rides this test's own Steps, so no other test's walk
         // answers to it.
         let bounded = Steps {
-            reads: 1_000,
+            reads: 4,
             visits: 2,
         };
         let (found, _) = in_steps(

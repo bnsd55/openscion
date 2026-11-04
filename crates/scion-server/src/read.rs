@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Bound;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -608,10 +608,12 @@ struct RenameKey {
     rename_entries: usize,
 }
 
-/// A stored rename map: the map, whether renames may be missing, its
-/// cost in bytes, and the last time a page asked for it.
+/// A stored rename map: the map shared with its readers, whether
+/// renames may be missing, its cost in bytes, and the last time a page
+/// asked for it. The map is shared, so a page answers from the entry
+/// without a copy, whatever its size.
 struct CachedRenames {
-    map: HashMap<RepoPath, Rename>,
+    map: std::sync::Arc<HashMap<RepoPath, Rename>>,
     incomplete: bool,
     bytes: usize,
     asked: Instant,
@@ -626,7 +628,21 @@ const RENAME_CACHE_TTL: Duration = Duration::from_secs(600);
 /// [`MAX_RENAME_ENTRIES`] diff costs about 150 MB (its own comment
 /// carries the arithmetic), so 512 MiB holds a few of the largest maps
 /// a server may see, or many more of the small ones most diffs are.
+fn rename_cache_max_bytes() -> usize {
+    #[cfg(any(test, feature = "test-hooks"))]
+    {
+        let small = RENAME_CACHE_MAX_BYTES_OVERRIDE.load(Ordering::Relaxed);
+        if small != 0 {
+            return small;
+        }
+    }
+    RENAME_CACHE_MAX_BYTES
+}
+
 const RENAME_CACHE_MAX_BYTES: usize = 512 << 20;
+
+#[cfg(any(test, feature = "test-hooks"))]
+static RENAME_CACHE_MAX_BYTES_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
 
 static RENAME_CACHE: std::sync::LazyLock<Mutex<HashMap<RenameKey, CachedRenames>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -671,7 +687,12 @@ fn publish_cache_bytes(maps: &HashMap<RenameKey, CachedRenames>) {
 }
 
 /// Drops the entries that no page asked for within the TTL, unless
-/// `all`, which drops everything (the tests' reset).
+/// `all`, which drops everything (the tests' reset). The sweep runs
+/// when the cache is called - a server whose diffs all ended holds its
+/// last maps until the next diff or the cap's trim (SHORTCUT: no
+/// timer, so an idle server may hold up to `RENAME_CACHE_MAX_BYTES` of
+/// ended diffs' maps for their TTL's length; the upgrade is a sweep on
+/// the runtime's own interval).
 fn evict_expired(maps: &mut HashMap<RenameKey, CachedRenames>, all: bool) {
     if all {
         maps.clear();
@@ -683,7 +704,7 @@ fn evict_expired(maps: &mut HashMap<RenameKey, CachedRenames>, all: bool) {
 
 /// Drops the oldest entries until the stored maps fit the cap.
 fn trim_to_cap(maps: &mut HashMap<RenameKey, CachedRenames>) {
-    while cache_bytes(maps) > RENAME_CACHE_MAX_BYTES {
+    while cache_bytes(maps) > rename_cache_max_bytes() {
         let Some(oldest) = maps
             .iter()
             .min_by_key(|(_, cached)| cached.asked)
@@ -696,27 +717,34 @@ fn trim_to_cap(maps: &mut HashMap<RenameKey, CachedRenames>) {
 }
 
 /// The map for `key`, refreshing its stamp, or `None` when the cache
-/// holds none: the page then runs its own search.
-fn cached_renames(key: &RenameKey) -> Option<(HashMap<RepoPath, Rename>, bool)> {
+/// holds none: the page then runs its own search. The map hands out
+/// shared, so a page never copies one under the lock.
+fn cached_renames(key: &RenameKey) -> Option<(std::sync::Arc<HashMap<RepoPath, Rename>>, bool)> {
     let mut maps = rename_cache_lock();
     evict_expired(&mut maps, false);
-    let cached = maps.get_mut(key)?;
-    cached.asked = Instant::now();
-    let map = cached.map.clone();
-    let incomplete = cached.incomplete;
+    let answer = match maps.get_mut(key) {
+        Some(cached) => {
+            cached.asked = Instant::now();
+            Some((std::sync::Arc::clone(&cached.map), cached.incomplete))
+        }
+        None => None,
+    };
+    // The gauge follows every path: a miss that evicted nothing still
+    // says what the cache holds now.
     publish_cache_bytes(&maps);
-    Some((map, incomplete))
+    answer
 }
 
 /// Stores a whole diff's map, keeping the cache under its cap.
 fn store_renames(key: RenameKey, map: HashMap<RepoPath, Rename>, incomplete: bool) {
     let mut maps = rename_cache_lock();
     evict_expired(&mut maps, false);
+    let bytes = map_bytes(&map);
     maps.insert(
         key,
         CachedRenames {
-            bytes: map_bytes(&map),
-            map,
+            bytes,
+            map: std::sync::Arc::new(map),
             incomplete,
             asked: Instant::now(),
         },
@@ -737,13 +765,30 @@ fn forget_renames(key: &RenameKey) {
     }
 }
 
-/// The tests' reset of the cache: every map goes, so a page after it
-/// runs its own search.
+/// The tests' reset of the cache: every map goes and the cap returns
+/// to the server's, so a page after it runs its own search and no
+/// test's small cap reaches another test's maps.
 #[cfg(any(test, feature = "test-hooks"))]
 pub fn test_clear_rename_cache() {
     let mut maps = rename_cache_lock();
     evict_expired(&mut maps, true);
+    RENAME_CACHE_MAX_BYTES_OVERRIDE.store(0, Ordering::Relaxed);
     publish_cache_bytes(&maps);
+}
+
+/// Holds a small byte cap for the tests that pin the trim: the next
+/// stored map past it evicts the oldest. The guard puts the server's
+/// cap back.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn test_set_rename_cache_cap_for_tests(bytes: usize) -> impl Drop {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            RENAME_CACHE_MAX_BYTES_OVERRIDE.store(0, Ordering::Relaxed);
+        }
+    }
+    RENAME_CACHE_MAX_BYTES_OVERRIDE.store(bytes, Ordering::Relaxed);
+    Reset
 }
 
 /// The tests read the cache's size: the entries and the bytes, as the
@@ -830,11 +875,14 @@ pub fn diff_with(
                     entry.rename = renames.get(&entry.path).cloned();
                 }
                 // A diff whose pages go on stores its map for the pages
-                // after this one. An incomplete map would promise
-                // renames it did not find; the pages rerun the search
-                // instead.
-                if next_after.is_some() && !incomplete {
-                    store_renames(key.clone(), renames.clone(), incomplete);
+                // after this one, its incompleteness with it: the
+                // search is deterministic, so a page that answers from
+                // a stored incomplete map says the same
+                // renames_incomplete the searching page did, and the
+                // heaviest diffs (the ones past the search's budget)
+                // still cost one search, not one a page.
+                if next_after.is_some() {
+                    store_renames(key.clone(), renames, incomplete);
                 }
             }
         }
