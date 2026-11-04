@@ -151,9 +151,86 @@ pub(crate) struct Pg {
     inner: Arc<PgInner>,
 }
 
+/// How many slot holders may take the write client ahead of other
+/// waiting writers before the lane must let one through: a stream of
+/// settles must not starve the record commits that feed it.
+const WRITER_LANE_AHEAD: usize = 4;
+
+/// The write lane's state: who holds the write client, who waits, and
+/// how the lane orders them. A land that holds its ref's lock (the
+/// settle's commit and the sweep's reject; the finish's reads ride the
+/// read pool now) enters ahead of other waiting writers, because its
+/// wait costs the whole queue of its ref; the bound keeps the other
+/// writers moving. Without a slot holder waiting, the lane is today's
+/// plain queue.
+#[derive(Default)]
+struct WriterGate {
+    /// The write client is out with a transaction.
+    taken: bool,
+    /// Takers not yet released: waiting or granted. The derivation
+    /// step's wait watches this one.
+    waiting: usize,
+    /// Slot holders that wait, not granted yet.
+    holders_waiting: usize,
+    /// Other writers that wait, not granted yet.
+    plain_waiting: usize,
+    /// Slot holders granted since the last other writer was.
+    holders_ahead: usize,
+}
+
+/// Whether a taker of this class may take the client now: a slot
+/// holder goes while the other writers have not earned the bound's
+/// mercy, and an other writer goes when no slot holder waits or after
+/// the bound's run of slot holders.
+fn lane_admits(gate: &WriterGate, slot_holder: bool) -> bool {
+    if slot_holder {
+        gate.plain_waiting == 0 || gate.holders_ahead < WRITER_LANE_AHEAD
+    } else {
+        gate.holders_waiting == 0 || gate.holders_ahead >= WRITER_LANE_AHEAD
+    }
+}
+
 struct PgInner {
-    /// The write client, for every commit and [`Pg::read_unflushed`].
+    /// The write client, for every commit and [`Pg::read_unflushed`]. The
+    /// gate below decides who holds it when; the invariants this one
+    /// client keeps are listed on [`WriterGate`], where the queue lives.
     writer: Mutex<PgClient>,
+    /// The write lane's gate: who may take the write client next, and
+    /// when it is out. The one write client keeps these invariants, in
+    /// words, so the next change to this lock reads them here:
+    ///
+    /// - Write transactions are serial. One client means two write
+    ///   transactions of this process never run their statements side by
+    ///   side, so they cannot deadlock on row locks and cannot read each
+    ///   other's uncommitted state. The gate grants one taker at a time.
+    /// - Every write transaction takes the collector's advisory key
+    ///   (`pg_advisory_xact_lock(hashtext(current_schema() || ':gc'))`)
+    ///   and holds it to the transaction's end, with the lock-timeout
+    ///   layering that rides it: the 60 s guard set before the key's
+    ///   statement, the 5 s writer clock set with it for the rest of the
+    ///   transaction. The collector's re-read pins the blobs a writer
+    ///   just put.
+    /// - A changeset's generation is computed inside the transaction
+    ///   that inserts it (the parents' generations read there, the
+    ///   child's written as their max + 1), so no other write can slip
+    ///   a sibling in between.
+    /// - The land's settle runs its row writes and the ref's CAS in one
+    ///   transaction, and the verdict path re-reads the ref in the same
+    ///   transaction as the land row's update: a ref that moved aborts
+    ///   the verdict and the land replans.
+    /// - The land row's update is guarded by `state = 'pending'`: a twin
+    ///   call that settles first is stopped there.
+    /// - The fence lives in this client's session: the process knows it
+    ///   still owns the store because this session holds the one-server
+    ///   lock, and every commit checks the fence before it runs.
+    /// - A transaction that held changeset or derived rows without the
+    ///   flush rolls back and refuses; the write order is changesets,
+    ///   parents, membership, derived, history, git imports.
+    /// - The waiting count lets a derivation step wait while writers
+    ///   wait, so a steady stream of writers delays a cold read up to
+    ///   its deadline, never a land.
+    writer_gate: Mutex<WriterGate>,
+    writer_woken: Condvar,
     /// Set when this process lost the one-server lock: every read and
     /// write of this backend fails from then on, and the server that
     /// holds the backend exits (the [`Fence`]).
@@ -169,11 +246,6 @@ struct PgInner {
     readers: Readers,
     /// The blob folder: blob files stay on local disk in every backend.
     blobs: Blobs,
-    /// Writers that wait for the write client: the derivation walk waits
-    /// while they wait, so a steady stream of writers delays a cold read
-    /// up to its deadline, never a land ([#142]).
-    writers: Mutex<usize>,
-    write_woken: Condvar,
     /// The walks in flight of this backend's derivations.
     derive: crate::derived::DeriveFlights,
     /// The import's test hooks and busy-retry count.
@@ -975,8 +1047,8 @@ impl Pg {
             migrated,
             readers: Readers::new_with(readers, url, ca, &options, schema)?,
             blobs,
-            writers: Mutex::new(0),
-            write_woken: Condvar::new(),
+            writer_gate: Mutex::new(WriterGate::default()),
+            writer_woken: Condvar::new(),
             derive: flights.unwrap_or_else(|| {
                 crate::derived::DeriveFlights::new(crate::store::DERIVE_WALKS_CAP)
             }),
@@ -1092,12 +1164,14 @@ impl Pg {
     }
 
     /// A read on the write client, so it sees the caller's own commits.
+    /// The land's finish reads now ride the read pool (`read_latest`), so
+    /// the lane serves only the writes that hold their ref's slot.
     pub(crate) fn read_unflushed<T>(
         &self,
         f: impl FnOnce(&mut PgTx<'_>) -> Result<T>,
     ) -> Result<T> {
         self.check_fenced()?;
-        let (mut writer, _waiting) = self.lock_writer();
+        let (mut writer, _waiting) = self.lock_writer(false);
         let mut pending = Vec::new();
         let mut derived = DerivedPending::default();
         let mut preload = std::collections::HashMap::new();
@@ -1211,8 +1285,29 @@ impl Pg {
     ///
     /// What `f` returns, or a database error from begin or commit.
     pub(crate) fn commit<T>(&self, f: impl FnOnce(&mut PgTx<'_>) -> Result<T>) -> Result<T> {
+        self.commit_in_lane(f, false)
+    }
+
+    /// [`Pg::commit`], as a caller that holds its ref's slot: the
+    /// transaction enters the write lane ahead of other waiting
+    /// writers, within the lane's bound. What the slot holder writes is
+    /// what its ref's next land needs, and its wait costs the whole
+    /// queue of its ref, so it stops queueing behind writers it does
+    /// not depend on.
+    pub(crate) fn commit_for_slot_holder<T>(
+        &self,
+        f: impl FnOnce(&mut PgTx<'_>) -> Result<T>,
+    ) -> Result<T> {
+        self.commit_in_lane(f, true)
+    }
+
+    fn commit_in_lane<T>(
+        &self,
+        f: impl FnOnce(&mut PgTx<'_>) -> Result<T>,
+        slot_holder: bool,
+    ) -> Result<T> {
         self.check_fenced()?;
-        let (mut writer, _waiting) = self.lock_writer();
+        let (mut writer, _waiting) = self.lock_writer(slot_holder);
         // A write transaction runs at READ COMMITTED, the Postgres
         // default: every change of the caller checks the newest state of
         // the row it touches (the CAS predicates).
@@ -1406,18 +1501,47 @@ impl Pg {
     /// writers delays a cold read up to its deadline, never a land
     /// ([#142]). The count falls when the client is back, so a walk step
     /// that ends hands the client to a writer, not to its own next step.
-    fn lock_writer(&self) -> (MutexGuard<'_, PgClient>, PgWriteWaiter<'_>) {
-        *self
+    /// Takes the write client for one transaction, through the lane:
+    /// `slot_holder` marks a caller that holds its ref's slot (the
+    /// settle's commit and the sweep's reject), which enters ahead of
+    /// other waiting writers, within the lane's bound. The invariants
+    /// the one client keeps are listed on [`PgInner`'s gate
+    /// field](Self::writer_gate).
+    fn lock_writer(&self, slot_holder: bool) -> (MutexGuard<'_, PgClient>, PgWriteWaiter<'_>) {
+        let mut gate = self
             .inner
-            .writers
+            .writer_gate
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) += 1;
+            .unwrap_or_else(PoisonError::into_inner);
+        gate.waiting += 1;
+        if slot_holder {
+            gate.holders_waiting += 1;
+        } else {
+            gate.plain_waiting += 1;
+        }
+        while gate.taken || !lane_admits(&gate, slot_holder) {
+            gate = self
+                .inner
+                .writer_woken
+                .wait(gate)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        gate.taken = true;
+        if slot_holder {
+            gate.holders_waiting -= 1;
+            gate.holders_ahead += 1;
+        } else {
+            gate.plain_waiting -= 1;
+            gate.holders_ahead = 0;
+        }
+        let writer = self
+            .inner
+            .writer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         (
-            self.inner
-                .writer
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-            PgWriteWaiter(&self.inner.writers, &self.inner.write_woken),
+            writer,
+            PgWriteWaiter(&self.inner.writer_gate, &self.inner.writer_woken),
         )
     }
 
@@ -1430,11 +1554,25 @@ impl Pg {
     #[cfg(test)]
     #[must_use]
     pub(crate) fn writers_waiting(&self) -> usize {
-        *self
-            .inner
-            .writers
+        self.inner
+            .writer_gate
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .waiting
+    }
+
+    /// The lane's queue, for the tests: the slot holders and the other
+    /// writers that wait, not granted yet.
+    #[cfg(test)]
+    #[allow(dead_code)] // the lane tests read it through Backend
+    #[must_use]
+    pub(crate) fn writer_lane_waiting(&self) -> (usize, usize) {
+        let gate = self
+            .inner
+            .writer_gate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        (gate.holders_waiting, gate.plain_waiting)
     }
 
     /// Waits while writers wait for the write client, until the deadline.
@@ -1446,27 +1584,27 @@ impl Pg {
         &self,
         deadline: Option<&crate::deadline::Deadline>,
     ) -> Result<()> {
-        let mut waiting = self
+        let mut gate = self
             .inner
-            .writers
+            .writer_gate
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        while *waiting > 0 {
+        while gate.waiting > 0 {
             let Some(deadline) = deadline else {
-                waiting = self
+                gate = self
                     .inner
-                    .write_woken
-                    .wait(waiting)
+                    .writer_woken
+                    .wait(gate)
                     .unwrap_or_else(PoisonError::into_inner);
                 continue;
             };
             let budget = deadline.remaining();
             let (guard, timed_out) = self
                 .inner
-                .write_woken
-                .wait_timeout_while(waiting, budget, |waiting| *waiting > 0)
+                .writer_woken
+                .wait_timeout_while(gate, budget, |gate| gate.waiting > 0)
                 .unwrap_or_else(PoisonError::into_inner);
-            waiting = guard;
+            gate = guard;
             if timed_out.timed_out() {
                 return Err(Error::DeadlineExceeded(
                     "the call ran past its deadline".to_owned(),
@@ -1479,12 +1617,16 @@ impl Pg {
 
 /// The count of a taken write client, while it is taken: it falls, and
 /// wakes the waiters, when the client is back.
-struct PgWriteWaiter<'a>(&'a Mutex<usize>, &'a Condvar);
+// SHORTCUT: one condvar, notify_all, so a release wakes every waiting
+// writer and a commit costs O(waiters) wake-ups. Per-class condvars if
+// waiting writers often pass ~50.
+struct PgWriteWaiter<'a>(&'a Mutex<WriterGate>, &'a Condvar);
 
 impl Drop for PgWriteWaiter<'_> {
     fn drop(&mut self) {
-        let mut waiting = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        *waiting -= 1;
+        let mut gate = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        gate.taken = false;
+        gate.waiting -= 1;
         self.1.notify_all();
     }
 }
@@ -5564,6 +5706,198 @@ pub(crate) mod pool_tests {
         let again = store.write(|c| c.insert_changeset(repo, &cs)).unwrap();
         assert_eq!(again, id);
     }
+
+    /// The lane's admission rule, on its own: a slot holder goes ahead
+    /// of other waiting writers, an other writer goes when no slot
+    /// holder waits or after the bound's run of slot holders, and with
+    /// no slot holder in the lane the rule is today's plain queue.
+    #[test]
+    fn the_write_lane_admits_by_the_bound() {
+        let gate = |holders_waiting: usize, plain_waiting: usize, holders_ahead: usize| {
+            super::WriterGate {
+                taken: false,
+                waiting: holders_waiting + plain_waiting,
+                holders_waiting,
+                plain_waiting,
+                holders_ahead,
+            }
+        };
+        // A slot holder passes queued other writers while the bound is
+        // not reached.
+        assert!(super::lane_admits(&gate(0, 3, 0), true));
+        assert!(super::lane_admits(&gate(0, 3, 3), true));
+        // At the bound, the next other writer goes first.
+        assert!(!super::lane_admits(
+            &gate(0, 1, super::WRITER_LANE_AHEAD),
+            true
+        ));
+        assert!(super::lane_admits(
+            &gate(1, 1, super::WRITER_LANE_AHEAD),
+            false
+        ));
+        // After that writer, the holders go on.
+        assert!(super::lane_admits(&gate(2, 0, 0), true));
+        // An other writer with no slot holder waiting goes at once: the
+        // lane is the plain queue when no land holds a slot.
+        assert!(super::lane_admits(&gate(0, 1, 0), false));
+        // A slot holder with no other writer waiting goes at once.
+        assert!(super::lane_admits(&gate(1, 0, 0), true));
+    }
+
+    /// A slot holder's commit enters ahead of the other writers that
+    /// wait for the write client: the write client is held by a slow
+    /// transaction, five other writers and one slot holder queue behind
+    /// it, and the slot holder's commit completes before any of the
+    /// five.
+    #[test]
+    fn a_slot_holders_commit_enters_ahead_of_the_write_queue() {
+        use crate::test_support::meta::Meta as _;
+        let _slot = super::damage::slot();
+        let dir = crate::test_support::private_tempdir();
+        let store = Arc::new(crate::Backend::open_test(dir.path()).unwrap());
+        let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let holder = {
+            let store = Arc::clone(&store);
+            let hold = Arc::clone(&hold);
+            let release = Arc::clone(&release);
+            std::thread::spawn(move || {
+                store
+                    .write(|_| {
+                        hold.store(true, std::sync::atomic::Ordering::Release);
+                        while !release.load(std::sync::atomic::Ordering::Acquire) {
+                            std::thread::sleep(std::time::Duration::from_millis(2));
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+            })
+        };
+        while !hold.load(std::sync::atomic::Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        // Five other writers and one slot holder queue; the slot holder
+        // goes first, then the other writers.
+        let order = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+        let mut threads = Vec::new();
+        for class in ["plain", "plain", "plain", "plain", "plain", "holder"] {
+            let store = Arc::clone(&store);
+            let order = Arc::clone(&order);
+            threads.push(std::thread::spawn(move || {
+                let done = |_c: &mut crate::pg::PgTx<'_>| -> crate::error::Result<()> {
+                    order
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(class);
+                    Ok(())
+                };
+                if class == "holder" {
+                    store.write_slot_holder(done).unwrap();
+                } else {
+                    store.write(done).unwrap();
+                }
+            }));
+        }
+        // All six wait: one slot holder and five other writers.
+        for _ in 0..2_000 {
+            let (holders, plain) = store.writer_lane_waiting();
+            if holders == 1 && plain == 5 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let (holders, plain) = store.writer_lane_waiting();
+        assert_eq!((holders, plain), (1, 5), "the six writers did not queue");
+        release.store(true, std::sync::atomic::Ordering::Release);
+        holder.join().unwrap();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let order = order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(order.len(), 6, "every writer ran: {order:?}");
+        assert_eq!(order[0], "holder", "the slot holder went first: {order:?}");
+    }
+
+    /// The bound: after four slot holders in a row, the next turn is
+    /// the other writer's, so a stream of settles cannot starve the
+    /// record commits that feed it.
+    #[test]
+    fn a_non_slot_writer_is_admitted_within_the_bound() {
+        use crate::test_support::meta::Meta as _;
+        let _slot = super::damage::slot();
+        let dir = crate::test_support::private_tempdir();
+        let store = Arc::new(crate::Backend::open_test(dir.path()).unwrap());
+        let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let holder = {
+            let store = Arc::clone(&store);
+            let hold = Arc::clone(&hold);
+            let release = Arc::clone(&release);
+            std::thread::spawn(move || {
+                store
+                    .write(|_| {
+                        hold.store(true, std::sync::atomic::Ordering::Release);
+                        while !release.load(std::sync::atomic::Ordering::Acquire) {
+                            std::thread::sleep(std::time::Duration::from_millis(2));
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+            })
+        };
+        while !hold.load(std::sync::atomic::Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        // Four slot holders, then one other writer, then one more slot
+        // holder, all queued before the held transaction ends.
+        let order = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+        let mut threads = Vec::new();
+        for class in ["holder", "holder", "holder", "holder", "plain", "holder"] {
+            let store = Arc::clone(&store);
+            let order = Arc::clone(&order);
+            threads.push(std::thread::spawn(move || {
+                let done = |_c: &mut crate::pg::PgTx<'_>| -> crate::error::Result<()> {
+                    order
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(class);
+                    Ok(())
+                };
+                if class == "holder" {
+                    store.write_slot_holder(done).unwrap();
+                } else {
+                    store.write(done).unwrap();
+                }
+            }));
+        }
+        for _ in 0..2_000 {
+            let (holders, plain) = store.writer_lane_waiting();
+            if holders == 5 && plain == 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let (holders, plain) = store.writer_lane_waiting();
+        assert_eq!((holders, plain), (5, 1), "the six writers did not queue");
+        release.store(true, std::sync::atomic::Ordering::Release);
+        holder.join().unwrap();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let order = order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The first four slot holders go, then the other writer, then
+        // the fifth slot holder: the bound held the fifth back.
+        assert_eq!(
+            order.as_slice(),
+            ["holder", "holder", "holder", "holder", "plain", "holder"],
+            "the lane ran the writers in the bound's order"
+        );
+    }
+
     /// A read that runs while a write transaction holds the write
     /// client: the land's outcome check and plan ride it, so a land in
     /// its slot must not wait for another writer's statements. The
