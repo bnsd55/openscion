@@ -1879,8 +1879,12 @@ impl<'a> PgTx<'a> {
         )?;
         let belows: Vec<i64> = belows
             .iter()
-            .map(|row| row.try_get(1))
-            .collect::<std::result::Result<_, _>>()?;
+            .map(|row| {
+                row.try_get::<_, i64>(1).map_err(|error| {
+                    Error::Corrupt(format!("the flush's count is no number: {error}"))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         let calls: Vec<(String, i64)> = kinds.iter().cloned().zip(steps).collect();
         let (kinds, totals) = delete_prefixes(&calls, &belows);
         let deleted = self.c.execute(
