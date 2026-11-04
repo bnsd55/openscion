@@ -90,10 +90,11 @@ compose run --rm certs-init '
 '
 compose run --rm pg-certs-init
 
-# The server flags that name the database. The Postgres host is the
-# network's `postgres`, which is not local, so the CA rides along, and
-# the password is the demo run's own.
-PG_ARGS="--postgres-url postgres://scion:${SCION_DEMO_DB_PASSWORD}@postgres:5432/scion?sslmode=require --postgres-ca /certs/ca.pem"
+# The server flag that names the database's CA. The Postgres host is
+# the network's `postgres`, which is not local, so the CA rides along;
+# the URL itself rides in SCION_POSTGRES_URL, which compose.yml sets
+# for the service, and the password is the demo run's own.
+PG_ARGS="--postgres-ca /certs/ca.pem"
 compose up -d postgres
 for _ in $(seq 1 30); do
     if compose run --rm --entrypoint pg_isready postgres -h postgres -U scion >/dev/null 2>&1; then

@@ -118,8 +118,12 @@ Out of profile. Any of these voids the model:
 4. **Between tiers.** A daemon trusts its upstream and its socket user;
    a cache trusts the public keys it was given. Neither decides who may
    read: the ticket does, wherever it is checked.
-5. **The client machine.** `scn` keeps the token out of files and logs,
-   but the command line is public through `ps`; the environment is not.
+5. **The client machine.** `scn` keeps the token out of files and
+   logs, and refuses the command-line form at start, before any
+   parsing (`ps` makes the command line public); the checked file form
+   and the environment remain
+   (`scn/tests/argv_token.rs::a_command_line_token_is_refused_and_leaks_nowhere_scn_writes`,
+   `scn/tests/argv_secrets.rs::the_argv_form_refuses_and_names_the_file_and_env_forms`).
 6. **The data directory.** Local files answer who may read what only
    through the server; every open refuses a directory that group or
    others can write, and one under a directory another user can change.
@@ -313,11 +317,16 @@ that breaks one is caught.
   every way a reply ends — the reply finishes, the client resets the
   stream, or the connection closes — frees its share. (#586)
   `crates/scion-server/tests/reply_budget_h2.rs`
-- **A restore verifies first, and goes only into an empty store.** It
-  runs the same `verify` a reader runs and refuses on any damage, and it
-  refuses a data directory that already holds a store
-  (`scion-server/tests/archive.rs::a_verify_names_a_blob_whose_bytes_someone_corrupted`,
-  `scion-server/tests/archive.rs::a_restore_refuses_a_data_directory_that_already_holds_a_store`).
+- **A narrowed access file does not cut outstanding tickets.** A ticket
+  holds for at most 15 minutes from signing, by design; to cut one at
+  once, rotate the key. The window and the cut are pinned:
+  `scion-server/tests/access.rs::an_outstanding_ticket_survives_a_narrowed_access_file_until_the_key_rotates`
+- **A partial reader sees real changeset IDs for its view.** A landing
+  on hidden paths moves `main`, and the reader's `ResolveRef` answers
+  the new ID over an unchanged view. The channel is pinned as
+  documented behavior, not closed:
+  `scion-server/tests/access.rs::a_partial_reader_sees_a_hidden_landing_through_the_ref_id`
+
 ## 6. What has no test yet
 
 Each of these is a claim this document makes without a test behind it.
@@ -331,17 +340,8 @@ They become issues as the project moves past alpha.
   duration lets a caller estimate how many principals are configured.
   That is config size, not identity, and the compare itself stays
   constant time; a fixed-worst-case loop would buy nothing else.
-- A narrowed access file does not cut outstanding tickets: they hold
-  for at most 15 minutes from signing, by design (rotate the key to cut
-  at once). The window and the cut are pinned:
-  `scion-server/tests/access.rs::an_outstanding_ticket_survives_a_narrowed_access_file_until_the_key_rotates`
 - TLS revocation, and hostname checks beyond what the CA signs: no
   test; revocation has no issue yet.
-- A partial reader sees real changeset IDs for its view: a landing on
-  hidden paths moves `main`, and the reader's `ResolveRef` answers the
-  new ID over an unchanged view. The channel is pinned as documented
-  behavior, not closed:
-  `scion-server/tests/access.rs::a_partial_reader_sees_a_hidden_landing_through_the_ref_id`
 - The page cache makes a shared blob fast, and the rename of a replaced
   blob frees the old file: two side channels the code does not hide. No
   test can exist here: both are behavior of the operating system and

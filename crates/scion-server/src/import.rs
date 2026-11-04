@@ -92,6 +92,19 @@ thread_local! {
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-hooks"))]
     pub static CHECKS: Cell<usize> = const { Cell::new(0) };
+    /// Tree checks of the transactions a checker reset rolled back: the
+    /// checks the import paid for and then paid again, exactly. A test of
+    /// a rolled-back batch reads it to add the rolled-back checks to one
+    /// pass, so the exact total holds whatever the budget split and how
+    /// many transactions rolled back.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub static ROLLED_CHECKS: Cell<usize> = const { Cell::new(0) };
+    /// Tree checks since the last checker reset, the run of the
+    /// transaction in progress. [`ROLLED_CHECKS`] collects it on a reset.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub static TX_CHECKS: Cell<usize> = const { Cell::new(0) };
     /// A test's lower bound on one commit or tree object's bytes, and on
     /// one tree's entries: the refusal is proved with small objects, and
     /// the product caps stay the documented ones. `None` is the product.
@@ -834,6 +847,14 @@ impl Checker<'_> {
     fn reset_for_retry(&mut self) {
         self.equal.clear();
         self.intact.clear();
+        // The checks this run paid for roll back with the transaction:
+        // the retry runs them again, so they are the import's extra.
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            let since = TX_CHECKS.with(Cell::get);
+            ROLLED_CHECKS.with(|rolled| rolled.set(rolled.get() + since));
+            TX_CHECKS.with(|checks| checks.set(0));
+        }
     }
 
     /// Fails unless the Scion tree `scion` has exactly the names, kinds,
@@ -854,6 +875,8 @@ impl Checker<'_> {
             // cleared did no work.
             #[cfg(any(test, feature = "test-hooks"))]
             CHECKS.with(|checks| checks.set(checks.get() + 1));
+            #[cfg(any(test, feature = "test-hooks"))]
+            TX_CHECKS.with(|checks| checks.set(checks.get() + 1));
             let want = read_tree(self.git, commit, Some(git_id))?;
             let have: BTreeMap<Vec<u8>, Entry> = c
                 .get_tree(scion_id)?

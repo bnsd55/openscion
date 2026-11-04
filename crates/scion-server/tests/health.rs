@@ -59,9 +59,10 @@ fn spawn_with(extra: &[&str], data: &Path, log: &Path) -> Server {
     cmd.arg("--data").arg(data);
     // The same schema the test helpers filled: the server serves the
     // rows the test wrote, not a fresh schema.
-    cmd.arg("--postgres-url").arg(common::postgres_url(data));
+    cmd.env("SCION_POSTGRES_URL", common::postgres_url(data));
     let child = cmd
-        .args(["serve", "--token", common::TOKEN, "--listen", "127.0.0.1:0"])
+        .args(["serve", "--listen", "127.0.0.1:0"])
+        .env("SCION_TOKEN", common::TOKEN)
         .args(extra)
         // Plain log lines, so the address parses without escape codes.
         .env("NO_COLOR", "1")
@@ -469,7 +470,7 @@ async fn after_the_restart(
     fsck.arg("--data").arg(data);
     // The store lives in the database; the URL names the schema the
     // server served.
-    fsck.arg("--postgres-url").arg(common::postgres_url(data));
+    fsck.env("SCION_POSTGRES_URL", common::postgres_url(data));
     let clean = fsck.arg("fsck").output().unwrap();
     assert_eq!(clean.status.code(), Some(0), "fsck is clean");
     drop(again);

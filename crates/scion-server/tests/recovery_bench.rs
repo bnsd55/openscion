@@ -183,15 +183,14 @@ fn start_server_named(work: &std::path::Path, log: &str) -> Child {
     // The child needs the test database, under the data directory's
     // own schema.
     let url = common::postgres_url(&work.join("data"));
-    command.arg("--postgres-url").arg(url);
+    command.env("SCION_POSTGRES_URL", url);
     command
         .arg("--data")
         .arg(work.join("data"))
         .arg("serve")
         .arg("--listen")
         .arg(format!("127.0.0.1:{PORT}"))
-        .arg("--token")
-        .arg(TOKEN)
+        .env("SCION_TOKEN", TOKEN)
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(err))
         .spawn()

@@ -29,27 +29,19 @@ struct Cli {
     /// The data directory. Holds the objects and the backend marker file.
     #[arg(long, global = true, env = "SCION_DATA", default_value = "scion-data")]
     data: PathBuf,
-    /// Serve metadata from Postgres at this URL. The URL holds the
-    /// credentials, so it is never logged. Prefer `--postgres-url-file` or
-    /// `SCION_POSTGRES_URL`: a URL on the command line is readable by every
-    /// local account (`ps`).
-    #[arg(long, global = true, value_name = "URL")]
-    postgres_url: Option<String>,
     /// File with the Postgres URL, read like the access file: the owner
-    /// alone may read it, and a symlink is refused. Give `--postgres-url`
-    /// or `--postgres-url-file`, not both.
+    /// alone may read it, and a symlink is refused. The URL may also ride
+    /// `SCION_POSTGRES_URL`; give one, not both.
     #[arg(
         long,
         global = true,
-        conflicts_with = "postgres_url",
         env = "SCION_POSTGRES_URL_FILE",
         value_name = "FILE"
     )]
     postgres_url_file: Option<PathBuf>,
     /// Verify the certificate of the Postgres server with this CA (PEM).
-    /// Required when `--postgres-url` names a host that is not local.
-    /// The URL may come from any source: `--postgres-url`,
-    /// `--postgres-url-file` or `SCION_POSTGRES_URL`.
+    /// Required when the URL names a host that is not local; the URL may
+    /// come from `--postgres-url-file` or `SCION_POSTGRES_URL`.
     #[arg(long, global = true, value_name = "FILE")]
     postgres_ca: Option<PathBuf>,
     #[command(subcommand)]
@@ -62,33 +54,31 @@ struct ServeArgs {
     /// Address to listen on.
     #[arg(long, default_value = "127.0.0.1:7878")]
     listen: SocketAddr,
-    /// Bearer token that clients must send. Its principal, `default`,
-    /// may read and write every repo. Give `--token`, `--token-file` or
-    /// `--access`, not two. With this, the per-principal quotas are off
+    /// File with the bearer token of the single principal, `default`,
+    /// which may read and write every repo. Give `--token-file` or
+    /// `--access`, not both. With this, the per-principal quotas are off
     /// unless a flag sets one: every client is the same principal, so a
     /// cap would be a global one.
-    #[arg(long, value_name = "TOKEN")]
-    token: Option<String>,
-    /// File with the bearer token of `--token`, read like the access
-    /// file: the owner alone may read it, and a symlink is refused.
-    #[arg(long, conflicts_with_all = ["token", "access"], value_name = "FILE")]
+    #[arg(long, conflicts_with = "access", value_name = "FILE")]
     token_file: Option<PathBuf>,
     /// Access file: tokens with principals, and which repos and paths
-    /// each principal may read and write. Give `--token` or `--access`,
-    /// not both.
+    /// each principal may read and write. Give `--token-file` or
+    /// `--access`, not both.
     #[arg(long, value_name = "FILE")]
     access: Option<PathBuf>,
     /// Most requests one principal may hold at once. With `--access`
-    /// the default is 64; with `--token` the check is off.
+    /// the default is 64; in the single-principal mode the check is
+    /// off.
     #[arg(long)]
     max_principal_requests: Option<NonZeroUsize>,
     /// Most upload bytes one principal may hold in flight. With
-    /// `--access` the default is 536870912 (512 MiB); with `--token`
-    /// the check is off.
+    /// `--access` the default is 536870912 (512 MiB); in the
+    /// single-principal mode the check is off.
     #[arg(long, value_name = "BYTES")]
     max_principal_upload_bytes: Option<NonZeroUsize>,
     /// Most pending lands one principal may hold at once. With
-    /// `--access` the default is 64; with `--token` the check is off.
+    /// `--access` the default is 64; in the single-principal mode the
+    /// check is off.
     #[arg(long)]
     max_principal_pending_lands: Option<NonZeroUsize>,
     /// A land that has been pending for longer than this many seconds is
@@ -162,13 +152,9 @@ enum Command {
     /// Print the BLAKE3 digest of a token, as a `token` line of an access
     /// file wants it. The file holds digests, never tokens.
     HashToken {
-        /// The token to digest. Give `--token` (deprecated: it sits in
-        /// the process list), `--token-file`, `SCION_TOKEN`, or the
-        /// token on stdin.
-        #[arg(long, value_name = "TOKEN")]
-        token: Option<String>,
-        /// File with the token to digest, read like the access file.
-        #[arg(long, conflicts_with = "token", value_name = "FILE")]
+        /// The token to digest. Give `--token-file`, `SCION_TOKEN`, or
+        /// the token on stdin.
+        #[arg(long, value_name = "FILE")]
         token_file: Option<PathBuf>,
     },
     /// Generate an Ed25519 key for the tickets of object reads: writes the
@@ -831,6 +817,25 @@ async fn main() -> anyhow::Result<()> {
         .with_ansi(std::io::stderr().is_terminal())
         .with_writer(std::io::stderr)
         .init();
+    if let Some(removed) = scion_proto::runtime::auth::removed::removed_flag_of(
+        std::env::args_os().skip(1).collect::<Vec<_>>().as_slice(),
+        &[
+            scion_proto::runtime::auth::removed::RemovedFlag {
+                flag: "--token",
+                instead: "pass the token in SCION_TOKEN, in a file with --token-file FILE, or in --access FILE",
+            },
+            scion_proto::runtime::auth::removed::RemovedFlag {
+                flag: "--postgres-url",
+                instead: "pass the URL in SCION_POSTGRES_URL, or in a file with --postgres-url-file FILE",
+            },
+        ],
+    ) {
+        eprintln!(
+            "error: {}",
+            scion_proto::runtime::auth::removed::refusal_text(removed)
+        );
+        std::process::exit(2);
+    }
     let cli = Cli::parse();
     // Every `serve` flag is checked before the data directory opens: a bad
     // flag must not take the data directory's one-server lock, and must
@@ -868,8 +873,7 @@ async fn main() -> anyhow::Result<()> {
                 .with_context(|| format!("cannot create {}", cli.data.display()))?;
             let audit = cli_audit(&cli.data, audit_file.as_deref())?;
             // Restore makes a store, so it needs the URL.
-            let postgres_url =
-                postgres_url_of(cli.postgres_url_file.as_ref(), cli.postgres_url.as_ref())?;
+            let postgres_url = postgres_url_of(cli.postgres_url_file.as_ref())?;
             return restore_command(
                 audit,
                 &cli.data,
@@ -916,17 +920,16 @@ async fn main() -> anyhow::Result<()> {
     // above, and never refuse a missing one. `fsck`'s exit table
     // promises 2 for "could not run", and a missing URL is that case;
     // the other commands fail with the generic open failure's 1.
-    let postgres_url =
-        match postgres_url_of(cli.postgres_url_file.as_ref(), cli.postgres_url.as_ref()) {
-            Ok(url) => url,
-            Err(why) => {
-                if matches!(cli.command, Command::Fsck) {
-                    eprintln!("scion-server fsck: {why:#}");
-                    std::process::exit(2);
-                }
-                return Err(why);
+    let postgres_url = match postgres_url_of(cli.postgres_url_file.as_ref()) {
+        Ok(url) => url,
+        Err(why) => {
+            if matches!(cli.command, Command::Fsck) {
+                eprintln!("scion-server fsck: {why:#}");
+                std::process::exit(2);
             }
-        };
+            return Err(why);
+        }
+    };
     let store = match cli.command {
         Command::Import { .. }
         | Command::CreateRepo { .. }
@@ -1172,9 +1175,10 @@ fn server_tls(
     }
 }
 
-/// The three per-principal caps, as the flags set them. With one principal
-/// (the `--token` mode) a per-principal cap is a global one, so each cap is
-/// off unless a flag sets it; with an access file the defaults apply.
+/// The three per-principal caps, as the flags set them. In the
+/// single-principal mode (one token from the environment or a file) a
+/// per-principal cap is a global one, so each cap is off unless a flag
+/// sets it; with an access file the defaults apply.
 struct Caps {
     quotas: Quotas,
     pending_lands: Option<usize>,
@@ -1245,29 +1249,22 @@ struct ServeFlags {
     mtls: bool,
 }
 
-/// Checks every `serve` flag that a parse alone does not settle: the rules
-/// of `--token` against `--access`, the TLS files, the ticket keys, and the
-/// listen rule (a non-loopback address needs TLS or `--insecure-listen`).
-/// Checks every `serve` flag that a parse alone does not settle: the rules
-/// of `--token` against `--access`, the TLS files, the ticket keys, and the
-/// listen rule (a non-loopback address needs TLS or `--insecure-listen`).
+/// Checks every `serve` flag that a parse alone does not settle: the
+/// token's rules against `--access`, the TLS files, the ticket keys,
+/// and the listen rule (a non-loopback address needs TLS or
+/// `--insecure-listen`).
+/// Checks every `serve` flag that a parse alone does not settle: the
+/// token's rules against `--access`, the TLS files, the ticket keys,
+/// and the listen rule (a non-loopback address needs TLS or
+/// `--insecure-listen`).
 fn serve_flags(args: &ServeArgs) -> anyhow::Result<ServeFlags> {
-    // The token of the flags: the file form, the env, or the argv form,
-    // which warns. The second reply says whether the mode is one token:
-    // with one principal, a per-principal cap is a global one, so the
-    // quotas are off unless a flag sets one.
-    let token = match (&args.token, &args.token_file) {
-        (Some(_), Some(_)) => unreachable!("clap refuses --token with --token-file"),
-        (Some(_), None) => {
-            warn_argv_exposure(
-                "--token",
-                "--token-file (or SCION_TOKEN)",
-                "the argv form is deprecated and goes away in a later release",
-            );
-            args.token.clone()
-        }
-        (None, Some(file)) => Some(secret_file(file)?),
-        (None, None) => std::env::var("SCION_TOKEN")
+    // The token of the flags: the checked file, or the environment. The
+    // second reply says whether the mode is one token: with one
+    // principal, a per-principal cap is a global one, so the quotas are
+    // off unless a flag sets one.
+    let token = match &args.token_file {
+        Some(file) => Some(secret_file(file)?),
+        None => std::env::var("SCION_TOKEN")
             .ok()
             .map(|t| t.trim().to_owned())
             .filter(|t| !t.is_empty()),
@@ -1403,24 +1400,6 @@ async fn serve(
     Ok(())
 }
 
-/// The stderr warning of a secret that arrived on the command line: ps
-/// and `/proc/$$/cmdline` show it to every local account, and it lands
-/// in shell history. The argv form goes away: `--postgres-url` in
-/// v0.2.0 (the owner's call), the rest in a later minor; the
-/// replacement reads a file that the checked read of the access file
-/// protects.
-fn argv_exposure_warning(flag: &str, replacement: &str, removal: &str) -> String {
-    format!(
-        "warning: {flag} put a secret on the command line, which ps and \
-         /proc/$$/cmdline show to every local account, and which lands in \
-         shell history; use {replacement} instead ({removal})"
-    )
-}
-
-fn warn_argv_exposure(flag: &str, replacement: &str, removal: &str) {
-    eprintln!("{}", argv_exposure_warning(flag, replacement, removal));
-}
-
 /// A secret from a file the checked read protects, trimmed: the owner
 /// alone may read it, a symlink is refused, and the directories above
 /// it are checked.
@@ -1434,37 +1413,29 @@ fn secret_file(file: &Path) -> anyhow::Result<String> {
     Ok(token.to_owned())
 }
 
-/// The Postgres URL of the CLI, required: the file form wins (clap
-/// refuses both at once), the argv form warns, the env is quiet. Every
-/// command that opens the store needs one: the metadata has nowhere
-/// else to live. The fields come in one at a time, because a caller
-/// that matched its command out of `Cli` holds a partially moved value.
-fn postgres_url_of(url_file: Option<&PathBuf>, url_arg: Option<&String>) -> anyhow::Result<String> {
+/// The Postgres URL of the CLI, required: a checked file named by
+/// `--postgres-url-file`, or `SCION_POSTGRES_URL`. Every command that
+/// opens the store needs one: the metadata has nowhere else to live.
+/// The fields come in one at a time, because a caller that matched its
+/// command out of `Cli` holds a partially moved value.
+fn postgres_url_of(url_file: Option<&PathBuf>) -> anyhow::Result<String> {
     let url = if let Some(file) = url_file {
         secret_file(file)?
-    } else if let Some(url) = url_arg {
-        warn_argv_exposure(
-            "--postgres-url",
-            "--postgres-url-file (or SCION_POSTGRES_URL)",
-            "--postgres-url will be removed in v0.2.0",
-        );
-        url.clone()
     } else if let Some(url) = std::env::var("SCION_POSTGRES_URL")
         .ok()
         .filter(|u| !u.is_empty())
     {
         url
     } else {
-        anyhow::bail!(
-            "no Postgres URL: give --postgres-url, --postgres-url-file or SCION_POSTGRES_URL"
-        );
+        anyhow::bail!("no Postgres URL: give --postgres-url-file or SCION_POSTGRES_URL");
     };
     Ok(url)
 }
 
-/// The rules of `serve`: exactly one of `--token` (one principal with
-/// every right), `--token-file` (the same principal, from a checked
-/// file) and `--access` (a file of tokens and rules).
+/// The rules of `serve`: exactly one of `--token-file` (one principal
+/// with every right, from a checked file) and `--access` (a file of
+/// tokens and rules). The environment form of the single principal is
+/// `SCION_TOKEN`.
 fn load_access(
     token: Option<String>,
     token_file: Option<PathBuf>,
@@ -1479,7 +1450,7 @@ fn load_access(
         if given == 0 {
             "give --token-file, SCION_TOKEN or --access: serve has no token source"
         } else {
-            "give --token, --token-file or --access, not two"
+            "give --token-file, SCION_TOKEN or --access, not two"
         }
     );
     if let Some(file) = token_file {
@@ -1490,7 +1461,7 @@ fn load_access(
         let trimmed = token.trim();
         anyhow::ensure!(
             !trimmed.is_empty(),
-            "--token must not be empty or whitespace-only"
+            "SCION_TOKEN must not be empty or whitespace-only"
         );
         return Ok((scion_server::Access::single(trimmed), true));
     }
@@ -1611,30 +1582,15 @@ fn make_key_file(out: &Path) -> std::result::Result<scion_server::Keys, anyhow::
 /// Prints the BLAKE3 digest of the token of `hash-token`.
 fn hash_token() -> anyhow::Result<()> {
     let Cli { command, .. } = Cli::parse();
-    let Command::HashToken { token, token_file } = command else {
+    let Command::HashToken { token_file } = command else {
         unreachable!("hash_token handles only the hash-token command")
     };
     // The token's source: the checked file, the env, the argv form (it
     // warns), or stdin, which keeps the token out of the process list
     // and out of the shell history alike.
-    let token = match (&token, &token_file) {
-        (Some(_), Some(_)) => unreachable!("clap refuses --token with --token-file"),
-        (None, Some(file)) => secret_file(file)?,
-        (Some(_), None) => {
-            warn_argv_exposure(
-                "--token",
-                "--token-file, SCION_TOKEN or stdin",
-                "the argv form is deprecated and goes away in a later release",
-            );
-            let token = token.expect("the argv form is given");
-            let trimmed = token.trim();
-            anyhow::ensure!(
-                !trimmed.is_empty(),
-                "a token of only whitespace is no secret"
-            );
-            trimmed.to_owned()
-        }
-        (None, None) => match std::env::var("SCION_TOKEN") {
+    let token = match &token_file {
+        Some(file) => secret_file(file)?,
+        None => match std::env::var("SCION_TOKEN") {
             Ok(env_token) if !env_token.trim().is_empty() => env_token.trim().to_owned(),
             _ => {
                 use std::io::Read as _;
@@ -1645,7 +1601,7 @@ fn hash_token() -> anyhow::Result<()> {
                 let from_stdin = from_stdin.trim().to_owned();
                 anyhow::ensure!(
                     !from_stdin.is_empty(),
-                    "give --token, --token-file, SCION_TOKEN or a token on stdin"
+                    "give --token-file, SCION_TOKEN or a token on stdin"
                 );
                 from_stdin
             }

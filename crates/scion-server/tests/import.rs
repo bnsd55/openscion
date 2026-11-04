@@ -22,7 +22,7 @@ use scion_core::{
 };
 use scion_server::test_support::auth::Caller;
 use scion_server::test_support::deadline::Deadline;
-use scion_server::test_support::import::{BUSY_TRIES, CHECKS};
+use scion_server::test_support::import::{BUSY_TRIES, CHECKS, ROLLED_CHECKS, TX_CHECKS};
 use scion_server::test_support::land::{LandRequest, LandState, Lands};
 use scion_server::test_support::meta::{Meta as _, MetaTx as _, RefState};
 use scion_server::test_support::{read, tree, write};
@@ -900,6 +900,7 @@ fn criss_cross_merges_import_and_the_ref_moves_only_to_descendants() {
 fn server_process(data: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_scion-server"));
     command.arg("--data").arg(data).args(args);
+    command.env("SCION_TOKEN", "t");
     command.env("RUST_LOG", "warn");
     command
 }
@@ -912,19 +913,12 @@ fn import_process_on_postgres(data: &Path, git: &Git, rev: &str, name: &str) -> 
     let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
     let schema = Backend::test_schema(data);
     let sep = if url.contains('?') { '&' } else { '?' };
-    // `--postgres-url` is a flag of the root command, so it goes before
-    // the subcommand.
-    let mut command = server_process(
-        data,
-        &[
-            "--postgres-url",
-            &format!("{url}{sep}options=--search_path%3D{schema}"),
-            "import",
-            "--repo",
-            "r",
-            "--rev",
-            rev,
-        ],
+    // The URL rides the environment (no binary takes a secret as a
+    // flag); its options carry this directory's schema.
+    let mut command = server_process(data, &["import", "--repo", "r", "--rev", rev]);
+    command.env(
+        "SCION_POSTGRES_URL",
+        format!("{url}{sep}options=--search_path%3D{schema}"),
     );
     command
         .args(["--ref", name, "--verify", "10"])
@@ -1123,19 +1117,14 @@ fn a_second_server_process_is_refused() {
     let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
     let schema = Backend::test_schema(dir.path());
     let sep = if url.contains('?') { '&' } else { '?' };
-    let extra = [
-        "--postgres-url".to_owned(),
-        format!("{url}{sep}options=--search_path%3D{schema}"),
-    ];
-    let args: Vec<&str> = ["serve", "--token", "t", "--listen", "127.0.0.1:0"]
-        .into_iter()
-        .chain(extra.iter().map(String::as_str))
-        .collect();
+    let url = format!("{url}{sep}options=--search_path%3D{schema}");
+    let args: Vec<&str> = ["serve", "--listen", "127.0.0.1:0"].to_vec();
     let out = common::spawn_guard::across_spawn(|| {
         // A serve child held past a bounded wait is killed, not waited
         // on forever: the refusal exits by itself, and a server that
         // ever serves fails here instead of hanging the cell.
         let mut child = server_process(dir.path(), &args)
+            .env("SCION_POSTGRES_URL", &url)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
@@ -1358,6 +1347,8 @@ fn a_rolled_back_import_batch_verifies_again_when_it_reruns() {
     let clean_report = try_import(&clean, &git, &rev).unwrap();
     let one_pass = CHECKS.get();
     CHECKS.with(|checks| checks.set(0));
+    TX_CHECKS.with(|checks| checks.set(0));
+    ROLLED_CHECKS.with(|checks| checks.set(0));
     // The retried import's batch runs whole, checks every commit, and its
     // commit fails as busy. The retry runs the batch again, and the checker
     // reset makes it verify from scratch: every committed changeset was
@@ -1368,11 +1359,20 @@ fn a_rolled_back_import_batch_verifies_again_when_it_reruns() {
     let report = try_import(&store, &git, &rev).unwrap();
     assert_eq!((report.commits, report.imported), (40, 40));
     assert_eq!(report.verified, clean_report.verified);
+    // The plan splits into transactions on the budget (1 s of wall
+    // clock), so which batch holds the injected failure depends on the
+    // machine's speed. The exact total does not: one pass over every
+    // pair, plus the failed batch's own checks again - the count since
+    // the checker reset is exactly that batch's checks, re-run whole by
+    // the retry. Batches whose commits persisted checked once and are
+    // not re-run; a retry that re-verified only part of the failed
+    // batch, or that re-ran a committed one, lands outside.
     let walks = CHECKS.get();
+    let retried = ROLLED_CHECKS.get();
     assert_eq!(
         walks,
-        2 * one_pass,
-        "the checks of the rolled-back batch ran again"
+        one_pass + retried,
+        "the rolled-back batch's checks ran again whole: {walks} = {one_pass} + {retried}"
     );
 }
 

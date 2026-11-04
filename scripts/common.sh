@@ -182,7 +182,7 @@ import_dataset() {
   # The server refuses a missing data directory (#578); create it here.
   mkdir -p "$WORK/server"
   chmod 700 "$WORK/server"
-  /usr/bin/time -p "$BIN/scion-server" --data "$WORK/server" --postgres-url "$PG_URL" import --rev main "$WORK/src.git" \
+  /usr/bin/time -p env SCION_POSTGRES_URL="$PG_URL" "$BIN/scion-server" --data "$WORK/server" import --rev main "$WORK/src.git" \
     > "$WORK/import.out" 2> "$WORK/import.log" || {
     tail -n 20 "$WORK/import.log" >&2
     die "import failed"
@@ -433,7 +433,7 @@ start_scion() {
   if [ ! -f "$WORK/ticket.key" ]; then
     "$BIN/scion-server" --data "$WORK/server" ticket-key --out "$WORK/ticket.key" > "$WORK/ticket.pub"
   fi
-  start server serving "$BIN/scion-server" --data "$WORK/server" --postgres-url "$PG_URL" serve \
+  start server serving env SCION_POSTGRES_URL="$PG_URL" "$BIN/scion-server" --data "$WORK/server" serve \
     --listen "127.0.0.1:$SERVER_PORT" \
     --ticket-key "$WORK/ticket.key" \
     --metrics-listen "127.0.0.1:$SERVER_METRICS_PORT"
