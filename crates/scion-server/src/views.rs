@@ -401,10 +401,11 @@ fn walk(
                     .collect(),
             );
         }
-        let entries = stack[top].entries.as_mut().expect("fetched above");
-        if stack[top].next < entries.len() {
-            let (name, entry) = entries[stack[top].next].clone();
-            stack[top].next += 1;
+        let next = stack[top].next;
+        let len = stack[top].entries.as_ref().expect("fetched above").len();
+        if next < len {
+            let (name, entry) = stack[top].entries.as_ref().expect("fetched above")[next].clone();
+            stack[top].next = next + 1;
             match entry {
                 // A file is visible when a prefix names it exactly; a
                 // prefix can name nothing below a file.
