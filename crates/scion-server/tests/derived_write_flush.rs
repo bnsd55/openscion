@@ -92,6 +92,66 @@ fn the_old_rows_a_write_path_deletes_are_gone_after_its_commit() {
     );
 }
 
+/// Two versions of one kind deferred in one transaction: the commit's
+/// flush must delete what the same two deletes would have deleted when
+/// they ran per call, in the call order. The flush's one statement once
+/// miscounted this mix - a row below the lower version joined both of
+/// the call's rows and was counted once per join - so the rows that
+/// remain are read from two identical stores and compared.
+#[test]
+fn the_flush_deletes_what_the_per_call_deletes_delete_in_order() {
+    let mut remaining = Vec::new();
+    for defer in [true, false] {
+        let dir = scion_server::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let repo = store.write(|c| c.create_repo(REPO)).unwrap();
+        // Six rows of one kind, one version each, one changeset each:
+        // three below the lower delete's version, three between the two
+        // versions.
+        let mut ids = Vec::new();
+        for i in 1..=6u32 {
+            let cs = changeset(&format!("cs-{i}\n"), ids.last().copied());
+            let id = store
+                .write(|c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0))
+                .unwrap();
+            store
+                .write(|c| c.put_derived("root_tree", i, id, format!("v{i}").as_bytes()))
+                .unwrap();
+            ids.push(id);
+        }
+        // The call order is the higher version first, then the lower:
+        // every row below the lower version is below the higher one too,
+        // which is the mix the join miscounted.
+        store
+            .write(|c| {
+                if defer {
+                    c.defer_derived_deletes();
+                }
+                c.delete_derived_below("root_tree", 7, 2)?;
+                c.delete_derived_below("root_tree", 4, 2)
+            })
+            .unwrap();
+        remaining.push(
+            ids.iter()
+                .enumerate()
+                .map(|(i, id)| {
+                    let version = i as u32 + 1;
+                    let present = store
+                        .read(|c| c.get_derived("root_tree", version, *id))
+                        .unwrap()
+                        .is_some();
+                    (version, present)
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert_eq!(
+        remaining[0], remaining[1],
+        "the deferred flush's rows must be the per-call rows: \
+         (version, still-there)"
+    );
+}
+
 #[test]
 fn a_write_that_disagrees_with_a_stored_row_still_refuses() {
     let _log = log_guard();
