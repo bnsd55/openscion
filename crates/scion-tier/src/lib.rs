@@ -52,7 +52,8 @@ use scion_proto::runtime::object::{
     self, Assembler, Header, MAX_ENCODED_BYTES, UNPACK_BYTES, zstd_bound,
 };
 use scion_proto::runtime::reply::{
-    self, BUSY_TIMEOUT, Body, IN_FLIGHT_BYTES, ObjectStream, Outgoing, STALL_TIMEOUT,
+    self, BUSY_TIMEOUT, Body, IN_FLIGHT_BYTES, ObjectStream, Outgoing, READS_IN_FLIGHT,
+    STALL_TIMEOUT,
 };
 use scion_proto::runtime::tls::{ClientTls, ServerTls};
 use scion_proto::ticket::Walk;
@@ -79,6 +80,13 @@ pub use store::{DiskStore, MemoryStore, Store};
 /// Most objects that one fetch asks upstream for. A reply sends at most
 /// 64 MiB, so fetching far ahead of it only fills the store.
 const MAX_BATCH: usize = 128;
+
+// A reply's reads run at most [`READS_IN_FLIGHT`] at a time, in order, so a
+// claim is never more than a batch behind the reply's tiling boundary and
+// the batches tile the ask without a gap. If READS_IN_FLIGHT ever passed
+// MAX_BATCH, a claim in the else branch would start a batch ahead of the
+// boundary and leave a gap behind it.
+const _: () = assert!(READS_IN_FLIGHT < MAX_BATCH);
 
 /// Most fetches that read from upstream at once. Each holds at most one
 /// message that the fetch budget has not counted yet: the first part of an
@@ -1044,11 +1052,96 @@ impl<S: Store> Tier<S> {
         let later = if i < progress.fetched_to.load(Ordering::Relaxed) {
             Vec::new()
         } else {
-            let end = keys.len().min(i + MAX_BATCH);
-            progress.fetched_to.store(end, Ordering::Relaxed);
-            keys[i + 1..end].to_vec()
+            #[cfg(test)]
+            tests::claim_gate(i).await;
+            self.claim(ask, i, progress)
         };
         self.fetch_for(key, &path, later, ask).await
+    }
+
+    /// Claims the keys after `i` for the fetch that this reply starts, and
+    /// registers them in the flights table, under the one lock: a read
+    /// ahead that misses cannot start its own fetch before this batch has
+    /// claimed the keys after it. The batches tile the ask from
+    /// `fetched_to`, the end of this reply's last batch, which the claim
+    /// writes under this lock. The table alone cannot say where the last
+    /// batch began: a read that reaches the lock first claims from its
+    /// own index, which can leave the key of a read just before it
+    /// outside every flight, and a finished flight has taken its keys out
+    /// of the table. A read within one batch of that end starts its batch
+    /// there, so the read holding a key that a racing claim or a finished
+    /// flight left out joins the batch that covers it instead of starting
+    /// a flight of one. The count of upstream calls is then the same in
+    /// every schedule: one claim per batch, and the reads ahead join it.
+    ///
+    /// The store's checks for the window the claim may cover run before
+    /// the lock: they are sync file I/O, and under a shared std Mutex
+    /// they would block every other claim on an async worker, and a slow
+    /// disk or a network mount would stall the worker (the same class as
+    /// #795). A key that lands in the store between a check and the lock
+    /// gets fetched once more, which is harmless: the put is idempotent.
+    ///
+    /// Returns the keys along, which the caller passes to [`Self::
+    /// fetch_for`] only to join the flight `claim` already started.
+    fn claim(&self, ask: &Ask, i: usize, progress: &Progress) -> Vec<(Key, Vec<u8>)> {
+        let keys = &ask.keys;
+        let (key, _) = &keys[i];
+        let stored = |k: &Key| matches!(self.inner.store.size(*k), Ok(Some(_)));
+        if stored(key) {
+            return Vec::new();
+        }
+        // The window the claim may cover: from one batch behind `i` - a
+        // batch tiles from `fetched_to`, which is at least `i` - 127 here -
+        // to one batch ahead.
+        let from = i.saturating_sub(MAX_BATCH - 1);
+        let to = keys.len().min(i + MAX_BATCH);
+        let has: Vec<bool> = (from..to).map(|j| stored(&keys[j].0)).collect();
+        let mut flights = lock(&self.inner.flights);
+        if flights.contains_key(key) {
+            // Another reply's fetch got this key: join, and fetch nothing
+            // along.
+            return Vec::new();
+        }
+        let fetched = progress.fetched_to.load(Ordering::Relaxed);
+        // The else branch: a claim a batch ahead of the boundary. It cannot
+        // happen today - a reply reads at most [`READS_IN_FLIGHT`] keys at
+        // once, in order, so no claim is ever a batch behind the boundary
+        // (the const assertion above makes that loud) - but if it did,
+        // starting at `i` is the safe choice, and `fetch_max` below keeps
+        // the boundary from following it down.
+        let start = if fetched <= i && i - fetched < MAX_BATCH {
+            fetched
+        } else {
+            i
+        };
+        let end = keys.len().min(start + MAX_BATCH);
+        // Another claim can have moved the boundary past this read between
+        // its caller's check and this lock; the boundary only grows.
+        progress.fetched_to.fetch_max(end, Ordering::Relaxed);
+        let later: Vec<_> = keys[i + 1..end].to_vec();
+        let mut waiting = VecDeque::new();
+        for j in start..end {
+            if has[j - from] {
+                continue;
+            }
+            let (k, p) = keys[j].clone();
+            if let Entry::Vacant(slot) = flights.entry(k) {
+                let (tx, rx) = watch::channel(None);
+                slot.insert(rx);
+                waiting.push_back((k, p, tx));
+            }
+        }
+        drop(flights);
+        let flight = Flight {
+            tier: self.clone(),
+            repo: ask.ticket.repo.clone(),
+            ticket: ask.ticket.clone(),
+            waiting,
+            until: ask.until,
+            request_id: ask.request_id.clone(),
+        };
+        tokio::spawn(flight.run());
+        later
     }
 
     /// Gets `key` in its stored form from upstream, with the path that its
@@ -1511,6 +1604,26 @@ fn private_tempdir() -> tempfile::TempDir {
 #[cfg(test)]
 mod tests {
 
+    /// The claim gate a test arms to hold one read's claim until another
+    /// has claimed, forcing a schedule the scheduler picks rarely. The
+    /// armed index waits until the permit is set; no other read notices.
+    static CLAIM_GATE_ARMED: AtomicUsize = AtomicUsize::new(usize::MAX);
+    static CLAIM_GATE_PERMIT: AtomicU64 = AtomicU64::new(0);
+
+    /// Called by [`Tier::fetch`] on the claim path in tests only.
+    pub(super) async fn claim_gate(i: usize) {
+        if CLAIM_GATE_ARMED.load(Ordering::SeqCst) == i {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            while CLAIM_GATE_PERMIT.load(Ordering::SeqCst) == 0 {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the gated claim was never let through"
+                );
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+    }
+
     /// Waits until no fetch is in flight, so a test asserts on state, not on
     /// timing. The tier notifies when a flight settles; the ceiling bounds a
     /// missed wake or a stalled fetch at 10 s.
@@ -1552,6 +1665,7 @@ mod tests {
         root: TreeId,
         asked: Arc<AtomicUsize>,
         largest: Arc<AtomicUsize>,
+        calls: Arc<std::sync::Mutex<Vec<Vec<Vec<u8>>>>>,
     }
 
     type Replies = Pin<Box<dyn Stream<Item = Result<ObjectPart, Status>> + Send>>;
@@ -1594,6 +1708,10 @@ mod tests {
             let refs = request.into_inner().refs;
             self.asked.fetch_add(refs.len(), Ordering::SeqCst);
             self.largest.fetch_max(refs.len(), Ordering::SeqCst);
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(refs.iter().map(|r| r.id.clone()).collect());
             let replies: Vec<_> = refs
                 .into_iter()
                 .flat_map(|r| {
@@ -1656,6 +1774,7 @@ mod tests {
             root,
             asked: Arc::default(),
             largest: Arc::default(),
+            calls: Arc::default(),
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -1832,18 +1951,37 @@ mod tests {
     async fn an_object_that_a_fetch_has_stored_is_never_fetched_again() {
         let f = setup(3, 1 << 20).await;
         let asked = || f.fake.asked.load(Ordering::SeqCst);
+        let call_indexes = || {
+            f.fake
+                .calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .map(|call| {
+                    call.iter()
+                        .map(|id| {
+                            f.keys
+                                .iter()
+                                .position(|k| k.id().as_slice() == id.as_slice())
+                                .unwrap_or(9999)
+                        })
+                        .collect::<Vec<usize>>()
+                })
+                .collect::<Vec<Vec<usize>>>()
+        };
         let settled = || async {
             settled(&f.tier).await;
         };
 
-        // A fetch of the last two objects ends, and stores them.
+        // A fetch of the last two objects takes the first along - the batch
+        // tiles from fetched_to, which starts at zero - and stores all three.
         f.tier
             .fetch(&ask(&f, &f.keys, "r"), 1, &Progress::default())
             .await
             .unwrap();
         settled().await;
-        assert_eq!(asked(), 2);
-        // A batch that starts at the first object leaves out the two stored.
+        assert_eq!(asked(), 3);
+        // A read whose key the tiled batch already stored fetches nothing.
         f.tier
             .fetch(&ask(&f, &f.keys, "r"), 0, &Progress::default())
             .await
@@ -1860,7 +1998,12 @@ mod tests {
                 .await;
             assert!(fetched.unwrap().is_none(), "read it from the store");
         }
-        assert_eq!(asked(), 3, "nothing was fetched twice");
+        assert_eq!(
+            asked(),
+            3,
+            "nothing was fetched twice; upstream calls by ask index: {:?}",
+            call_indexes()
+        );
         // Through a reply, the object comes from the store, with its share.
         // The first prove fetches the root tree of the ticket: one more ask.
         for (i, blob) in f.blobs.iter().enumerate() {
@@ -1954,7 +2097,99 @@ mod tests {
         // 300 blobs and the root tree of the ticket.
         assert_eq!(f.fake.asked.load(Ordering::SeqCst), 300 + 1);
         assert_eq!(f.fake.largest.load(Ordering::SeqCst), MAX_BATCH);
-        assert_eq!(f.tier.upstream_calls(), 4);
+        let call_indexes = || {
+            f.fake
+                .calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .map(|call| {
+                    call.iter()
+                        .map(|id| {
+                            f.keys
+                                .iter()
+                                .position(|k| k.id().as_slice() == id.as_slice())
+                                .unwrap_or(9999)
+                        })
+                        .collect::<Vec<usize>>()
+                })
+                .collect::<Vec<Vec<usize>>>()
+        };
+        assert_eq!(
+            f.tier.upstream_calls(),
+            4,
+            "upstream calls by ask index: {:?}",
+            call_indexes()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_batches_tile_from_the_replys_last_claim_after_a_flight_finished() {
+        let f = setup(300, 1 << 20).await;
+        let keys: Vec<Key> = f.keys.clone();
+        // The first batch's flight finishes before reads 128 and 129 claim,
+        // and read 129 takes the flights lock first. Read 128 must join the
+        // batch that tiles next from fetched_to, not start a flight of one.
+        CLAIM_GATE_ARMED.store(128, Ordering::SeqCst);
+        let tier = f.tier.clone();
+        let releaser = tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            while tier.upstream_calls() < 3 {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the claim after the finished batch never ran"
+                );
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            CLAIM_GATE_PERMIT.store(1, Ordering::SeqCst);
+        });
+        let request = GetObjectsRequest {
+            refs: keys
+                .iter()
+                .zip(&f.paths)
+                .map(|(key, path)| key.to_ref(path))
+                .collect(),
+            accept: vec![Encoding::Zstd.into()],
+            ticket: f.ticket.clone(),
+        };
+        let reply = f.tier.get_objects(Request::new(request)).await.unwrap();
+        let mut stream = reply.into_inner();
+        let mut got = 0;
+        while let Some(part) = stream.next().await {
+            part.unwrap();
+            got += 1;
+        }
+        releaser.await.unwrap();
+        CLAIM_GATE_ARMED.store(usize::MAX, Ordering::SeqCst);
+        CLAIM_GATE_PERMIT.store(0, Ordering::SeqCst);
+        assert_eq!(got, 300);
+        // 300 blobs and the root tree of the ticket, in the design's
+        // batches: 1 call for the root tree, then 128, 128, 44.
+        assert_eq!(f.fake.asked.load(Ordering::SeqCst), 300 + 1);
+        let call_indexes = || {
+            f.fake
+                .calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .map(|call| {
+                    call.iter()
+                        .map(|id| {
+                            f.keys
+                                .iter()
+                                .position(|k| k.id().as_slice() == id.as_slice())
+                                .unwrap_or(9999)
+                        })
+                        .collect::<Vec<usize>>()
+                })
+                .collect::<Vec<Vec<usize>>>()
+        };
+        assert_eq!(
+            f.tier.upstream_calls(),
+            4,
+            "upstream calls by ask index: {:?}",
+            call_indexes()
+        );
     }
 
     #[tokio::test]
