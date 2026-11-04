@@ -693,8 +693,9 @@ pair_4() {
     summary "pair 4: both builds write schema $cur_schema, so the upgrade ladder and the N-1 refusal cannot fire on this pair"
     return 0
   fi
-  SCION_POSTGRES_URL="$URL" "$BIN/scion-server" --data "$dir/server" migrate --check >"$dir/check.log" 2>&1
-  [ "$?" -eq 3 ] || die "pair '$PAIR' ($SIDE): the check on the N-1 store did not say pending (exit 3)"
+  rc=0
+  SCION_POSTGRES_URL="$URL" "$BIN/scion-server" --data "$dir/server" migrate --check >"$dir/check.log" 2>&1 || rc=$?
+  [ "$rc" -eq 3 ] || die "pair '$PAIR' ($SIDE): the check on the N-1 store did not say pending (exit 3)"
   if SCION_POSTGRES_URL="$URL" "$BIN/scion-server" --data "$dir/server" fsck >"$dir/fsck.log" 2>&1; then
     die "pair '$PAIR' ($SIDE): the N server opened the N-1 store without being asked to migrate"
   fi
