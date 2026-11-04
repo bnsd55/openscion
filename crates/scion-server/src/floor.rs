@@ -28,11 +28,11 @@ use std::path::{Path, PathBuf};
 /// reading, not one source of it: the cgroup and /proc files exist on
 /// Linux, and a probe at one source would never be called there
 /// (#795).
-#[cfg(feature = "test-hooks")]
 #[doc(hidden)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub type HostProbeFn = fn() -> Option<u64>;
-#[cfg(feature = "test-hooks")]
 #[doc(hidden)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub static HOST_PROBE: std::sync::Mutex<Option<HostProbeFn>> = std::sync::Mutex::new(None);
 
 /// What every `Blame` call together may hold
@@ -267,11 +267,12 @@ pub(crate) fn check_startup_memory(
     paths: &Paths,
 ) {
     metrics.set_memory_floor_bytes(FLOOR);
-    #[cfg(feature = "test-hooks")]
+    #[cfg(any(test, feature = "test-hooks"))]
     let injected = match HOST_PROBE.lock() {
         Ok(guard) => *guard,
         Err(poisoned) => *poisoned.into_inner(),
     };
+    #[cfg(any(test, feature = "test-hooks"))]
     let limit = match injected {
         Some(probe) => probe().map(|bytes| HostLimit {
             bytes,
@@ -279,7 +280,7 @@ pub(crate) fn check_startup_memory(
         }),
         None => host_limit(paths, macos_memsize),
     };
-    #[cfg(not(feature = "test-hooks"))]
+    #[cfg(not(any(test, feature = "test-hooks")))]
     let limit = host_limit(paths, macos_memsize);
     if let Some(limit) = limit {
         metrics.set_host_memory_bytes(limit.bytes);
