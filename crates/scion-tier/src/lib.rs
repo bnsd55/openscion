@@ -1044,11 +1044,56 @@ impl<S: Store> Tier<S> {
         let later = if i < progress.fetched_to.load(Ordering::Relaxed) {
             Vec::new()
         } else {
-            let end = keys.len().min(i + MAX_BATCH);
-            progress.fetched_to.store(end, Ordering::Relaxed);
-            keys[i + 1..end].to_vec()
+            self.claim(ask, i, progress)
         };
         self.fetch_for(key, &path, later, ask).await
+    }
+
+    /// Claims the keys after `i` for the fetch that this reply starts, and
+    /// registers them in the flights table, under the one lock: a read
+    /// ahead that misses cannot start its own fetch before this batch has
+    /// claimed the keys after it. Without the one lock, a read ahead whose
+    /// key the claim covers could see the claim and skip its own fetch
+    /// along, yet find no flight to join - the claim's registration had
+    /// not run yet - and start a flight of one, splitting the batch. The
+    /// count of upstream calls is then the same in every schedule: one
+    /// claim per batch, and the reads ahead join it.
+    ///
+    /// Returns the keys along, which the caller passes to [`Self::
+    /// fetch_for`] only to join the flight `claim` already started.
+    fn claim(&self, ask: &Ask, i: usize, progress: &Progress) -> Vec<(Key, Vec<u8>)> {
+        let keys = &ask.keys;
+        let (key, path) = &keys[i];
+        let mut flights = lock(&self.inner.flights);
+        if flights.contains_key(key) || matches!(self.inner.store.size(*key), Ok(Some(_))) {
+            // Another reply's fetch got this key, or the store has it now:
+            // join, and fetch nothing along.
+            return Vec::new();
+        }
+        let end = keys.len().min(i + MAX_BATCH);
+        progress.fetched_to.store(end, Ordering::Relaxed);
+        let later: Vec<_> = keys[i + 1..end].to_vec();
+        let mut waiting = VecDeque::new();
+        for (k, p) in iter::once((*key, path.clone())).chain(later.iter().cloned()) {
+            if let Entry::Vacant(slot) = flights.entry(k)
+                && (k == *key || !matches!(self.inner.store.size(k), Ok(Some(_))))
+            {
+                let (tx, rx) = watch::channel(None);
+                slot.insert(rx);
+                waiting.push_back((k, p, tx));
+            }
+        }
+        drop(flights);
+        let flight = Flight {
+            tier: self.clone(),
+            repo: ask.ticket.repo.clone(),
+            ticket: ask.ticket.clone(),
+            waiting,
+            until: ask.until,
+            request_id: ask.request_id.clone(),
+        };
+        tokio::spawn(flight.run());
+        later
     }
 
     /// Gets `key` in its stored form from upstream, with the path that its
