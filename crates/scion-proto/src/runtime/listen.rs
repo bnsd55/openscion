@@ -484,13 +484,14 @@ impl Limits {
         I: Stream<Item = io::Result<IO>> + Send + 'static,
         IO: AsyncRead + AsyncWrite + Connected + PeerOf + Unpin + Send + 'static,
     {
-        self.serve_with(&TIMERS, router, incoming, tls, shutdown, metrics)
+        let accepting = Accepting::of(&self, &TIMERS);
+        self.serve_with(&accepting, router, incoming, tls, shutdown, metrics)
             .await
     }
 
     async fn serve_with<I, IO>(
         self,
-        timers: &Timers,
+        accepting: &Accepting,
         router: impl FnOnce(Server) -> Router,
         incoming: I,
         tls: Option<Arc<ServerConfig>>,
@@ -536,27 +537,18 @@ impl Limits {
                 )
             })
             .max_concurrent_streams(self.streams.get())
-            .http2_keepalive_interval(Some(timers.keepalive))
-            .http2_keepalive_timeout(Some(timers.keepalive_timeout))
-            .max_connection_age(timers.age)
-            .max_connection_age_grace(timers.grace);
+            .http2_keepalive_interval(Some(accepting.keepalive))
+            .http2_keepalive_timeout(Some(accepting.keepalive_timeout))
+            .max_connection_age(accepting.age)
+            .max_connection_age_grace(accepting.grace);
         // The accept path owns the shutdown future and sets the watch when
         // it resolves (or when the listener ends); the serve below reads
         // the same watch, so the drain starts at the signal itself.
         let (stop, stopped) = watch::channel(false);
-        let accepting = Accepting {
-            max: self.connections.get(),
-            handshake: timers.handshake,
-            wait: timers.wait,
-            stalled_bytes: self.stalled_bytes.get(),
-            total: Arc::new(TotalBytes::new(self.stalled_total.get())),
-            waits: WaitWarn::new(WAIT_WARN_INTERVAL),
-            refusals: WaitWarn::new(WAIT_WARN_INTERVAL),
-        };
         if let Some(config) = tls {
             let incoming = accept_tls(
                 incoming,
-                &accepting,
+                accepting,
                 stop,
                 shutdown,
                 config,
@@ -565,20 +557,24 @@ impl Limits {
             let outcome = router(server)
                 .serve_with_incoming_shutdown(incoming, watch_signal(stopped))
                 .await;
-            Self::warn_the_last(&accepting);
+            Self::warn_the_last(accepting);
             return outcome;
         }
-        let incoming = accept(incoming, &accepting, stop, shutdown, metrics);
+        let incoming = accept(incoming, accepting, stop, shutdown, metrics);
         let outcome = router(server)
             .serve_with_incoming_shutdown(incoming, watch_signal(stopped))
             .await;
-        Self::warn_the_last(&accepting);
+        Self::warn_the_last(accepting);
         outcome
     }
 
     /// Writes whatever the last interval gathered, before the serve
     /// returns: the binaries exit soon after, and the flusher's detached
-    /// task may not run again.
+    /// task may not run again. Not the whole story: waiter tasks spawned
+    /// before the signal can still time out up to [`CONNECTION_WAIT`]
+    /// after this ran, and their refusals are counted then - in the
+    /// binaries the exit takes the log with them first; an embedder whose
+    /// runtime keeps running may miss those in its log.
     fn warn_the_last(accepting: &Accepting) {
         if let Some(waited) = accepting.waits.flush_all() {
             warn_waited(accepting.max, waited);
@@ -762,7 +758,7 @@ async fn place_within(
     place
 }
 
-/// What the accept paths share, fixed when the serve starts.
+/// What the serve and the accept paths share, fixed when the serve starts.
 #[derive(Clone)]
 struct Accepting {
     /// Most connections served at once, and most waiting at once.
@@ -771,6 +767,13 @@ struct Accepting {
     handshake: Duration,
     /// How long a connection over the cap waits for a place.
     wait: Duration,
+    /// After how long without a frame the process pings a connection, and
+    /// how long it waits for the answer.
+    keepalive: Duration,
+    keepalive_timeout: Duration,
+    /// When a connection is asked to close, and when it is closed.
+    age: Duration,
+    grace: Duration,
     /// The stalled-replies cap of one connection.
     stalled_bytes: u64,
     /// The stalled-replies cap of the whole process.
@@ -779,6 +782,25 @@ struct Accepting {
     waits: WaitWarn,
     /// The rate-limited line about connections a full cap closed.
     refusals: WaitWarn,
+}
+
+impl Accepting {
+    /// What a serve with `timers` shares, at the serve's start.
+    fn of(self_: &Limits, timers: &Timers) -> Self {
+        Self {
+            max: self_.connections.get(),
+            handshake: timers.handshake,
+            wait: timers.wait,
+            keepalive: timers.keepalive,
+            keepalive_timeout: timers.keepalive_timeout,
+            age: timers.age,
+            grace: timers.grace,
+            stalled_bytes: self_.stalled_bytes.get(),
+            total: Arc::new(TotalBytes::new(self_.stalled_total.get())),
+            waits: WaitWarn::new(WAIT_WARN_INTERVAL),
+            refusals: WaitWarn::new(WAIT_WARN_INTERVAL),
+        }
+    }
 }
 
 /// The waits line, with the count it covers.
@@ -856,6 +878,7 @@ where
         total,
         waits,
         refusals,
+        ..
     } = accepting.clone();
     let places = Arc::new(Semaphore::new(max));
     let waiters = Arc::new(Semaphore::new(max));
@@ -990,6 +1013,7 @@ where
         total,
         waits,
         refusals,
+        ..
     } = accepting.clone();
     let places = Arc::new(Semaphore::new(max));
     let waiters = Arc::new(Semaphore::new(max));
@@ -1583,7 +1607,7 @@ mod tests {
                     ..timers
                 };
                 Box::pin(limits.serve_with(
-                    &timers,
+                    &Accepting::of(&limits, &timers),
                     router,
                     tcp(listener),
                     Some(config),
@@ -1607,7 +1631,14 @@ mod tests {
                 let router = |mut server: Server| server.add_service(ObjectsServer::new(Stalls));
                 let pending = std::future::pending();
                 limits
-                    .serve_with(&timers, router, tcp(listener), None, pending, metrics)
+                    .serve_with(
+                        &Accepting::of(&limits, &timers),
+                        router,
+                        tcp(listener),
+                        None,
+                        pending,
+                        metrics,
+                    )
                     .await
             }
         });
@@ -1910,22 +1941,60 @@ mod tests {
         assert_eq!(warn.flush(), None, "nothing is left to flush");
     }
 
-    /// The serve's last line writes what is left without the interval
-    /// check: a line at 3 s, two refusals at 5 s, the serve ends at 8 s -
-    /// the flusher's next tick would be too late, the 2 are not lost.
-    #[tokio::test]
+    /// The serve itself writes what is left when it ends: a refusal, the
+    /// signal before the interval, and after the serve returns the
+    /// accepting's refusals are gone - the serve's last line took them. A
+    /// `warn_the_last` removed from the serve fails this.
+    #[tokio::test(flavor = "multi_thread")]
     async fn the_serve_writes_what_is_left_when_it_ends() {
-        let warn = WaitWarn::new(Duration::from_secs(60));
-        assert_eq!(warn.tick(), Some(1), "the first wait writes at once");
-        assert_eq!(warn.tick(), None, "counted for the last line");
-        assert_eq!(warn.tick(), None, "counted for the last line");
-        assert_eq!(warn.flush(), None, "the interval has not passed");
+        let wait = Duration::from_millis(500);
+        let limits = Limits {
+            connections: NonZeroUsize::MIN,
+            ..Limits::default()
+        };
+        let accepting = Accepting::of(&limits, &cap_timers(wait));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // The signal is a oneshot the test fires when the refusal is in:
+        // the serve awaits `fired`, the test sends through `signal`.
+        let (signal, fired) = tokio::sync::oneshot::channel::<()>();
+        let serve = tokio::spawn({
+            let metrics = Arc::new(Metrics::default());
+            // The accepting is shared: the serve writes its last line into
+            // it, and the test reads what is left after it returns.
+            let accepting = accepting.clone();
+            async move {
+                let router = |mut server: Server| server.add_service(ObjectsServer::new(Stalls));
+                let shutdown = async move {
+                    let _ = fired.await;
+                };
+                limits
+                    .serve_with(&accepting, router, tcp(listener), None, shutdown, metrics)
+                    .await
+            }
+        });
+        // The first connection holds the only place.
+        let mut first = ObjectsClient::new(endpoint(addr).connect_lazy());
+        assert_eq!(quick(&mut first).await, Code::NotFound);
+        // A second client is refused inside the wait, before the interval
+        // of the rate limiter could pass.
+        let mut second = tokio::net::TcpStream::connect(addr).await.unwrap();
+        second.write_all(PREFACE).await.unwrap();
+        tokio::time::sleep(wait * 2).await;
+        // The serve ends with its signal, well inside the limiter's
+        // interval: only the serve's last line can carry the refusal.
+        let _ = signal.send(());
+        let outcome = tokio::time::timeout(Duration::from_secs(10), serve)
+            .await
+            .expect("the serve ends")
+            .expect("the serve is ok");
+        assert!(outcome.is_ok(), "the serve is ok: {outcome:?}");
         assert_eq!(
-            warn.flush_all(),
-            Some(2),
-            "the serve's last line carries them"
+            accepting.refusals.flush_all(),
+            None,
+            "the serve's last line took the refusal"
         );
-        assert_eq!(warn.flush_all(), None, "nothing is left");
+        assert_eq!(accepting.waits.flush_all(), None, "nothing waited");
     }
 
     /// A peer that connects and sends nothing is closed: it gets no place
