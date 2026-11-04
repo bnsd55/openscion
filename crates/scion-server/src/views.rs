@@ -1008,8 +1008,7 @@ mod tests {
                 .map(|r| RepoPath::new(r.clone()).unwrap().as_bytes().to_vec())
                 .collect();
             let mut memo = Memo::default();
-            let view = store
-                derive(&store, repo, &digest, root_id, ctx, &mut memo, &alive())
+            let view = derive(&store, repo, &digest, root_id, ctx, &mut memo, &alive())
                 .unwrap();
             // The derivation stores nothing: put the derived trees, then
             // the walk can read the views below.
@@ -1032,7 +1031,7 @@ mod tests {
                 blobs: std::collections::BTreeSet::new(),
                 tree_ids: Vec::new(),
             };
-            walk(&mut w, view, "")?;
+            walk_model(&mut w, view, "")?;
 
             // Nothing hidden leaks: a name that is hidden everywhere it
             // exists, the blob of an uncovered file, and the real ID of a
@@ -1106,7 +1105,7 @@ mod tests {
 
     /// Walks the view tree, comparing it against the model, and collecting
     /// every name, blob ID and tree ID the view shows.
-    fn walk(w: &mut Walk<'_>, view: Option<TreeId>, dir: &str) -> Result<(), TestCaseError> {
+    fn walk_model(w: &mut Walk<'_>, view: Option<TreeId>, dir: &str) -> Result<(), TestCaseError> {
         let paths: &[String] = w.paths;
         let rules: &[String] = w.rules;
         let shown = match view {
@@ -1641,8 +1640,14 @@ mod tests {
                 let repo = c.create_repo("lane")?;
                 c.insert_changeset(
                     repo,
-                    &Changeset::new(vec![], ada, None, b"root\n".to_vec(), files.into())
-                        .expect("changeset fits the format"),
+                    &Changeset::new(
+                        vec![],
+                        ada,
+                        None,
+                        b"root\n".to_vec(),
+                        files.into_iter().collect(),
+                    )
+                    .expect("changeset fits the format"),
                 )
             })
             .unwrap();
