@@ -1500,16 +1500,23 @@ mod tests {
         // A real repo: the parts' rows name it, and its key must be there.
         let repo = store.write(|c| c.create_repo("parts")).unwrap();
         let digest = [7; 32];
-        // Two hundred directories of one file each, all visible: the walk
-        // derives two hundred view trees, far past a four-kilobyte part.
+        // Two hundred directories of two files each, one visible one
+        // hidden: every directory is a partial view, so the walk derives
+        // two hundred view trees, far past a four-kilobyte part.
         let mut dir_ids = Vec::new();
         let root_id = store
             .write(|c| {
                 let mut entries = std::collections::BTreeMap::new();
                 for i in 0..200 {
                     let d = name(format!("d{i:03}").as_bytes());
-                    let inner = Tree::new([(d.clone(), file(&store, b"body\n"))].into())
-                        .expect("tree fits the format");
+                    let inner = Tree::new(
+                        [
+                            (name(b"see"), file(&store, b"body\n")),
+                            (name(b"hide"), file(&store, b"secret\n")),
+                        ]
+                        .into(),
+                    )
+                    .expect("tree fits the format");
                     let id = c.put_tree(&inner)?;
                     dir_ids.push(id);
                     entries.insert(d, Entry::Dir(id));
@@ -1518,7 +1525,9 @@ mod tests {
                 c.put_tree(&root)
             })
             .unwrap();
-        let ctx: Context = (0..200).map(|i| format!("d{i:03}").into_bytes()).collect();
+        let ctx: Context = (0..200)
+            .map(|i| format!("d{i:03}/see").into_bytes())
+            .collect();
         let first = {
             let _part = test_set_view_part_bound(4 << 10);
             store
@@ -1542,7 +1551,7 @@ mod tests {
         let stored = store
             .read(|c| {
                 let mut count = 0_usize;
-                let below: [u8; 32] = context_digest(&Context::new());
+                let below: [u8; 32] = context_digest(&[b"see".to_vec()]);
                 for id in &dir_ids {
                     if c.get_view_tree(repo, &digest, u32::from(PROJECTION_VERSION), *id, below)?
                         .is_some()
