@@ -43,7 +43,6 @@ services:
       # docs/operations.md): a start moves the schema instead of
       # refusing to come up.
       - --migrate
-=======
       - --tls-cert
       - /certs/server.crt
       - --tls-key
