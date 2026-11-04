@@ -1559,6 +1559,80 @@ mod tests {
         assert_eq!(code, Code::NotFound);
     }
 
+    /// A connection that is over the stall total only through the process
+    /// count - its own count stays under its cap - is closed by the
+    /// server's HTTP/2 keepalive, not by a wake: nothing crossed its own
+    /// limit, so nothing wakes its read. The keepalive pings the client,
+    /// the client's answer wakes the server's read, and that read closes
+    /// the connection and frees what its stalled reply holds, without the
+    /// client sending or reading anything.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_connection_over_the_stall_total_without_its_own_crossing_closes_at_the_keepalive() {
+        let limits = Limits {
+            connections: NonZeroUsize::new(8).unwrap(),
+            // The own cap: large, so the first connection's own count
+            // never crosses it and nothing wakes its read.
+            stalled_bytes: NonZeroU64::new(64 * (1 << 20)).unwrap(),
+            // The process total: the second connection's hold crosses it.
+            stalled_total: NonZeroU64::new(6 * (1 << 20)).unwrap(),
+            ..Limits::default()
+        };
+        // A short keepalive: the silent connection is pinged, and the
+        // answer wakes its read. Long age and grace, so only a count can
+        // close a connection.
+        let timers = Timers {
+            handshake: Duration::from_millis(100),
+            keepalive: Duration::from_millis(500),
+            keepalive_timeout: Duration::from_millis(500),
+            age: Duration::from_secs(3600),
+            grace: Duration::from_secs(3600),
+        };
+        let (addr, metrics) = serve(limits, timers).await;
+        let mut first = a_stalling_client(addr).await;
+        // The stream stays bound: its reply's stall is what the gauge
+        // settles on. The test reads nothing from this stream: the client
+        // neither sends nor reads from here on.
+        let _first_stream = stall(&mut first).await;
+        let mut second = a_stalling_client(addr).await;
+        let mut second_stream = stall(&mut second).await;
+
+        // The second connection's hold crosses the process total (the
+        // first connection's 4 MiB plus its own), so its stalled reply
+        // ends and its bytes go free; the frames it had buffered drain
+        // first.
+        let closed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match second_stream.message().await {
+                    Err(_) | Ok(None) => break,
+                    Ok(Some(_)) => {}
+                }
+            }
+        })
+        .await;
+        assert!(
+            closed.is_ok(),
+            "the connection whose hold crossed the total is closed"
+        );
+        // The gauge settles at the first connection's one reply's estimate:
+        // the first connection is over the total only through the process
+        // count now.
+        until(|| stalled_gauge(&metrics) == reply::STALLED_REPLY_BYTES).await;
+
+        // The first connection neither sends nor reads, and nothing wakes
+        // its read. The server's keepalive pings it, the client's answer
+        // wakes the server's read, and that read closes the connection:
+        // the gauge goes to nothing without the client acting.
+        until(|| stalled_gauge(&metrics) == 0).await;
+
+        // A new client is served: the closed connection freed its place
+        // and its share of the total.
+        let mut third = ObjectsClient::new(endpoint(addr).connect_lazy());
+        let code = tokio::time::timeout(Duration::from_secs(10), quick(&mut third))
+            .await
+            .expect("a new connection is served after the keepalive close");
+        assert_eq!(code, Code::NotFound);
+    }
+
     /// What the process's gauge says the stalled replies hold, from a
     /// scrape: this is the series an operator reads.
     fn stalled_gauge(metrics: &Metrics) -> u64 {
