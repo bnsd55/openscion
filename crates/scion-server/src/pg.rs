@@ -5385,7 +5385,9 @@ mod tests {
         let (kinds, totals) = delete_prefixes(&[(kind.clone(), 2), (kind, 2)], &[6, 3]);
         assert_eq!(kinds, vec!["k"]);
         assert_eq!(totals, vec![3]);
-        // Kinds interleave in the call order; each kind folds alone.
+        // Kinds interleave in the call order; each kind folds alone: a's
+        // first call takes the 2 rows below it, its second 5 of the 8
+        // still below, so 7; b sees no rows below its version.
         let (kinds, totals) = delete_prefixes(
             &[
                 ("a".to_owned(), 5),
@@ -5395,7 +5397,7 @@ mod tests {
             &[2, 0, 10],
         );
         assert_eq!(kinds, vec!["a", "b"]);
-        assert_eq!(totals, vec![10, 0]);
+        assert_eq!(totals, vec![7, 0]);
         // A later call's version sees fewer rows than the calls before
         // it took: its share is nothing.
         let kind = "k".to_owned();
