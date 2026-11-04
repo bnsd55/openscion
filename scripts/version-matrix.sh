@@ -699,8 +699,15 @@ pair_4() {
   SIDE='N-1 refuses N'
   note "pair 4 ($SIDE)"
   URL=$(pg_db_for "$dir/server2")
-  SCION_POSTGRES_URL="$URL" "$BIN/scion-server" --data "$dir/server2" import "$dir/src" >/dev/null 2>&1 ||
+  # The server refuses a missing data directory (#578), as import() says:
+  # create this one too before the import opens it.
+  mkdir -p "$dir/server2"
+  chmod 700 "$dir/server2"
+  SCION_POSTGRES_URL="$URL" "$BIN/scion-server" --data "$dir/server2" import "$dir/src" \
+    >"$dir/import2.out" 2>"$dir/import2.log" || {
+    tail -n 5 "$dir/import2.log" >&2
     die "pair '$PAIR' ($SIDE): the import of the N store failed"
+  }
   if SCION_POSTGRES_URL="$URL" "$PREV_BIN/scion-server" --data "$dir/server2" fsck >"$dir/refuse.log" 2>&1; then
     die "pair '$PAIR' ($SIDE): the N-1 server accepted a store of N"
   fi
