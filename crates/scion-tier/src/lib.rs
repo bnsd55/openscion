@@ -52,7 +52,8 @@ use scion_proto::runtime::object::{
     self, Assembler, Header, MAX_ENCODED_BYTES, UNPACK_BYTES, zstd_bound,
 };
 use scion_proto::runtime::reply::{
-    self, BUSY_TIMEOUT, Body, IN_FLIGHT_BYTES, ObjectStream, Outgoing, STALL_TIMEOUT,
+    self, BUSY_TIMEOUT, Body, IN_FLIGHT_BYTES, ObjectStream, Outgoing, READS_IN_FLIGHT,
+    STALL_TIMEOUT,
 };
 use scion_proto::runtime::tls::{ClientTls, ServerTls};
 use scion_proto::ticket::Walk;
