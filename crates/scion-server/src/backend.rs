@@ -376,6 +376,13 @@ impl Backend {
         self.pg.writers_waiting()
     }
 
+    /// How many deadline-less waits for writers ended.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn yield_turns(&self) -> u64 {
+        self.pg.yield_turns()
+    }
+
     /// The write lane's queue, for the lane's tests: the slot holders
     /// and the other writers that wait, not granted yet.
     #[cfg(test)]
