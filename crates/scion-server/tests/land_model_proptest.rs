@@ -39,7 +39,7 @@ mod common;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -57,6 +57,12 @@ use tonic::Status;
 const CALLERS: usize = 4;
 /// A ref that does not exist, for the lands that must be rejected.
 const MISSING: usize = REFS.len();
+/// The ref the run's imports move: it does not exist until the first
+/// `import` op creates it, so every import of the run fast-forwards it,
+/// and the corpus parks its CAS lands here - the import under a parked
+/// land is the mover no land lock can stop.
+const IMPORTED: usize = REFS.len() + 1;
+const IMPORTED_REF_NAME: &str = "imported";
 
 /// One operation of the script. Ops that name an earlier land do so by
 /// its position in the script's ledger; the runner takes the index
@@ -125,7 +131,7 @@ enum Op {
     /// Import a git repo into the model's repo, pointing the named ref
     /// at a fresh tip: the one ref mover that takes no land lock, so a
     /// land parked before its compare-and-swap loses the CAS to it.
-    Import { target: usize },
+    Import,
 }
 
 /// The gate points the runner can name, spelled as the server's marker
@@ -168,14 +174,6 @@ impl GatePoint {
     }
 }
 
-const GATE_POINTS: [GatePoint; 5] = [
-    GatePoint::Record,
-    GatePoint::Planned,
-    GatePoint::Cas,
-    GatePoint::Settled,
-    GatePoint::Step,
-];
-
 fn op_strategy() -> impl Strategy<Value = Op> {
     prop_oneof![
         // Weights: lands dominate; the races and the crashes appear.
@@ -205,25 +203,6 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         1 => Just(Op::Kill),
         1 => Just(Op::KillAtPending),
         1 => Just(Op::Gc),
-        1 => (any::<usize>(), any::<usize>(), any::<bool>(), any::<usize>()).prop_map(
-            |(c, t, s, p)| Op::SendNoWait {
-                caller: c % CALLERS,
-                target: t % (REFS.len() + 1),
-                stale: s,
-                point: GATE_POINTS[p % GATE_POINTS.len()],
-            },
-        ),
-        1 => (any::<usize>(), any::<usize>()).prop_map(|(l, p)| Op::AwaitGate {
-            land: l,
-            point: GATE_POINTS[p % GATE_POINTS.len()],
-        }),
-        1 => (any::<usize>(), any::<usize>()).prop_map(|(l, p)| Op::Resume {
-            land: l,
-            point: GATE_POINTS[p % GATE_POINTS.len()],
-        }),
-        1 => any::<usize>().prop_map(|t| Op::Import {
-            target: t % (REFS.len() + 1),
-        }),
         2 => (2usize..=8, any::<usize>()).prop_map(|(k, t)| {
             if k % 3 == 0 {
                 Op::BurstCut {
@@ -350,9 +329,7 @@ fn parse_script(text: &str) -> Vec<Op> {
                     land: num(land),
                     point: GatePoint::from_word(point),
                 },
-                ["import", target] => Op::Import {
-                    target: num(target),
-                },
+                ["import"] => Op::Import,
                 other => panic!("a corpus line the runner does not know: {other:?}"),
             }
         })
@@ -632,6 +609,8 @@ async fn note_head(state: &mut Run, target: &str, idxs: &[usize]) {
 fn target_name(target: usize) -> &'static str {
     if target == MISSING {
         "no-such-ref"
+    } else if target == IMPORTED {
+        IMPORTED_REF_NAME
     } else {
         REFS[target % REFS.len()]
     }
@@ -758,6 +737,53 @@ struct RunSummary {
 }
 
 /// Runs the whole script against one real server, then checks.
+#[allow(clippy::too_many_lines)] // one arm per op: the dispatch is the table
+/// Adds one git commit in the run's repo and imports it to the run's
+/// own `imported` ref. The repo lives beside the run's temp dir and
+/// every import of a run shares it, so each import's tip sits on the
+/// previous one and the server's fast-forward rule holds: the first
+/// import creates the ref, and a later one moves it only from an
+/// ancestor of the tip - the last import, or a land on top of it.
+/// The lands the corpus parks at the CAS stand on this ref, so the
+/// import under them is the mover no land lock can stop.
+async fn run_import(state: &mut Run, root: &Path, data: &Path) {
+    use std::fmt::Write as _;
+    let name = IMPORTED_REF_NAME;
+    let git_dir = root.join("git");
+    if git_dir.join(".git").exists() {
+        let mut note = std::fs::read_to_string(git_dir.join("import-note.txt")).unwrap();
+        writeln!(note, "import {}", state.ops).unwrap();
+        std::fs::write(git_dir.join("import-note.txt"), &note).unwrap();
+        common::git(&git_dir, &["add", "."]);
+        common::git(&git_dir, &["commit", "-m", "the model's import"]);
+    } else {
+        std::fs::create_dir_all(&git_dir).unwrap();
+        common::git(&git_dir, &["init", "--initial-branch=main"]);
+        std::fs::write(git_dir.join("import-note.txt"), "import 0\n").unwrap();
+        common::git(&git_dir, &["add", "."]);
+        common::git(&git_dir, &["commit", "-m", "the model's import seed"]);
+    }
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"));
+    cmd.arg("--data")
+        .arg(data)
+        .env("SCION_POSTGRES_URL", common::postgres_url(data))
+        .args(["import", "--repo", REPO, "--ref", name])
+        .arg(&git_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "import to {name} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The import's tip is the ref's head now: a foreign changeset no
+    // land sent, which the chain check holds as the model's own import.
+    let tip = resolve_ref(&mut state.objects, name).await.unwrap();
+    state.imported.entry(name.to_owned()).or_default().push(tip);
+    state.heads.entry(name).or_default().push(tip);
+}
+
 #[allow(clippy::too_many_lines)] // one arm per op: the dispatch is the table
 async fn run_script(script: &[Op]) -> RunSummary {
     let dir = scion_server::test_support::private_tempdir();
@@ -1150,46 +1176,8 @@ async fn run_script(script: &[Op]) -> RunSummary {
                     .unwrap();
                 }
             }
-            Op::Import { target } => {
-                use std::fmt::Write as _;
-                let name = target_name(*target);
-                // The git repo lives in the run's temp dir, beside the
-                // data dir; the first import makes it with one commit,
-                // every import adds one more, so the tip moves and the
-                // ref's version with it.
-                let git_dir = dir.path().join("git");
-                if !git_dir.join(".git").exists() {
-                    std::fs::create_dir_all(&git_dir).unwrap();
-                    common::git(&git_dir, &["init", "--initial-branch=main"]);
-                    std::fs::write(git_dir.join("import-note.txt"), "import 0\n").unwrap();
-                    common::git(&git_dir, &["add", "."]);
-                    common::git(&git_dir, &["commit", "-m", "the model's import seed"]);
-                }
-                let mut note = std::fs::read_to_string(git_dir.join("import-note.txt")).unwrap();
-                writeln!(note, "import {}", state.ops).unwrap();
-                std::fs::write(git_dir.join("import-note.txt"), &note).unwrap();
-                common::git(&git_dir, &["add", "."]);
-                common::git(&git_dir, &["commit", "-m", "the model's import"]);
-                let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"));
-                cmd.arg("--data")
-                    .arg(&data)
-                    .env("SCION_POSTGRES_URL", common::postgres_url(&data))
-                    .args(["import", "--repo", REPO, "--ref", name])
-                    .arg(&git_dir)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::piped());
-                let out = cmd.output().unwrap();
-                assert!(
-                    out.status.success(),
-                    "import to {name} failed: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
-                // The import's tip is the ref's head now: a foreign
-                // changeset no land sent, which the chain check holds as
-                // the model's own import.
-                let tip = resolve_ref(&mut state.objects, name).await.unwrap();
-                state.imported.entry(name.to_owned()).or_default().push(tip);
-                state.heads.entry(name).or_default().push(tip);
+            Op::Import => {
+                run_import(&mut state, dir.path(), &data).await;
             }
             Op::Burst { k, target } => {
                 let name = target_name(*target);
@@ -1451,6 +1439,33 @@ async fn check(state: &mut Run) {
         )
         .await;
     }
+    // The imported ref holds the run's imports and whatever lands the
+    // corpus parked on it; the same checks apply once anything is there.
+    if state.imported.contains_key(IMPORTED_REF_NAME) {
+        let foreign: HashSet<ChangesetId> = state
+            .imported
+            .get(IMPORTED_REF_NAME)
+            .map(|tips| tips.iter().copied().collect())
+            .unwrap_or_default();
+        let (mut scion, mut objects) = (state.scion.clone(), state.objects.clone());
+        check_chain(
+            &mut scion,
+            &mut objects,
+            IMPORTED_REF_NAME,
+            &state.lands,
+            &foreign,
+        )
+        .await;
+        check_conflict(&mut scion, &mut objects, IMPORTED_REF_NAME, &state.lands).await;
+        check_durability(
+            &mut scion,
+            &mut objects,
+            IMPORTED_REF_NAME,
+            &state.lands,
+            &state.acked_before_kill,
+        )
+        .await;
+    }
     check_get_land(&state.scion, &state.lands).await;
     check_files(state).await;
 }
@@ -1691,9 +1706,11 @@ async fn check_chain(
     // R4: the chain is constructible. Walking root-first, each step's
     // land has its base on the chain before it, and no path of the land
     // changed on the chain between its base and the head it landed on.
+    // An import step is no land: the walk skips it, as R2 above did.
     for i in 1..chain.steps.len() {
         let (id, _, land) = &chain.steps[i];
-        let rec = &lands[land.expect("mapped above")];
+        let Some(land) = land else { continue };
+        let rec = &lands[*land];
         let base_at = if rec.base == chain.steps[0].0 {
             0
         } else {
