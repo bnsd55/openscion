@@ -931,7 +931,6 @@ fn spawn_tls_accepted<IO>(
 ) where
     IO: AsyncRead + AsyncWrite + PeerOf + Unpin + Send + 'static,
 {
-    let handshake = accepting.handshake;
     let Accepting {
         max,
         handshake,
@@ -1021,6 +1020,8 @@ where
     I: Stream<Item = io::Result<IO>> + Send + 'static,
     IO: AsyncRead + AsyncWrite + Connected + PeerOf + Unpin + Send + 'static,
 {
+    // The task below owns its copy: the caller's ref must not outlive it.
+    let accepting = accepting.clone();
     let Accepting {
         max,
         wait,
