@@ -2481,8 +2481,7 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         let worst = streams as usize * 400 * 1024;
-        assert!(
-            false,
+        panic!(
             "measurement only: server RSS over a minute of a slow reader on \
              {streams} streams with the largest windows: {most} bytes; h2's wired \
              per-stream cap times the streams: {worst}; stalled gauge {}",
