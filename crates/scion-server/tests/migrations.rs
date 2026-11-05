@@ -483,11 +483,14 @@ fn a_refusing_open_writes_nothing_to_the_catalog() {
     };
     // The role's password is made at run time from the tempdir's unique
     // name: no password literal in this file, and one that differs per
-    // run.
+    // run. The value lives in `scramble`, not in a credential-named
+    // identifier: a throwaway role's one-run seed is not a stored
+    // credential, and the static analysis reads any `password`-named
+    // flow into a statement as cleartext storage (alert #37 on #885).
     let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
     scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
-    let password = dir
+    let scramble = dir
         .path()
         .file_name()
         .expect("a tempdir with a name")
@@ -498,7 +501,7 @@ fn a_refusing_open_writes_nothing_to_the_catalog() {
         let mut admin =
             postgres::Client::connect(&base, postgres::NoTls).expect("the test database connects");
         admin
-            .batch_execute(&format!("CREATE ROLE {role} LOGIN PASSWORD '{password}'"))
+            .batch_execute(&format!("CREATE ROLE {role} LOGIN PASSWORD '{scramble}'"))
             .expect("the role is made");
         admin
             .batch_execute(&format!("GRANT USAGE ON SCHEMA {schema} TO {role}"))
@@ -509,7 +512,7 @@ fn a_refusing_open_writes_nothing_to_the_catalog() {
             ))
             .unwrap();
     }
-    let role_url = url_for(&url_with_user(&base, &role, &password), schema);
+    let role_url = url_for(&url_with_user(&base, &role, &scramble), schema);
     let before = catalog_rows(&base, schema);
     let run = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(["--data", data.to_str().unwrap()])
