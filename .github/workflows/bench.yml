@@ -31,7 +31,7 @@ env:
 
 jobs:
   checkout:
-    if: github.event.inputs.blob_counts == ''
+    if: ${{ !inputs.profile && github.event.inputs.blob_counts == '' }}
     name: checkout vs git clone
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -94,7 +94,7 @@ jobs:
   # Postgres cells need SCION_PG_URL, which the service container
   # below provides.
   capacity:
-    if: github.event.inputs.blob_counts == ''
+    if: ${{ !inputs.profile && github.event.inputs.blob_counts == '' }}
     name: capacity envelope
     runs-on: ubuntu-24.04
     timeout-minutes: 240
