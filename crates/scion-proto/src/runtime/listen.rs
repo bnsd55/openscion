@@ -568,7 +568,16 @@ impl Limits {
                 io = incoming.next() => match io {
                     Some(Ok(io)) => {
                         let svc = ServeRoutes::of(&routes, &io);
-                        conns.spawn(Self::serve_one(io, svc, accepting, streams, stopped.clone()));
+                        conns.spawn(Self::serve_one(
+                            io,
+                            svc,
+                            accepting.keepalive,
+                            accepting.keepalive_timeout,
+                            accepting.age,
+                            accepting.grace,
+                            streams,
+                            stopped.clone(),
+                        ));
                     }
                     Some(Err(_)) => continue,
                     None => break,
@@ -587,7 +596,10 @@ impl Limits {
     async fn serve_one<IO, S>(
         io: IO,
         svc: S,
-        accepting: &Accepting,
+        keepalive: Duration,
+        keepalive_timeout: Duration,
+        age: Duration,
+        grace: Duration,
         streams: u32,
         stop: watch::Receiver<bool>,
     ) where
@@ -608,13 +620,13 @@ impl Limits {
         let mut h2 = builder.http2();
         h2.timer(TokioTimer::new())
             .max_concurrent_streams(Some(streams))
-            .keep_alive_interval(Some(accepting.keepalive))
-            .keep_alive_timeout(accepting.keepalive_timeout)
+            .keep_alive_interval(Some(keepalive))
+            .keep_alive_timeout(keepalive_timeout)
             .max_send_buf_size(SEND_BUF);
         let mut conn = pin!(
             h2.serve_connection_with_upgrades(TokioIo::new(io), TowerToHyperService::new(svc))
         );
-        let mut age = Box::pin(age_out(accepting.age, accepting.grace));
+        let mut age = Box::pin(age_out(age, grace));
         let mut stop = pin!(watch_signal(stop));
         loop {
             tokio::select! {
