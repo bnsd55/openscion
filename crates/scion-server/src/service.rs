@@ -3028,6 +3028,59 @@ mod tests {
         (gates, parked)
     }
 
+    /// The measurement #868 asks for, before any fix: N long calls take
+    /// all permits and cancel at once; their jobs detach and run on, as
+    /// a client's cancel leaves them - a job with no deadline check in
+    /// its current phase (one long statement, a large tree store) holds
+    /// its permit to the phase's end. A live call then times its wait
+    /// for a permit. The numbers land in the CI log; the mail to the
+    /// lead carries them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_cancelled_calls_keep_their_permits_until_their_work_ends() {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let worker = Arc::new(Worker::new(store));
+        // The baseline: a fast call with no load.
+        let started = std::time::Instant::now();
+        worker.run(|_| Ok(())).await.unwrap();
+        let baseline = started.elapsed();
+        // MAX_BLOCKING long calls: a job that sleeps past any check.
+        const LONG: Duration = Duration::from_millis(1000);
+        let tasks: Vec<tokio::task::JoinHandle<()>> = (0..MAX_BLOCKING)
+            .map(|_| {
+                tokio::spawn({
+                    let worker = Arc::clone(&worker);
+                    async move {
+                        let _ = worker
+                            .run(move |_| {
+                                std::thread::sleep(LONG);
+                                Ok(())
+                            })
+                            .await;
+                    }
+                })
+            })
+            .collect();
+        while worker.permits.available_permits() > 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        // The cancels, at once: dropping the await detaches the jobs.
+        for task in &tasks {
+            task.abort();
+        }
+        // A live call times its wait for a permit.
+        let started = std::time::Instant::now();
+        worker.run(|_| Ok(())).await.unwrap();
+        let waited = started.elapsed();
+        eprintln!(
+            "#868: baseline {baseline:?}; after {MAX_BLOCKING} cancelled calls              of {LONG:?} with no check, the live call waited {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(5),
+            "the live call never got a permit: {waited:?}"
+        );
+    }
+
     /// A call aborted while its job could not claim it: the intent is
     /// durable, the job never claimed, the drop answers it `cancelled`,
     /// and no land row is recorded. This is the window the test above
