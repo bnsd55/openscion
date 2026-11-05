@@ -2277,6 +2277,53 @@ mod tests {
         assert_eq!(code, Code::NotFound);
     }
 
+    /// Measures the HTTP/2 send buffer a slow reader can hold, as wired.
+    /// One client grants the largest windows, opens the stream limit of
+    /// reads, and reads one part per second: slow enough to hold data at
+    /// the server, fast enough to answer the keepalive pings. The server
+    /// samples its own RSS over the run and the failure names the peak,
+    /// to compare with what FLOOR counts.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_slow_reader_holds_send_buffer_over_the_stream_limit() {
+        let streams = DEFAULT_STREAMS;
+        let limits = Limits::default();
+        let (addr, metrics) = serve(limits, TIMERS).await;
+        let channel = endpoint(addr)
+            .initial_stream_window_size((1 << 31) - 1)
+            .initial_connection_window_size((1 << 31) - 1)
+            .connect()
+            .await
+            .unwrap();
+        let mut client = ObjectsClient::new(channel);
+        let mut streams_open = Vec::new();
+        for _ in 0..streams {
+            let request = GetObjectsRequest::default();
+            let response = client.get_objects(request).await.unwrap();
+            streams_open.push(response.into_inner());
+        }
+        // The reader: one part per second, so the pings are answered and
+        // the connection stays, while the server's send buffers hold.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut most = 0u64;
+        while tokio::time::Instant::now() < deadline {
+            for response in streams_open.iter_mut() {
+                let _ = tokio::time::timeout(Duration::from_millis(10), response.message()).await;
+            }
+            if let Some(bytes) = rss_bytes() {
+                most = most.max(bytes);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        let worst = streams as usize * 400 * 1024;
+        assert!(
+            false,
+            "measurement only: server RSS over a minute of a slow reader on \
+             {streams} streams with the largest windows: {most} bytes; h2's wired \
+             per-stream cap times the streams: {worst}; stalled gauge {}",
+            stalled_gauge(&metrics)
+        );
+    }
+
     /// What the process's gauge says the stalled replies hold, from a
     /// scrape: this is the series an operator reads.
     fn stalled_gauge(metrics: &Metrics) -> u64 {
@@ -2286,6 +2333,22 @@ mod tests {
             }
         }
         0
+    }
+
+    /// The process's resident set, on the cells that report it. The
+    /// measurement compares it with what FLOOR counts.
+    fn rss_bytes() -> Option<u64> {
+        #[cfg(target_os = "linux")]
+        {
+            let status = std::fs::read_to_string("/proc/self/status").ok()?;
+            let line = status.lines().find(|l| l.starts_with("VmRSS:"))?;
+            let kb = line.split_whitespace().nth(1)?.parse::<u64>().ok()?;
+            Some(kb * 1024)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
     }
 
     /// Waits until `done` holds, at most 10 s.
