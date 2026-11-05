@@ -134,7 +134,11 @@ reader() {
 cell() {
   local name=$1 writers=$2 readers=$3 rep i
   note "cell $name: $writers writers, $readers readers"
-  CELL=$name reset_cell "$name"
+  # The cell's name reaches the reader loops: an env-prefix here would
+  # scope it to reset_cell alone, and the loops would die on the unset
+  # name (the first clean run's readers never checked out).
+  CELL=$name
+  reset_cell "$name"
   curl -fsS "http://127.0.0.1:$SERVER_METRICS_PORT/metrics" \
     > "$WORK/metrics-$name-before.txt" || die "no metrics before the bench"
   psql "$SCION_PG_URL" -X -q -c "SELECT pg_stat_statements_reset()" > /dev/null \
