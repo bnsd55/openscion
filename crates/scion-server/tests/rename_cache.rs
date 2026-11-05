@@ -444,6 +444,196 @@ fn a_map_past_the_cap_evicts_the_oldest() {
     );
 }
 
+/// One empty-map diff over the shared old root: every file's content
+/// changed and one file added, so page 1 carries the add, the search
+/// runs and finds no renames, and the map waits for the pages after -
+/// which the test never asks for.
+fn empty_map_diff(
+    store: &Backend,
+    repo: scion_server::test_support::meta::RepoId,
+    old: scion_core::ChangesetId,
+    i: usize,
+) -> scion_core::ChangesetId {
+    let new = Changeset::new(
+        vec![old],
+        identity(),
+        None,
+        format!("new-{i}\n").as_bytes(),
+        (0..1_100)
+            .map(|j| {
+                (
+                    RepoPath::new(format!("d/{j:04}.txt").as_str()).unwrap(),
+                    Some(FileState::Regular {
+                        content: BlobId::of(format!("second-{j}\n").as_bytes()),
+                        executable: false,
+                    }),
+                )
+            })
+            .chain(std::iter::once((
+                RepoPath::new(format!("z/{i:04}.txt").as_str()).unwrap(),
+                Some(FileState::Regular {
+                    content: BlobId::of(format!("added-{i}\n").as_bytes()),
+                    executable: false,
+                }),
+            )))
+            .collect(),
+    )
+    .unwrap();
+    tree::store_changeset(
+        &mut store.write(|c| Ok(c.repo_id(REPO)).unwrap()),
+        repo,
+        &new,
+        &mut |_| Ok(0),
+    )
+    .unwrap()
+    .0
+}
+
+/// Many paged diffs with no renames, each stopped at page 1: every one
+/// stores an empty map, which counts no rename bytes. The cap must
+/// still hold the entries to its bound - each entry costs its own
+/// overhead - and the gauge must read what the cache keeps.
+#[test]
+fn the_cap_holds_empty_maps_to_its_bound() {
+    let _log = log_guard();
+    scion_server::test_support::read::test_clear_rename_cache();
+    let dir = scion_server::test_support::private_tempdir();
+    let store = Backend::open_test(dir.path()).unwrap();
+    let repo = store.write(|c| c.create_repo(REPO)).unwrap();
+    // The blobs the pages' files name.
+    for i in 0..1_100 {
+        store
+            .blobs()
+            .put(format!("second-{i}\n").as_bytes())
+            .unwrap();
+    }
+    let old_files: std::collections::BTreeMap<RepoPath, Option<FileState>> = (0..1_100)
+        .map(|i| {
+            (
+                RepoPath::new(format!("d/{i:04}.txt").as_str()).unwrap(),
+                Some(FileState::Regular {
+                    content: BlobId::of(format!("first-{i}\n").as_bytes()),
+                    executable: false,
+                }),
+            )
+        })
+        .collect();
+    let old = Changeset::new(vec![], identity(), None, b"old\n".to_vec(), old_files).unwrap();
+    let old = tree::store_changeset(
+        &mut store.write(|c| Ok(c.repo_id(REPO)).unwrap()),
+        repo,
+        &old,
+        &mut |_| Ok(0),
+    )
+    .unwrap()
+    .0;
+    for i in 0..16 {
+        store
+            .blobs()
+            .put(format!("added-{i}\n").as_bytes())
+            .unwrap();
+        let _page = page(&store, old, new, None);
+        let (maps, bytes) = scion_server::test_support::read::test_rename_cache_size();
+        let overhead = scion_server::test_support::read::test_rename_cache_entry_overhead();
+        assert!(
+            maps <= 4,
+            "the cap holds the entries to its bound: {maps} entries after diff {i}"
+        );
+        let cap = scion_server::test_support::read::test_rename_cache_entry_overhead() * 4;
+        assert!(
+            (bytes as usize) <= cap,
+            "the kept bytes sit under the cap: {bytes} against {cap}"
+        );
+        let gauge = scion_server::test_support::read::test_rename_cache_gauge();
+        assert_eq!(gauge, bytes, "the gauge reads the kept total");
+    }
+    // Four empty-map entries survive; the twelve oldest are gone.
+    let (maps, bytes) = scion_server::test_support::read::test_rename_cache_size();
+    assert_eq!(maps, 4, "the cap holds four empty-map entries, not all 16");
+    let overhead = scion_server::test_support::read::test_rename_cache_entry_overhead();
+    assert_eq!(
+        bytes as usize,
+        maps * overhead,
+        "an empty map costs exactly its overhead against the cap"
+    );
+}
+
+/// A page that answers from an entry moves it to the young end: a trim
+/// then drops another entry first. A refresh that left the old stamp
+/// in the order would let the trim drop the entry the page just used.
+#[test]
+fn a_page_that_answers_moves_its_entry_to_the_young_end() {
+    let _log = log_guard();
+    scion_server::test_support::read::test_clear_rename_cache();
+    let dir = scion_server::test_support::private_tempdir();
+    let store = Backend::open_test(dir.path()).unwrap();
+    let repo = store.write(|c| c.create_repo(REPO)).unwrap();
+    for i in 0..1_101 {
+        store
+            .blobs()
+            .put(format!("second-{i}\n").as_bytes())
+            .unwrap();
+    }
+    let old_files: std::collections::BTreeMap<RepoPath, Option<FileState>> = (0..1_100)
+        .map(|i| {
+            (
+                RepoPath::new(format!("d/{i:04}.txt").as_str()).unwrap(),
+                Some(FileState::Regular {
+                    content: BlobId::of(format!("first-{i}\n").as_bytes()),
+                    executable: false,
+                }),
+            )
+        })
+        .collect();
+    let old = Changeset::new(vec![], identity(), None, b"old\n".to_vec(), old_files).unwrap();
+    let old = tree::store_changeset(
+        &mut store.write(|c| Ok(c.repo_id(REPO)).unwrap()),
+        repo,
+        &old,
+        &mut |_| Ok(0),
+    )
+    .unwrap()
+    .0;
+    let overhead = scion_server::test_support::read::test_rename_cache_entry_overhead();
+    // The cap holds exactly three entries.
+    let _cap = scion_server::test_support::read::test_set_rename_cache_cap_for_tests(overhead * 3);
+    let mut new_ids = Vec::new();
+    for i in 0..3 {
+        new_ids.push(empty_map_diff(&store, repo, old, i));
+    }
+    // Page 1 of the first two diffs: two entries, one older.
+    let _p1 = page(&store, old, new_ids[0], None);
+    let _p2 = page(&store, old, new_ids[1], None);
+    // A page of the first diff again: it answers from its entry, which
+    // moves to the young end - past the second diff's entry.
+    Backend::test_reset_statement_count();
+    let again = page(&store, old, new_ids[0], None);
+    let hit = Backend::test_statement_count();
+    assert!(hit > 0);
+    let _ = again;
+    // The third diff's entry cannot fit: the trim drops the second
+    // diff's entry, the older one, not the one the page just used.
+    let third = empty_map_diff(&store, repo, old, 3);
+    let _p3 = page(&store, old, third, None);
+    let (maps, _) = scion_server::test_support::read::test_rename_cache_size();
+    assert_eq!(maps, 3);
+    // The first diff's page still answers from its map: the refresh
+    // kept it young. Its cost is one page's statements, not a search.
+    Backend::test_reset_statement_count();
+    let _again = page(&store, old, new_ids[0], None);
+    let still_hit = Backend::test_statement_count();
+    // The second diff's entry was the one trimmed: its page runs the
+    // search again, more statements than the survivor's hit.
+    Backend::test_reset_statement_count();
+    let _second_again = page(&store, old, new_ids[1], None);
+    let evicted = Backend::test_statement_count();
+    assert!(
+        still_hit < evicted,
+        "the refreshed entry survived the trim and the older one went: \
+         {still_hit} against {evicted}"
+    );
+}
+
 /// A diff whose rename vector passes its byte bound finds no renames
 /// and says so. The bound counts the bytes of the paths too, so it
 /// trips far under the entry count the same bytes would allow a
