@@ -749,6 +749,7 @@ fn stays_pending(e: Error) -> Error {
 /// steps, and the derivation stops between steps at `deadline`. A database
 /// from before path history needs this once: each later changeset gets its
 /// own when it is written.
+#[cfg_attr(not(any(test, feature = "test-hooks")), allow(unused_variables))]
 fn derive_history(
     store: &Backend,
     repo: RepoId,
