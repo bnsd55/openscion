@@ -2451,43 +2451,49 @@ mod tests {
     /// failure names the per-phase peaks, so the growth per connection is
     /// the uncounted remainder's slope.
     #[tokio::test(flavor = "multi_thread")]
+    /// Measures what slow readers hold in the server, as wired, at 1, 4
+    /// and 16 connections. The clients run in child processes of this same
+    /// binary, so the RSS this test samples is the server process's alone.
+    /// Each connection grants the largest windows, opens the stream limit
+    /// of reads, and reads one part per second: slow enough to hold data
+    /// at the server, fast enough to answer the keepalive pings.
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_slow_reader_holds_send_buffer_over_the_stream_limit() {
-        let streams = u32::from(DEFAULT_STREAMS.get());
+        // The child mode: this same test binary runs one slow client for
+        // the parent's server, so the bytes the server sent sit here, not
+        // in the parent's RSS.
+        if let Ok(addr) = std::env::var("SLOW_READER_CHILD") {
+            let addr: std::net::SocketAddr = addr.parse().unwrap();
+            run_slow_reader_client(&addr).await;
+            return;
+        }
         let limits = Limits::default();
         let (addr, metrics) = serve(limits, TIMERS).await;
+        let exe = std::env::current_exe().unwrap();
+        let mut children: Vec<std::process::Child> = Vec::new();
         let mut phases: Vec<(u64, u64)> = Vec::new();
-        let mut readers = Vec::new();
         for connections in [1u64, 4, 16] {
-            // The connections the phase adds, each with its stream limit
-            // of reads and its own reader.
-            while readers.len() < connections as usize {
-                let channel = endpoint(addr)
-                    .initial_stream_window_size((1 << 31) - 1)
-                    .initial_connection_window_size((1 << 31) - 1)
-                    .connect()
-                    .await
+            // The connections the phase adds: each a child process in the
+            // client mode above.
+            while children.len() < connections as usize {
+                let child = std::process::Command::new(&exe)
+                    .arg("--exact")
+                    .arg(
+                        "runtime::listen::tests::a_slow_reader_holds_send_buffer_over_the_stream_limit",
+                    )
+                    .arg("--nocapture")
+                    .env("SLOW_READER_CHILD", addr.to_string())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
                     .unwrap();
-                let mut client = ObjectsClient::new(channel);
-                let mut streams_open = Vec::new();
-                for _ in 0..streams {
-                    let request = GetObjectsRequest::default();
-                    let response = client.get_objects(request).await.unwrap();
-                    streams_open.push(response.into_inner());
-                }
-                readers.push(streams_open);
+                children.push(child);
             }
-            // The readers: one part per second per connection, so the
-            // pings are answered and the connections stay, while the
-            // server's pipelines hold.
+            // The children's setup: the connect and the streams.
+            tokio::time::sleep(Duration::from_secs(5)).await;
             let started = tokio::time::Instant::now();
             let mut most = 0u64;
             while tokio::time::Instant::now() < started + Duration::from_secs(60) {
-                for connection in readers.iter_mut() {
-                    for response in connection.iter_mut() {
-                        let _ = tokio::time::timeout(Duration::from_millis(10), response.message())
-                            .await;
-                    }
-                }
                 if let Some(bytes) = rss_bytes() {
                     most = most.max(bytes);
                 }
@@ -2495,13 +2501,41 @@ mod tests {
             }
             phases.push((connections, most));
         }
-        let streams_per_conn = streams as usize * 256 * 1024;
+        for child in children {
+            let _ = child.kill();
+        }
         panic!(
-            "measurement only: server RSS peaks per slow-connection phase \
-             (connections, peak bytes): {phases:?}; streams x the uncounted \
-             remainder cap: {streams_per_conn} bytes per connection; stalled gauge {}",
+            "measurement only (the clients in child processes): server RSS \
+             peaks per slow-connection phase (connections, peak bytes): \
+             {phases:?}; stalled gauge {}",
             stalled_gauge(&metrics)
         );
+    }
+
+    /// One slow-reader connection for the parent's measurement, in this
+    /// child process: the largest windows, the stream limit of reads, one
+    /// part per second, until the parent kills this process.
+    async fn run_slow_reader_client(addr: &std::net::SocketAddr) {
+        let channel = endpoint(*addr)
+            .initial_stream_window_size((1 << 31) - 1)
+            .initial_connection_window_size((1 << 31) - 1)
+            .connect()
+            .await
+            .unwrap();
+        let mut client = ObjectsClient::new(channel);
+        let mut streams_open = Vec::new();
+        for _ in 0..u32::from(DEFAULT_STREAMS.get()) {
+            let request = GetObjectsRequest::default();
+            let response = client.get_objects(request).await.unwrap();
+            streams_open.push(response.into_inner());
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(400);
+        while tokio::time::Instant::now() < deadline {
+            for response in streams_open.iter_mut() {
+                let _ = tokio::time::timeout(Duration::from_millis(10), response.message()).await;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
     }
 
     /// What the process's gauge says the stalled replies hold, from a
