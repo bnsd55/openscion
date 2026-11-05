@@ -923,11 +923,8 @@ fn spawn_tls_accepted<IO>(
     accepting: Accepting,
     places: &Arc<Semaphore>,
     waiters: &Arc<Semaphore>,
-    waits: &WaitWarn,
-    refusals: &WaitWarn,
     done: &mpsc::Sender<io::Result<Connection<TlsStream<IO>>>>,
     metrics: &Arc<Metrics>,
-    total: &Arc<TotalBytes>,
 ) where
     IO: AsyncRead + AsyncWrite + PeerOf + Unpin + Send + 'static,
 {
@@ -936,6 +933,8 @@ fn spawn_tls_accepted<IO>(
         handshake,
         wait,
         stalled_bytes,
+        total,
+        refusals,
         ..
     } = accepting;
     let places = Arc::clone(places);
@@ -945,7 +944,7 @@ fn spawn_tls_accepted<IO>(
     let refusals = refusals.clone();
     let sender = done.clone();
     let metrics = Arc::clone(metrics);
-    let total = Arc::clone(total);
+    let total = Arc::clone(&total);
     tokio::spawn(async move {
         // The place first, bounded: a connection over the cap waits at
         // most `wait`, then the server closes it, so a storm fails fast
@@ -1025,8 +1024,6 @@ where
     let Accepting {
         max,
         wait,
-        stalled_bytes,
-        total,
         waits,
         refusals,
         ..
@@ -1090,11 +1087,8 @@ where
                 accepting.clone(),
                 &places,
                 &waiters,
-                &waits,
-                &refusals,
                 &done,
                 &metrics,
-                &total,
             );
         }
     });
