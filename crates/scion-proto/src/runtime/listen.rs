@@ -2355,7 +2355,7 @@ mod tests {
                 started.elapsed() < Duration::from_secs(10),
                 "the silent connection over the total was never closed: \
                  read polls {polls}, bytes read {bytes}, over-limit fires {over}, \
-                 gauge {}",
+                 hold calls {holds}, bytes sent into channels {sent}, gauge {}",
                 stalled_gauge(&metrics)
             );
             tokio::time::sleep(Duration::from_millis(5)).await;

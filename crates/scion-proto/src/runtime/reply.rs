@@ -25,6 +25,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -41,6 +42,12 @@ use crate::{Bytes, CHUNK_BYTES, MAX_MESSAGE_BYTES, MAX_OBJECT_BYTES};
 /// bytes, so it holds less than this plus one object. The client asks again
 /// for the rest, so one call stays short.
 pub(crate) const REPLY_BUDGET_BYTES: usize = MAX_MESSAGE_BYTES;
+
+/// The stall-path marks the probe reads: how many times a reply's stall
+/// path took a hold, and how many bytes replies sent into their channels
+/// before they stopped. Test-only.
+pub(crate) static HOLD_CALLS: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static SENT_INTO_TX: AtomicUsize = AtomicUsize::new(0);
 
 /// The most reads one reply keeps in flight while it sends, in the request's
 /// order: enough to overlap the hops of a read with the sends of the objects
@@ -396,10 +403,12 @@ pub async fn send_objects<K, F>(
                     Err(_) => {
                         if let Some(stalled) = &stalled {
                             slot.release();
+                            HOLD_CALLS.fetch_add(1, Ordering::Relaxed);
                             slot.park(stalled.hold(STALLED_REPLY_BYTES));
                         }
                     }
                 }
+                SENT_INTO_TX.fetch_add(sent, Ordering::Relaxed);
                 return;
             }
         };
@@ -413,13 +422,17 @@ pub async fn send_objects<K, F>(
                 Ok(Ok(())) => sent += len,
                 // The client is gone or stalled. In the middle of an object,
                 // the stream then ends with `DEADLINE_EXCEEDED`.
-                Ok(Err(_)) => return,
+                Ok(Err(_)) => {
+                    SENT_INTO_TX.fetch_add(sent, Ordering::Relaxed);
+                    return;
+                }
                 // Stalled: the parts stay in HTTP/2 until the connection
                 // ends or the client resets the stream. Count them, so a
                 // connection that stalls too much is closed with them.
                 Err(_) => {
                     if let Some(stalled) = &stalled {
                         slot.release();
+                        HOLD_CALLS.fetch_add(1, Ordering::Relaxed);
                         slot.park(stalled.hold(STALLED_REPLY_BYTES));
                     }
                     return;
@@ -433,6 +446,7 @@ pub async fn send_objects<K, F>(
         // The object's bytes are gone, and so is its share.
         drop((parts, permit));
         if sent >= REPLY_BUDGET_BYTES {
+            SENT_INTO_TX.fetch_add(sent, Ordering::Relaxed);
             return;
         }
         // The next object in the request's order, from the window's front.
