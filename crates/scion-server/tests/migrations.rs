@@ -384,3 +384,142 @@ fn a_migrate_beside_a_live_server_refuses_and_moves_nothing() {
         "the migrate runs once the server is gone"
     );
 }
+
+/// The catalog rows of one schema: the count the refused-open test
+/// compares before and after.
+fn catalog_rows(url: &str, schema: &str) -> i64 {
+    let mut client = postgres::Client::connect(url, postgres::NoTls)
+        .expect("the test database connects");
+    let rows = client
+        .query_one(
+            "SELECT count(*) FROM pg_class
+             WHERE relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $1)",
+            &[&schema],
+        )
+        .expect("the catalog is readable");
+    rows.get(0)
+}
+
+/// The test URL with another role's credentials: the same host, path and
+/// options, a different userinfo.
+fn url_with_user(url: &str, user: &str, password: &str) -> String {
+    let scheme_end = url.find("://").expect("a URL") + 3;
+    let rest = &url[scheme_end..];
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let host = match authority.rsplit_once('@') {
+        Some((_, host)) => host,
+        None => authority,
+    };
+    format!(
+        "{}{user}:{password}@{}{}",
+        &url[..scheme_end],
+        host,
+        &rest[authority_end..]
+    )
+}
+
+/// Drops the test's role whatever the test's outcome: roles are
+/// cluster-wide, and the suite's schemas run in parallel.
+struct RoleGuard {
+    url: String,
+    role: String,
+}
+
+impl Drop for RoleGuard {
+    fn drop(&mut self) {
+        if let Ok(mut client) = postgres::Client::connect(&self.url, postgres::NoTls) {
+            let _ = client.batch_execute(&format!("DROP ROLE IF EXISTS {}", self.role));
+        }
+    }
+}
+
+/// A migration statement is the operator's ask, not a lane's call: it
+/// runs under no statement budget. The base budget is shrunk to 250 ms
+/// and the migration's own statement sleeps 1 s — the sleep dies under
+/// the open's budget, and completes under the migrate's.
+#[test]
+fn a_migration_statement_outlives_the_base_statement_budget() {
+    let base = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL must name the test database");
+    let schema = "mig_sleep";
+    let url = url_for(&base, schema);
+    seed_behind_store(&base, schema);
+    let dir = scion_server::test_support::private_tempdir();
+    let data = dir.path().join("data");
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
+    let run = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
+        .args(["--data", data.to_str().unwrap()])
+        .env("SCION_POSTGRES_URL", &url)
+        .args(["migrate"])
+        .env("NO_COLOR", "1")
+        .env("SCION_TEST_STATEMENT_TIMEOUT", "250ms")
+        .env("SCION_TEST_MIGRATION_SLEEP_MS", "1000")
+        .output()
+        .expect("the migrate runs");
+    assert!(
+        run.status.success(),
+        "the migration's own statement is not bounded by the base budget: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let out = String::from_utf8_lossy(&run.stdout);
+    assert!(out.contains("from version 5 to 6"), "{out}");
+}
+
+/// A refusing open of a behind database writes nothing to the catalog:
+/// it refuses before any DDL, so a role that may read the ledger but not
+/// create in the schema reaches the refusal instead of dying on the
+/// ledger's DDL, and the schema's catalog rows are the same after.
+#[test]
+fn a_refusing_open_writes_nothing_to_the_catalog() {
+    let base = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL must name the test database");
+    let schema = "mig_no_create";
+    let url = url_for(&base, schema);
+    seed_behind_store(&base, schema);
+    let role = format!("{schema}_role");
+    let guard = RoleGuard {
+        url: base.clone(),
+        role: role.clone(),
+    };
+    {
+        let mut admin =
+            postgres::Client::connect(&base, postgres::NoTls).expect("the test database connects");
+        admin
+            .batch_execute(&format!(
+                "CREATE ROLE {role} LOGIN PASSWORD 'migrations-test'"
+            ))
+            .expect("the role is made");
+        admin
+            .batch_execute(&format!("GRANT USAGE ON SCHEMA {schema} TO {role}"))
+            .unwrap();
+        admin
+            .batch_execute(&format!(
+                "GRANT SELECT ON {schema}.schema_migrations TO {role}"
+            ))
+            .unwrap();
+    }
+    let role_url = url_for(&url_with_user(&base, &role, "migrations-test"), schema);
+    let before = catalog_rows(&base, schema);
+    let dir = scion_server::test_support::private_tempdir();
+    let data = dir.path().join("data");
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
+    let run = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
+        .args(["--data", data.to_str().unwrap()])
+        .env("SCION_POSTGRES_URL", &role_url)
+        .args(["serve", "--listen", "127.0.0.1:0", "--token-file"])
+        .arg(ensure_token())
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("the refused serve runs");
+    assert!(!run.status.success(), "a behind database is refused");
+    let why = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        why.contains("run `scion-server migrate` first, or pass --migrate to serve"),
+        "the refusal names the fix: {why}"
+    );
+    assert!(!why.contains("permission denied"), "the refusal is not an ACL error: {why}");
+    let after = catalog_rows(&base, schema);
+    assert_eq!(before, after, "the refused open wrote nothing to the catalog");
+    drop(guard);
+}
