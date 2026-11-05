@@ -1676,6 +1676,12 @@ impl Scion for ScionService {
         &self,
         request: Request<scion_proto::v1::LandRequest>,
     ) -> Result<Response<LandResponse>, Status> {
+        // The profile's Pre phase opens at the handler's first line: the
+        // checks and the audit intent are the land's own work, and the
+        // phase sum can be read against the client's latency only when
+        // they are in it. The wall rides the worker's closure: the trace
+        // is thread-local and the land runs on a blocking thread.
+        let handler_started = std::time::Instant::now();
         // The job checks it in its walks: a request timeout, or a client
         // that cancels, drops this call but not a job that is running. The
         // guard ends the deadline when this call ends or is dropped.
@@ -1737,6 +1743,7 @@ impl Scion for ScionService {
         // The job writes the land's own result lines, so the evidence
         // does not depend on this handler living: the job needs its own
         // copies of what the lines name.
+        let pre = handler_started.elapsed();
         let (job_request_id, job_principal) = (request_id.clone(), principal.clone());
         let (job_repo, job_ref) = (repo.clone(), target_ref.clone());
         let audit = self.audit.clone();
@@ -1776,7 +1783,8 @@ impl Scion for ScionService {
                     access
                         .check_write(&caller, &req.repo, cs.changes().keys())
                         .map_err(Status::from)?;
-                    lands.land(&store, &caller, &req).map_err(Status::from)
+                    crate::land_profile::seed_pre(pre);
+                    lands.land(&store, &caller, &req, pre).map_err(Status::from)
                 })();
                 // The job that changed the state writes the state change's
                 // own lines, after the commit and outside the write

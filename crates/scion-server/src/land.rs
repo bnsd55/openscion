@@ -412,11 +412,18 @@ impl Lands {
     /// the request's deadline, or [`Error::Cancelled`] if the call went.
     /// The land then stays pending, and a retry with the same request key
     /// resumes it. Store errors otherwise.
-    pub fn land(&self, store: &Backend, caller: &Caller, req: &LandRequest) -> Result<LandOutcome> {
+    pub fn land(
+        &self,
+        store: &Backend,
+        caller: &Caller,
+        req: &LandRequest,
+        pre: std::time::Duration,
+    ) -> Result<LandOutcome> {
+        crate::land_profile::seed_pre(pre);
         let started = Instant::now();
         let (outcome, trace) =
             crate::land_profile::Trace::measure(|| self.land_committed(store, caller, req));
-        crate::land_profile::log(recorded_land_id(&outcome), started.elapsed(), &trace);
+        crate::land_profile::log(recorded_land_id(&outcome), started.elapsed() + pre, &trace);
         // An index can hold up to the whole budget, and freeing it takes a
         // while, so it happens here, outside every lock.
         let evicted = mem::take(&mut *self.evicted.lock().unwrap_or_else(PoisonError::into_inner));
@@ -1750,7 +1757,12 @@ mod tests {
         }
 
         fn try_land(&self, cs: ChangesetId, key: &str) -> Result<LandOutcome> {
-            self.lands.land(&self.store, &caller(), &req(cs, key))
+            self.lands.land(
+                &self.store,
+                &caller(),
+                &req(cs, key),
+                std::time::Duration::ZERO,
+            )
         }
 
         fn landed_count(&self) -> i64 {
@@ -1848,7 +1860,9 @@ mod tests {
                 target_ref: name.into(),
                 ..req(cs, key)
             };
-            self.lands.land(&self.store, &caller(), &req).unwrap()
+            self.lands
+                .land(&self.store, &caller(), &req, std::time::Duration::ZERO)
+                .unwrap()
         }
     }
 
@@ -1918,6 +1932,7 @@ mod tests {
                     request_key: "knorepo".into(),
                     deadline: Deadline::new(Instant::now() + std::time::Duration::from_secs(600)),
                 },
+                std::time::Duration::ZERO,
             )
             .unwrap_err();
         assert!(matches!(err, Error::NotFound(_)), "{err:?}");
@@ -1943,6 +1958,7 @@ mod tests {
                     request_key: "knone".into(),
                     deadline: Deadline::new(Instant::now() + std::time::Duration::from_secs(600)),
                 },
+                std::time::Duration::ZERO,
             )
             .unwrap();
         assert_eq!(out.state, LandState::Rejected, "{}", out.detail);
@@ -2088,7 +2104,10 @@ mod tests {
         };
         drop(guard);
         let commits_before = f.store.commits();
-        let err = f.lands.land(&f.store, &caller(), &gone).unwrap_err();
+        let err = f
+            .lands
+            .land(&f.store, &caller(), &gone, std::time::Duration::ZERO)
+            .unwrap_err();
         // The reply says the land stays pending, and a retry with the
         // same request key resumes it.
         assert!(
@@ -2208,7 +2227,10 @@ mod tests {
         let cs = f.commit(f.root, &[put("a/x", "new")]);
         let mut r = req(cs, "k");
         r.target_ref = String::new();
-        match f.lands.land(&f.store, &caller(), &r) {
+        match f
+            .lands
+            .land(&f.store, &caller(), &r, std::time::Duration::ZERO)
+        {
             Err(Error::InvalidArgument(why)) => {
                 assert!(why.contains("must be 1 to"), "{why}");
             }
@@ -2216,7 +2238,10 @@ mod tests {
         }
         let mut r = req(cs, "k");
         r.request_key = String::new();
-        match f.lands.land(&f.store, &caller(), &r) {
+        match f
+            .lands
+            .land(&f.store, &caller(), &r, std::time::Duration::ZERO)
+        {
             Err(Error::InvalidArgument(why)) => {
                 assert!(why.contains("must be 1 to"), "{why}");
             }
@@ -2244,10 +2269,16 @@ mod tests {
         r.target_ref = "m".repeat(MAX_NAME_BYTES);
         // No ref carries that name, so a name that passes the limit
         // answers Rejected - the state proves the check passed it.
-        let out = f.lands.land(&f.store, &caller(), &r).unwrap();
+        let out = f
+            .lands
+            .land(&f.store, &caller(), &r, std::time::Duration::ZERO)
+            .unwrap();
         assert_eq!(out.state, LandState::Rejected, "{}", out.detail);
         r.target_ref = "m".repeat(MAX_NAME_BYTES + 1);
-        match f.lands.land(&f.store, &caller(), &r) {
+        match f
+            .lands
+            .land(&f.store, &caller(), &r, std::time::Duration::ZERO)
+        {
             Err(Error::InvalidArgument(why)) => {
                 assert!(why.contains("must be 1 to"), "{why}");
             }
@@ -2322,7 +2353,12 @@ mod tests {
             f.repo,
             Arc::new(Mutex::new(imports.clone())),
         );
-        let out = lands.land(&f.store, &caller(), &req(cs, "hook"));
+        let out = lands.land(
+            &f.store,
+            &caller(),
+            &req(cs, "hook"),
+            std::time::Duration::ZERO,
+        );
         match out {
             Err(Error::Aborted(detail)) => {
                 assert!(!detail.is_empty(), "the abort says why");
@@ -2387,7 +2423,14 @@ mod tests {
             assert!(moved, "the import's move lost a race it cannot lose");
         }));
 
-        let out = lands.land(&f.store, &caller(), &req(cs, "hook")).unwrap();
+        let out = lands
+            .land(
+                &f.store,
+                &caller(),
+                &req(cs, "hook"),
+                std::time::Duration::ZERO,
+            )
+            .unwrap();
         assert_eq!(out.state, LandState::Landed, "{}", out.detail);
         let landed = out.result.expect("landed");
         // The landed changeset sits on top of the import: the land
@@ -2399,7 +2442,14 @@ mod tests {
         assert_eq!(parents, vec![import], "the land rebased onto the import");
         assert_eq!(metrics.land_replans(), 1, "the replan counted once");
         // A retry with the same key returns the same outcome.
-        let again = lands.land(&f.store, &caller(), &req(cs, "hook")).unwrap();
+        let again = lands
+            .land(
+                &f.store,
+                &caller(),
+                &req(cs, "hook"),
+                std::time::Duration::ZERO,
+            )
+            .unwrap();
         assert_eq!(stored(&again), stored(&out));
     }
 
@@ -2435,7 +2485,14 @@ mod tests {
             assert!(moved, "the import's move lost a race it cannot lose");
         }));
 
-        let out = lands.land(&f.store, &caller(), &req(cs, "hook")).unwrap();
+        let out = lands
+            .land(
+                &f.store,
+                &caller(),
+                &req(cs, "hook"),
+                std::time::Duration::ZERO,
+            )
+            .unwrap();
         assert_eq!(out.state, LandState::Conflict, "{}", out.detail);
         // The verdict is the plan's answer to the head the import made:
         // it names `c`, which only that head changed. The stale verdict
@@ -2451,7 +2508,14 @@ mod tests {
             "the stale verdict replanned against the head the import made"
         );
         // A retry with the same key returns the same verdict.
-        let again = lands.land(&f.store, &caller(), &req(cs, "hook")).unwrap();
+        let again = lands
+            .land(
+                &f.store,
+                &caller(),
+                &req(cs, "hook"),
+                std::time::Duration::ZERO,
+            )
+            .unwrap();
         assert_eq!(stored(&again), stored(&out));
     }
 
@@ -2505,7 +2569,9 @@ mod tests {
             // A new process retries with the same key.
             let before = f.main();
             let fresh = Lands::default();
-            let out = fresh.land(&f.store, &caller(), &req).unwrap();
+            let out = fresh
+                .land(&f.store, &caller(), &req, std::time::Duration::ZERO)
+                .unwrap();
             assert_eq!(out.land_id, recorded.land_id, "{crash:?}: a stable land id");
             assert_eq!(out.state, LandState::Landed, "{crash:?}: {}", out.detail);
             let after = f.main();
@@ -2513,7 +2579,9 @@ mod tests {
             assert_eq!(Some(after.target), out.result);
             let landed = f.store.read(|c| c.get_changeset(repo, after.target));
             assert_eq!(landed.unwrap().parents(), [before.target], "{crash:?}");
-            let replay = fresh.land(&f.store, &caller(), &req).unwrap();
+            let replay = fresh
+                .land(&f.store, &caller(), &req, std::time::Duration::ZERO)
+                .unwrap();
             assert_eq!(stored(&replay), stored(&out));
             assert!(!replay.moved, "{crash:?}: the replay moved nothing");
             assert_eq!(f.landed_count(), 1, "{crash:?}");
@@ -2561,10 +2629,18 @@ mod tests {
             target_ref: "nope".into(),
             ..req(side, "n")
         };
-        let out = f.lands.land(&f.store, &caller(), &missing).unwrap();
+        let out = f
+            .lands
+            .land(&f.store, &caller(), &missing, std::time::Duration::ZERO)
+            .unwrap();
         assert_eq!(out.state, LandState::Rejected);
         assert_eq!(out.reject_reason, LandRejectReason::MissingRef);
-        assert_eq!(f.lands.land(&f.store, &caller(), &missing).unwrap(), out);
+        assert_eq!(
+            f.lands
+                .land(&f.store, &caller(), &missing, std::time::Duration::ZERO)
+                .unwrap(),
+            out
+        );
         let slots = f.lands.refs.lock().unwrap();
         let keys: Vec<_> = slots.iter().map(|(key, _)| key).collect();
         assert_eq!(keys, [&(f.repo, "main".into())]);
@@ -2744,7 +2820,10 @@ mod tests {
                 deadline: Deadline::new(Instant::now()),
                 ..req(cs, key)
             };
-            let err = f.lands.land(&f.store, &caller(), &late).unwrap_err();
+            let err = f
+                .lands
+                .land(&f.store, &caller(), &late, std::time::Duration::ZERO)
+                .unwrap_err();
             assert!(matches!(err, Error::DeadlineExceeded(_)), "{key}: {err}");
             assert_eq!(f.main(), before, "{key}");
             let row = damage::land_state_by_key(&f.store, key).unwrap();
@@ -2788,7 +2867,10 @@ mod tests {
                 ..req(cs, key)
             };
             drop(guard);
-            let err = f.lands.land(&f.store, &caller(), &gone).unwrap_err();
+            let err = f
+                .lands
+                .land(&f.store, &caller(), &gone, std::time::Duration::ZERO)
+                .unwrap_err();
             assert!(
                 matches!(&err, Error::Cancelled(why) if why.contains("its call has gone")),
                 "{key}: {err}"
@@ -2851,7 +2933,10 @@ mod tests {
             deadline: Deadline::new(Instant::now()),
             ..req(f.commit(f.root, &[put("c1", "late")]), "late")
         };
-        let err = f.lands.land(&f.store, &caller(), &late).unwrap_err();
+        let err = f
+            .lands
+            .land(&f.store, &caller(), &late, std::time::Duration::ZERO)
+            .unwrap_err();
         assert!(matches!(err, Error::DeadlineExceeded(_)), "{err}");
         assert!(!stored(head));
 
@@ -3621,7 +3706,10 @@ mod tests {
             target_ref: "nope".into(),
             ..req(f.root, "rejected")
         };
-        let rejected = f.lands.land(&f.store, &caller(), &missing).unwrap();
+        let rejected = f
+            .lands
+            .land(&f.store, &caller(), &missing, std::time::Duration::ZERO)
+            .unwrap();
         let states = [landed.state, conflict.state, rejected.state];
         assert_eq!(states, [Landed, Conflict, Rejected]);
         // All three expired; landed is the oldest, rejected the newest.
@@ -3889,7 +3977,12 @@ mod tests {
         let head = f.main().target;
         let b_cs = f.commit(head, &[put("b/y", "b")]);
         let b_out = Lands::default()
-            .land(&f.store, &Caller("b".into()), &req(b_cs, "shared"))
+            .land(
+                &f.store,
+                &Caller("b".into()),
+                &req(b_cs, "shared"),
+                std::time::Duration::ZERO,
+            )
             .unwrap();
         assert_eq!(b_out.state, LandState::Landed, "{}", b_out.detail);
         assert_ne!(b_out.land_id, a_land.land_id, "two rows, one per caller");

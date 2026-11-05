@@ -980,7 +980,12 @@ fn land(
     // A ceiling on the retries: a land that aborts forever must fail the
     // test, not hang it.
     for tries in 0..100 {
-        match lands.land(store, &Caller("t".into()), &request) {
+        match lands.land(
+            store,
+            &Caller("t".into()),
+            &request,
+            std::time::Duration::ZERO,
+        ) {
             Err(Error::Aborted(_)) => {}
             outcome => return outcome.unwrap(),
         }

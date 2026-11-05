@@ -895,7 +895,9 @@ mod tests {
             request_key: "late".into(),
             deadline: Deadline::new(Instant::now()),
         };
-        let err = lands.land(&store, &Caller("t".into()), &req).unwrap_err();
+        let err = lands
+            .land(&store, &Caller("t".into()), &req, std::time::Duration::ZERO)
+            .unwrap_err();
         assert!(matches!(err, crate::Error::DeadlineExceeded(_)), "{err:?}");
         // Every stored blob is old, and nothing new is orphaned.
         let report = collect(&store, Duration::ZERO, &mut |_| {});

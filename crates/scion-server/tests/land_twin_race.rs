@@ -147,7 +147,12 @@ fn twin_calls_land_once_and_answer_one_outcome() {
         );
         threads.push(std::thread::spawn(move || {
             barrier.wait();
-            lands.land(&store, &Caller("t".into()), &request(cs, "twin"))
+            lands.land(
+                &store,
+                &Caller("t".into()),
+                &request(cs, "twin"),
+                std::time::Duration::ZERO,
+            )
         }));
     }
     let mut results = Vec::new();
@@ -223,7 +228,7 @@ fn a_call_resumed_after_its_twin_settled_returns_the_twin_s_outcome() {
 
     // The twin finishes the land: the ref moves once.
     let twin = Lands::default()
-        .land(&store, &Caller("t".into()), &req)
+        .land(&store, &Caller("t".into()), &req, std::time::Duration::ZERO)
         .unwrap();
     assert_eq!(twin.state, LandState::Landed, "{}", twin.detail);
     let (head, version) = main_ref(&store);
@@ -232,7 +237,7 @@ fn a_call_resumed_after_its_twin_settled_returns_the_twin_s_outcome() {
     // The first call resumes: it reads the settled row in its finish and
     // returns its twin's outcome, without moving the ref again.
     let resumed = Lands::default()
-        .land(&store, &Caller("t".into()), &req)
+        .land(&store, &Caller("t".into()), &req, std::time::Duration::ZERO)
         .unwrap();
     assert_eq!(resumed.land_id, land_id, "a stable land id");
     assert_eq!(resumed.state, LandState::Landed, "{}", resumed.detail);

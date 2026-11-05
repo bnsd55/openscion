@@ -99,6 +99,7 @@ fn catch_up_statements(n: usize) -> u64 {
                 request_key: "base".into(),
                 deadline: Deadline::new(Instant::now() + Duration::from_secs(600)),
             },
+            std::time::Duration::ZERO,
         )
         .unwrap();
     assert_eq!(out.state, LandState::Landed, "{}", out.detail);
@@ -127,6 +128,7 @@ fn catch_up_statements(n: usize) -> u64 {
                 request_key: "end".into(),
                 deadline: Deadline::new(Instant::now() + Duration::from_secs(600)),
             },
+            std::time::Duration::ZERO,
         )
         .unwrap();
     assert_eq!(
