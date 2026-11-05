@@ -60,7 +60,7 @@ use crate::runtime::metrics::Metrics;
 use crate::runtime::request_id;
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
+use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::time::Sleep;
 use tokio_rustls::rustls::ServerConfig;
@@ -1046,6 +1046,7 @@ async fn pace_after_failed_accept<IO>(
     done.send(Err(error)).await.is_ok()
 }
 
+#[allow(clippy::too_many_lines)] // the loop's arms share its locals
 fn accept<I, IO>(
     incoming: I,
     accepting: &Accepting,
@@ -1416,6 +1417,7 @@ mod tests {
     use std::path::Path;
     use std::pin::pin;
     use std::sync::Arc;
+    use std::task::{Context, Poll};
 
     use rcgen::{
         BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
@@ -1440,6 +1442,7 @@ mod tests {
         Encoding, GetObjectsRequest, GetRootTreeRequest, GetRootTreeResponse, ObjectKind,
         ObjectPart, ResolveRefRequest, ResolveRefResponse,
     };
+    use tokio::net::TcpStream;
 
     /// A wait that ends at once when nothing holds the call back.
     const HELD: Duration = Duration::from_millis(500);
@@ -1732,7 +1735,7 @@ mod tests {
     impl Stream for AlwaysFail {
         type Item = io::Result<TcpStream>;
 
-        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Poll::Ready(Some(Err(io::Error::other("every accept fails"))))
         }
