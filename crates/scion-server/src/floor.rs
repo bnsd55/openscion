@@ -87,6 +87,11 @@ pub(crate) const VIEW_MEMO: u64 =
 pub(crate) const RENAME_WORK: u64 =
     (crate::read::MAX_RENAME_BYTES * crate::service::MAX_DIFFS) as u64;
 
+/// What the paged diffs' shared rename maps hold across calls: the
+/// cache's byte cap (`read::RENAME_CACHE_MAX_BYTES`), process-wide,
+/// held until each map's last page is a call deadline old.
+pub(crate) const RENAME_CACHE: u64 = crate::read::RENAME_CACHE_MAX_BYTES as u64;
+
 /// Slack for what the budgets do not count: the interpreter, the
 /// allocators' overhead, the connection and TLS buffers, the stacks of
 /// the worker threads.
@@ -105,6 +110,7 @@ pub(crate) const FLOOR: u64 = BLAME
     + STALL_TOTAL
     + VIEW_MEMO
     + RENAME_WORK
+    + RENAME_CACHE
     + HEADROOM;
 
 /// The files the host-limit reader reads, so a test can point them at a
@@ -315,6 +321,7 @@ pub(crate) fn check_startup_memory(
                 stall_total_bytes = STALL_TOTAL,
                 view_memo_bytes = VIEW_MEMO,
                 rename_work_bytes = RENAME_WORK,
+                rename_cache_bytes = RENAME_CACHE,
                 "the host has less memory than the server's floor: \
                  the page cache gives way first, and under load the \
                  process can reach the OOM killer"
@@ -354,17 +361,20 @@ mod tests {
                 + STALL_TOTAL
                 + VIEW_MEMO
                 + RENAME_WORK
+                + RENAME_CACHE
                 + HEADROOM
         );
-        assert_eq!(FLOOR, 6992 << 20);
+        assert_eq!(FLOOR, 7504 << 20);
     }
 
     /// The rename share is the diffs that run at once, each holding its
-    /// rename pass's byte bound. A drift in either constant shows here
+    /// rename pass's byte bound; the cache share is the maps the paged
+    /// diffs keep across calls. A drift in any constant shows here
     /// before it shows in a host check.
     #[test]
-    fn the_rename_share_is_the_diffs_at_once_times_their_bound() {
+    fn the_rename_shares_are_their_constants_times_their_counts() {
         assert_eq!(RENAME_WORK, 256 << 20);
+        assert_eq!(RENAME_CACHE, 512 << 20);
     }
 
     #[test]

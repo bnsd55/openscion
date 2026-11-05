@@ -7,5 +7,4 @@ and a derivation beyond that waits under its call's deadline with no
 store lock and no write lane held. A diff's rename pass is bounded by
 bytes, not entries: past 64 MiB of walked entries it finds no renames
 and says so, where the old entry bound let a long-path diff hold far
-more than the entries' count suggested. The memory floor counts the
-view share.
+more than the entries' count suggested.
