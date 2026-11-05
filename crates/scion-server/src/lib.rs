@@ -85,6 +85,7 @@ pub(crate) mod metrics;
 pub(crate) mod names;
 pub(crate) mod objects;
 mod pg;
+pub mod preflight;
 pub(crate) mod quotas;
 pub(crate) mod read;
 pub(crate) mod reply;
