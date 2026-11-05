@@ -1540,6 +1540,7 @@ fn preflight_options(cli: &Cli, args: &ServeArgs) -> scion_server::preflight::Pr
         postgres_ca: cli.postgres_ca.clone(),
         listen: args.listen,
         metrics_listen: args.metrics_listen,
+        migrate: args.migrate,
     }
 }
 

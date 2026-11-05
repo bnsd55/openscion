@@ -26,6 +26,10 @@ pub struct PreflightOptions {
     pub listen: SocketAddr,
     /// The address the metrics listener would bind, when given.
     pub metrics_listen: Option<SocketAddr>,
+    /// Whether the serve this preflight precedes runs `--migrate`: a
+    /// schema behind this build is then the answer the operator asked
+    /// for, not a failure.
+    pub migrate: bool,
 }
 
 /// What a run answers: one line per check, and the shell's exit code -
@@ -82,7 +86,7 @@ pub fn run(opts: &PreflightOptions) -> Report {
     };
 
     if let Some(db) = db.as_mut() {
-        database_checks(&opts.data, db, &mut answers);
+        database_checks(&opts.data, opts.migrate, db, &mut answers);
     }
 
     // The listen address: bound and dropped, the way `serve` binds it.
@@ -108,6 +112,7 @@ pub fn run(opts: &PreflightOptions) -> Report {
 /// checks still print.
 fn database_checks(
     data: &Path,
+    migrate: bool,
     db: &mut postgres::Client,
     answers: &mut Vec<(&'static str, Answer)>,
 ) {
@@ -183,6 +188,13 @@ fn database_checks(
         "schema version",
         if check.db_version() == 0 {
             Answer::Ok("a fresh database; serve creates the schema".to_owned())
+        } else if check.is_pending() && migrate {
+            Answer::Ok(format!(
+                "the schema stands at version {}, this build ships {}; \
+                 the serve this precedes runs --migrate, which moves it",
+                check.db_version(),
+                check.build_version()
+            ))
         } else if check.is_pending() {
             Answer::Fail(crate::pg::pending_migration_message(
                 check.db_version(),
@@ -499,6 +511,7 @@ mod tests {
             postgres_ca: None,
             listen: "127.0.0.1:0".parse().unwrap(),
             metrics_listen: None,
+            migrate: false,
         })
     }
 
@@ -513,7 +526,7 @@ mod tests {
     /// The host's memory read points at a meminfo with room to spare:
     /// the floor's answer must not depend on the runner's own memory.
     /// The override is process-global: the tests that touch it hold
-    /// [`MEMORY_LOCK`], and the drop resets it under the same lock.
+    /// [`TEST_LOCK`], and the drop resets it under the same lock.
     struct MemoryOverride(#[allow(dead_code)] tempfile::TempDir);
     impl MemoryOverride {
         fn set(lock: &MutexGuard<'_, ()>) -> (Self, ()) {
@@ -716,6 +729,48 @@ mod tests {
         assert!(
             schema.starts_with("fail") && schema.contains("migrate"),
             "the behind schema fails with the fix:\n{schema}"
+        );
+    }
+
+    /// A schema behind this build is the answer the operator asked for
+    /// when the serve this preflight precedes runs --migrate: an ok
+    /// line that names the move, and exit 0.
+    #[test]
+    fn a_schema_behind_with_migrate_passes_preflight() {
+        let lock = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_memory, ()) = MemoryOverride::set(&lock);
+        let (dir, url) = ready_store();
+        let mut raw = postgres::Client::connect(
+            std::fs::read_to_string(&url).unwrap().as_str(),
+            postgres::NoTls,
+        )
+        .unwrap();
+        raw.execute("DELETE FROM schema_migrations", &[]).unwrap();
+        raw.execute(
+            "INSERT INTO schema_migrations (version, name) VALUES (3, 'an old step')",
+            &[],
+        )
+        .unwrap();
+        drop(raw);
+        let report = run(&PreflightOptions {
+            data: dir.path().to_path_buf(),
+            postgres_url_file: Some(url.clone()),
+            postgres_ca: None,
+            listen: "127.0.0.1:0".parse().unwrap(),
+            metrics_listen: None,
+            migrate: true,
+        });
+        assert_eq!(
+            report.code, 0,
+            "the migrate serve moves it:\n{:#?}",
+            report.lines
+        );
+        let schema = line(&report, "schema version");
+        assert!(
+            schema.starts_with("ok") && schema.contains("migrate"),
+            "the ok line names the move:\n{schema}"
         );
     }
 
@@ -942,6 +997,7 @@ mod tests {
             postgres_ca: None,
             listen: taken,
             metrics_listen: None,
+            migrate: false,
         });
         assert_eq!(report.code, 2);
         assert!(
@@ -1010,6 +1066,7 @@ mod tests {
             postgres_ca: None,
             listen: "127.0.0.1:0".parse().unwrap(),
             metrics_listen: Some(taken),
+            migrate: false,
         });
         assert_eq!(report.code, 2);
         assert!(
@@ -1031,18 +1088,25 @@ mod tests {
         let (_memory, ()) = MemoryOverride::set(&lock);
         let (dir, _url) = ready_store();
         // A schema that exists and holds nothing: the search path
-        // answers, the ledger does not, the version reads 0.
+        // answers, the ledger does not, the version reads 0. The name
+        // is a test schema of the data directory's own - unique per
+        // run, and the sweep knows it - but of the sub-path `fresh`, so
+        // it is not the schema the store itself was opened with.
         let raw_url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
-        let fresh = "scion_test_freshpair";
+        let fresh = crate::Backend::test_schema(&dir.path().join("fresh"));
         {
             let mut raw = postgres::Client::connect(&raw_url, postgres::NoTls).unwrap();
-            raw.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {fresh}"))
+            raw.batch_execute(&format!("DROP SCHEMA IF EXISTS {fresh}"))
                 .unwrap();
+            raw.batch_execute(&format!("CREATE SCHEMA {fresh}"))
+                .unwrap();
+            crate::pg::test_hooks::register_test_schema(&mut raw, &fresh, dir.path()).unwrap();
         }
         let base = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let sep = if base.contains('?') { '&' } else { '?' };
         let url = url_file(
             dir.path(),
-            &format!("{base}?options=--search_path%3D{fresh}"),
+            &format!("{base}{sep}options=--search_path%3D{fresh}"),
         );
         let report = run_cli(dir.path(), Some(&url));
         assert_eq!(
@@ -1057,7 +1121,8 @@ mod tests {
         );
         {
             let mut raw = postgres::Client::connect(&raw_url, postgres::NoTls).unwrap();
-            raw.batch_execute(&format!("DROP SCHEMA {fresh}")).unwrap();
+            raw.batch_execute(&format!("DROP SCHEMA IF EXISTS {fresh}"))
+                .unwrap();
         }
     }
 

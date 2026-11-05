@@ -997,8 +997,12 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
         // are not on this disk.
         let uuid = uuid_of(row.get::<_, Vec<u8>>("uuid"))?;
         // The repos probe only decides the no-marker case: a schema
-        // that holds repos was served, one that holds none was not.
-        let has_repos = !writer.query("SELECT 1 FROM repos LIMIT 1", &[])?.is_empty();
+        // that holds repos was served, one that holds none was not. No
+        // arm reads the flag while the marker is there, so the probe
+        // runs then not at all - the reopen costs exactly main's
+        // statements.
+        let has_repos =
+            marker.uuid.is_none() && !writer.query("SELECT 1 FROM repos LIMIT 1", &[])?.is_empty();
         match pairing_decision(marker.uuid, Some(uuid), has_repos) {
             Pairing::Agree => {}
             Pairing::AdoptCut => {
