@@ -940,7 +940,6 @@ fn spawn_tls_accepted<IO>(
     } = accepting;
     let places = Arc::clone(places);
     let waiters = Arc::clone(waiters);
-    let acceptor = acceptor.clone();
     let waits = waits.clone();
     let refusals = refusals.clone();
     let sender = done.clone();
