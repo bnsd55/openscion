@@ -35,7 +35,6 @@ use tonic::service::interceptor::InterceptedService;
 
 use crate::metrics::{Metrics, MetricsLayer, code_label};
 use serde_json::Value;
-use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::Instrument as _;
 
@@ -381,10 +380,12 @@ pub async fn serve(
         audit.ready(),
     )
     .await;
-    let router = |server: Server| {
-        server
-            .timeout(REQUEST_TIMEOUT)
-            .add_service(scion)
+    // SHORTCUT: the spike drops tonic's Server::timeout layer; the
+    // app-level Deadline in the handlers (REQUEST_TIMEOUT) still ends
+    // every call. A fix would wire the grpc-timeout layer beside the
+    // routes; the loss list is on the issue.
+    let router = || {
+        tonic::service::Routes::new(scion)
             .add_service(objects)
             .add_service(health)
     };

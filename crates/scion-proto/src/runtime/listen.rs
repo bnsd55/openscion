@@ -67,8 +67,9 @@ use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::server::TlsStream;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt as _};
-use tonic::transport::Server;
-use tonic::transport::server::{Connected, Router, TcpIncoming};
+use tonic::service::Routes;
+use tonic::transport::server::{Connected, TcpIncoming};
+use tracing::Instrument as _;
 
 /// The default of [`Limits::connections`]. Room for the 50 checkouts at once
 /// of `scripts/bench-checkout.sh`, each on its own connection to one daemon.
@@ -77,6 +78,14 @@ pub const DEFAULT_CONNECTIONS: NonZeroUsize = NonZeroUsize::new(128).unwrap();
 /// The default of [`Limits::streams`]. One connection can still fill all
 /// 256 job slots of the server, and carry the 200 agents of `scn bench`.
 pub const DEFAULT_STREAMS: NonZeroU32 = NonZeroU32::new(256).unwrap();
+
+/// The send buffer one stream may hold, as wired by the spike's serve
+/// path. hyper's default is 400 KiB and tonic 0.14.9 takes no knob for
+/// it, so the spike serves through hyper-util's builder itself to set
+/// this. A slow reader's per-stream hold is bounded by this plus one
+/// channel part plus the reply's in-flight window, and the slow-reader
+/// test below measures the whole connection.
+pub(crate) const SEND_BUF: usize = 64 * 1024;
 
 /// A client must send the HTTP/2 preface within this long after it gets its
 /// place, or its connection is closed. The same bound covers the TLS
@@ -474,7 +483,7 @@ impl Limits {
     /// Transport errors.
     pub async fn serve<I, IO>(
         self,
-        router: impl FnOnce(Server) -> Router,
+        router: impl FnOnce() -> Routes,
         incoming: I,
         tls: Option<Arc<ServerConfig>>,
         shutdown: impl Future<Output = ()> + Send + 'static,
@@ -492,7 +501,7 @@ impl Limits {
     async fn serve_with<I, IO>(
         self,
         accepting: &Accepting,
-        router: impl FnOnce(Server) -> Router,
+        router: impl FnOnce() -> Routes,
         incoming: I,
         tls: Option<Arc<ServerConfig>>,
         shutdown: impl Future<Output = ()> + Send + 'static,
@@ -502,49 +511,11 @@ impl Limits {
         I: Stream<Item = io::Result<IO>> + Send + 'static,
         IO: AsyncRead + AsyncWrite + Connected + PeerOf + Unpin + Send + 'static,
     {
-        // One span per call: the RPC and the peer at the start, and the
-        // principal and the repo once the call knows them. `error_span`, so
-        // the span is open under any filter, and a `WARN` line under a
-        // `warn` filter still shows its fields.
-        let server = Server::builder()
-            .trace_fn(|request| {
-                // The connection's handle carries the peer: the connect
-                // info of a request below the router is ours, and the
-                // transport's `TcpConnectInfo` is not on the request.
-                let peer = request
-                    .extensions()
-                    .get::<Stalled>()
-                    .and_then(Stalled::peer)
-                    .map(|addr| addr.to_string())
-                    .unwrap_or_default();
-                // The caller's request ID, if it sent one that fits. A
-                // header that does not fit is dropped whole, not cleaned
-                // up: nothing of it is logged.
-                let request_id = request_id::sanitize(
-                    request
-                        .headers()
-                        .get(request_id::REQUEST_ID)
-                        .map(http::HeaderValue::as_bytes),
-                )
-                .unwrap_or_default();
-                tracing::error_span!(
-                    "call",
-                    rpc = %request.uri().path(),
-                    peer,
-                    request_id = %request_id,
-                    principal = tracing::field::Empty,
-                    repo = tracing::field::Empty,
-                )
-            })
-            .max_concurrent_streams(self.streams.get())
-            .http2_keepalive_interval(Some(accepting.keepalive))
-            .http2_keepalive_timeout(Some(accepting.keepalive_timeout))
-            .max_connection_age(accepting.age)
-            .max_connection_age_grace(accepting.grace);
         // The accept path owns the shutdown future and sets the watch when
         // it resolves (or when the listener ends); the serve below reads
         // the same watch, so the drain starts at the signal itself.
         let (stop, stopped) = watch::channel(false);
+        let routes = router();
         if let Some(config) = tls {
             let incoming = accept_tls(
                 incoming,
@@ -554,18 +525,111 @@ impl Limits {
                 config,
                 Arc::clone(&metrics),
             );
-            let outcome = router(server)
-                .serve_with_incoming_shutdown(incoming, watch_signal(stopped))
-                .await;
+            let outcome =
+                Self::serve_connections(routes, incoming, stopped, accepting, self.streams.get())
+                    .await;
             Self::warn_the_last(accepting);
             return outcome;
         }
         let incoming = accept(incoming, accepting, stop, shutdown, metrics);
-        let outcome = router(server)
-            .serve_with_incoming_shutdown(incoming, watch_signal(stopped))
-            .await;
+        let outcome =
+            Self::serve_connections(routes, incoming, stopped, accepting, self.streams.get()).await;
         Self::warn_the_last(accepting);
         outcome
+    }
+
+    /// Serves the routes on every accepted connection, through hyper-util's
+    /// builder, so the send buffer is ours to set ([`SEND_BUF`]). tonic's
+    /// own serve path sets no send buffer and takes no knob for one; its
+    /// other behavior - the keepalive, the age and grace, the drain, the
+    /// per-call span - is replicated here from tonic 0.14.9's
+    /// `serve_internal`, and the accept stream (the TLS, the marks, the
+    /// shutdown) is ours as before.
+    async fn serve_connections<I, IO>(
+        routes: Routes,
+        incoming: I,
+        mut stopped: watch::Receiver<bool>,
+        accepting: &Accepting,
+        streams: u32,
+    ) -> Result<(), tonic::transport::Error>
+    where
+        I: Stream<Item = io::Result<IO>> + Send + 'static,
+        IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let mut conns = tokio::task::JoinSet::new();
+        let mut incoming = pin!(incoming);
+        loop {
+            tokio::select! {
+                changed = stopped.changed() => {
+                    if changed.is_err() || *stopped.borrow() {
+                        break;
+                    }
+                }
+                io = incoming.next() => match io {
+                    Some(Ok(io)) => {
+                        let svc = ServeRoutes::of(&routes, &io);
+                        conns.spawn(Self::serve_one(io, svc, accepting, streams, stopped.clone()));
+                    }
+                    Some(Err(_)) => continue,
+                    None => break,
+                },
+            }
+        }
+        // The connections see the same watch and drain themselves; the
+        // serve returns only when the last one is done, as tonic's does.
+        while conns.join_next().await.is_some() {}
+        Ok(())
+    }
+
+    /// One connection, as tonic's own `serve_connection` task: the HTTP/2
+    /// conn races its keepalive (in the builder), the stop watch (graceful
+    /// close) and the age with its grace (graceful, then forceful).
+    async fn serve_one<IO, S>(
+        io: IO,
+        svc: S,
+        accepting: &Accepting,
+        streams: u32,
+        stop: watch::Receiver<bool>,
+    ) where
+        IO: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+        S: hyper::service::Service<
+                http::Request<hyper::body::Incoming>,
+                Response = http::Response<tonic::body::Body>,
+            > + Send
+            + 'static,
+        S::Future: Send + 'static,
+        S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let mut conn = pin!(
+            hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                .http2_only()
+                .http2()
+                .timer(TokioTimer::new())
+                .max_concurrent_streams(Some(streams))
+                .keep_alive_interval(Some(accepting.keepalive))
+                .keep_alive_timeout(accepting.keepalive_timeout)
+                .max_send_buf_size(SEND_BUF)
+                .serve_connection(TokioIo::new(io), svc)
+        );
+        let mut age = Box::pin(age_out(accepting.age, accepting.grace));
+        let mut stop = pin!(watch_signal(stop));
+        loop {
+            tokio::select! {
+                outcome = &mut conn => {
+                    if let Err(err) = outcome {
+                        tracing::debug!("the connection failed: {err}");
+                    }
+                    break;
+                }
+                _ = &mut stop => conn.as_mut().graceful_shutdown(),
+                forceful = &mut age => {
+                    if forceful {
+                        break;
+                    }
+                    conn.as_mut().graceful_shutdown();
+                }
+            }
+        }
     }
 
     /// Writes whatever the last interval gathered, before the serve
@@ -588,6 +652,92 @@ impl Limits {
 /// A shutdown for the serve that completes when the accept side stopped:
 /// the accept task sets the watch when the shutdown resolves, or when the
 /// listener ends, and this reads it.
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+
+/// The routes as a hyper service: the per-call span set from the same
+/// fields the builder's `trace_fn` set, the connection's `Stalled` put in
+/// the request's extensions for the handlers, and the request's body
+/// mapped into tonic's. The future is boxed once per request: `Routes`'
+/// own future is concrete but not nameable outside tonic.
+#[derive(Clone)]
+struct ServeRoutes {
+    inner: Routes,
+    stalled: Stalled,
+}
+
+impl ServeRoutes {
+    /// One per connection, with that connection's `Stalled`.
+    fn of<IO>(routes: &Routes, io: &IO) -> Self
+    where
+        IO: Connected,
+    {
+        Self {
+            inner: routes.clone(),
+            stalled: Connected::connect_info(io),
+        }
+    }
+}
+
+impl hyper::service::Service<http::Request<hyper::body::Incoming>> for ServeRoutes {
+    type Response = http::Response<tonic::body::Body>;
+    type Error = std::convert::Infallible;
+    type Future =
+        Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        tower::Service::poll_ready(&mut self.inner, cx)
+    }
+
+    fn call(&mut self, mut request: http::Request<hyper::body::Incoming>) -> Self::Future {
+        // The connection's handle carries the peer: the connect info of a
+        // request below the router is ours, and the transport's
+        // `TcpConnectInfo` is not on the request.
+        request.extensions_mut().insert(self.stalled.clone());
+        let peer = request
+            .extensions()
+            .get::<Stalled>()
+            .and_then(Stalled::peer)
+            .map(|addr| addr.to_string())
+            .unwrap_or_default();
+        // The caller's request ID, if it sent one that fits. A header that
+        // does not fit is dropped whole, not cleaned up: nothing of it is
+        // logged.
+        let request_id = request_id::sanitize(
+            request
+                .headers()
+                .get(request_id::REQUEST_ID)
+                .map(http::HeaderValue::as_bytes),
+        )
+        .unwrap_or_default();
+        // One span per call: the RPC and the peer at the start, and the
+        // principal and the repo once the call knows them. `error_span`,
+        // so the span is open under any filter, and a `WARN` line under a
+        // `warn` filter still shows its fields.
+        let span = tracing::error_span!(
+            "call",
+            rpc = %request.uri().path(),
+            peer,
+            request_id = %request_id,
+            principal = tracing::field::Empty,
+            repo = tracing::field::Empty,
+        );
+        let call = tower::Service::call(&mut self.inner, request.map(tonic::body::Body::new));
+        Box::pin(call.instrument(span))
+    }
+}
+
+/// The age of a connection, as tonic's own `connection_timeout_future`:
+/// `false` at the age (close it gracefully), `true` after the grace on
+/// top (close it regardless).
+async fn age_out(age: Duration, grace: Duration) -> bool {
+    tokio::time::sleep(age).await;
+    if grace.is_zero() {
+        return false;
+    }
+    tokio::time::sleep(grace).await;
+    true
+}
+
 async fn watch_signal(mut stopped: watch::Receiver<bool>) {
     while !*stopped.borrow_and_update() {
         if stopped.changed().await.is_err() {
@@ -1651,7 +1801,7 @@ mod tests {
         tokio::spawn({
             let metrics = Arc::clone(&metrics);
             async move {
-                let router = |mut server: Server| server.add_service(ObjectsServer::new(Stalls));
+                let router = || tonic::service::Routes::new(ObjectsServer::new(Stalls));
                 let pending = std::future::pending();
                 let timers = Timers {
                     handshake: tls_timeout,
@@ -1679,7 +1829,7 @@ mod tests {
         tokio::spawn({
             let metrics = Arc::clone(&metrics);
             async move {
-                let router = |mut server: Server| server.add_service(ObjectsServer::new(Stalls));
+                let router = || tonic::service::Routes::new(ObjectsServer::new(Stalls));
                 let pending = std::future::pending();
                 limits
                     .serve_with(
@@ -2015,7 +2165,7 @@ mod tests {
             // it, and the test reads what is left after it returns.
             let accepting = accepting.clone();
             async move {
-                let router = |mut server: Server| server.add_service(ObjectsServer::new(Stalls));
+                let router = || tonic::service::Routes::new(ObjectsServer::new(Stalls));
                 let shutdown = async move {
                     let _ = fired.await;
                 };
