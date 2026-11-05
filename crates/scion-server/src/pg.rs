@@ -737,8 +737,8 @@ fn run_job(
 /// every statement until a rollback. So a failed open rolls back before
 /// the error returns; the rollback's own failure (a lost connection)
 /// is fine - the reconnect's setup handles that session.
-fn open_transaction(c: &PgClient, open: String) -> Result<()> {
-    if let Err(error) = c.batch(&open) {
+fn open_transaction(c: &PgClient, open: &str) -> Result<()> {
+    if let Err(error) = c.batch(open) {
         let _ = c.execute("ROLLBACK", &[]);
         return Err(error);
     }
@@ -1408,11 +1408,12 @@ impl Pg {
         // transaction is back on the writer's clock, so the row locks it
         // meets later still answer Busy at 5 s (SET LOCAL lasts to the
         // end of the transaction).
-        // The 60 s guard must be in force before the statement that
-        // takes the key. `lock_timeout` is read when the lock wait
-        // begins (the timer starts in the lock's sleep), so the guard
-        // cannot ride the same statement as the key: it stays its own
-        // statement, before the key's.
+        // The 60 s guard is in force before the statement that takes
+        // the key: the transaction's open batch carries it (BEGIN and
+        // the SET LOCAL in one round trip). `lock_timeout` is read when
+        // the lock wait begins (the timer starts in the lock's sleep),
+        // so the guard cannot ride the same statement as the key: it
+        // stays its own statement, before the key's - inside the open.
         //
         // The restore is a data dependency, not a target-list neighbor:
         // it reads FROM the subquery that takes the key, so it cannot
@@ -1420,10 +1421,6 @@ impl Pg {
         // the 60 s. OFFSET 0 keeps the planner from flattening the
         // subquery into one target list (tests/pg_guard_timeouts.rs
         // checks the plan's shape and times the wait).
-        tx.c.query(
-            &format!("SET LOCAL lock_timeout = '{LOCK_TIMEOUT_FOR_KEY}'"),
-            &[],
-        )?;
         let key_started = std::time::Instant::now();
         tx.c.query_opt(
             &format!(
@@ -1998,7 +1995,7 @@ impl<'a> PgTx<'a> {
     ) -> Result<PgTx<'a>> {
         open_transaction(
             c,
-            match lock_timeout {
+            &match lock_timeout {
                 Some(v) => format!("BEGIN; SET LOCAL lock_timeout = '{v}';"),
                 None => "BEGIN;".to_owned(),
             },
@@ -2048,7 +2045,7 @@ impl<'a> PgTx<'a> {
         // clean for its next holder.
         open_transaction(
             c,
-            format!(
+            &format!(
                 "BEGIN TRANSACTION ISOLATION LEVEL {} READ ONLY; \
                  SET LOCAL statement_timeout = {}; \
                  SET LOCAL idle_in_transaction_session_timeout = {};",
