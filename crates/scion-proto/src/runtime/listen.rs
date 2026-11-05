@@ -1023,7 +1023,6 @@ where
 {
     let Accepting {
         max,
-        handshake,
         wait,
         stalled_bytes,
         total,
@@ -1087,7 +1086,7 @@ where
             spawn_tls_accepted(
                 io,
                 acceptor.clone(),
-                &accepting,
+                accepting.clone(),
                 &places,
                 &waiters,
                 &waits,
