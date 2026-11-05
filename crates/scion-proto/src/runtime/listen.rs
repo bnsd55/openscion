@@ -931,7 +931,7 @@ fn spawn_tls_accepted<IO>(
 ) where
     IO: AsyncRead + AsyncWrite + PeerOf + Send + 'static,
 {
-    let max = accepting.max.get();
+    let max = accepting.max;
     let handshake = accepting.handshake;
     let wait = accepting.wait;
     let stalled_bytes = accepting.stalled_bytes;
@@ -957,7 +957,8 @@ fn spawn_tls_accepted<IO>(
         // One deadline, from the place: the TLS handshake and the HTTP/2
         // preface that follows share it.
         let deadline = tokio::time::Instant::now() + handshake;
-        let wait = tokio::time::timeout_at(deadline, acceptor.accept(io));
+        let mut io = pin!(io);
+        let wait = tokio::time::timeout_at(deadline, acceptor.accept(io.as_mut()));
         let preface = Some((
             PREFACE_BYTES,
             Box::pin(tokio::time::sleep_until(deadline)) as Pin<Box<Sleep>>,
