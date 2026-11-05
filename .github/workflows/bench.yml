@@ -8,19 +8,16 @@ name: bench
 on:
   workflow_dispatch:
     inputs:
-<<<<<<< HEAD
       # The blob-count measurement (issue #823): a space-separated list
       # of blob counts. When it is set, the checkout and capacity jobs
       # are skipped and the blob-count job runs the stores' costs.
       blob_counts:
         description: blob counts to measure (space-separated); set to run the blob-count job
         default: ""
-=======
       profile:
         description: "Profile one land instead of the envelope jobs."
         type: boolean
         default: false
->>>>>>> 4f69fa2 (the bench workflow dispatches the land profile behind an input, so the run reuses the envelope's harness file)
 
 permissions:
   contents: read
@@ -36,7 +33,6 @@ jobs:
   checkout:
     if: github.event.inputs.blob_counts == ''
     name: checkout vs git clone
-    if: ${{ !inputs.profile }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     services:
@@ -100,7 +96,6 @@ jobs:
   capacity:
     if: github.event.inputs.blob_counts == ''
     name: capacity envelope
-    if: ${{ !inputs.profile }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     services:
@@ -146,7 +141,6 @@ jobs:
           path: ${{ runner.temp }}/capacity-artifacts/
           if-no-files-found: error
 
-<<<<<<< HEAD
   # The blob-count costs (issue #823): stores of small blobs at the
   # counts the dispatch input names, each measured for the server's
   # open, fsck, gc --dry-run, bytes on disk and inodes. Dispatch only:
@@ -159,23 +153,11 @@ jobs:
     services:
       # The stores open through the test backend, whose Postgres half
       # reads this database.
-=======
-  land-profile:
-    name: land profile
-    if: ${{ inputs.profile }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    services:
-      # pg_stat_statements needs a shared preload, so this service is
-      # not the envelope's: the profile names the statements a land
-      # runs, and the envelope counts what the run spends.
->>>>>>> 4f69fa2 (the bench workflow dispatches the land profile behind an input, so the run reuses the envelope's harness file)
       postgres:
         image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
         env:
           POSTGRES_PASSWORD: scion
           POSTGRES_DB: scion
-<<<<<<< HEAD
         ports:
           - 5432:5432
         options: >-
@@ -187,29 +169,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
-=======
-          POSTGRES_HOST_AUTH_METHOD: trust
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-          -c shared_preload_libraries=pg_stat_statements
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
->>>>>>> 4f69fa2 (the bench workflow dispatches the land profile behind an input, so the run reuses the envelope's harness file)
         with:
           tool: protoc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-<<<<<<< HEAD
       - name: the facts of the run
         run: |
           {
@@ -225,7 +189,48 @@ jobs:
         run: |
           set -o pipefail
           scripts/bench-blob-count.sh 2>&1 | tee "$RUNNER_TEMP/blob-count-output.txt" >> "$GITHUB_STEP_SUMMARY"
-=======
+      - name: upload the raw output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: blob-count-output
+          path: ${{ runner.temp }}/blob-count-output.txt
+          if-no-files-found: error
+
+  land-profile:
+    name: land profile
+    if: ${{ inputs.profile }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    services:
+      # pg_stat_statements needs a shared preload, so this service is
+      # not the envelope's: the profile names the statements a land
+      # runs, and the envelope counts what the run spends.
+      postgres:
+        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        env:
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: scion
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          -c shared_preload_libraries=pg_stat_statements
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
+        with:
+          tool: protoc
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: the harness needs strace and jq
         run: |
           set -euo pipefail
@@ -238,16 +243,10 @@ jobs:
           SCION_PG_URL: postgres://postgres@127.0.0.1:5432/scion_capacity_profile
           CAPACITY_MACHINE: "GitHub ubuntu-24.04 hosted runner: 4 vCPU, 16 GiB RAM, ~144 GiB SSD"
         run: scripts/land-profile.sh
->>>>>>> 4f69fa2 (the bench workflow dispatches the land profile behind an input, so the run reuses the envelope's harness file)
       - name: upload the raw output
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-<<<<<<< HEAD
-          name: blob-count-output
-          path: ${{ runner.temp }}/blob-count-output.txt
-=======
           name: land-profile-artifacts
           path: ${{ runner.temp }}/land-profile-artifacts/
->>>>>>> 4f69fa2 (the bench workflow dispatches the land profile behind an input, so the run reuses the envelope's harness file)
           if-no-files-found: error
