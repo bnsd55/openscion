@@ -1654,7 +1654,7 @@ mod tests {
                 (
                     RepoPath::new(p.as_str()).unwrap(),
                     Some(FileState::Regular {
-                        content: store.blobs().put(content).unwrap(),
+                        content: store.blobs().put(content.as_bytes()).unwrap(),
                         executable: false,
                     }),
                 )
