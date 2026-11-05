@@ -2443,48 +2443,63 @@ mod tests {
         assert_eq!(code, Code::NotFound);
     }
 
-    /// Measures the HTTP/2 send buffer a slow reader can hold, as wired.
-    /// One client grants the largest windows, opens the stream limit of
-    /// reads, and reads one part per second: slow enough to hold data at
-    /// the server, fast enough to answer the keepalive pings. The server
-    /// samples its own RSS over the run and the failure names the peak,
-    /// to compare with what FLOOR counts.
+    /// Measures what slow readers hold, as wired, at 1, 4 and 16
+    /// connections. Each connection grants the largest windows, opens the
+    /// stream limit of reads, and reads one part per second: slow enough
+    /// to hold data at the server, fast enough to answer the keepalive
+    /// pings. The server samples its own RSS through each phase and the
+    /// failure names the per-phase peaks, so the growth per connection is
+    /// the uncounted remainder's slope.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_slow_reader_holds_send_buffer_over_the_stream_limit() {
         let streams = u32::from(DEFAULT_STREAMS.get());
         let limits = Limits::default();
         let (addr, metrics) = serve(limits, TIMERS).await;
-        let channel = endpoint(addr)
-            .initial_stream_window_size((1 << 31) - 1)
-            .initial_connection_window_size((1 << 31) - 1)
-            .connect()
-            .await
-            .unwrap();
-        let mut client = ObjectsClient::new(channel);
-        let mut streams_open = Vec::new();
-        for _ in 0..streams {
-            let request = GetObjectsRequest::default();
-            let response = client.get_objects(request).await.unwrap();
-            streams_open.push(response.into_inner());
-        }
-        // The reader: one part per second, so the pings are answered and
-        // the connection stays, while the server's send buffers hold.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        let mut most = 0u64;
-        while tokio::time::Instant::now() < deadline {
-            for response in streams_open.iter_mut() {
-                let _ = tokio::time::timeout(Duration::from_millis(10), response.message()).await;
+        let mut phases: Vec<(u64, u64)> = Vec::new();
+        let mut readers = Vec::new();
+        for connections in [1u64, 4, 16] {
+            // The connections the phase adds, each with its stream limit
+            // of reads and its own reader.
+            while readers.len() < connections as usize {
+                let channel = endpoint(addr)
+                    .initial_stream_window_size((1 << 31) - 1)
+                    .initial_connection_window_size((1 << 31) - 1)
+                    .connect()
+                    .await
+                    .unwrap();
+                let mut client = ObjectsClient::new(channel);
+                let mut streams_open = Vec::new();
+                for _ in 0..streams {
+                    let request = GetObjectsRequest::default();
+                    let response = client.get_objects(request).await.unwrap();
+                    streams_open.push(response.into_inner());
+                }
+                readers.push(streams_open);
             }
-            if let Some(bytes) = rss_bytes() {
-                most = most.max(bytes);
+            // The readers: one part per second per connection, so the
+            // pings are answered and the connections stay, while the
+            // server's pipelines hold.
+            let started = tokio::time::Instant::now();
+            let mut most = 0u64;
+            while tokio::time::Instant::now() < started + Duration::from_secs(60) {
+                for connection in readers.iter_mut() {
+                    for response in connection.iter_mut() {
+                        let _ = tokio::time::timeout(Duration::from_millis(10), response.message())
+                            .await;
+                    }
+                }
+                if let Some(bytes) = rss_bytes() {
+                    most = most.max(bytes);
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            phases.push((connections, most));
         }
-        let worst = streams as usize * 400 * 1024;
+        let streams_per_conn = streams as usize * 256 * 1024;
         panic!(
-            "measurement only: server RSS over a minute of a slow reader on \
-             {streams} streams with the largest windows: {most} bytes; h2's wired \
-             per-stream cap times the streams: {worst}; stalled gauge {}",
+            "measurement only: server RSS peaks per slow-connection phase \
+             (connections, peak bytes): {phases:?}; streams x the uncounted \
+             remainder cap: {streams_per_conn} bytes per connection; stalled gauge {}",
             stalled_gauge(&metrics)
         );
     }
