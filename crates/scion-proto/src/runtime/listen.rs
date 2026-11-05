@@ -936,9 +936,8 @@ where
                     io
                 }
                 Err(error) => {
-                    if pace_after_failed_accept(error, &accept_warn, &metrics, &mut backoff, &done)
+                    if !pace_after_failed_accept(error, &accept_warn, &metrics, &mut backoff, &done)
                         .await
-                        .is_err()
                     {
                         break;
                     }
@@ -1019,7 +1018,7 @@ where
 /// rate-limited warn with the failures since its last line, the count in
 /// the metrics, the error handed on to the serve, and the wait that paces
 /// the next attempt - 10 ms doubling to 1 s, reset by a success, so a
-/// failure that persists cannot spin the task. `Err` says the serve went
+/// failure that persists cannot spin the task. `false` says the serve went
 /// and the task stops.
 async fn pace_after_failed_accept<IO>(
     error: io::Error,
@@ -1027,7 +1026,7 @@ async fn pace_after_failed_accept<IO>(
     metrics: &Metrics,
     backoff: &mut Duration,
     done: &mpsc::Sender<io::Result<Connection<IO>>>,
-) -> Result<(), io::Error> {
+) -> bool {
     tracing::debug!(
         error = ?error,
         thread = ?std::thread::current().id(),
@@ -1044,10 +1043,7 @@ async fn pace_after_failed_accept<IO>(
     metrics.accept_error();
     tokio::time::sleep(*backoff).await;
     *backoff = (*backoff * 2).min(MAX_ACCEPT_BACKOFF);
-    done.send(Err(error))
-        .await
-        .map(|_| ())
-        .map_err(|sent| sent.0)
+    done.send(Err(error)).await.is_ok()
 }
 
 fn accept<I, IO>(
@@ -1760,7 +1756,7 @@ mod tests {
                 let _ = limits
                     .serve_with(
                         &Accepting::of(&limits, &TIMERS),
-                        |server: Server| server.add_service(ObjectsServer::new(Stalls)),
+                        |mut server: Server| server.add_service(ObjectsServer::new(Stalls)),
                         AlwaysFail(Arc::clone(&attempts)),
                         None,
                         pending,
