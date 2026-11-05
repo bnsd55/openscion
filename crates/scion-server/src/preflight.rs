@@ -523,40 +523,30 @@ mod tests {
             .unwrap_or_else(|| panic!("no {name} line in\n{:#?}", report.lines))
     }
 
-    /// The host's memory read points at a meminfo with room to spare:
-    /// the floor's answer must not depend on the runner's own memory.
-    /// The override is process-global: the tests that touch it hold
-    /// [`TEST_LOCK`], and the drop resets it under the same lock.
-    struct MemoryOverride(#[allow(dead_code)] tempfile::TempDir);
+    /// The host's memory limit is the test's own number, on every OS:
+    /// the floor's answer must not depend on the runner's own memory
+    /// (macOS runners come in more than one size, and the file paths
+    /// the limit falls back past are Linux files). The override is
+    /// process-global: the tests that touch it hold [`TEST_LOCK`], and
+    /// the drop resets it under the same lock.
+    struct MemoryOverride(#[allow(dead_code)] u64);
     impl MemoryOverride {
         fn set(lock: &MutexGuard<'_, ()>) -> (Self, ()) {
             let _ = lock;
-            let dir = private_tempdir();
-            std::fs::write(dir.path().join("meminfo"), "MemTotal:       67108864 kB\n").unwrap();
-            crate::floor::test_set_paths(Some(crate::floor::Paths {
-                self_cgroup: dir.path().join("no-cgroup"),
-                cgroup_root: dir.path().join("no-root"),
-                meminfo: dir.path().join("meminfo"),
-            }));
-            (Self(dir), ())
+            crate::floor::test_set_host_limit(Some(64 << 30));
+            (Self(64 << 30), ())
         }
 
         /// The override pointed at a small host: a floor warning.
         fn set_small(lock: &MutexGuard<'_, ()>) -> (Self, ()) {
             let _ = lock;
-            let dir = private_tempdir();
-            std::fs::write(dir.path().join("meminfo"), "MemTotal:         1048576 kB\n").unwrap();
-            crate::floor::test_set_paths(Some(crate::floor::Paths {
-                self_cgroup: dir.path().join("no-cgroup"),
-                cgroup_root: dir.path().join("no-root"),
-                meminfo: dir.path().join("meminfo"),
-            }));
-            (Self(dir), ())
+            crate::floor::test_set_host_limit(Some(1 << 30));
+            (Self(1 << 30), ())
         }
     }
     impl Drop for MemoryOverride {
         fn drop(&mut self) {
-            crate::floor::test_set_paths(None);
+            crate::floor::test_set_host_limit(None);
         }
     }
 
@@ -1017,11 +1007,14 @@ mod tests {
         let (_memory, ()) = MemoryOverride::set(&lock);
         let (dir, url) = ready_store();
         let report = run_cli(dir.path(), Some(&url));
-        assert_eq!(report.code, 0);
+        // This test is the disk line's: the other checks' answers ride
+        // the whole-report asserts of their own tests, and the line
+        // carries the numbers whatever they are.
         let disk = line(&report, "disk and inodes");
         assert!(
-            disk.contains("inodes on") && disk.contains("free"),
-            "the numbers are the answer:\n{disk}"
+            disk.starts_with("ok") && disk.contains("inodes on") && disk.contains("free"),
+            "the numbers are the answer:\ndisk line: {disk}\nreport:\n{:#?}",
+            report.lines
         );
     }
 

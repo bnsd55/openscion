@@ -142,6 +142,26 @@ impl Paths {
 #[cfg(any(test, feature = "test-hooks"))]
 static TEST_PATHS: std::sync::Mutex<Option<Paths>> = std::sync::Mutex::new(None);
 
+/// A test's override of the host's memory limit itself, behind the test
+/// hooks: the number every OS reads, so a test's floor answer never
+/// depends on the runner's own memory - the file paths above name
+/// Linux files, and a macOS host answers `hw.memsize` past them.
+#[cfg(any(test, feature = "test-hooks"))]
+static TEST_HOST_LIMIT: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+
+/// Sets the host limit the checks read, behind the test hooks. Pass
+/// `None` to reset.
+///
+/// # Panics
+///
+/// Panics if the override lock is poisoned.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn test_set_host_limit(bytes: Option<u64>) {
+    *TEST_HOST_LIMIT
+        .lock()
+        .expect("the host limit override lock is not poisoned") = bytes;
+}
+
 /// Points the start-up check at a test's paths. Pass `None` to reset.
 ///
 /// # Panics
@@ -184,6 +204,13 @@ pub(crate) struct HostLimit {
 /// The host's memory limit, as a number for preflight's warn line: the
 /// same read the start-up check makes, without the registry or the log.
 pub(crate) fn host_memory(paths: &Paths) -> Option<(u64, &'static str)> {
+    #[cfg(any(test, feature = "test-hooks"))]
+    if let Some(bytes) = *TEST_HOST_LIMIT
+        .lock()
+        .expect("the host limit override lock is not poisoned")
+    {
+        return Some((bytes, "test"));
+    }
     host_limit(paths, macos_memsize).map(|limit| (limit.bytes, limit.source))
 }
 
