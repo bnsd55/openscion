@@ -3545,7 +3545,7 @@ mod tests {
                 service
                     .create_changeset(as_default(scion_proto::v1::CreateChangesetRequest {
                         repo: "r".into(),
-                        changeset: bytes,
+                        changeset: bytes.clone(),
                     }))
                     .await
             }
