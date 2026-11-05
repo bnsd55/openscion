@@ -3581,7 +3581,7 @@ mod tests {
         // The build rolled back: no changeset row, no tree rows.
         let id = write::decode(&bytes).unwrap().1;
         let stored = store
-            .read(|c| Ok(c.stored_changeset_body_lengths(&[id.as_bytes().to_vec()])?))
+            .read(|c| c.stored_changeset_body_lengths(&[id.as_bytes().to_vec()]))
             .unwrap();
         assert!(
             stored.iter().all(|(_, len)| *len == 0),

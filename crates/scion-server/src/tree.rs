@@ -108,9 +108,7 @@ pub fn apply(
         }
         root.delete(c, &mut loaded, path, &parts(path))?;
     }
-    #[cfg(test)]
-    let mut park_index = 0usize;
-    for (path, state) in changes {
+    for (i, (path, state)) in changes.iter().enumerate() {
         if let Some(state) = state {
             // A gitlink names no blob, so it carries no length; its entry
             // ends at the commit bytes.
@@ -124,10 +122,9 @@ pub fn apply(
         // here, cancels its call, and lets the job reach the next
         // path's check.
         #[cfg(test)]
-        {
-            crate::write::PARK_APPLY.park(park_index);
-            park_index += 1;
-        }
+        crate::write::PARK_APPLY.park(i);
+        #[cfg(not(test))]
+        let _ = i;
     }
     let mut rows = Vec::new();
     let tree = root.store(&mut rows)?;

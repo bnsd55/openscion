@@ -156,7 +156,7 @@ pub fn create_changeset(
     // while the park file of its first put's blob exists.
     #[cfg(test)]
     if let Some((_, blob)) = db::puts(&cs).next() {
-        PARK_CREATE.park(&blob);
+        PARK_CREATE.park(blob);
     }
     // See `tree::store_changeset`. The write's flush covers these steps.
     tree::fill_root_tree(store, repo_id, parent)?;
@@ -215,7 +215,7 @@ pub fn put_blob(store: &Backend, repo: RepoId, upload: Upload) -> Result<BlobId>
     // The test seam of the collector race: the caller parks here, after
     // the read answered and before the row question is settled.
     #[cfg(test)]
-    PARK_PUT.park(&id);
+    PARK_PUT.park(id);
     store.blobs().put_upload(upload, member)?;
     // The upsert runs even when the read said the row is there: the
     // collector's prune may have taken the row between the read and
@@ -336,7 +336,7 @@ fn check_blobs(
         let problem = match blobs.keep(blob)? {
             BlobStatus::Valid => {
                 #[cfg(test)]
-                PARK_CHECK.park(&blob);
+                PARK_CHECK.park(blob);
                 lens.insert(blob, store.blobs().size(blob)? as u64);
                 continue;
             }
