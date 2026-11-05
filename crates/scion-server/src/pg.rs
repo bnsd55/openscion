@@ -3502,17 +3502,38 @@ pub(crate) fn preflight_client(url: &str, ca: Option<&Path>) -> Result<Client> {
 /// version 0 is a database with no schema yet. The check and the open's
 /// pending-migration refusal read it; the migration itself runs under
 /// the schema's lock, and its first step makes the ledger.
-fn schema_version(client: &mut Client) -> Result<u32> {
+/// The two statement paths one schema-state read may take: the open's
+/// migration reads through the worker's client, the preflight's check
+/// and `migrate --check`'s read through a plain session of their own.
+/// One trait, so the read is one code path, not a copy.
+pub(crate) trait SchemaRows {
+    /// The statement's rows, in this backend's errors.
+    fn schema_query(&mut self, sql: &str) -> Result<Vec<postgres::Row>>;
+}
+
+impl SchemaRows for Client {
+    fn schema_query(&mut self, sql: &str) -> Result<Vec<postgres::Row>> {
+        Client::query(self, sql, &[]).map_err(map_pg_error)
+    }
+}
+
+impl SchemaRows for PgClient {
+    fn schema_query(&mut self, sql: &str) -> Result<Vec<postgres::Row>> {
+        self.query(sql, &[])
+    }
+}
+
+fn schema_version(client: &mut impl SchemaRows) -> Result<u32> {
     let ledger: Option<String> = client
-        .query_opt("SELECT to_regclass('schema_migrations')::text", &[])
-        .map_err(map_pg_error)?
+        .schema_query("SELECT to_regclass('schema_migrations')::text")?
+        .into_iter()
+        .next()
         .and_then(|row| row.get(0));
     if ledger.is_none() {
         return Ok(0);
     }
     let version: i64 = client
-        .query("SELECT max(version) FROM schema_migrations", &[])
-        .map_err(map_pg_error)?
+        .schema_query("SELECT max(version) FROM schema_migrations")?
         .first()
         .and_then(|row| row.get::<_, Option<i64>>(0))
         .unwrap_or(0);
@@ -3567,17 +3588,8 @@ impl SchemaCheck {
 /// What the database returns, and the newer-schema refusal a newer
 /// database gives every opener.
 pub fn check_schema(url: &str, ca: Option<&Path>) -> Result<SchemaCheck> {
-    let client = connect_with(url, ca, &base_options(), None)?;
-    // The read runs on the worker thread, where the sync client
-    // belongs, and hands its answer back through the channel.
-    let (reply, received) = std::sync::mpsc::channel();
-    client.raw(Box::new(move |client| {
-        let _ = reply.send(check_schema_on(client));
-        Ok(())
-    }))?;
-    received
-        .recv()
-        .map_err(|_| Error::Corrupt(WORKER_STOPPED.into()))?
+    let mut client = connect_with(url, ca, &base_options(), None)?;
+    check_schema_on(&mut client)
 }
 
 /// [`check_schema`]'s decision, on a caller's connection: the preflight
@@ -3588,7 +3600,7 @@ pub fn check_schema(url: &str, ca: Option<&Path>) -> Result<SchemaCheck> {
 ///
 /// What the database returns, and the newer-schema refusal a newer
 /// database gives every opener.
-pub(crate) fn check_schema_on(client: &mut Client) -> Result<SchemaCheck> {
+pub(crate) fn check_schema_on(client: &mut impl SchemaRows) -> Result<SchemaCheck> {
     let db_version = schema_version(client)?;
     if db_version > PG_SCHEMA_VERSION {
         return Err(Error::FailedPrecondition(format!(
