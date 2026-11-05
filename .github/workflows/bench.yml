@@ -243,7 +243,7 @@ jobs:
         env:
           # The harness drops and creates its database, so it runs
           # only on a scion_capacity_* database.
-          SCION_PG_URL: postgres://postgres@127.0.0.1:5432/scion_capacity_profile
+          SCION_PG_URL: postgres://postgres:scion@127.0.0.1:5432/scion_capacity_profile
           CAPACITY_MACHINE: "GitHub ubuntu-24.04 hosted runner: 4 vCPU, 16 GiB RAM, ~144 GiB SSD"
         run: scripts/land-profile.sh
       - name: upload the raw output
