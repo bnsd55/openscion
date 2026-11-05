@@ -181,11 +181,15 @@ fn a_batch_of_one_version_per_kind_still_flows_one_statement() {
         })
         .unwrap();
     let log = Backend::test_statement_log();
-    let deletes = log
+    // The log names a statement by its opening shape: the one-statement
+    // flush opens "WITH k AS", the fold's delete opens "WITH rank AS".
+    let flushes = log.iter().filter(|sql| sql.contains("WITH k AS")).count();
+    let folds = log
         .iter()
-        .filter(|sql| sql.contains("DELETE FROM derived"))
+        .filter(|sql| sql.contains("WITH rank AS"))
         .count();
-    assert_eq!(deletes, 1, "the common flush is one statement:\n{log:#?}");
+    assert_eq!(flushes, 1, "the common flush is one statement:\n{log:#?}");
+    assert_eq!(folds, 0, "the fold must not run for one version per kind");
 }
 
 #[test]
