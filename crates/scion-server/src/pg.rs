@@ -3596,8 +3596,10 @@ fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
     // writer with no answer is the silent path the base budget exists
     // to prevent. The migration's own error comes first, and the
     // restore's failure answers when the migrations left none.
-    let restored = client
-        .execute(&format!("SET statement_timeout = '{}'", base_statement_timeout()), &[]);
+    let restored = client.execute(
+        &format!("SET statement_timeout = '{}'", base_statement_timeout()),
+        &[],
+    );
     // The lock lives on the client's session: it goes back whatever the
     // migrations did. A client that died mid-migration lost the lock with
     // its connection, and the unlock names a lock the new connection
