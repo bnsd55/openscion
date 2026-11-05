@@ -5178,24 +5178,22 @@ impl MetaTx for PgTx<'_> {
         let row = self
             .c
             .query_opt(
-                &format!(
-                    "SELECT l.state, l.result_cs, l.detail, l.conflict_paths, l.reject_reason,
-                            r.target, r.version,
-                            COALESCE((SELECT d.value IS NOT NULL FROM derived d
-                                      WHERE d.kind = '{}' AND d.version = {}
-                                        AND d.cs = r.target),
-                                     false)
-                     FROM lands l
-                     LEFT JOIN refs r ON r.repo_id = l.repo_id AND r.name = $4
-                     WHERE l.repo_id = $1 AND l.land_id = $2 AND l.caller = $3",
-                    <RootTree as crate::derived::Kind>::NAME,
-                    i64::from(<RootTree as crate::derived::Kind>::VERSION),
-                ),
+                "SELECT l.state, l.result_cs, l.detail, l.conflict_paths, l.reject_reason,
+                        r.target, r.version,
+                        COALESCE((SELECT d.value IS NOT NULL FROM derived d
+                                  WHERE d.kind = $5 AND d.version = $6
+                                    AND d.cs = r.target),
+                                 false)
+                 FROM lands l
+                 LEFT JOIN refs r ON r.repo_id = l.repo_id AND r.name = $4
+                 WHERE l.repo_id = $1 AND l.land_id = $2 AND l.caller = $3",
                 &[
                     P::i64(repo.0),
                     P::i64(land_id),
                     P::text(&caller.0),
                     P::text(ref_name.unwrap_or_default()),
+                    P::text(<RootTree as crate::derived::Kind>::NAME),
+                    P::i64(i64::from(<RootTree as crate::derived::Kind>::VERSION)),
                 ],
             )?
             .ok_or_else(|| Error::NotFound(format!("land {land_id}")))?;
@@ -6186,16 +6184,17 @@ pub(crate) mod pool_tests {
         assert_eq!(recorded.state, LandState::Pending);
         let pg = store.into_pg();
         // The join answers the ref while it exists.
-        let (row, head, _head_tree) = crate::meta::Meta::read(&pg, |c| {
+        let (row, head, head_tree) = crate::meta::Meta::read(&pg, |c| {
             let repo = c.repo_id("r")?;
             c.land_outcome(repo, &Caller("t".into()), recorded.land_id, Some("main"))
         })
         .unwrap();
         assert_eq!(row.state, LandState::Pending);
         assert!(head.is_some());
-        // The head-tree answer rides along, true or false by whether
-        // this store has derived the head's root tree yet; this
-        // fixture's store has not, and the read still names it.
+        // This fixture never derived its head's root tree - no land has
+        // run - so the read answers false while the ref stands, and the
+        // answer still rides the joined row.
+        assert!(!head_tree, "the fixture's head tree was never derived");
         // The ref goes away (the API never deletes refs; an operator or a
         // future gc can), and the land's outcome must survive it.
         let mut reader = pg.inner.readers.take(READER_WAIT).unwrap();

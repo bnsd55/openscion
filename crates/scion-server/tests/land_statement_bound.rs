@@ -224,9 +224,11 @@ fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound()
 
 /// A head whose root tree row is missing (a version bump's leftover, or
 /// a row an operator removed) still lands, and its derive runs before
-/// the write transaction, not inside it: the fill's two reads sit
-/// between the plan's ROLLBACK and the settle's BEGIN, and the settle
-/// transaction holds no single-changeset derived-value read.
+/// the settle transaction, in a transaction of its own: the fill's
+/// reads sit between the plan's ROLLBACK and its own BEGIN, its
+/// transaction writes the head's derived row, and the settle
+/// transaction - the one that moves the ref - writes the land's own
+/// derived row alone.
 #[test]
 fn a_land_whose_head_tree_is_missing_fills_before_the_write_transaction() {
     let _log = LOG_LOCK.lock().unwrap();
@@ -258,48 +260,66 @@ fn a_land_whose_head_tree_is_missing_fills_before_the_write_transaction() {
     Backend::test_reset_statement_count();
     let outcome = land_once(&store, &lands, cs);
     assert_eq!(outcome.state, LandState::Landed, "{}", outcome.detail);
-    // The fill's reads sit before the write transaction; the settle
-    // transaction derives nothing itself.
     let log = Backend::test_statement_log();
     let plan_end = log
         .iter()
         .rposition(|sql| sql.starts_with("ROLLBACK"))
         .expect("the plan's transaction rolled back");
-    let settle_begin = log[plan_end..]
+    // The fill commits its own transaction: derived::fill's step write
+    // rides `store.commit`, so the first BEGIN after the plan is the
+    // fill's, not the settle's. Name the two windows so the next reader
+    // does not trade them.
+    let fill_begin = log[plan_end..]
         .iter()
         .position(|sql| sql.starts_with("BEGIN;"))
         .map(|at| plan_end + at)
-        .expect("the settle transaction begins");
-    let between = &log[plan_end + 1..settle_begin];
-    // The fill's shape, not its size: the derive reads the generation,
-    // the head's tree and the changeset it derives from - reads all,
-    // before the write transaction, so an unbounded derive never holds
-    // the write connection.
+        .expect("the fill's transaction begins");
+    let fill_end = log[fill_begin..]
+        .iter()
+        .position(|sql| sql == "COMMIT")
+        .map(|at| fill_begin + at)
+        .expect("the fill's transaction commits");
+    // The fill's reads sit before its transaction, reads all: an
+    // unbounded derive never holds a write connection until the write
+    // itself.
+    let fill_reads = &log[plan_end + 1..fill_begin];
     assert!(
-        between[0].starts_with("SELECT gen FROM changesets"),
-        "the fill reads the generation first:\n{between:#?}"
+        fill_reads.iter().all(|sql| sql.starts_with("SELECT")),
+        "the fill only reads before its transaction:\n{fill_reads:#?}"
     );
     assert!(
-        between.iter().all(|sql| sql.starts_with("SELECT")),
-        "the fill only reads before the write transaction:\n{between:#?}"
-    );
-    assert!(
-        between
+        fill_reads
             .iter()
-            .any(|sql| sql.starts_with("SELECT value FROM derived WHERE kind = $1")),
-        "the fill reads the tree's value second:\n{between:#?}"
+            .any(|sql| sql.starts_with("SELECT gen FROM changesets")),
+        "the fill reads the generation among its reads:\n{fill_reads:#?}"
     );
-    let settle_tx = &log[settle_begin..];
-    let settle_end = settle_tx
+    let fill_writes = log[fill_begin..fill_end]
+        .iter()
+        .filter(|sql| sql.starts_with("INSERT INTO derived"))
+        .count();
+    assert_eq!(
+        fill_writes,
+        1,
+        "the fill's transaction writes the head's derived row:\n{:#?}",
+        &log[fill_begin..fill_end]
+    );
+    // The settle transaction is the one that moves the ref: its window
+    // holds the CAS UPDATE. The transaction still READS the parent's
+    // tree value - the store_changeset the land always does, and the
+    // reason the fill had to run first.
+    let cas = log
+        .iter()
+        .position(|sql| sql.starts_with("UPDATE refs SET target"))
+        .expect("the land's CAS moves the ref");
+    let settle_begin = log[..cas]
+        .iter()
+        .rposition(|sql| sql.starts_with("BEGIN;"))
+        .expect("the settle transaction begins");
+    let settle_end = log[settle_begin..]
         .iter()
         .position(|sql| sql == "COMMIT")
         .map(|at| settle_begin + at)
         .expect("the settle transaction commits");
-    // The settle transaction writes the land's own tree and nothing
-    // else derived: the head's derive ran before the transaction, so
-    // its INSERT is not here. The transaction still READS the parent's
-    // tree value - the store_changeset the land always does - which is
-    // why the fill had to run first.
     let derived_writes = log[settle_begin..settle_end]
         .iter()
         .filter(|sql| sql.starts_with("INSERT INTO derived"))
