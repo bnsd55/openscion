@@ -5048,14 +5048,39 @@ impl MetaTx for PgTx<'_> {
         Ok(())
     }
 
-    /// A land that `caller` started in `repo`.
-    fn land_outcome(&mut self, repo: RepoId, caller: &Caller, land_id: i64) -> Result<LandOutcome> {
+    /// A land that `caller` started in `repo`. With `ref_name`, the ref's
+    /// state rides the same statement: the finish's outcome check and the
+    /// plan's ref read run in one read-only transaction, and one
+    /// statement answers both from the same snapshot.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotFound`] if the repo has no such land.
+    fn land_outcome(
+        &mut self,
+        repo: RepoId,
+        caller: &Caller,
+        land_id: i64,
+        ref_name: Option<&str>,
+    ) -> Result<(LandOutcome, Option<RefState>)> {
+        // The ref rides a LEFT JOIN: a ref deleted between the record and
+        // the finish answers no ref columns, and the land's outcome
+        // stands alone - the plan then sees a missing ref, as a separate
+        // read would have.
         let row = self
             .c
             .query_opt(
-                "SELECT state, result_cs, detail, conflict_paths, reject_reason FROM lands
-                 WHERE repo_id = $1 AND land_id = $2 AND caller = $3",
-                &[P::i64(repo.0), P::i64(land_id), P::text(&caller.0)],
+                "SELECT l.state, l.result_cs, l.detail, l.conflict_paths, l.reject_reason,
+                        r.target, r.version
+                 FROM lands l
+                 LEFT JOIN refs r ON r.repo_id = l.repo_id AND r.name = $4
+                 WHERE l.repo_id = $1 AND l.land_id = $2 AND l.caller = $3",
+                &[
+                    P::i64(repo.0),
+                    P::i64(land_id),
+                    P::text(&caller.0),
+                    P::text(ref_name.unwrap_or_default()),
+                ],
             )?
             .ok_or_else(|| Error::NotFound(format!("land {land_id}")))?;
         let state: String = row.get(0);
@@ -5063,11 +5088,21 @@ impl MetaTx for PgTx<'_> {
         let detail: String = row.get(2);
         let paths: Vec<u8> = row.get(3);
         let reason: String = row.get(4);
+        let ref_target: Option<Vec<u8>> = row.get(5);
+        let ref_version: Option<i64> = row.get(6);
+        let head = match (ref_target, ref_version) {
+            (Some(target), Some(version)) => Some(RefState {
+                target: to_id(&target)?,
+                version,
+            }),
+            (None, None) => None,
+            _ => return Err(Error::Corrupt(format!("land {land_id} ref half-read"))),
+        };
         let result = result
             .map(|bytes| ChangesetId::try_from(bytes.as_slice()))
             .transpose()
             .map_err(|e| Error::Corrupt(format!("land {land_id} result: {e}")))?;
-        Ok(LandOutcome {
+        let out = LandOutcome {
             moved: false,
             land_id,
             state: LandState::parse(&state)?,
@@ -5077,7 +5112,8 @@ impl MetaTx for PgTx<'_> {
             conflict_paths: decode_paths(&paths)
                 .ok_or_else(|| Error::Corrupt(format!("land {land_id} conflict paths")))?,
             reject_reason: LandRejectReason::parse(&reason)?,
-        })
+        };
+        Ok((out, head))
     }
 
     /// Moves a pending land to its final state and returns the outcome.
@@ -5987,6 +6023,76 @@ pub(crate) mod pool_tests {
     /// cleanly. Without the rollback, the session would sit in an
     /// aborted transaction - "current transaction is aborted" on every
     /// statement until someone rolls it back.
+    /// The finish's joined read answers a land whose ref vanished after
+    /// the record: the land's outcome stands alone (LEFT JOIN), the ref
+    /// half answers None, and the plan then sees a missing ref - the
+    /// same answer a separate ref read would have given. An inner join
+    /// would lose the land's row with its ref.
+    #[test]
+    fn a_finish_still_reads_the_land_when_its_ref_vanished() {
+        let data = crate::test_support::private_tempdir();
+        let store = crate::Backend::open_test(data.path()).unwrap();
+        let cs = store
+            .commit(|c| {
+                let repo = c.create_repo("r")?;
+                let cs = c.insert_changeset(
+                    repo,
+                    &Changeset::new(
+                        vec![],
+                        scion_core::IdentityTime::new(
+                            b"Ada".to_vec(),
+                            b"ada@example.com".to_vec(),
+                            0,
+                            0,
+                        )
+                        .expect("identity fits the format"),
+                        None,
+                        b"root".to_vec(),
+                        std::collections::BTreeMap::new(),
+                    )
+                    .expect("changeset fits the format"),
+                )?;
+                assert!(c.cas_ref(repo, "main", None, cs)?);
+                Ok(cs)
+            })
+            .unwrap();
+        let req = LandRequest {
+            repo: "r".into(),
+            changeset: cs,
+            target_ref: "main".into(),
+            request_key: "k".into(),
+            deadline: crate::deadline::Deadline::new(Instant::now() + Duration::from_secs(60)),
+        };
+        let (_, recorded) = store
+            .commit(|c| c.record_land(&Caller("t".into()), &req, None))
+            .unwrap();
+        assert_eq!(recorded.state, LandState::Pending);
+        let pg = store.into_pg();
+        // The join answers the ref while it exists.
+        let (row, head) = crate::meta::Meta::read(&pg, |c| {
+            let repo = c.repo_id("r")?;
+            c.land_outcome(repo, &Caller("t".into()), recorded.land_id, Some("main"))
+        })
+        .unwrap();
+        assert_eq!(row.state, LandState::Pending);
+        assert!(head.is_some());
+        // The ref goes away (the API never deletes refs; an operator or a
+        // future gc can), and the land's outcome must survive it.
+        let mut reader = pg.inner.readers.take(READER_WAIT).unwrap();
+        reader
+            .client()
+            .execute("DELETE FROM refs WHERE name = 'main'", &[])
+            .unwrap();
+        drop(reader);
+        let (row, head) = crate::meta::Meta::read(&pg, |c| {
+            let repo = c.repo_id("r")?;
+            c.land_outcome(repo, &Caller("t".into()), recorded.land_id, Some("main"))
+        })
+        .unwrap();
+        assert_eq!(row.state, LandState::Pending, "the land row stands alone");
+        assert!(head.is_none(), "the ref half answers None");
+    }
+
     #[test]
     fn an_open_whose_set_local_failed_leaves_no_open_transaction() {
         let (_pool, pg) = pg();

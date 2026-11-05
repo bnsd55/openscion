@@ -653,7 +653,7 @@ impl Lands {
 pub fn get_land(store: &Backend, caller: &Caller, repo: &str, land_id: i64) -> Result<LandOutcome> {
     store.read(|c| {
         let repo = c.repo_id(repo)?;
-        c.land_outcome(repo, caller, land_id)
+        Ok(c.land_outcome(repo, caller, land_id, None)?.0)
     })
 }
 
@@ -775,11 +775,11 @@ fn finish(
         // pending" instead of moving the ref twice - the guard is the
         // backstop there, not the read.
         let planned = store.read_latest(|c| {
-            let row = c.land_outcome(repo, caller, land_id)?;
+            let (row, head) = c.land_outcome(repo, caller, land_id, Some(&req.target_ref))?;
             if row.state != LandState::Pending {
                 return Ok(Planned::Settled(row));
             }
-            plan(lands, c, repo, req, index).map(Planned::Do)
+            plan(lands, c, repo, req, head, index).map(Planned::Do)
         })?;
         #[cfg(test)]
         let step = lands
@@ -817,6 +817,7 @@ fn plan(
     c: &mut dyn MetaTx,
     repo: RepoId,
     req: &LandRequest,
+    head: Option<RefState>,
     index: &mut Option<PathIndex>,
 ) -> Result<Plan> {
     let target = &req.target_ref;
@@ -827,7 +828,7 @@ fn plan(
             detail: "a land needs a changeset with exactly one parent".into(),
         });
     };
-    let Some(head) = c.get_ref(repo, target)? else {
+    let Some(head) = head else {
         return Ok(Plan::Verdict(Verdict {
             state: LandState::Rejected,
             detail: format!("ref {target:?} does not exist"),
@@ -2239,11 +2240,12 @@ mod tests {
         );
         // The land stays pending: a retry with the same key replans
         // against the head the last import made.
-        let row = f
+        let (row, head) = f
             .store
-            .read(|c| c.land_outcome(f.repo, &caller(), 1))
+            .read(|c| c.land_outcome(f.repo, &caller(), 1, Some("main")))
             .unwrap();
         assert_eq!(row.state, LandState::Pending);
+        assert!(head.is_some(), "the ref rides the joined read");
     }
 
     /// Where the first attempt at a land stopped.
