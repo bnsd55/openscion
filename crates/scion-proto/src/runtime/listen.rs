@@ -920,7 +920,7 @@ async fn pace_after_failed_accept<IO>(
 fn spawn_tls_accepted<IO>(
     io: IO,
     acceptor: tokio_rustls::TlsAcceptor,
-    accepting: &Accepting,
+    accepting: Accepting,
     places: &Arc<Semaphore>,
     waiters: &Arc<Semaphore>,
     waits: &WaitWarn,
@@ -932,9 +932,13 @@ fn spawn_tls_accepted<IO>(
     IO: AsyncRead + AsyncWrite + PeerOf + Unpin + Send + 'static,
 {
     let handshake = accepting.handshake;
-    let wait = accepting.wait;
-    let max = accepting.max;
-    let stalled_bytes = accepting.stalled_bytes;
+    let Accepting {
+        max,
+        handshake,
+        wait,
+        stalled_bytes,
+        ..
+    } = accepting;
     let places = Arc::clone(places);
     let waiters = Arc::clone(waiters);
     let acceptor = acceptor.clone();
