@@ -5181,9 +5181,10 @@ impl MetaTx for PgTx<'_> {
                 &format!(
                     "SELECT l.state, l.result_cs, l.detail, l.conflict_paths, l.reject_reason,
                             r.target, r.version,
-                            (SELECT d.value IS NOT NULL FROM derived d
-                             WHERE d.kind = '{}' AND d.version = {}
-                               AND d.cs = r.target)
+                            COALESCE((SELECT d.value IS NOT NULL FROM derived d
+                                      WHERE d.kind = '{}' AND d.version = {}
+                                        AND d.cs = r.target),
+                                     false)
                      FROM lands l
                      LEFT JOIN refs r ON r.repo_id = l.repo_id AND r.name = $4
                      WHERE l.repo_id = $1 AND l.land_id = $2 AND l.caller = $3",
