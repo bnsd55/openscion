@@ -501,8 +501,8 @@ mod tests {
 
     /// The preflight of `data` against `url_file`, as the shell sees
     /// it: the exit code and the lines.
-    fn run(data: &Path, url_file: Option<&PathBuf>) -> Report {
-        run(&PreflightOptions {
+    fn run_cli(data: &Path, url_file: Option<&PathBuf>) -> Report {
+        super::run(&PreflightOptions {
             data: data.to_path_buf(),
             postgres_url_file: url_file.cloned(),
             postgres_ca: None,
@@ -528,7 +528,7 @@ mod tests {
 
     /// The host's memory read points at a meminfo with room to spare:
     /// the floor's answer must not depend on the runner's own memory.
-    struct MemoryOverride(tempfile::TempDir);
+    struct MemoryOverride(#[allow(dead_code)] tempfile::TempDir);
     impl MemoryOverride {
         fn set() -> Self {
             let dir = private_tempdir();
@@ -574,7 +574,7 @@ mod tests {
             .unwrap()
             .get::<_, i64>(0);
         drop(raw);
-        let report = run(dir.path(), Some(&url));
+        let report = run_cli(dir.path(), Some(&url));
         assert_eq!(
             report.code, 0,
             "a ready store passes everything:\n{:#?}",
@@ -630,7 +630,7 @@ mod tests {
         std::fs::write(dir.path().join("scion.db"), b"sqlite bytes\n").unwrap();
         let url = crate::Backend::test_postgres_url(dir.path()).unwrap();
         let url = url_file(dir.path(), &url);
-        let report = run(dir.path(), Some(&url));
+        let report = run_cli(dir.path(), Some(&url));
         assert_eq!(report.code, 2);
         assert!(
             line(&report, "data directory").starts_with("fail"),
@@ -646,7 +646,7 @@ mod tests {
         let _memory = MemoryOverride::set();
         let dir = private_tempdir();
         let url = url_file(dir.path(), "postgres://127.0.0.1:1/scion");
-        let report = run(dir.path(), Some(&url));
+        let report = run_cli(dir.path(), Some(&url));
         assert_eq!(report.code, 2);
         assert!(
             line(&report, "database").starts_with("fail"),
@@ -672,7 +672,7 @@ mod tests {
         .unwrap();
         raw.execute("DELETE FROM schema_migrations", &[]).unwrap();
         drop(raw);
-        let report = run(dir.path(), Some(&url));
+        let report = run_cli(dir.path(), Some(&url));
         assert_eq!(report.code, 2);
         let schema = line(&report, "schema version");
         assert!(
@@ -702,7 +702,7 @@ mod tests {
                 &[&crate::pg::schema_lock_key(&schema)],
             )
             .unwrap();
-        let report = run(dir.path(), Some(&url));
+        let report = run_cli(dir.path(), Some(&url));
         assert_eq!(
             report.code, 1,
             "a held lock warns, not fails:\n{:#?}",
@@ -727,7 +727,7 @@ mod tests {
         let _memory = MemoryOverride::set();
         let (dir, url) = ready_store();
         std::fs::remove_file(dir.path().join("token")).unwrap();
-        let report = run(dir.path(), Some(&url));
+        let report = run_cli(dir.path(), Some(&url));
         assert_eq!(report.code, 2);
         assert!(
             line(&report, "token and access").starts_with("fail"),
@@ -771,7 +771,7 @@ mod tests {
     fn the_disk_check_names_the_numbers() {
         let _memory = MemoryOverride::set();
         let (dir, url) = ready_store();
-        let report = run(dir.path(), Some(&url));
+        let report = run_cli(dir.path(), Some(&url));
         assert_eq!(report.code, 0);
         let disk = line(&report, "disk and inodes");
         assert!(

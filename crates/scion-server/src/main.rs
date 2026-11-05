@@ -886,8 +886,8 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         // `preflight` reports a missing directory as a failed check, so
         // it runs before the refusal and writes nothing anywhere.
-        Command::Preflight(args) => {
-            let report = scion_server::preflight::run(&preflight_options(&cli, &args));
+        Command::Preflight(ref args) => {
+            let report = scion_server::preflight::run(&preflight_options(&cli, args));
             for line in report.lines {
                 println!("{line}");
             }
@@ -1044,7 +1044,8 @@ async fn main() -> anyhow::Result<()> {
         // `verify`, `restore`, `hash-token` and `ticket-key` ended the
         // function above: verify exits, and the others return. `migrate`
         // ran its command above and returned: it opens no store here.
-        Command::Verify { .. }
+        Command::Preflight(_)
+        | Command::Verify { .. }
         | Command::Restore { .. }
         | Command::HashToken { .. }
         | Command::TicketKey { .. }
@@ -1123,6 +1124,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::HashToken { .. }
         | Command::TicketKey { .. }
+        | Command::Preflight(_)
         | Command::Verify { .. }
         | Command::Restore { .. }
         | Command::Migrate { .. } => {
