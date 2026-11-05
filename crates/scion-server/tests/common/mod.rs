@@ -210,9 +210,12 @@ impl Server {
     /// appended, since a test must not share a port and must not hold
     /// the token in argv.
     pub(crate) fn guide_argv(heading: &'static str, data: &Path) -> Vec<String> {
-        use scion_server::test_support::docs::runbook_block;
+        use scion_server::test_support::docs::runbook_block_with;
         let binary = env!("CARGO_BIN_EXE_scion-server");
-        let raw = runbook_block(heading, &[]);
+        // A section's first block may be a step before the serve (the
+        // first boot's preflight); the argv the harness runs is the
+        // block that serves.
+        let raw = runbook_block_with(heading, "serve", &[]);
         let token = token_file().to_str().unwrap().to_owned();
         let dir = data.to_str().unwrap().to_owned();
         let mut subs = vec![("./scion-server", binary), ("/srv/scion", dir.as_str())];
@@ -222,7 +225,7 @@ impl Server {
         if raw.contains("127.0.0.1:7878") {
             subs.push(("127.0.0.1:7878", "127.0.0.1:0"));
         }
-        let block = runbook_block(heading, &subs);
+        let block = runbook_block_with(heading, "serve", &subs);
         let line = block
             .lines()
             .find(|l| l.split_whitespace().any(|p| p == "serve"))
