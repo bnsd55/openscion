@@ -104,6 +104,29 @@ pub(crate) const MAX_ACCEPT_BACKOFF: Duration = Duration::from_secs(1);
 /// many accepts failed since the last line.
 pub(crate) const ACCEPT_WARN_INTERVAL: Duration = Duration::from_secs(10);
 
+/// The wait between accepts after a failure, as its own state: the first
+/// wait ([`FIRST_ACCEPT_BACKOFF`]) doubling to [`MAX_ACCEPT_BACKOFF`], and
+/// reset by a success, so a failure that persists cannot spin the task.
+struct Backoff(Duration);
+
+impl Backoff {
+    fn new() -> Self {
+        Self(FIRST_ACCEPT_BACKOFF)
+    }
+
+    /// Waits this backoff out, and doubles it for the next failure, to the
+    /// cap.
+    async fn wait(&mut self) {
+        tokio::time::sleep(self.0).await;
+        self.0 = (self.0 * 2).min(MAX_ACCEPT_BACKOFF);
+    }
+
+    /// A success: the next failure waits the first wait again.
+    fn reset(&mut self) {
+        self.0 = FIRST_ACCEPT_BACKOFF;
+    }
+}
+
 /// After this long, a connection is asked to close, so one that a client
 /// keeps for life (a daemon keeps one to its cache) gives its place up.
 pub(crate) const MAX_CONNECTION_AGE: Duration = Duration::from_secs(30 * 60);
@@ -869,7 +892,6 @@ fn warn_refused(refusals: &WaitWarn, max: usize, wait: Duration) {
 ///
 /// The error of `incoming` must be [`io::Error`], which is what a TCP or a
 /// unix listener yields.
-#[allow(clippy::too_many_lines)] // the loop's arms share its locals
 fn accept_tls<I, IO>(
     incoming: I,
     accepting: &Accepting,
@@ -910,7 +932,7 @@ where
         let mut incoming = pin!(incoming);
         let mut shutdown = pin!(shutdown);
         let accept_warn = WaitWarn::new(ACCEPT_WARN_INTERVAL);
-        let mut backoff = FIRST_ACCEPT_BACKOFF;
+        let mut backoff = Backoff::new();
         loop {
             // The shutdown signal itself stops the accept: a client that
             // reconnects after the GOAWAY is refused by its connect, not
@@ -933,7 +955,7 @@ where
             };
             let io = match accepted {
                 Ok(io) => {
-                    backoff = FIRST_ACCEPT_BACKOFF;
+                    backoff.reset();
                     io
                 }
                 Err(error) => {
@@ -1025,7 +1047,7 @@ async fn pace_after_failed_accept<IO>(
     error: io::Error,
     accept_warn: &WaitWarn,
     metrics: &Metrics,
-    backoff: &mut Duration,
+    backoff: &mut Backoff,
     done: &mpsc::Sender<io::Result<Connection<IO>>>,
 ) -> bool {
     tracing::debug!(
@@ -1042,12 +1064,10 @@ async fn pace_after_failed_accept<IO>(
         );
     }
     metrics.accept_error();
-    tokio::time::sleep(*backoff).await;
-    *backoff = (*backoff * 2).min(MAX_ACCEPT_BACKOFF);
+    backoff.wait().await;
     done.send(Err(error)).await.is_ok()
 }
 
-#[allow(clippy::too_many_lines)] // the loop's arms share its locals
 fn accept<I, IO>(
     incoming: I,
     accepting: &Accepting,
@@ -1086,7 +1106,7 @@ where
         let mut incoming = pin!(incoming);
         let mut shutdown = pin!(shutdown);
         let accept_warn = WaitWarn::new(ACCEPT_WARN_INTERVAL);
-        let mut backoff = FIRST_ACCEPT_BACKOFF;
+        let mut backoff = Backoff::new();
         loop {
             // The shutdown signal itself stops the accept: a client that
             // reconnects after the GOAWAY is refused by its connect, not
@@ -1107,17 +1127,12 @@ where
                 // listener with this task.
                 () = done.closed() => break,
             };
-            // The accept's marks (issue #795): the moment the listener's
-            // socket reaches this task, on the thread that saw it, and -
-            // on the connection's first read - the wait it had. The gap
-            // between a client's connect and the first line is the
-            // accept's delay; the gap to the second is the connection
-            // task's start delay. An accept error is logged here too:
-            // tonic logs it at trace only, below every default filter.
+            // The accept's marks (issue #795), and the accept error's only
+            // log under any filter: tonic logs it at trace.
             let born = std::time::Instant::now();
             let io = match accepted {
                 Ok(io) => {
-                    backoff = FIRST_ACCEPT_BACKOFF;
+                    backoff.reset();
                     io
                 }
                 Err(error) => {
