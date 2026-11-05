@@ -1572,6 +1572,7 @@ mod tests {
         // The first derivation: the map fills past the part bound and
         // stays there, and the parts still run at the pending bound.
         let before = store.commits();
+        let mut memo1 = Memo::default();
         let first = {
             let _lock = part_guard();
             let _bound = test_set_view_part_bound(4 << 10);
@@ -1581,7 +1582,7 @@ mod tests {
                 &digest,
                 root_id,
                 ctx.clone(),
-                &mut Memo::default(),
+                &mut memo1,
                 &alive(),
             )
             .unwrap()
@@ -1590,7 +1591,12 @@ mod tests {
         let parts = store.commits() - before;
         assert!(
             (10..=40).contains(&parts),
-            "the parts ran at the pending bound, not one per push: {parts}"
+            "the parts ran at the pending bound, not one per push: {parts}              (walked {}, pending {}, map {}, rows {}, bound {})",
+            memo1.walked,
+            memo1.pending,
+            memo1.derived.len(),
+            memo1.rows.len(),
+            view_part_bytes(),
         );
         // The second derivation: every subtree's row is in the store, so
         // the pending never grows - no parts, whatever the map's size.
