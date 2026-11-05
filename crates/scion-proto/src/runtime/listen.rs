@@ -869,6 +869,7 @@ fn warn_refused(refusals: &WaitWarn, max: usize, wait: Duration) {
 ///
 /// The error of `incoming` must be [`io::Error`], which is what a TCP or a
 /// unix listener yields.
+#[allow(clippy::too_many_lines)] // the loop's arms share its locals
 fn accept_tls<I, IO>(
     incoming: I,
     accepting: &Accepting,
