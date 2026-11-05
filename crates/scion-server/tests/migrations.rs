@@ -402,7 +402,7 @@ fn catalog_rows(url: &str, schema: &str) -> i64 {
 
 /// The test URL with another role's credentials: the same host, path and
 /// options, a different userinfo.
-fn url_with_user(url: &str, user: &str, password: &str) -> String {
+fn url_with_user(url: &str, user: &str, scramble: &str) -> String {
     let scheme_end = url.find("://").expect("a URL") + 3;
     let rest = &url[scheme_end..];
     let authority_end = rest.find('/').unwrap_or(rest.len());
@@ -412,7 +412,7 @@ fn url_with_user(url: &str, user: &str, password: &str) -> String {
         None => authority,
     };
     format!(
-        "{}{user}:{password}@{}{}",
+        "{}{user}:{scramble}@{}{}",
         &url[..scheme_end],
         host,
         &rest[authority_end..]
