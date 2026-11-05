@@ -1508,7 +1508,6 @@ mod tests {
 
     #[test]
     fn a_draft_changeset_has_a_path_history() {
-        let _park_serial = crate::write::PARK_SERIAL.blocking_lock();
         let (_dir, store, repo) = open();
         let main = store_chain(&store, repo, None, &[&[("a", true)], &[("b", true)]], true);
         let blob = store.blobs().put(b"draft").unwrap();

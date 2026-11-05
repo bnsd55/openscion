@@ -3490,7 +3490,6 @@ mod tests {
     #[allow(clippy::too_many_lines)] // the large changeset's fixture is the length
     #[tokio::test(flavor = "multi_thread")]
     async fn a_cancelled_large_tree_store_frees_its_permit_at_the_next_path() {
-        let _park_serial = write::PARK_SERIAL.lock().await;
         let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test(dir.path()).unwrap();
         let repo_id = store.write(|c| c.create_repo("r")).unwrap();
@@ -3524,7 +3523,7 @@ mod tests {
         let changes: std::collections::BTreeMap<RepoPath, Option<FileState>> = (0..2000)
             .map(|i| {
                 (
-                    RepoPath::new(format!("p/{i}")).unwrap(),
+                    RepoPath::new(format!("cancel-proof/{i:04}")).unwrap(),
                     state(if i % 2 == 0 { one } else { two }),
                 )
             })
@@ -3546,7 +3545,9 @@ mod tests {
         let hooks = dir.path().join("hooks");
         std::fs::create_dir_all(&hooks).unwrap();
         write::PARK_APPLY.arm(&hooks);
-        std::fs::write(hooks.join("park-0"), b"").unwrap();
+        // The park's id is the path: this test's paths name no other
+        // build, so no other job parks on the armed seam.
+        std::fs::write(hooks.join("park-cancel-proof_0000"), b"").unwrap();
         let call = tokio::spawn({
             let service = Arc::clone(&service);
             let bytes = bytes.clone();
@@ -3559,7 +3560,7 @@ mod tests {
                     .await
             }
         });
-        let parked = hooks.join("parked-0");
+        let parked = hooks.join("parked-cancel-proof_0000");
         let started = Instant::now();
         while !parked.exists() {
             assert!(
@@ -3574,22 +3575,24 @@ mod tests {
         // The next path's park stands ready before the lift: a job with
         // no put-path check reaches path 1 and parks there; the check
         // stops it before that. The arm stays up for this window.
-        std::fs::write(hooks.join("park-1"), b"").unwrap();
-        std::fs::remove_file(hooks.join("park-0")).unwrap();
+        std::fs::write(hooks.join("park-cancel-proof_0001"), b"").unwrap();
+        std::fs::remove_file(hooks.join("park-cancel-proof_0000")).unwrap();
         // A window for the job to reach path 1 if its check is gone:
         // the window closes after 500 ms, and a job that parked in it
         // fails the assert below; the checked job never parks.
         let started = Instant::now();
-        while !hooks.join("parked-1").exists() && started.elapsed() < Duration::from_millis(500) {
+        while !hooks.join("parked-cancel-proof_0001").exists()
+            && started.elapsed() < Duration::from_millis(500)
+        {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         assert!(
-            !hooks.join("parked-1").exists(),
+            !hooks.join("parked-cancel-proof_0001").exists(),
             "the cancelled job walked past its next path's check and \
              parked within {:?}",
             started.elapsed()
         );
-        std::fs::remove_file(hooks.join("park-1")).unwrap();
+        std::fs::remove_file(hooks.join("park-cancel-proof_0001")).unwrap();
         write::PARK_APPLY.lift();
         // The live call times its wait for the permit the parked job
         // held. The job's next path check stops it first.
@@ -3620,7 +3623,6 @@ mod tests {
     /// gets its one failed line, and nothing is written.
     #[tokio::test]
     async fn a_create_cut_mid_check_stops_at_its_next_blob_and_records_nothing() {
-        let _park_serial = write::PARK_SERIAL.lock().await;
         let (dir, store, repo_id, id, bytes, one) = create_cut_fixture();
 
         let audit_path = dir.path().join("audit.log");

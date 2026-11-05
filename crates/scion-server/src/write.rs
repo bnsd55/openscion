@@ -65,6 +65,8 @@ impl Park {
     /// Parks the caller while the park file of `id` exists. The ceiling
     /// bounds a park nobody lifts: it fails the holder, not the store.
     pub(crate) fn park(&self, id: impl std::fmt::Display) {
+        // A path-shaped id names a flat file: the separator comes out.
+        let id = id.to_string().replace('/', "_");
         let root = self
             .root
             .lock()
@@ -92,13 +94,6 @@ impl Park {
 pub(crate) static PARK_CREATE: Park = Park {
     root: std::sync::Mutex::new(None),
 };
-
-/// The park tests run one at a time: every store write rides a park
-/// seam, so two armed parks would see each other's callers. Async test
-/// bodies hold it across awaits, so it is the async mutex; sync tests
-/// block on it outside any runtime.
-#[cfg(test)]
-pub(crate) static PARK_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The park inside the tree build ([`crate::tree::apply`]), at the end
 /// of a put's path: a test holds the caller between two paths' checks.
@@ -497,7 +492,6 @@ mod tests {
 
     #[test]
     fn a_blob_of_another_repo_is_refused_before_it_is_read() {
-        let _park_serial = crate::write::PARK_SERIAL.blocking_lock();
         let _slot = damage::slot();
         let (_dir, store, root) = store_with_root();
         let secret = upload(&store, repo(&store, "other"), b"secret");
@@ -521,7 +515,6 @@ mod tests {
 
     #[test]
     fn a_blob_of_another_repo_fails_the_changeset_before_any_blob_is_read() {
-        let _park_serial = crate::write::PARK_SERIAL.blocking_lock();
         let _slot = damage::slot();
         let (_dir, store, root) = store_with_root();
         let theirs = upload(&store, repo(&store, "other"), b"theirs");
@@ -536,7 +529,6 @@ mod tests {
 
     #[test]
     fn a_gitlink_names_no_blob_whatever_its_bytes() {
-        let _park_serial = crate::write::PARK_SERIAL.blocking_lock();
         let _slot = damage::slot();
         let (_dir, store, root) = store_with_root();
         let theirs = upload(&store, repo(&store, "other"), b"theirs");
@@ -563,7 +555,6 @@ mod tests {
 
     #[test]
     fn a_changeset_makes_its_blobs_durable_before_it_commits() {
-        let _park_serial = crate::write::PARK_SERIAL.blocking_lock();
         let _slot = damage::slot();
         let (_dir, store, root) = store_with_root();
         // Backendd by an upload that never synced.
@@ -586,7 +577,6 @@ mod tests {
 
     #[test]
     fn a_parent_without_a_root_tree_is_derived_in_steps_before_the_write() {
-        let _park_serial = crate::write::PARK_SERIAL.blocking_lock();
         let _slot = damage::slot();
         let (_dir, store, root) = store_with_root();
         // Changesets without root trees, as after a version bump of the kind.

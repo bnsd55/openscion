@@ -133,10 +133,10 @@ fn apply_impl(
         }
         root.delete(c, &mut loaded, path, &parts(path))?;
     }
-    for (i, (path, state)) in changes.iter().enumerate() {
+    for (path, state) in changes {
         if let Some(deadline) = deadline {
             // The same check on the put path: a large tree's store is
-            // all puts, and its job stops between them like a delete's.
+            // all puts, and its job stops between puts like a delete's.
             deadline.check()?;
         }
         if let Some(state) = state {
@@ -150,11 +150,10 @@ fn apply_impl(
         }
         // The test seam of the cancelled tree build: the caller parks
         // here, cancels its call, and lets the job reach the next
-        // path's check.
+        // path's check. The park's id is the path, so a test's armed
+        // seam sees only its own build's paths.
         #[cfg(test)]
-        crate::write::PARK_APPLY.park(i);
-        #[cfg(not(test))]
-        let _ = i;
+        crate::write::PARK_APPLY.park(String::from_utf8_lossy(path.as_bytes()));
     }
     let mut rows = Vec::new();
     let tree = root.store(&mut rows)?;
