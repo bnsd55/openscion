@@ -116,7 +116,7 @@ fn the_flush_deletes_what_the_per_call_deletes_delete_in_order() {
         for i in 1..=6u32 {
             let cs = changeset(&format!("cs-{i}\n"), ids.last().copied());
             let id = store
-                .write(|c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0))
+                .write(|c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0))
                 .unwrap();
             store
                 .write(|c| c.put_derived("test_kind", i, id, format!("v{i}").as_bytes()))
@@ -168,7 +168,7 @@ fn a_batch_of_one_version_per_kind_still_flows_one_statement() {
     let repo = store.write(|c| c.create_repo(REPO)).unwrap();
     let cs = changeset("root\n", None);
     let id = store
-        .write(|c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0))
+        .write(|c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0))
         .unwrap();
     store
         .write(|c| c.put_derived("test_kind", 0, id, b"one"))
