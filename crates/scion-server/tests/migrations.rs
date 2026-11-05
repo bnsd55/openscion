@@ -388,8 +388,8 @@ fn a_migrate_beside_a_live_server_refuses_and_moves_nothing() {
 /// The catalog rows of one schema: the count the refused-open test
 /// compares before and after.
 fn catalog_rows(url: &str, schema: &str) -> i64 {
-    let mut client = postgres::Client::connect(url, postgres::NoTls)
-        .expect("the test database connects");
+    let mut client =
+        postgres::Client::connect(url, postgres::NoTls).expect("the test database connects");
     let rows = client
         .query_one(
             "SELECT count(*) FROM pg_class
@@ -523,6 +523,9 @@ fn a_refusing_open_writes_nothing_to_the_catalog() {
         "the refusal is not an ACL error: {why}"
     );
     let after = catalog_rows(&base, schema);
-    assert_eq!(before, after, "the refused open wrote nothing to the catalog");
+    assert_eq!(
+        before, after,
+        "the refused open wrote nothing to the catalog"
+    );
     drop(guard);
 }
