@@ -712,7 +712,9 @@ enum Finished {
 /// by a twin call, or the plan says what it must do now.
 enum Planned {
     Settled(LandOutcome),
-    Do(Plan),
+    /// The plan, and whether the head's root tree is stored - the
+    /// plan's read answered it on the snapshot the head rode.
+    Do(Plan, bool),
 }
 
 /// Says that a land that stopped at its deadline, or whose call went,
@@ -775,11 +777,12 @@ fn finish(
         // pending" instead of moving the ref twice - the guard is the
         // backstop there, not the read.
         let planned = store.read_latest(|c| {
-            let (row, head) = c.land_outcome(repo, caller, land_id, Some(&req.target_ref))?;
+            let (row, head, head_tree) =
+                c.land_outcome(repo, caller, land_id, Some(&req.target_ref))?;
             if row.state != LandState::Pending {
                 return Ok(Planned::Settled(row));
             }
-            plan(lands, c, repo, req, head, index).map(Planned::Do)
+            plan(lands, c, repo, req, head, index).map(|plan| Planned::Do((plan, head_tree)))
         })?;
         #[cfg(test)]
         let step = lands
@@ -794,11 +797,20 @@ fn finish(
         if let Some(step) = step {
             step();
         }
-        let plan = match planned {
+        let (plan, head_tree) = match planned {
             Planned::Settled(row) => return Ok(Finished::Outcome(row)),
-            Planned::Do(plan) => plan,
+            Planned::Do((plan, head_tree)) => (plan, head_tree),
         };
-        match settle(lands, store, repo, land_id, &req.target_ref, plan, index) {
+        match settle(
+            lands,
+            store,
+            repo,
+            land_id,
+            &req.target_ref,
+            plan,
+            index,
+            head_tree,
+        ) {
             Err(Error::Aborted(detail)) if attempt < MAX_ATTEMPTS => {
                 tracing::info!(land_id, attempt, %detail, "planning the land again");
                 if let Some(metrics) = &lands.metrics {
@@ -890,6 +902,7 @@ fn settle(
     target: &str,
     plan: Plan,
     index: &mut Option<PathIndex>,
+    head_tree_stored: bool,
 ) -> Result<Finished> {
     let (rebased, head) = match plan {
         Plan::Derive(head) => return Ok(Finished::Derive(head)),
@@ -917,7 +930,14 @@ fn settle(
     };
 
     // See `tree::store_changeset`. The land's flush covers these steps.
-    tree::fill_root_tree(store, repo, head.target)?;
+    // The fill runs only when the head's root tree is not stored: the
+    // plan's read answered its presence on the same snapshot the head
+    // rode, so a stored tree costs the land nothing here, and a missing
+    // one derives before the write transaction - never inside it, where
+    // the derive would run unbounded and hold the write connection.
+    if !head_tree_stored {
+        tree::fill_root_tree(store, repo, head.target)?;
+    }
     // The blob lengths the tree build needs, read before the write
     // transaction, so the write connection does no file I/O.
     let lens = tree::lens_of_puts(store, crate::meta::puts(&rebased).map(|(_, blob)| blob))?;
@@ -2266,12 +2286,13 @@ mod tests {
         );
         // The land stays pending: a retry with the same key replans
         // against the head the last import made.
-        let (row, head) = f
+        let (row, head, head_tree) = f
             .store
             .read(|c| c.land_outcome(f.repo, &caller(), 1, Some("main")))
             .unwrap();
         assert_eq!(row.state, LandState::Pending);
         assert!(head.is_some(), "the ref rides the joined read");
+        assert!(head_tree, "the head's tree rides the same read");
     }
 
     /// Where the first attempt at a land stopped.

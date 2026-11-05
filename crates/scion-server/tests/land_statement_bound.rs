@@ -149,26 +149,31 @@ fn land_statement_count(paths: usize) -> u64 {
     count
 }
 
+/// The seam is process-wide, so the tests take turns: parallel windows
+/// would count each other's statements.
+static LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound() {
-    // The seam is process-wide, so the runs share one test: parallel
-    // windows would count each other's statements.
+    let _log = LOG_LOCK.lock().unwrap();
     // Today's count, with slack for one more plan attempt: each fold of
     // the round-trip card lowers this number, and a change that raises
     // it must say why. Measured in CI (probe run 41899707438): main's
-    // land over 3 paths costs 37; the read-back fold brought 36; this
-    // fold opens each transaction in one round trip - BEGIN and its
+    // land over 3 paths costs 37; the read-back fold brought 36; that
+    // fold opened each transaction in one round trip - BEGIN and its
     // guard SET LOCALs ride one batch, on the writer transactions and
-    // the reader's alike; that fold joined the record's repos read into
-    // the key lookup; and this fold joins the finish's ref read into
-    // the land's outcome read: the land costs 30.
+    // the reader's alike; the next fold joined the record's repos read
+    // into the key lookup; the next joined the finish's ref read into
+    // the land's outcome read: 30. This fold asks the same read whether
+    // the head's root tree is stored, and the pre-settle fill runs only
+    // when it is missing: the land costs 28.
     //
     // This run has no rival writer, so the land settles in one attempt;
     // the log's one verdict UPDATE proves it. On that run the count is
     // exact, so a statement coming back fails the test here, and the
     // bound keeps guarding only the retried case it has slack for.
-    const BOUND: u64 = 38;
-    const EXACT: u64 = 30;
+    const BOUND: u64 = 36;
+    const EXACT: u64 = 28;
     let count = land_statement_count(3);
     {
         let log = Backend::test_statement_log();
@@ -187,6 +192,25 @@ fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound()
         "a land cost {count} statements, over the bound {BOUND}:\n{:#?}",
         Backend::test_statement_log()
     );
+    // The stored-tree path fills nothing: between the plan's ROLLBACK
+    // and the settle's BEGIN sit no statements at all.
+    let log = Backend::test_statement_log();
+    let plan_end = log
+        .iter()
+        .rposition(|sql| sql.starts_with("ROLLBACK"))
+        .expect("the plan's transaction rolled back");
+    let settle_begin = log[plan_end..]
+        .iter()
+        .position(|sql| sql.starts_with("BEGIN;"))
+        .map(|at| plan_end + at)
+        .expect("the settle transaction begins");
+    assert_eq!(
+        plan_end + 1,
+        settle_begin,
+        "the stored head's tree fills nothing: between the plan and the \
+         settle sit statements:\n{}",
+        &log[plan_end + 1..settle_begin]
+    );
     let small = land_statement_count(10);
     let large = land_statement_count(100);
     let growth = large.saturating_sub(small);
@@ -195,5 +219,83 @@ fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound()
         growth <= 8,
         "a land over 100 paths cost {large} statements, over 10 cost {small}: \
          the difference {growth} grew with the paths"
+    );
+}
+
+/// A head whose root tree row is missing (a version bump's leftover, or
+/// a row an operator removed) still lands, and its derive runs before
+/// the write transaction, not inside it: the fill's two reads sit
+/// between the plan's ROLLBACK and the settle's BEGIN, and the settle
+/// transaction holds no single-changeset derived-value read.
+#[test]
+fn a_land_whose_head_tree_is_missing_fills_before_the_write_transaction() {
+    let _log = LOG_LOCK.lock().unwrap();
+    let paths: Vec<String> = (0..3).map(|i| format!("p{i:03}.txt")).collect();
+    let (dir, store) = store_with_root(&paths.iter().take(1).cloned().collect::<Vec<_>>());
+    let lands = Lands::default();
+    let base = store
+        .read(|c| {
+            let repo = c.repo_id(REPO)?;
+            Ok(c.get_ref(repo, "main")?
+                .expect("the root ref exists")
+                .target)
+        })
+        .unwrap();
+    let cs = changeset_on(&store, base, &paths);
+    // The head's root tree row goes away: the delete is the test's own
+    // connection, on the store's own URL - preflight rules do not bind
+    // a test that stages a broken store.
+    let url = scion_server::Backend::test_postgres_url(dir.path()).unwrap();
+    let mut raw = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    let deleted = raw
+        .execute(
+            "DELETE FROM derived WHERE kind = 'root_tree' AND cs = $1",
+            &[base.as_bytes().to_vec()],
+        )
+        .unwrap();
+    assert_eq!(deleted, 1, "the head's root tree row was there");
+    drop(raw);
+    Backend::test_reset_statement_count();
+    let outcome = land_once(&store, &lands, cs);
+    assert_eq!(outcome.state, LandState::Landed, "{}", outcome.detail);
+    // The fill's reads sit before the write transaction; the settle
+    // transaction derives nothing itself.
+    let log = Backend::test_statement_log();
+    let plan_end = log
+        .iter()
+        .rposition(|sql| sql.starts_with("ROLLBACK"))
+        .expect("the plan's transaction rolled back");
+    let settle_begin = log[plan_end..]
+        .iter()
+        .position(|sql| sql.starts_with("BEGIN;"))
+        .map(|at| plan_end + at)
+        .expect("the settle transaction begins");
+    let between = &log[plan_end + 1..settle_begin];
+    assert_eq!(
+        between.len(),
+        2,
+        "the missing tree fills with two reads before the write \
+         transaction:\n{between:#?}"
+    );
+    assert!(
+        between[0].starts_with("SELECT gen FROM changesets"),
+        "the fill reads the generation first:\n{between:#?}"
+    );
+    assert!(
+        between[1].starts_with("SELECT value FROM derived WHERE kind = $1"),
+        "the fill reads the tree's value second:\n{between:#?}"
+    );
+    let settle_tx = &log[settle_begin..];
+    let settle_end = settle_tx
+        .iter()
+        .position(|sql| sql == "COMMIT")
+        .map(|at| settle_begin + at)
+        .expect("the settle transaction commits");
+    assert!(
+        !log[settle_begin..settle_end]
+            .iter()
+            .any(|sql| sql.starts_with("SELECT value FROM derived WHERE kind = $1")),
+        "the derive ran before the write transaction, not inside it:\n{:#?}",
+        &log[settle_begin..settle_end]
     );
 }
