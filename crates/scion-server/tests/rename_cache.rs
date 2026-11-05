@@ -496,6 +496,7 @@ fn the_cap_holds_empty_maps_to_its_bound() {
     scion_server::test_support::read::test_clear_rename_cache();
     let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
+    store.write(|c| c.create_repo(REPO)).unwrap();
     // The blobs the pages' files name.
     for i in 0..1_100 {
         store
@@ -536,8 +537,8 @@ fn the_cap_holds_empty_maps_to_its_bound() {
         // An empty map costs exactly its overhead against the cap.
         let overhead = scion_server::test_support::read::test_rename_cache_entry_overhead();
         assert_eq!(
-            bytes as usize,
-            maps * overhead,
+            usize::try_from(bytes),
+            Ok(maps * overhead),
             "the kept bytes are the entries' overhead: {bytes} for {maps} entries"
         );
         let gauge = scion_server::test_support::read::test_rename_cache_gauge();
@@ -548,8 +549,8 @@ fn the_cap_holds_empty_maps_to_its_bound() {
     assert_eq!(maps, 4, "the cap holds four empty-map entries, not all 16");
     let overhead = scion_server::test_support::read::test_rename_cache_entry_overhead();
     assert_eq!(
-        bytes as usize,
-        maps * overhead,
+        usize::try_from(bytes),
+        Ok(maps * overhead),
         "an empty map costs exactly its overhead against the cap"
     );
 }
@@ -563,6 +564,7 @@ fn a_page_that_answers_moves_its_entry_to_the_young_end() {
     scion_server::test_support::read::test_clear_rename_cache();
     let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
+    store.write(|c| c.create_repo(REPO)).unwrap();
     for i in 0..1_101 {
         store
             .blobs()
