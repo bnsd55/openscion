@@ -475,7 +475,6 @@ fn a_refusing_open_writes_nothing_to_the_catalog() {
     let base = std::env::var("SCION_TEST_POSTGRES_URL")
         .expect("SCION_TEST_POSTGRES_URL must name the test database");
     let schema = "mig_no_create";
-    let url = url_for(&base, schema);
     seed_behind_store(&base, schema);
     let role = format!("{schema}_role");
     let guard = RoleGuard {
