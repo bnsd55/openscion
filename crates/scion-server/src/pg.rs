@@ -751,15 +751,11 @@ fn open_transaction(c: &PgClient, open: &str) -> Result<()> {
 }
 
 impl PgClient {
-    /// Runs one closure with the client on the worker thread: the sync
-    /// client must never be touched from a tokio thread, so the setup
-    /// and read paths that need the client whole send it here, where a
-    /// blocking statement is just a blocking statement.
-    ///
-    /// # Errors
-    ///
-    /// The worker is gone (its log line names why), or the closure
-    /// failed.
+    /// Runs one closure with the client on the worker thread. The sync
+    /// client must never be touched from a tokio thread; the test
+    /// schema's preparation calls it. No production path needs the
+    /// client whole, so the method is test-only.
+    #[cfg(any(test, feature = "test-hooks"))]
     fn raw(&self, f: RawFn) -> Result<()> {
         let (reply, rx) = std::sync::mpsc::channel();
         self.jobs
