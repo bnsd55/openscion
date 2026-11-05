@@ -3445,13 +3445,15 @@ pub(crate) fn preflight_client(url: &str, ca: Option<&Path>) -> Result<Client> {
 /// A database that does not answer, or a version that is not a number.
 pub(crate) fn read_schema_version_raw(client: &mut Client) -> Result<u32> {
     let ledger: Option<String> = client
-        .query_opt("SELECT to_regclass('schema_migrations')::text", &[])?
+        .query_opt("SELECT to_regclass('schema_migrations')::text", &[])
+        .map_err(map_pg_error)?
         .and_then(|row| row.get(0));
     if ledger.is_none() {
         return Ok(0);
     }
     let version: i64 = client
-        .query("SELECT max(version) FROM schema_migrations", &[])?
+        .query("SELECT max(version) FROM schema_migrations", &[])
+        .map_err(map_pg_error)?
         .first()
         .and_then(|row| row.get::<_, Option<i64>>(0))
         .unwrap_or(0);
