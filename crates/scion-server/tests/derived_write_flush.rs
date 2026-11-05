@@ -156,6 +156,38 @@ fn the_flush_deletes_what_the_per_call_deletes_delete_in_order() {
     );
 }
 
+/// A batch where every kind appears once - the case every caller is in
+/// today - still rides the commit's one delete statement: the lands'
+/// settle statement bound counts on it. A kind that repeats takes the
+/// fold's two round trips instead (the test above proves its end state).
+#[test]
+fn a_batch_of_one_version_per_kind_still_flows_one_statement() {
+    let _log = log_guard();
+    let dir = scion_server::test_support::private_tempdir();
+    let store = Backend::open_test(dir.path()).unwrap();
+    let repo = store.write(|c| c.create_repo(REPO)).unwrap();
+    let cs = changeset("root\n", None);
+    let id = store
+        .write(|c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0))
+        .unwrap();
+    store
+        .write(|c| c.put_derived("test_kind", 0, id, b"one"))
+        .unwrap();
+    Backend::test_reset_statement_count();
+    store
+        .write(|c| {
+            c.defer_derived_deletes();
+            c.delete_derived_below("test_kind", 1, 1)
+        })
+        .unwrap();
+    let log = Backend::test_statement_log();
+    let deletes = log
+        .iter()
+        .filter(|sql| sql.contains("DELETE FROM derived"))
+        .count();
+    assert_eq!(deletes, 1, "the common flush is one statement:\n{log:#?}");
+}
+
 #[test]
 fn a_write_that_disagrees_with_a_stored_row_still_refuses() {
     let _log = log_guard();

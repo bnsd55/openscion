@@ -1932,8 +1932,45 @@ impl<'a> PgTx<'a> {
             .collect();
         let versions: Vec<i64> = self.deferred_deletes.iter().map(|(_, v, _)| *v).collect();
         let steps: Vec<i64> = self.deferred_deletes.iter().map(|(_, _, s)| *s).collect();
-        // How many rows each call still had below its version, one row
-        // per call in call order.
+        // One version per kind, the case every caller is in today: the
+        // one statement ranks each row once against its kind's single
+        // call and cuts at the step, as it has since the deferral. Only
+        // a kind that repeats in the batch needs the fold, and no caller
+        // reaches that today (#855); the lands' settle statement bound
+        // counts on this shape staying one statement.
+        let repeats = {
+            let mut seen = std::collections::HashSet::new();
+            kinds.iter().any(|k| !seen.insert(k))
+        };
+        if !repeats {
+            let deleted = self.c.execute(
+                "WITH k AS (
+                     SELECT kind, version, SUM(step) AS step
+                     FROM unnest($1::text[], $2::int8[], $3::int8[]) AS t(kind, version, step)
+                     GROUP BY kind, version),
+                 v AS (
+                     SELECT d.ctid AS ctid, k.step AS step,
+                            row_number() OVER (PARTITION BY d.kind
+                                               ORDER BY d.version) AS rn
+                     FROM derived d JOIN k ON d.kind = k.kind
+                                                            AND d.version < k.version)
+                 DELETE FROM derived WHERE ctid IN (SELECT ctid FROM v WHERE rn <= step)",
+                &[
+                    P::text_array(kinds),
+                    P::i64_array(versions),
+                    P::i64_array(steps),
+                ],
+            )?;
+            if deleted > 0 {
+                tracing::debug!(deleted, "flushed the transaction's derived deletes");
+            }
+            return Ok(());
+        }
+        // A kind repeated: its calls, in call order, take a prefix of
+        // the kind's rows - each call takes up to its step from the rows
+        // still there below its version, from the same low end the
+        // per-call deletes pick. How many rows each call still had below
+        // its version, one row per call in call order:
         let belows = self.c.query(
             "SELECT c.kind, count(d.cs)
              FROM unnest($1::text[], $2::int8[]) WITH ORDINALITY AS c(kind, version, i)
