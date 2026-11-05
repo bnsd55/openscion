@@ -1816,7 +1816,7 @@ mod tests {
         INIT.call_once(|| {
             let subscriber = tracing_subscriber::fmt()
                 .with_ansi(false)
-                .with_max_level(tracing::level_filters::LevelFilter::TRACE)
+                .with_max_level(tracing::level_filters::LevelFilter::WARN)
                 .with_writer(log())
                 .finish();
             tracing::subscriber::set_global_default(subscriber).unwrap();
