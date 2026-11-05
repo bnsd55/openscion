@@ -299,7 +299,7 @@ fn tickets(opts: &PreflightOptions) -> Answer {
 /// The marker's UUID beside the database's store_uuid row, plain
 /// selects: a mismatch is a store restored over a directory, the
 /// open's own refusal to name.
-fn store_pairing(data: &Path, db: &postgres::Client) -> Answer {
+fn store_pairing(data: &Path, db: &mut postgres::Client) -> Answer {
     let marker = crate::backend::store_uuid_of(data);
     let held: Option<Vec<u8>> = db
         .query_opt("SELECT uuid FROM store_uuid WHERE one = 1", &[])
