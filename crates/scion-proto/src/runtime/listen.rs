@@ -554,7 +554,7 @@ impl Limits {
     ) -> Result<(), tonic::transport::Error>
     where
         I: Stream<Item = io::Result<IO>> + Send + 'static,
-        IO: AsyncRead + AsyncWrite + Connected + Unpin + Send + 'static,
+        IO: AsyncRead + AsyncWrite + Connected<ConnectInfo = Stalled> + Unpin + Send + 'static,
     {
         let mut conns = tokio::task::JoinSet::new();
         let mut incoming = pin!(incoming);
@@ -601,9 +601,10 @@ impl Limits {
         S::Future: Send + 'static,
         S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
+        let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+        builder.http2_only();
         let mut conn = pin!(
-            hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
-                .http2_only()
+            builder
                 .http2()
                 .timer(TokioTimer::new())
                 .max_concurrent_streams(Some(streams))
@@ -669,7 +670,10 @@ struct ServeRoutes {
 
 impl ServeRoutes {
     /// One per connection, with that connection's `Stalled`.
-    fn of<IO: Connected>(routes: &Routes, io: &IO) -> Self {
+    fn of<IO>(routes: &Routes, io: &IO) -> Self
+    where
+        IO: Connected<ConnectInfo = Stalled>,
+    {
         Self {
             inner: routes.clone(),
             stalled: io.connect_info(),
