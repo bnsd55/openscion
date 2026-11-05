@@ -515,7 +515,7 @@ impl Limits {
         // it resolves (or when the listener ends); the serve below reads
         // the same watch, so the drain starts at the signal itself.
         let (stop, stopped) = watch::channel(false);
-        let routes = router();
+        let service_routes = router();
         if let Some(config) = tls {
             let incoming = accept_tls(
                 incoming,
@@ -525,15 +525,26 @@ impl Limits {
                 config,
                 Arc::clone(&metrics),
             );
-            let outcome =
-                Self::serve_connections(routes, incoming, stopped, accepting, self.streams.get())
-                    .await;
+            let outcome = Self::serve_connections(
+                service_routes,
+                incoming,
+                stopped,
+                accepting,
+                self.streams.get(),
+            )
+            .await;
             Self::warn_the_last(accepting);
             return outcome;
         }
         let incoming = accept(incoming, accepting, stop, shutdown, metrics);
-        let outcome =
-            Self::serve_connections(routes, incoming, stopped, accepting, self.streams.get()).await;
+        let outcome = Self::serve_connections(
+            service_routes,
+            incoming,
+            stopped,
+            accepting,
+            self.streams.get(),
+        )
+        .await;
         Self::warn_the_last(accepting);
         outcome
     }
@@ -613,8 +624,6 @@ impl Limits {
         S::Future: Send + 'static,
         S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        let mut builder =
-            hyper_util::server::conn::auto::Builder::new(TokioExecutor::new()).http2_only();
         let mut builder =
             hyper_util::server::conn::auto::Builder::new(TokioExecutor::new()).http2_only();
         let mut h2 = builder.http2();
