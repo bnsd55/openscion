@@ -154,6 +154,20 @@ bounded too, at 1 GiB over every connection (a connection whose count
 crosses that total is closed, like one over its own cap). A cache and a
 daemon take the same three flags.
 
+A client over the connection cap waits 5 seconds for a place
+(`CONNECTION_WAIT` in crates/scion-proto/src/runtime/listen.rs), and the
+server closes it when none frees in time, so a failed client learns at
+once instead of waiting unread for up to half an hour. At most the cap's
+own number of clients wait at once (128 by default): a client over that
+is closed at once, so a storm holds at most twice the cap in sockets.
+The server counts every such close in the
+`scion_connections_refused_total` metric, and writes one warning line
+per 10 seconds at most, with the number of connections the line covers;
+the line a client that left while it waited also lands in the count. A
+few refusals in a burst are a client that retried; a steady count means
+the cap is too low for the load: raise `--max-connections` (and the
+host's memory, by the floor below) or add caches in front.
+
 What one server process can hold for clients that never read, at the
 defaults, in the worst case:
 
@@ -243,13 +257,19 @@ supervisor. The minimal systemd unit — the token through the file
 [Service]
 ExecStart=/usr/local/bin/scion-server --data /srv/scion serve \
   --token-file /etc/scion/token \
-  --ticket-key /srv/scion-keys/ticket.key
+  --ticket-key /srv/scion-keys/ticket.key \
+  --migrate
 Restart=on-failure
 User=scion
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+The `--migrate` on the serve line is the unattended start's rule
+(section 4): a machine that reboots after an upgrade moves the schema
+instead of refusing to come up. The upgrade window itself still runs
+the four steps of section 4 — check, back up, migrate, serve — by hand.
 
 `systemctl stop scion` sends SIGTERM, and the drain of the last
 section is what happens next. Never kill by pattern: on a machine that
@@ -397,10 +417,13 @@ SCION_POSTGRES_URL='postgres://user@dbhost/scion?sslmode=require' \
   trusts, and the open refuses one (`chmod go-w /srv/scion/db-ca.pem`).
 - The open checks the database runs `synchronous_commit=on`: a returned
   commit must be durable. A database that answers otherwise is refused.
-- The open migrates the database's schema to this build's version, one
-  transaction per migration, under a database lock with the same 5 s clock:
-  an open that waits longer answers busy, and the caller retries. A
-  database of a newer build is refused: run that build's server.
+- The open refuses a database whose schema is behind this build's
+  version: the answer names the fix ("run `scion-server migrate` first,
+  or pass --migrate to serve"). Only `migrate` and `serve --migrate`
+  move the schema, one transaction per migration, under a database lock
+  with the same 5 s clock: a second that waits longer answers busy, and
+  the caller retries. A database of a newer build is refused: run that
+  build's server. A fresh, empty database is created by the open.
 - One server process serves one store - a data directory, or a Postgres
   schema: a second `serve` on the same URL (and schema)
   fails at its open with "another server holds this store". An import
@@ -541,14 +564,15 @@ and administrative changes, with no tokens and no contents. It lives at
 The CLI's state-changing subcommands record their own admin lines in
 the same file: one intent before a change, and one result after it.
 Every state-changing command is covered: gc, import, restore, derive,
-ticket-key generation, and the schema migration an open performs. The
+ticket-key generation, and the schema migration of `migrate` (or a
+serve asked to move it). The
 restore's lines land in the restored store's own
 audit file, so its history opens with the restore that made it. The
 collector is the runbook's cure for a full disk, so a gc whose intent
 cannot go in because the disk is full runs anyway, and records its
 intent, marked `deferred: disk_full`, after it freed the space. The
-migration's line has no intent before it: it ran inside the store's
-open, before the audit could exist, so its record, marked with the
+migration's line has no intent before it: it runs under the schema's
+own lock, before the audit could exist, so its record, marked with the
 versions it moved, goes in as soon as the audit exists.
 There is no way to turn it off: a server that cannot record refuses the
 changes it cannot account for, and flips readiness until a restart. The
@@ -668,6 +692,14 @@ TLS and a ticket key, and `docker/demo.sh` seeds a repo and checks it out
 through the cache. It is the quickest end-to-end look at a two-tier
 deployment, and a template for the real files (the secrets are made at
 compose time, the server's data lives in a volume).
+
+A Postgres container needs shared memory beyond Docker's default: the
+database keeps its cumulative statistics (one entry per table) in
+`/dev/shm`, and a parallel plan asks it for tens of megabytes more in
+one segment. A full device ends with the database in crash recovery,
+and every connection it served with it. Give the container 256 MB
+(compose's `shm_size`, `docker run`'s `--shm-size`); more tables want
+more. The compose file in this repository already sets it.
 
 ### Environment variables
 
@@ -915,19 +947,27 @@ Proof: crates/scion-server/tests/archive_attacks.rs::a_restored_store_does_not_c
 
 ## 4. Upgrades
 
-The schema version lives in the database. On open, a server migrates an
-older schema forward, one migration per released version, each in one
+The schema version lives in the database. A build moves an older schema
+forward only when you ask: the `migrate` command, or a serve started
+with `--migrate`. One migration per released version, each in one
 transaction (v0.1.0 shipped migrations 1–5: table creations and a parent
 numbering; migration 6 adds a land's reject reason. None rewrites data,
-so none takes long). Two rules:
+so none takes long). Three rules:
 
 - A database with a **newer** schema than the binary refuses to open,
   with the build's own numbers — for a build one version behind a
   database at 7, the refusal is
   `corrupt data: database schema version 7 is newer than this build (6)`.
   Run the old binary until you can upgrade, or restore a backup.
-- Other servers take the schema's advisory lock: one process migrates at
-  a time, and an open that waits longer than 5 s answers busy, and the
+- A database **behind** the build refuses every open but the two that
+  are asked to move it: `serve`, `import`, `gc`, `fsck` and `derive`
+  answer "the database is at schema version N, this build ships M; run
+  `scion-server migrate` first, or pass --migrate to serve", and nothing
+  changes. Only `migrate` and `serve --migrate` move the schema. A
+  fresh, empty database is not behind: `serve` and `import` still
+  create it, so a first boot needs no migrate step.
+- The move takes the schema's advisory lock: one process migrates at a
+  time, and a second that waits longer than 5 s answers busy, and the
   caller retries.
 
 ### A failed migration
@@ -942,9 +982,9 @@ is the rule that names the case:
    in the database by hand: the version is the migration's bookmark,
    and a hand-moved one leaves the database half-migrated in a way no
    migration can finish.
-2. The open answers busy (the 5 s clock above): another server holds
+2. The migrate answers busy (the 5 s clock above): another server holds
    the schema's migration lock. It finishes its migration; this one
-   retries and serves.
+   retries.
 
 After the fix, the server starts and serves; `fsck` says the store is
 whole.
@@ -961,16 +1001,55 @@ offset is unknown, not zero, and importing it would fold the sign into
 the stored history. Every real zone imports with its offset; fix or
 re-date such a commit in the git history and import again.
 
-So an upgrade is: stop the server (and any tiers that share the directory —
-none do by default), copy the directory as a backup (section 3), start the
-new binary, watch the log for the migration, run `fsck`. A store that
-has data logs its migration steps when a build migrates it — the open
-logs `migrating the metadata schema` with the from and to versions, one
-`the metadata schema migrated one step` line per step with the step's
-time, and `the metadata migration is done` when it ends; a first boot on
-a fresh, empty directory logs `the metadata schema was created`, and an
-open that migrates nothing logs no migration line at all - only the
-usual `serving` line.
+So an upgrade is four steps: check, back up, migrate, serve. The check
+runs first, and it reads the state and writes nothing, so it is safe
+beside the live old server. With the new binary installed beside the
+old one (below), run it against the running store:
+
+```sh
+scion-server --data /srv/scion \
+  --postgres-url-file /etc/scion/db-url migrate --check
+```
+
+It prints the database's version, this build's version, and one
+`would run:` line per pending migration. It exits 0 when nothing is
+pending, 3 when steps are pending, and 1 when the state cannot be read
+— a database that is newer than this build, or one that does not
+answer. Exit 3 is the answer the check exists for, not a failure: a
+script tells "steps to run" from "cannot reach the database" by the
+code, never by the text.
+
+Then stop the server (and any tiers that share the directory — none do
+by default), copy the directory as a backup (section 3), and move the
+schema:
+
+```sh
+scion-server --data /srv/scion \
+  --postgres-url-file /etc/scion/db-url migrate
+```
+
+The migrate takes the schema's advisory lock, runs one transaction per
+step, and prints `migrated the metadata schema from version N to M`. A
+first boot on a fresh, empty database creates it and prints `no
+migrations pending` — the creation moves no version. The migration's
+record lands in the data directory's audit log with the from and to
+versions, like every other command's record. Nothing here rewrites
+store data, so the directory copy from before the migrate is the
+rollback point (below).
+
+Then start the server and run `fsck`. An unattended start — the unit
+below, or the compose file — passes `--migrate`, and a serve that finds
+steps pending moves them first: the log carries `migrating the metadata
+schema` with the from and to versions, one `the metadata schema
+migrated one step` line per step with the step's time, and `the
+metadata migration is done` when it ends. A serve that migrates nothing
+logs no migration line at all — only the usual `serving` line. When the
+owner's policy is to keep every move explicit, drop `--migrate` from
+the unit: the start then refuses a database that is behind, with the
+message that names the migrate.
+
+Proof: crates/scion-server/tests/migrations.rs::a_serve_refuses_a_behind_database_until_asked_to_migrate (behaviour, no command: the runbook's steps are operator actions on a stopped server; the test holds the refusal the section quotes and the serve --migrate that ends it)
+Proof: crates/scion-server/tests/migrations.rs::a_check_on_a_fresh_database_prints_the_steps_and_exits_3 (behaviour, no command: the check's exit table the section states — 0 clean, 3 pending — is the test's own assertion)
 
 Where the binaries come from. v0.1.0 is a source release: build the
 version you need from its signed tag (`docs/RELEASING.md`):
@@ -1248,7 +1327,11 @@ log.
   access rules. Expected if your rules are strict; look at the `principal`
   field to see who.
 - `a connection waits: the most connections are open` — the server is at
-  `--max-connections` and new clients queue. Raise the cap or add caches.
+  `--max-connections` and new clients wait up to 5 seconds for a place,
+  then the server closes them (at most 128 wait at once; a client over
+  that is closed at once). The refused count is the
+  `scion_connections_refused_total` metric; a steady count means the cap
+  is too low. Raise the cap or add caches.
 - `the database stayed busy` / `the database stayed busy; the batch
   retries` — a lock or connection the caller could not get inside the
   clock, usually an import beside a live server. Rare bursts are fine;
@@ -1456,22 +1539,22 @@ checking out through a cache and a daemon beside it.
 
 | | |
 |---|---|
-| Commit | f4d62b595f94f86903225629a936f8ac221942cb the main commit the run measured (the run's own HEAD), at [run 40864498937](https://github.com/bnsd55/openscion/actions/runs/40864498937) |
+| Commit | 7609d66851c7fc844c8b3eb3a8bc40ba0bd1a17b the main commit the run measured (the run's own HEAD), at [run 41811605641](https://github.com/bnsd55/openscion/actions/runs/41811605641) |
 | Runner | GitHub-hosted `ubuntu-24.04`: 4 vCPU, 16 GiB RAM, ext4 on a ~144 GiB SSD, runner image `ubuntu24 20261026.354.1`, kernel `7.0.0-1017-azure` (the run's `machine.txt` artifact) |
 | Filesystem | the filesystem the run measured, from the run's `machine.txt` artifact (`df -T` on the work directory); the `ubuntu-24.04` class's root disk is ext4 ([support.md](support.md)) |
 | Repetitions | 2 per cell; the table reports the cell's whole run, and the run's raw samples are the workflow run's `capacity.csv` artifact |
 
 | backend | writers | readers | land p99 ms | checkout p50 ms | checkout p99 ms | timeouts | errors | server RSS MiB | landed | lands per second | blob store KiB per 1k lands | database KiB per 1k lands |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| postgres | 2 | 0 | 57.8 | - | - | 0 | 0 | 20 | 2000 | 23.2 | 5668 | 85012 |
-| postgres | 2 | 5 | 123.4 | 248 | 291 | 0 | 0 | 24 | 2000 | 11.4 | 5668 | 87506 |
-| postgres | 2 | 20 | 245.3 | 861 | 1038 | 0 | 0 | 27 | 2000 | 8.2 | 5668 | 87298 |
-| postgres | 50 | 0 | 2034.1 | - | - | 0 | 0 | 34 | 2000 | 25.5 | 5672 | 34494 |
-| postgres | 50 | 5 | 4232.0 | 246 | 288 | 0 | 0 | 38 | 2000 | 12.7 | 5674 | 34510 |
-| postgres | 50 | 20 | 7708.9 | 867 | 1063 | 0 | 0 | 40 | 2000 | 8.4 | 5670 | 34534 |
-| postgres | 200 | 0 | 8081.3 | - | - | 0 | 0 | 45 | 2000 | 24.9 | 5670 | 62376 |
-| postgres | 200 | 5 | 16945.7 | 248 | 292 | 0 | 0 | 64 | 2000 | 12.5 | 5668 | 62234 |
-| postgres | 200 | 20 | 29120.7 | 873 | 1061 | 0 | 0 | 66 | 2000 | 8.3 | 5668 | 62340 |
+| postgres | 2 | 0 | 56.6 | - | - | 0 | 0 | 21 | 2000 | 23.3 | 5670 | 87610 |
+| postgres | 2 | 5 | 150.2 | 209 | 251 | 0 | 0 | 31 | 2000 | 9.9 | 5668 | 86432 |
+| postgres | 2 | 20 | 272.0 | 783 | 1019 | 0 | 0 | 28 | 2000 | 7.8 | 5670 | 86496 |
+| postgres | 50 | 0 | 2068.2 | - | - | 0 | 0 | 34 | 2000 | 25.1 | 5670 | 34508 |
+| postgres | 50 | 5 | 4675.5 | 213 | 254 | 0 | 0 | 39 | 2000 | 11.1 | 5670 | 34490 |
+| postgres | 50 | 20 | 8227.4 | 795 | 1046 | 0 | 0 | 41 | 2000 | 8.1 | 5670 | 34610 |
+| postgres | 200 | 0 | 8593.6 | - | - | 0 | 0 | 46 | 2000 | 24.3 | 5670 | 62320 |
+| postgres | 200 | 5 | 19496.2 | 211 | 252 | 0 | 0 | 65 | 2000 | 10.7 | 5672 | 62306 |
+| postgres | 200 | 20 | 33838.2 | 785 | 1027 | 0 | 0 | 67 | 2000 | 8.0 | 5668 | 62258 |
 
 Every cell runs on a store the cell's own import made: a database the
 cell dropped and recreated, so a cell's numbers are the store's at its

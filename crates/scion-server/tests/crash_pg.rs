@@ -246,6 +246,10 @@ impl PgServer {
             .arg("--data")
             .arg(data)
             .args(["serve", "--listen", "127.0.0.1:0"])
+            // The crash lands on a start that moves the schema: the
+            // upgrade is the point, so this start is asked for it
+            // (issue #816's rule - a start migrates only when asked).
+            .arg("--migrate")
             .env("SCION_TOKEN", TOKEN)
             .env("SCION_POSTGRES_URL", server_url(schema, &name))
             .env("NO_COLOR", "1")

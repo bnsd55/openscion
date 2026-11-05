@@ -39,6 +39,10 @@ services:
       - serve
       - --listen
       - 0.0.0.0:7878
+      # The demo is an unattended start (section 4 of
+      # docs/operations.md): a start moves the schema instead of
+      # refusing to come up.
+      - --migrate
       - --tls-cert
       - /certs/server.crt
       - --tls-key
@@ -59,6 +63,12 @@ services:
   # the cache's.
   postgres:
     image: postgres:17
+    # The database's parallel plans and its cumulative statistics share
+    # /dev/shm, which Docker caps at 64 MB; a busy database can ask for
+    # more than that in one plan and crash (#849). 256 MB is the
+    # headroom to set on any Postgres container (docker run's
+    # --shm-size, compose's shm_size).
+    shm_size: 256mb
     environment:
       POSTGRES_USER: scion
       POSTGRES_PASSWORD: ${SCION_DEMO_DB_PASSWORD:?set by docker/demo.sh}

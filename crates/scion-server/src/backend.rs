@@ -261,6 +261,18 @@ impl Backend {
         Self::open_shared_with(url, ca, data, Pg::open)
     }
 
+    /// [`Backend::open`], with the right to move the schema: the open of
+    /// `serve --migrate`, and of `migrate`. Every other opener refuses a
+    /// database that is behind this build, with the fix named.
+    ///
+    /// # Errors
+    ///
+    /// What the database returns, and another process holds the
+    /// one-server lock.
+    pub fn open_migrating(data: &Path, url: &str, ca: Option<&Path>) -> Result<Self> {
+        Self::open_shared_with(url, ca, data, Pg::open_exclusive_migrating)
+    }
+
     fn open_shared_with(
         url: &str,
         ca: Option<&Path>,
