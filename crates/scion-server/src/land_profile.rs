@@ -20,6 +20,9 @@ use std::time::Duration;
 /// statements issued outside a land.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Phase {
+    /// The handler's own work before the land's phases: the caller and
+    /// quota checks, the id parses, and the audit intent's append.
+    Pre,
     /// The `record_land` commit, before the ref's slot.
     Record,
     /// Waiting for the ref's slot lock. No statements: the wait is
@@ -47,7 +50,8 @@ pub(crate) enum Phase {
     Other,
 }
 
-pub(crate) const PHASES: [Phase; 11] = [
+pub(crate) const PHASES: [Phase; 12] = [
+    Phase::Pre,
     Phase::Record,
     Phase::SlotWait,
     Phase::Outcome,
@@ -69,6 +73,7 @@ impl Phase {
     /// The field name the log line and the harness use.
     pub(crate) fn name(self) -> &'static str {
         match self {
+            Phase::Pre => "pre",
             Phase::Record => "record",
             Phase::SlotWait => "slot_wait",
             Phase::Outcome => "outcome",
@@ -107,6 +112,14 @@ pub(crate) struct Trace {
 
 thread_local! {
     static CURRENT: Cell<Option<Trace>> = const { Cell::new(None) };
+    static PRE: Cell<Option<std::time::Duration>> = const { Cell::new(None) };
+}
+
+/// Hands the handler's pre-land wall to the land's trace: the handler
+/// measures it on its own task (the trace cannot cross threads), and
+/// the next `measure` on this thread takes it into the Pre phase.
+pub(crate) fn seed_pre(pre: std::time::Duration) {
+    PRE.with(|c| c.set(Some(pre)));
 }
 
 impl Trace {
@@ -127,6 +140,14 @@ impl Trace {
     pub(crate) fn measure<R>(f: impl FnOnce() -> R) -> (R, Trace) {
         let saved = Self::get();
         Self::put(&Trace::default());
+        let mut trace = Trace::default();
+        PRE.with(|c| {
+            if let Some(pre) = c.get() {
+                trace.slots[Phase::Pre.slot()].ns = pre.as_nanos();
+                c.set(None);
+            }
+        });
+        Self::put(&trace);
         let out = f();
         let trace = Self::get().unwrap_or_default();
         match saved {
