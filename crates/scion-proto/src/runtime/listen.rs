@@ -554,7 +554,7 @@ impl Limits {
     ) -> Result<(), tonic::transport::Error>
     where
         I: Stream<Item = io::Result<IO>> + Send + 'static,
-        IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        IO: AsyncRead + AsyncWrite + Connected + Unpin + Send + 'static,
     {
         let mut conns = tokio::task::JoinSet::new();
         let mut incoming = pin!(incoming);
@@ -609,7 +609,7 @@ impl Limits {
                 .keep_alive_interval(Some(accepting.keepalive))
                 .keep_alive_timeout(accepting.keepalive_timeout)
                 .max_send_buf_size(SEND_BUF)
-                .serve_connection(TokioIo::new(io), svc)
+                .serve_connection(TokioIo::new(io), TowerToHyperService::new(svc))
         );
         let mut age = Box::pin(age_out(accepting.age, accepting.grace));
         let mut stop = pin!(watch_signal(stop));
@@ -653,6 +653,7 @@ impl Limits {
 /// the accept task sets the watch when the shutdown resolves, or when the
 /// listener ends, and this reads it.
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::service::TowerToHyperService;
 
 /// The routes as a hyper service: the per-call span set from the same
 /// fields the builder's `trace_fn` set, the connection's `Stalled` put in
@@ -667,18 +668,15 @@ struct ServeRoutes {
 
 impl ServeRoutes {
     /// One per connection, with that connection's `Stalled`.
-    fn of<IO>(routes: &Routes, io: &IO) -> Self
-    where
-        IO: Connected,
-    {
+    fn of<IO: Connected>(routes: &Routes, io: &IO) -> Self {
         Self {
             inner: routes.clone(),
-            stalled: Connected::connect_info(io),
+            stalled: io.connect_info(),
         }
     }
 }
 
-impl hyper::service::Service<http::Request<hyper::body::Incoming>> for ServeRoutes {
+impl tower::Service<http::Request<hyper::body::Incoming>> for ServeRoutes {
     type Response = http::Response<tonic::body::Body>;
     type Error = std::convert::Infallible;
     type Future =
