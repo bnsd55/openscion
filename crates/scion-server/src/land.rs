@@ -2399,6 +2399,9 @@ mod tests {
                 if crash == Crash::RefMoved {
                     f.move_main(f.commit(f.main().target, &[put("c", "import")]));
                     let land_id = recorded.land_id;
+                    let deadline = Deadline::new(
+                        std::time::Instant::now() + std::time::Duration::from_secs(60),
+                    );
                     let err = settle(
                         &f.lands, &f.store, repo, land_id, "main", plan, &mut index, &deadline,
                     )
@@ -2976,7 +2979,7 @@ mod tests {
                 .write(|c| {
                     for &tip in &ids {
                         derived::derive::<CommitGraph>(c, repo, tip, &mut crate::tree::lens_none(), None)?;
-                        derived::derive::<PathHistory>(c, repo, tip, &mut crate::tree::lens_none())?;
+                        derived::derive::<PathHistory>(c, repo, tip, &mut crate::tree::lens_none(), None)?;
                     }
                     Ok(())
                 })

@@ -64,7 +64,7 @@ impl Park {
 
     /// Parks the caller while the park file of `id` exists. The ceiling
     /// bounds a park nobody lifts: it fails the holder, not the store.
-    fn park(&self, id: impl std::fmt::Display) {
+    pub(crate) fn park(&self, id: impl std::fmt::Display) {
         let root = self
             .root
             .lock()
