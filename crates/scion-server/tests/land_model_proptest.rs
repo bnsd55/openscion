@@ -789,13 +789,17 @@ async fn run_import(state: &mut Run, root: &Path, data: &Path) {
 /// that never answers one would hold the runtime's drop past every
 /// ceiling. A straggler dies with the runtime instead of the run.
 fn run_on_rt(script: &[Op]) -> RunSummary {
+    eprintln!("PROBE run_on_rt enter");
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
         .build()
         .unwrap();
+    eprintln!("PROBE rt built");
     let summary = rt.block_on(run_script(script));
+    eprintln!("PROBE script done");
     rt.shutdown_timeout(Duration::from_secs(10));
+    eprintln!("PROBE rt shut down");
     summary
 }
 
