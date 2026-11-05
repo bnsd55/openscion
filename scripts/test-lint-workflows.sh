@@ -54,15 +54,15 @@ done
 # download and pin would carry on to actionlint - which the fixture is
 # not: a healthy path's verdict is 1, from actionlint, never 0.
 run() {
-  local dir=$1 path=$2 pin=$3
+  local dir=$1 path=$2
   PATH=$(getconf PATH) ACTIONLINT_URL_BASE="http://127.0.0.1:$port$path" \
-    ACTIONLINT_PIN_SHA256=$pin ACTIONLINT_DIR=$dir \
+    ACTIONLINT_DIR=$dir \
     "$here/lint-workflows.sh" > "$work/out" 2> "$work/err"
 }
 
 # 1) an HTTP error: the download message, with the URL's status path,
 #    and no pin text before it.
-if run "$work/d1" /missing deadbeef; then
+if run "$work/d1" /missing; then
   echo "test-lint-workflows: the 404 download did not fail" >&2
   exit 1
 fi
@@ -75,9 +75,10 @@ grep -q 'not the pinned' "$work/err" && {
   exit 1
 }
 
-# 2) wrong bytes: the pin message, unchanged. The pin is not the
-# fixture bytes' hash, so the check fires before any tar.
-if run "$work/d2" /ok deadbeef; then
+# 2) bytes that are not the real release: the pin message, unchanged,
+# against the real pin (no pin override: an env var that replaced the
+# pin would turn the supply-chain check into a setting).
+if run "$work/d2" /ok; then
   echo "test-lint-workflows: wrong bytes did not fail the pin" >&2
   exit 1
 fi

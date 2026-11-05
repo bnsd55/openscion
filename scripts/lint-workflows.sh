@@ -29,8 +29,8 @@ url_base=${ACTIONLINT_URL_BASE:-https://github.com/rhysd/actionlint/releases/dow
 ACTIONLINT=$(command -v actionlint || true)
 if [ -z "$ACTIONLINT" ]; then
   case "$(uname -s)-$(uname -m)" in
-    Linux-x86_64) asset=linux_amd64; want=${ACTIONLINT_PIN_SHA256:-$ACTIONLINT_LINUX_AMD64} ;;
-    Darwin-arm64) asset=darwin_arm64; want=${ACTIONLINT_PIN_SHA256:-$ACTIONLINT_DARWIN_ARM64} ;;
+    Linux-x86_64) asset=linux_amd64; want=$ACTIONLINT_LINUX_AMD64 ;;
+    Darwin-arm64) asset=darwin_arm64; want=$ACTIONLINT_DARWIN_ARM64 ;;
     *) die "no pinned actionlint for $(uname -s)-$(uname -m)" ;;
   esac
   dir=${ACTIONLINT_DIR:-${TMPDIR:-/tmp}/actionlint-$ACTIONLINT_VERSION-bin}
