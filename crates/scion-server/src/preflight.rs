@@ -65,7 +65,6 @@ enum Answer {
 /// Every check, in the order an operator fixes them: the directory,
 /// the database, the schema, the keys and files, the address, the
 /// host. Nothing is written: no marker, no schema move, no lock.
-#[must_use]
 pub fn run(opts: &PreflightOptions) -> Report {
     let mut answers: Vec<(&'static str, Answer)> = Vec::new();
 
@@ -313,7 +312,7 @@ fn tickets(opts: &PreflightOptions) -> Answer {
     }
     match crate::Keys::load(&seed, &old) {
         Ok(_) => Answer::Ok("the ticket key loads".to_owned()),
-        Err(why) => Answer::Fail(why.to_string()),
+        Err(why) => Answer::Fail((*why).clone()),
     }
 }
 
