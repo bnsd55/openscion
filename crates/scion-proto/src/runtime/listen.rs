@@ -610,7 +610,7 @@ impl Limits {
                 .keep_alive_interval(Some(accepting.keepalive))
                 .keep_alive_timeout(accepting.keepalive_timeout)
                 .max_send_buf_size(SEND_BUF)
-                .serve_connection(TokioIo::new(io), TowerToHyperService::new(svc))
+                .serve_connection_with_upgrades(TokioIo::new(io), TowerToHyperService::new(svc))
         );
         let mut age = Box::pin(age_out(accepting.age, accepting.grace));
         let mut stop = pin!(watch_signal(stop));
