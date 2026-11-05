@@ -887,7 +887,13 @@ async fn main() -> anyhow::Result<()> {
         // `preflight` reports a missing directory as a failed check, so
         // it runs before the refusal and writes nothing anywhere.
         Command::Preflight(ref args) => {
-            let report = scion_server::preflight::run(&preflight_options(&cli, args));
+            let options = preflight_options(&cli, args);
+            // The checks' database reads are synchronous, and main runs
+            // in tokio's runtime: the run takes a thread of its own,
+            // where a blocking connect is just a blocking connect.
+            let report = std::thread::spawn(move || scion_server::preflight::run(&options))
+                .join()
+                .expect("the preflight thread does not panic");
             for line in report.lines {
                 println!("{line}");
             }

@@ -45,7 +45,7 @@ fn preflight(
     url_file: &std::path::Path,
     token_file: &std::path::Path,
 ) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_scion-server"))
+    let out = Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .arg("--data")
         .arg(data)
         .arg("--postgres-url-file")
@@ -54,7 +54,14 @@ fn preflight(
         .arg(token_file)
         .env("NO_COLOR", "1")
         .output()
-        .unwrap()
+        .unwrap();
+    assert!(
+        out.status.code().is_some(),
+        "the child did not exit: {}\nstderr:\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out
 }
 
 /// A ready store passes everything: exit 0, an ok line per check.

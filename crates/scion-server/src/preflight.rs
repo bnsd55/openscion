@@ -375,8 +375,13 @@ fn live_server(db: &mut postgres::Client) -> Answer {
     };
     let holders = db
         .query_opt(
+            // A 64-bit advisory key sits in pg_locks as two 32-bit
+            // halves: classid carries the high half, objid the low.
             "SELECT count(*) FROM pg_locks
-             WHERE locktype = 'advisory' AND objid = $1 AND granted",
+             WHERE locktype = 'advisory'
+               AND classid = (($1::bigint >> 32) & 4294967295)::oid
+               AND objid = ($1::bigint & 4294967295)::oid
+               AND granted",
             &[&crate::pg::schema_lock_key(&schema)],
         )
         .map(|row| row.map_or(0, |row| row.get::<_, i64>(0)));
@@ -496,6 +501,9 @@ mod tests {
         let store = crate::Backend::open_test(dir.path()).unwrap();
         drop(store);
         let file = url_file(dir.path(), &url);
+        // The token file stands before the run: the run rewrites the
+        // same name, and the unchanged-directory snapshot stays true.
+        let _token = token_file(dir.path());
         (dir, file)
     }
 
@@ -568,7 +576,8 @@ mod tests {
             .get(0);
         let catalog_before = raw
             .query_one(
-                "SELECT count(*) FROM pg_class WHERE relnamespace = $1::regnamespace",
+                "SELECT count(*) FROM pg_class
+                 WHERE relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $1)",
                 &[&schema],
             )
             .unwrap()
@@ -610,7 +619,8 @@ mod tests {
         .unwrap();
         let catalog_after = raw
             .query_one(
-                "SELECT count(*) FROM pg_class WHERE relnamespace = $1::regnamespace",
+                "SELECT count(*) FROM pg_class
+                 WHERE relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $1)",
                 &[&schema],
             )
             .unwrap()
@@ -721,13 +731,27 @@ mod tests {
             .unwrap();
     }
 
-    /// No token source anywhere: the token check fails, exit 2.
+    /// No token source anywhere: the token check fails, exit 2. The
+    /// options carry no token file and no access file, and the
+    /// environment names no token.
     #[test]
     fn a_missing_token_source_fails_preflight() {
         let _memory = MemoryOverride::set();
         let (dir, url) = ready_store();
-        std::fs::remove_file(dir.path().join("token")).unwrap();
-        let report = run_cli(dir.path(), Some(&url));
+        let report = super::run(&PreflightOptions {
+            data: dir.path().to_path_buf(),
+            postgres_url_file: Some(url),
+            postgres_ca: None,
+            token_file: None,
+            access: None,
+            tls_cert: None,
+            tls_key: None,
+            tls_client_ca: None,
+            ticket_key: None,
+            ticket_key_old: None,
+            listen: "127.0.0.1:0".parse().unwrap(),
+            metrics_listen: None,
+        });
         assert_eq!(report.code, 2);
         assert!(
             line(&report, "token and access").starts_with("fail"),
