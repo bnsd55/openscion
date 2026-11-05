@@ -1531,7 +1531,7 @@ async fn finish_lands(scion: &mut Scion, lands: &mut Ledger) {
 /// cannot capture - before the harness holds the test's output, so a
 /// panic is in the CI log even when the job is cancelled before the
 /// summary runs.
-/// Appends one guard line to the file SCION_TEST_GUARD_LOG names, when
+/// Appends one guard line to the file `SCION_TEST_GUARD_LOG` names, when
 /// it is set: the guards' words must survive a wedged thread holding
 /// the stderr lock, so the guards also speak to a file no one else
 /// writes.
@@ -1581,7 +1581,7 @@ fn snapshot_db(url: &str) {
     for row in &rows {
         guard_log(&format!(
             "lock: pid={} type={} class={} obj={} granted={} holder_state={} holder_q={}",
-            row.get::<_, Option<i32>>(4).map_or(-1, |p| p),
+            row.get::<_, Option<i32>>(4).unwrap_or(-1),
             row.get::<_, String>(0),
             row.get::<_, String>(1),
             row.get::<_, Option<String>>(2).unwrap_or_default(),
@@ -2140,9 +2140,8 @@ fn the_seed_corpus_holds() {
         while !corpus_guard_stop.load(Ordering::Relaxed) {
             if corpus_started.elapsed() >= corpus_budget {
                 guard_log(&format!(
-                    "the corpus passed its budget of {:?}; the run is \
-                     wedged between scripts, aborting the process",
-                    corpus_budget,
+                    "the corpus passed its budget of {corpus_budget:?}; the \
+                     run is wedged between scripts, aborting the process",
                 ));
                 eprintln!(
                     "the corpus passed its budget of {corpus_budget:?}; the \
