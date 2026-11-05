@@ -295,11 +295,19 @@ fn a_land_whose_head_tree_is_missing_fills_before_the_write_transaction() {
         .position(|sql| sql == "COMMIT")
         .map(|at| settle_begin + at)
         .expect("the settle transaction commits");
-    assert!(
-        !log[settle_begin..settle_end]
-            .iter()
-            .any(|sql| sql.starts_with("SELECT value FROM derived WHERE kind = $1")),
-        "the derive ran before the write transaction, not inside it:\n{:#?}",
+    // The settle transaction writes the land's own tree and nothing
+    // else derived: the head's derive ran before the transaction, so
+    // its INSERT is not here. The transaction still READS the parent's
+    // tree value - the store_changeset the land always does - which is
+    // why the fill had to run first.
+    let derived_writes = log[settle_begin..settle_end]
+        .iter()
+        .filter(|sql| sql.starts_with("INSERT INTO derived"))
+        .count();
+    assert_eq!(
+        derived_writes,
+        1,
+        "the settle transaction writes the land's own derived row alone:\n{:#?}",
         &log[settle_begin..settle_end]
     );
 }
