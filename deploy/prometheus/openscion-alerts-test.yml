@@ -573,9 +573,10 @@ tests:
               severity: high
             exp_annotations:
               response: >-
-                The store holds 85% of the supported blob count. Plan
-                the move to more data directories before fsck turns
-                slow (docs/operations.md section 6).
+                The store holds 85% of the supported blob count. Give
+                new repos a second store before the walks grow; there
+                is no tool to move existing repos between stores yet
+                (docs/operations.md section 6).
 
   # S3 BlobCount100: the share crosses 1.0 at 5m, fires after 15m more.
   - interval: 1m
@@ -594,6 +595,7 @@ tests:
             exp_annotations:
               response: >-
                 The store holds more blobs than docs/support.md
-                supports. Expect fsck to take hours; split the store
-                now (docs/operations.md section 6).
+                supports. The walk is seconds today and grows past
+                them; give new repos a second store now
+                (docs/operations.md section 6).
 

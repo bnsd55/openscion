@@ -200,13 +200,13 @@ pub struct Metrics {
 pub struct Rpc(usize);
 
 /// The blob count docs/support.md supports per data directory: what
-/// what `scion_blob_ceiling_share` divides by.
-pub const SUPPORTED_BLOBS: u64 = 1_000_000;
+/// `scion_blob_ceiling_share` divides by.
+const SUPPORTED_BLOBS: u64 = 1_000_000;
 
 /// The blob count as a share of the ceiling. The counts the ceiling
 /// names stay far under 2^52, so the f64 divide loses nothing.
 #[must_use]
-pub fn share_of_ceiling(count: u64) -> f64 {
+fn share_of_ceiling(count: u64) -> f64 {
     #[allow(clippy::cast_precision_loss)]
     let count = count as f64;
     #[allow(clippy::cast_precision_loss)]

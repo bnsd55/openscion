@@ -1313,7 +1313,8 @@ the process, scraped from there. The names:
 - `scion_blob_count` — blobs the store's metadata names, refreshed every
   60 s by one bounded count query over the blob rows (never a directory
   walk, never per scrape). At 1,000,000 blobs the query itself costs
-  about 0.2-0.4 s of one pooled read connection.
+  about 0.6 s of one pooled read connection ([run
+  42040632163](https://github.com/bnsd55/openscion/actions/runs/42040632163)).
 - `scion_blob_ceiling_share` — the blob count as a share of the 1,000,000
   blobs docs/support.md supports per data directory; the store alerts
   that watch fsck's future read this gauge, not the count.
@@ -1602,14 +1603,17 @@ What to do at each level:
   a week; a store that adds blobs faster than the gc takes them lands
   on the next line by itself.
 - At 85% (`high`): plan the move. The first cold `fsck` walk costs about
-  62 µs a blob at this size and grows with the count, so plan while the
-  walk is minutes, not hours: a second data directory (a stop, a copy
-  per section 3, a start at the new path), or point new repos at a new
-  store.
+  62 s at 1,000,000 blobs (61.7 µs a blob, run 41716921823) and the cost
+  a blob grows with the count: 863 s a walk, 172.6 µs a blob, at
+  5,000,000 (#828). What exists to move to: a second store - its own
+  database, data directory and server, because one server runs per
+  database - that takes new repos. There is no tool to move existing
+  repos between stores yet.
 - At 100% (`critical`): the store is past the count docs/support.md
-  supports. fsck's walk takes hours at this size; the store still works,
-  but nothing below this line is tested. Split the store now; treat an
-  fsck as planned downtime.
+  supports. The walk is seconds today and grows past them; the store
+  still works, but nothing below this line is tested. Give new repos a
+  second store now (as at 85%); there is no tool to move existing repos
+  between stores yet.
 
 Proof: crates/scion-server/tests/blob_count_gauge.rs::the_count_is_what_the_metadata_names_not_what_the_folder_holds (behaviour, no command: the runbook's steps are operator actions - watch the trend, plan the split - and each alert's firing is proven by the promtool cases deploy/prometheus/openscion-alerts-test.yml runs, which fire past the threshold and stay quiet just below it).
 

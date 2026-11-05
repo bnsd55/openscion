@@ -211,8 +211,9 @@ groups:
           severity: high
         annotations:
           response: >-
-            The store holds 85% of the supported blob count. Plan the
-            move to more data directories before fsck turns slow
+            The store holds 85% of the supported blob count. Give new
+            repos a second store before the walks grow; there is no
+            tool to move existing repos between stores yet
             (docs/operations.md section 6).
       - alert: BlobCount100
         expr: scion_blob_ceiling_share > 1.0
@@ -222,8 +223,8 @@ groups:
         annotations:
           response: >-
             The store holds more blobs than docs/support.md supports.
-            Expect fsck to take hours; split the store now
-            (docs/operations.md section 6).
+            The walk is seconds today and grows past them; give new
+            repos a second store now (docs/operations.md section 6).
   - name: gc
     rules:
       - alert: GcStale
