@@ -219,7 +219,7 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-          -c shared_preload_libraries=pg_stat_statements
+          postgres -c shared_preload_libraries=pg_stat_statements
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
