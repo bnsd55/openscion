@@ -183,6 +183,10 @@ pub struct Metrics {
     /// wait at the connection cap (`CONNECTION_WAIT` in
     /// [`crate::runtime::listen`]), counted by the accept paths.
     connections_refused: AtomicU64,
+    /// Accepts the listener failed (most often the process out of file
+    /// descriptors), counted by the accept tasks, which pace themselves
+    /// after failures so a persistent failure cannot spin a core.
+    accept_errors: AtomicU64,
     /// Calls the counting layer has seen whose reply body it has not
     /// given back yet: the calls a drain still waits for, as the
     /// [`scion_calls_in_flight`] gauge. A call that never reaches a
@@ -444,6 +448,12 @@ impl Metrics {
         self.connections_refused.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Counts one accept the listener failed. The export renders it as
+    /// `scion_accept_errors_total`.
+    pub(crate) fn accept_error(&self) {
+        self.accept_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Renders the registry as the Prometheus text format.
     #[must_use]
     pub fn render(&self) -> String {
@@ -503,6 +513,13 @@ impl Metrics {
              # TYPE scion_connections_refused_total counter\n\
              scion_connections_refused_total {}",
             self.connections_refused.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            text,
+            "# HELP scion_accept_errors_total Accepts the listener failed; a persistent failure leaves new clients unserved, and the accept task paces itself after failures.\n\
+             # TYPE scion_accept_errors_total counter\n\
+             scion_accept_errors_total {}",
+            self.accept_errors.load(Ordering::Relaxed)
         );
     }
 

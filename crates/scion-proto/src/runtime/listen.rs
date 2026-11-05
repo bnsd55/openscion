@@ -93,6 +93,17 @@ pub(crate) const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
 /// last frame.
 pub(crate) const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// After a failed accept, the accept task waits this long before it
+/// accepts again, doubling to [`MAX_ACCEPT_BACKOFF`], and reset by a
+/// success. A failure that persists - most often the process out of file
+/// descriptors - cannot spin a core on accepts that all fail at once.
+pub(crate) const FIRST_ACCEPT_BACKOFF: Duration = Duration::from_millis(10);
+/// The longest the accept task waits between accepts after failures.
+pub(crate) const MAX_ACCEPT_BACKOFF: Duration = Duration::from_secs(1);
+/// How often the accept task writes its rate-limited warning, with how
+/// many accepts failed since the last line.
+pub(crate) const ACCEPT_WARN_INTERVAL: Duration = Duration::from_secs(10);
+
 /// After this long, a connection is asked to close, so one that a client
 /// keeps for life (a daemon keeps one to its cache) gives its place up.
 pub(crate) const MAX_CONNECTION_AGE: Duration = Duration::from_secs(30 * 60);
@@ -897,6 +908,8 @@ where
     tokio::spawn(async move {
         let mut incoming = pin!(incoming);
         let mut shutdown = pin!(shutdown);
+        let accept_warn = WaitWarn::new(ACCEPT_WARN_INTERVAL);
+        let mut backoff = FIRST_ACCEPT_BACKOFF;
         loop {
             // The shutdown signal itself stops the accept: a client that
             // reconnects after the GOAWAY is refused by its connect, not
@@ -918,11 +931,30 @@ where
                 () = done.closed() => break,
             };
             let io = match accepted {
-                Ok(io) => io,
+                Ok(io) => {
+                    backoff = FIRST_ACCEPT_BACKOFF;
+                    io
+                }
                 Err(error) => {
+                    tracing::debug!(
+                        error = ?error,
+                        thread = ?std::thread::current().id(),
+                        "the listener failed to yield a socket"
+                    );
+                    if let Some(failures) = accept_warn.tick() {
+                        tracing::warn!(
+                            failures,
+                            backoff = ?backoff,
+                            error = ?error,
+                            "the listener failed to accept; waiting before it accepts again"
+                        );
+                    }
+                    metrics.accept_error();
                     if done.send(Err(error)).await.is_err() {
                         break;
                     }
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(MAX_ACCEPT_BACKOFF);
                     continue;
                 }
             };
@@ -1033,6 +1065,8 @@ where
     tokio::spawn(async move {
         let mut incoming = pin!(incoming);
         let mut shutdown = pin!(shutdown);
+        let accept_warn = WaitWarn::new(ACCEPT_WARN_INTERVAL);
+        let mut backoff = FIRST_ACCEPT_BACKOFF;
         loop {
             // The shutdown signal itself stops the accept: a client that
             // reconnects after the GOAWAY is refused by its connect, not
@@ -1062,16 +1096,33 @@ where
             // tonic logs it at trace only, below every default filter.
             let born = std::time::Instant::now();
             let io = match accepted {
-                Ok(io) => io,
+                Ok(io) => {
+                    backoff = FIRST_ACCEPT_BACKOFF;
+                    io
+                }
                 Err(error) => {
                     tracing::debug!(
                         error = ?error,
                         thread = ?std::thread::current().id(),
                         "the listener failed to yield a socket"
                     );
+                    // One warn per interval, with how many accepts failed
+                    // since the last line, so a persistent failure is seen
+                    // without a busy log.
+                    if let Some(failures) = accept_warn.tick() {
+                        tracing::warn!(
+                            failures,
+                            backoff = ?backoff,
+                            error = ?error,
+                            "the listener failed to accept; waiting before it accepts again"
+                        );
+                    }
+                    metrics.accept_error();
                     if done.send(Err(error)).await.is_err() {
                         break;
                     }
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(MAX_ACCEPT_BACKOFF);
                     continue;
                 }
             };
@@ -1672,6 +1723,64 @@ mod tests {
     }
 
     /// The stub, served within `limits` with `timers`, and its address.
+    /// A listener that never yields a socket: every accept fails at once,
+    /// as the process out of file descriptors makes every real listener
+    /// fail.
+    struct AlwaysFail(Arc<std::sync::atomic::AtomicU64>);
+
+    impl Stream for AlwaysFail {
+        type Item = io::Result<TcpStream>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Poll::Ready(Some(Err(io::Error::other("every accept fails"))))
+        }
+    }
+
+    /// A persistent accept failure must not spin a core: the accept task
+    /// paces itself (10 ms doubling to 1 s, reset by a success), counts
+    /// the failures in `scion_accept_errors_total`, and writes its
+    /// rate-limited warning.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_listener_that_fails_every_accept_is_paced_and_counted() {
+        let limits = Limits::default();
+        let metrics = Arc::new(Metrics::default());
+        let attempts = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        tokio::spawn({
+            let metrics = Arc::clone(&metrics);
+            let attempts = Arc::clone(&attempts);
+            async move {
+                let pending = std::future::pending();
+                let _ = limits
+                    .serve_with(
+                        &Accepting::of(&limits, &TIMERS),
+                        |server: Server| server.add_service(ObjectsServer::new(Stalls)),
+                        AlwaysFail(Arc::clone(&attempts)),
+                        None,
+                        pending,
+                        metrics,
+                    )
+                    .await;
+            }
+        });
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let attempts = attempts.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            attempts > 0 && attempts <= 20,
+            "failed accepts in 3 s: {attempts} - a persistent failure must be paced, \
+             not retried at once"
+        );
+        let text = metrics.render();
+        let line = text
+            .lines()
+            .find(|l| l.starts_with("scion_accept_errors_total "))
+            .unwrap_or_else(|| panic!("the render has no accept errors:\n{text}"));
+        assert_ne!(
+            line, "scion_accept_errors_total 0",
+            "the failed accepts are not counted:\n{text}"
+        );
+    }
+
     async fn serve(limits: Limits, timers: Timers) -> (SocketAddr, Arc<Metrics>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
