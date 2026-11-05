@@ -694,6 +694,10 @@ enum Plan {
     Land {
         rebased: Changeset,
         head: RefState,
+        /// Whether the head's root tree is already stored, answered on
+        /// the same snapshot the head rode: a land against a missing
+        /// tree fills before the write transaction.
+        head_tree_stored: bool,
     },
     /// The check needs the history of this head, which is not derived yet
     /// ([`check_history`]).
@@ -712,9 +716,10 @@ enum Finished {
 /// by a twin call, or the plan says what it must do now.
 enum Planned {
     Settled(LandOutcome),
-    /// The plan, and whether the head's root tree is stored - the
-    /// plan's read answered it on the snapshot the head rode.
-    Do(Plan, bool),
+    /// The plan to act on. Whether the head's root tree is stored rides
+    /// the plan itself: the plan's read answered it on the snapshot the
+    /// head rode.
+    Do(Plan),
 }
 
 /// Says that a land that stopped at its deadline, or whose call went,
@@ -782,7 +787,7 @@ fn finish(
             if row.state != LandState::Pending {
                 return Ok(Planned::Settled(row));
             }
-            plan(lands, c, repo, req, head, index).map(|plan| Planned::Do(plan, head_tree))
+            plan(lands, c, repo, req, head, head_tree, index).map(Planned::Do)
         })?;
         #[cfg(test)]
         let step = lands
@@ -797,20 +802,11 @@ fn finish(
         if let Some(step) = step {
             step();
         }
-        let (plan, head_tree) = match planned {
+        let plan = match planned {
             Planned::Settled(row) => return Ok(Finished::Outcome(row)),
-            Planned::Do(plan, head_tree) => (plan, head_tree),
+            Planned::Do(plan) => plan,
         };
-        match settle(
-            lands,
-            store,
-            repo,
-            land_id,
-            &req.target_ref,
-            plan,
-            index,
-            head_tree,
-        ) {
+        match settle(lands, store, repo, land_id, &req.target_ref, plan, index) {
             Err(Error::Aborted(detail)) if attempt < MAX_ATTEMPTS => {
                 tracing::info!(land_id, attempt, %detail, "planning the land again");
                 if let Some(metrics) = &lands.metrics {
@@ -830,6 +826,7 @@ fn plan(
     repo: RepoId,
     req: &LandRequest,
     head: Option<RefState>,
+    head_tree_stored: bool,
     index: &mut Option<PathIndex>,
 ) -> Result<Plan> {
     let target = &req.target_ref;
@@ -883,7 +880,11 @@ fn plan(
     let rebased = cs
         .with_parents(vec![head.target])
         .expect("one parent fits the format");
-    Ok(Plan::Land { rebased, head })
+    Ok(Plan::Land {
+        rebased,
+        head,
+        head_tree_stored,
+    })
 }
 
 /// Step 5: records what the plan decided. If the ref moved since the
@@ -902,9 +903,8 @@ fn settle(
     target: &str,
     plan: Plan,
     index: &mut Option<PathIndex>,
-    head_tree_stored: bool,
 ) -> Result<Finished> {
-    let (rebased, head) = match plan {
+    let (rebased, head, head_tree_stored) = match plan {
         Plan::Derive(head) => return Ok(Finished::Derive(head)),
         Plan::Reject { reason, detail } => {
             return store
@@ -926,7 +926,11 @@ fn settle(
                 .write_slot_holder(|c| record_verdict(c, repo, target, land_id, verdict))
                 .map(Finished::Outcome);
         }
-        Plan::Land { rebased, head } => (rebased, head),
+        Plan::Land {
+            rebased,
+            head,
+            head_tree_stored,
+        } => (rebased, head, head_tree_stored),
     };
 
     // See `tree::store_changeset`. The land's flush covers these steps.
@@ -2425,9 +2429,6 @@ mod tests {
                 let mut index = None;
                 // The head the finish plans on rides the joined read,
                 // as it does in Lands::land: the land's own row beside
-                // the ref's state.
-                // The head the finish plans on rides the joined read,
-                // as it does in Lands::land: the land's own row beside
                 // the ref's state, and whether the head's tree is
                 // stored.
                 let (_, head, head_tree) = f
@@ -2438,7 +2439,7 @@ mod tests {
                     .unwrap();
                 let plan = f
                     .store
-                    .read(|c| plan(&f.lands, c, repo, &req, head, &mut index));
+                    .read(|c| plan(&f.lands, c, repo, &req, head, head_tree, &mut index));
                 let plan = plan.unwrap();
                 let Plan::Land { rebased, .. } = &plan else {
                     panic!("{crash:?}: the land should plan to land");
@@ -2447,10 +2448,8 @@ mod tests {
                 if crash == Crash::RefMoved {
                     f.move_main(f.commit(f.main().target, &[put("c", "import")]));
                     let land_id = recorded.land_id;
-                    let err = settle(
-                        &f.lands, &f.store, repo, land_id, "main", plan, &mut index, head_tree,
-                    )
-                    .unwrap_err();
+                    let err = settle(&f.lands, &f.store, repo, land_id, "main", plan, &mut index)
+                        .unwrap_err();
                     assert!(matches!(err, Error::Aborted(_)), "{crash:?}: {err}");
                     let kept = f.store.read(|c| c.has_changeset(repo, rebased));
                     assert!(!kept.unwrap(), "the transaction rolled back");
