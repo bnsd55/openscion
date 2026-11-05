@@ -1534,6 +1534,7 @@ mod tests {
         // the row and the file the check saw.
         let hooks = dir.path().join("hooks");
         std::fs::create_dir_all(&hooks).unwrap();
+        let _park_serial = crate::write::PARK_SERIAL.blocking_lock();
         PARK_CREATE.arm(&hooks);
         std::fs::write(hooks.join(format!("park-{b}")), b"").unwrap();
         let writer = store.clone();
@@ -1579,6 +1580,7 @@ mod tests {
         // collector then prunes the row and unlinks the file.
         let hooks = dir.path().join("hooks");
         std::fs::create_dir_all(&hooks).unwrap();
+        let _park_serial = crate::write::PARK_SERIAL.blocking_lock();
         PARK_PUT.arm(&hooks);
         std::fs::write(hooks.join(format!("park-{b}")), b"").unwrap();
         let writer = store.clone();

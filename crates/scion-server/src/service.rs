@@ -3490,6 +3490,7 @@ mod tests {
     #[allow(clippy::too_many_lines)] // the large changeset's fixture is the length
     #[tokio::test(flavor = "multi_thread")]
     async fn a_cancelled_large_tree_store_frees_its_permit_at_the_next_path() {
+        let _park_serial = write::PARK_SERIAL.lock().await;
         let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test(dir.path()).unwrap();
         let repo_id = store.write(|c| c.create_repo("r")).unwrap();
@@ -3619,6 +3620,7 @@ mod tests {
     /// gets its one failed line, and nothing is written.
     #[tokio::test]
     async fn a_create_cut_mid_check_stops_at_its_next_blob_and_records_nothing() {
+        let _park_serial = write::PARK_SERIAL.lock().await;
         let (dir, store, repo_id, id, bytes, one) = create_cut_fixture();
 
         let audit_path = dir.path().join("audit.log");
