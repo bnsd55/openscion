@@ -3572,9 +3572,23 @@ mod tests {
         assert!(call.await.unwrap_err().is_cancelled());
         // The next path's park stands ready before the lift: a job with
         // no put-path check reaches path 1 and parks there; the check
-        // stops it before that.
+        // stops it before that. The arm stays up for this window.
         std::fs::write(hooks.join("park-1"), b"").unwrap();
         std::fs::remove_file(hooks.join("park-0")).unwrap();
+        // A window for the job to reach path 1 if its check is gone:
+        // the window closes after 500 ms, and a job that parked in it
+        // fails the assert below; the checked job never parks.
+        let started = Instant::now();
+        while !hooks.join("parked-1").exists() && started.elapsed() < Duration::from_millis(500) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            !hooks.join("parked-1").exists(),
+            "the cancelled job walked past its next path's check and \
+             parked within {:?}",
+            started.elapsed()
+        );
+        std::fs::remove_file(hooks.join("park-1")).unwrap();
         write::PARK_APPLY.lift();
         // The live call times its wait for the permit the parked job
         // held. The job's next path check stops it first.
@@ -3584,13 +3598,6 @@ mod tests {
         eprintln!(
             "#868 real phase: the live call waited {waited:?} for the permit \
              of a cancelled large tree's store"
-        );
-        // The job never reached the next path's park: its check stopped
-        // it first.
-        assert!(
-            !hooks.join("parked-1").exists(),
-            "the cancelled job walked past its next path's check; \
-             the live call waited {waited:?}"
         );
         assert!(
             waited < Duration::from_secs(5),
