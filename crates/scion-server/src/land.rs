@@ -2402,9 +2402,21 @@ mod tests {
             assert_eq!(recorded.state, LandState::Pending);
             if crash != Crash::AfterRecord {
                 let mut index = None;
+                // The head the finish plans on rides the joined read,
+                // as it does in Lands::land: the land's own row beside
+                // the ref's state.
+                let head = f
+                    .store
+                    .read(|c| {
+                        Ok(
+                            c.land_outcome(repo, &caller(), recorded.land_id, Some("main"))?
+                                .1,
+                        )
+                    })
+                    .unwrap();
                 let plan = f
                     .store
-                    .read(|c| plan(&f.lands, c, repo, &req, None, &mut index));
+                    .read(|c| plan(&f.lands, c, repo, &req, head, &mut index));
                 let plan = plan.unwrap();
                 let Plan::Land { rebased, .. } = &plan else {
                     panic!("{crash:?}: the land should plan to land");
