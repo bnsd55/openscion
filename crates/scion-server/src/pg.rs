@@ -5187,7 +5187,7 @@ impl MetaTx for PgTx<'_> {
                      FROM lands l
                      LEFT JOIN refs r ON r.repo_id = l.repo_id AND r.name = $4
                      WHERE l.repo_id = $1 AND l.land_id = $2 AND l.caller = $3",
-                    RootTree::NAME,
+                    <RootTree as crate::derived::Kind>::NAME,
                     i64::from(<RootTree as crate::derived::Kind>::VERSION),
                 ),
                 &[
