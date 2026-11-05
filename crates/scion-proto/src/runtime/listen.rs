@@ -910,6 +910,87 @@ async fn pace_after_failed_accept<IO>(
     done.send(Err(error)).await.is_ok()
 }
 
+/// One accepted TLS connection's own task: its place first, bounded as
+/// [`accept`] describes, then its TLS handshake on this task under
+/// `handshake`, and the decrypted connection handed to the serve with the
+/// preface deadline that its place started, so a silent peer holds its
+/// place for at most `handshake` in all. A handshake that failed or timed
+/// out is warned, and the io drops, so the client sees the connection
+/// close.
+fn spawn_tls_accepted<IO>(
+    io: IO,
+    acceptor: tokio_rustls::TlsAcceptor,
+    accepting: &Accepting,
+    places: &Arc<Semaphore>,
+    waiters: &Arc<Semaphore>,
+    waits: &WaitWarn,
+    refusals: &WaitWarn,
+    done: &mpsc::Sender<io::Result<Connection<TlsStream<IO>>>>,
+    metrics: &Arc<Metrics>,
+    total: &Arc<TotalBytes>,
+) where
+    IO: AsyncRead + AsyncWrite + PeerOf + Send + 'static,
+{
+    let max = accepting.max.get();
+    let handshake = accepting.handshake;
+    let wait = accepting.wait;
+    let stalled_bytes = accepting.stalled_bytes;
+    let places = Arc::clone(places);
+    let waiters = Arc::clone(waiters);
+    let acceptor = acceptor.clone();
+    let waits = waits.clone();
+    let refusals = refusals.clone();
+    let sender = done.clone();
+    let metrics = Arc::clone(metrics);
+    let total = Arc::clone(total);
+    tokio::spawn(async move {
+        // The place first, bounded: a connection over the cap waits at
+        // most `wait`, then the server closes it, so a storm fails fast
+        // instead of queueing behind `MAX_CONNECTION_AGE`.
+        let Some(place) = place_within(&places, &waiters, max, wait, &waits).await else {
+            metrics.connection_refused();
+            warn_refused(&refusals, max, wait);
+            // The io drops here: the client sees the connection close
+            // before any reply.
+            return;
+        };
+        // One deadline, from the place: the TLS handshake and the HTTP/2
+        // preface that follows share it.
+        let deadline = tokio::time::Instant::now() + handshake;
+        let wait = tokio::time::timeout_at(deadline, acceptor.accept(io));
+        let preface = Some((
+            PREFACE_BYTES,
+            Box::pin(tokio::time::sleep_until(deadline)) as Pin<Box<Sleep>>,
+        ));
+        match wait.await {
+            Ok(Ok(stream)) => {
+                let peer = stream.get_ref().0.peer_of();
+                // The place goes with the connection, and frees when it is
+                // dropped, which the gone receiver also does.
+                let _ = sender
+                    .send(Ok(Connection {
+                        io: stream,
+                        _place: place,
+                        preface,
+                        stalled: Stalled::new(peer, stalled_bytes, metrics, total),
+                        born: std::time::Instant::now(),
+                        first_poll: true,
+                    }))
+                    .await;
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "a TLS handshake failed");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    timeout = ?handshake,
+                    "no TLS handshake within the timeout"
+                );
+            }
+        }
+    });
+}
+
 /// The TLS connections of `incoming`, at most `max` at once, as
 /// [`accept`] yields plain ones: a connection takes its place first (and
 /// waits at the cap, at most [`CONNECTION_WAIT`], then the server closes
@@ -999,60 +1080,18 @@ where
                     continue;
                 }
             };
-            let places = Arc::clone(&places);
-            let waiters = Arc::clone(&waiters);
-            let acceptor = acceptor.clone();
-            let waits = waits.clone();
-            let refusals = refusals.clone();
-            let sender = done.clone();
-            let metrics = Arc::clone(&metrics);
-            let total = Arc::clone(&total);
-            tokio::spawn(async move {
-                // The place first, bounded, as [`accept`] describes: a
-                // connection over the cap waits at most `wait`, then closes.
-                let Some(place) = place_within(&places, &waiters, max, wait, &waits).await else {
-                    metrics.connection_refused();
-                    warn_refused(&refusals, max, wait);
-                    // The io drops here: the client sees the connection
-                    // close before any reply.
-                    return;
-                };
-                // One deadline, from the place: the TLS handshake and the
-                // HTTP/2 preface that follows share it, so a silent peer holds
-                // its place for at most `handshake` in all.
-                let deadline = tokio::time::Instant::now() + handshake;
-                let wait = tokio::time::timeout_at(deadline, acceptor.accept(io));
-                let preface = Some((
-                    PREFACE_BYTES,
-                    Box::pin(tokio::time::sleep_until(deadline)) as Pin<Box<Sleep>>,
-                ));
-                match wait.await {
-                    Ok(Ok(stream)) => {
-                        let peer = stream.get_ref().0.peer_of();
-                        // The place goes with the connection, and frees when
-                        // it is dropped, which the gone receiver also does.
-                        let _ = sender
-                            .send(Ok(Connection {
-                                io: stream,
-                                _place: place,
-                                preface,
-                                stalled: Stalled::new(peer, stalled_bytes, metrics, total),
-                                born: std::time::Instant::now(),
-                                first_poll: true,
-                            }))
-                            .await;
-                    }
-                    Ok(Err(error)) => {
-                        tracing::warn!(%error, "a TLS handshake failed");
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            timeout = ?handshake,
-                            "no TLS handshake within the timeout"
-                        );
-                    }
-                }
-            });
+            spawn_tls_accepted(
+                io,
+                acceptor.clone(),
+                &accepting,
+                &places,
+                &waiters,
+                &waits,
+                &refusals,
+                &done,
+                &metrics,
+                &total,
+            );
         }
     });
     ReceiverStream::new(served)
