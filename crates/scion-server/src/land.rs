@@ -1827,9 +1827,9 @@ mod tests {
         );
     }
 
-    /// A land into a repo the store does not hold is a NotFound error,
-    /// named by the repo - the record's joined read answers it before
-    /// any land row is written.
+    /// A land into a repo the store does not hold is a `NotFound`
+    /// error, named by the repo - the record's joined read answers it
+    /// before any land row is written.
     #[test]
     fn a_land_in_a_missing_repo_is_not_found() {
         let _slot = damage::slot();
