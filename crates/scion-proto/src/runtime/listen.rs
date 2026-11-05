@@ -2331,9 +2331,12 @@ mod tests {
         // MiB) and under its own cap.
         let started = tokio::time::Instant::now();
         while stalled_gauge(&metrics) != 2 * reply::STALLED_REPLY_BYTES {
+            let holds = reply::HOLD_CALLS.load(Ordering::Relaxed);
+            let sent = reply::SENT_INTO_TX.load(Ordering::Relaxed);
             assert!(
                 started.elapsed() < Duration::from_secs(10),
-                "the two stalled replies never settled the gauge at {}",
+                "the two stalled replies never settled the gauge at {} - \
+                 hold calls so far {holds}, bytes sent into channels so far {sent}",
                 stalled_gauge(&metrics)
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
