@@ -186,7 +186,7 @@ for name in solo writers flush; do
   [ -f "$log" ] || continue
   {
     echo ""
-    echo "## the slice in $name (per land, mean)"
+    echo "## the slice in $name (per land; wall and wait as mean/p50/p99 ms)"
     awk '
       / land_profile: / {
         phase = ""; wall = 0; sm = 0; st = 0; at = ""
@@ -199,15 +199,29 @@ for name in solo writers flush; do
         }
         if (phase == "") next
         n[phase]++; w[phase] += wall; s[phase] += sm; c[phase] += st
+        # The wait is the wall time outside the statements: queueing,
+        # the pool, and the work Postgres does between round trips.
+        k = ++q[phase]; W[k, phase] = wall; wait[k, phase] = wall - sm
         if (at != "") a[phase] += at
       }
+      function pct(vals, k, lo, hi,   i, j, v) {
+        for (i = 2; i <= k; i++) { v = vals[i]; j = i - 1
+          while (j > 0 && vals[j] > v) { vals[j + 1] = vals[j]; j-- }
+          vals[j + 1] = v }
+        lo = int((k + 1) / 2); hi = int((k * 99 + 99) / 100)
+        if (hi < 1) hi = 1; if (hi > k) hi = k
+        return vals[lo] SUBSEP vals[hi]
+      }
       END {
-        printf "%-10s %10s %10s %8s %9s\n", "phase", "wall_ms", "stmt_ms", "stmts", "attempts"
+        printf "%-10s %9s %9s %9s %12s %9s %9s %8s %9s\n", "phase", "wall50", "wall99", "wallavg", "wait50", "wait99", "waitavg", "stmts", "attempts"
         m = split("total slot_wait record outcome plan fill_root lens settle build cas set_state other", order, " ")
         for (i = 1; i <= m; i++) {
           p = order[i]
           if (!n[p]) continue
-          printf "%-10s %10.2f %10.2f %8.1f %9.2f\n", p, w[p] / n[p], s[p] / n[p], c[p] / n[p], (p == "total" ? a[p] / n[p] : 0)
+          for (j = 1; j <= q[p]; j++) { wv[j] = W[j, p]; xv[j] = wait[j, p] }
+          split(pct(wv, q[p]), t, SUBSEP)
+          split(pct(xv, q[p]), u, SUBSEP)
+          printf "%-10s %9.2f %9.2f %9.2f %12.2f %9.2f %9.2f %8.1f %9.2f\n", p, t[1], t[2], w[p] / n[p], u[1], u[2], (w[p] - s[p]) / n[p], c[p] / n[p], (p == "total" ? a[p] / n[p] : 0)
         }
       }' "$log"
   } >> "$sum"
