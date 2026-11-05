@@ -93,6 +93,41 @@ pub(crate) const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
 /// last frame.
 pub(crate) const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// After a failed accept, the accept task waits this long before it
+/// accepts again, doubling to [`MAX_ACCEPT_BACKOFF`], and reset by a
+/// success. A failure that persists - most often the process out of file
+/// descriptors - cannot spin a core on accepts that all fail at once.
+pub(crate) const FIRST_ACCEPT_BACKOFF: Duration = Duration::from_millis(10);
+/// The longest the accept task waits between accepts after failures.
+pub(crate) const MAX_ACCEPT_BACKOFF: Duration = Duration::from_secs(1);
+/// How often the accept task writes its rate-limited warning, with how
+/// many accepts failed since the last line.
+pub(crate) const ACCEPT_WARN_INTERVAL: Duration = Duration::from_secs(10);
+
+/// The wait between accepts after a failure, as its own state: the first
+/// wait ([`FIRST_ACCEPT_BACKOFF`]) doubling to [`MAX_ACCEPT_BACKOFF`], and
+/// reset by a success, so a failure that persists cannot spin the task.
+#[derive(Debug)]
+struct Backoff(Duration);
+
+impl Backoff {
+    fn new() -> Self {
+        Self(FIRST_ACCEPT_BACKOFF)
+    }
+
+    /// Waits this backoff out, and doubles it for the next failure, to the
+    /// cap.
+    async fn wait(&mut self) {
+        tokio::time::sleep(self.0).await;
+        self.0 = (self.0 * 2).min(MAX_ACCEPT_BACKOFF);
+    }
+
+    /// A success: the next failure waits the first wait again.
+    fn reset(&mut self) {
+        self.0 = FIRST_ACCEPT_BACKOFF;
+    }
+}
+
 /// After this long, a connection is asked to close, so one that a client
 /// keeps for life (a daemon keeps one to its cache) gives its place up.
 pub(crate) const MAX_CONNECTION_AGE: Duration = Duration::from_secs(30 * 60);
@@ -844,6 +879,123 @@ fn warn_refused(refusals: &WaitWarn, max: usize, wait: Duration) {
     }
 }
 
+/// What the accept task does after a failed accept: the debug line, the
+/// rate-limited warn with the failures since its last line, the count in
+/// the metrics, the error handed on to the serve, and the wait that paces
+/// the next attempt - 10 ms doubling to 1 s, reset by a success, so a
+/// failure that persists cannot spin the task. `false` says the serve went
+/// and the task stops.
+async fn pace_after_failed_accept<IO>(
+    error: io::Error,
+    accept_warn: &WaitWarn,
+    metrics: &Metrics,
+    backoff: &mut Backoff,
+    done: &mpsc::Sender<io::Result<Connection<IO>>>,
+) -> bool {
+    tracing::debug!(
+        error = ?error,
+        thread = ?std::thread::current().id(),
+        "the listener failed to yield a socket"
+    );
+    if let Some(failures) = accept_warn.tick() {
+        tracing::warn!(
+            failures,
+            backoff = ?backoff,
+            error = ?error,
+            "the listener failed to accept; waiting before it accepts again"
+        );
+    }
+    metrics.accept_error();
+    backoff.wait().await;
+    done.send(Err(error)).await.is_ok()
+}
+
+/// One accepted TLS connection's own task: its place first, bounded as
+/// [`accept`] describes, then its TLS handshake on this task under
+/// `handshake`, and the decrypted connection handed to the serve with the
+/// preface deadline that its place started, so a silent peer holds its
+/// place for at most `handshake` in all. A handshake that failed or timed
+/// out is warned, and the io drops, so the client sees the connection
+/// close.
+fn spawn_tls_accepted<IO>(
+    io: IO,
+    acceptor: tokio_rustls::TlsAcceptor,
+    accepting: Accepting,
+    places: &Arc<Semaphore>,
+    waiters: &Arc<Semaphore>,
+    done: &mpsc::Sender<io::Result<Connection<TlsStream<IO>>>>,
+    metrics: &Arc<Metrics>,
+) where
+    IO: AsyncRead + AsyncWrite + PeerOf + Unpin + Send + 'static,
+{
+    let Accepting {
+        max,
+        handshake,
+        wait,
+        stalled_bytes,
+        total,
+        waits,
+        refusals,
+        ..
+    } = accepting;
+    let places = Arc::clone(places);
+    let waiters = Arc::clone(waiters);
+    let waits = waits.clone();
+    let refusals = refusals.clone();
+    let sender = done.clone();
+    let metrics = Arc::clone(metrics);
+    let total = Arc::clone(&total);
+    tokio::spawn(async move {
+        // The place first, bounded: a connection over the cap waits at
+        // most `wait`, then the server closes it, so a storm fails fast
+        // instead of queueing behind `MAX_CONNECTION_AGE`. The wait runs
+        // in the connection's own task, so one waiter never holds the
+        // accept loop, and the waiters are capped, so a storm holds at
+        // most `max` waiting sockets.
+        let Some(place) = place_within(&places, &waiters, max, wait, &waits).await else {
+            metrics.connection_refused();
+            warn_refused(&refusals, max, wait);
+            // The io drops here: the client sees the connection close
+            // before any reply.
+            return;
+        };
+        // One deadline, from the place: the TLS handshake and the HTTP/2
+        // preface that follows share it.
+        let deadline = tokio::time::Instant::now() + handshake;
+        let wait = tokio::time::timeout_at(deadline, acceptor.accept(io));
+        let preface = Some((
+            PREFACE_BYTES,
+            Box::pin(tokio::time::sleep_until(deadline)) as Pin<Box<Sleep>>,
+        ));
+        match wait.await {
+            Ok(Ok(stream)) => {
+                let peer = stream.get_ref().0.peer_of();
+                // The place goes with the connection, and frees when it is
+                // dropped, which the gone receiver also does.
+                let _ = sender
+                    .send(Ok(Connection {
+                        io: stream,
+                        _place: place,
+                        preface,
+                        stalled: Stalled::new(peer, stalled_bytes, metrics, total),
+                        born: std::time::Instant::now(),
+                        first_poll: true,
+                    }))
+                    .await;
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "a TLS handshake failed");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    timeout = ?handshake,
+                    "no TLS handshake within the timeout"
+                );
+            }
+        }
+    });
+}
+
 /// The TLS connections of `incoming`, at most `max` at once, as
 /// [`accept`] yields plain ones: a connection takes its place first (and
 /// waits at the cap, at most [`CONNECTION_WAIT`], then the server closes
@@ -870,12 +1022,11 @@ where
     I: Stream<Item = io::Result<IO>> + Send + 'static,
     IO: AsyncRead + AsyncWrite + Connected + PeerOf + Unpin + Send + 'static,
 {
+    // The task below owns its copy: the caller's ref must not outlive it.
+    let accepting = accepting.clone();
     let Accepting {
         max,
-        handshake,
         wait,
-        stalled_bytes,
-        total,
         waits,
         refusals,
         ..
@@ -897,6 +1048,8 @@ where
     tokio::spawn(async move {
         let mut incoming = pin!(incoming);
         let mut shutdown = pin!(shutdown);
+        let accept_warn = WaitWarn::new(ACCEPT_WARN_INTERVAL);
+        let mut backoff = Backoff::new();
         loop {
             // The shutdown signal itself stops the accept: a client that
             // reconnects after the GOAWAY is refused by its connect, not
@@ -918,73 +1071,28 @@ where
                 () = done.closed() => break,
             };
             let io = match accepted {
-                Ok(io) => io,
+                Ok(io) => {
+                    backoff.reset();
+                    io
+                }
                 Err(error) => {
-                    if done.send(Err(error)).await.is_err() {
+                    if !pace_after_failed_accept(error, &accept_warn, &metrics, &mut backoff, &done)
+                        .await
+                    {
                         break;
                     }
                     continue;
                 }
             };
-            let places = Arc::clone(&places);
-            let waiters = Arc::clone(&waiters);
-            let acceptor = acceptor.clone();
-            let waits = waits.clone();
-            let refusals = refusals.clone();
-            let sender = done.clone();
-            let metrics = Arc::clone(&metrics);
-            let total = Arc::clone(&total);
-            tokio::spawn(async move {
-                // The place first, bounded: a connection over the cap waits
-                // at most `wait`, then the server closes it, so a storm
-                // fails fast instead of queueing behind
-                // `MAX_CONNECTION_AGE`. The wait runs in the connection's
-                // own task, so one waiter never holds the accept loop, and
-                // the waiters are capped, so a storm holds at most `max`
-                // waiting sockets.
-                let Some(place) = place_within(&places, &waiters, max, wait, &waits).await else {
-                    metrics.connection_refused();
-                    warn_refused(&refusals, max, wait);
-                    // The io drops here: the client sees the connection
-                    // close before any reply.
-                    return;
-                };
-                // One deadline, from the place: the TLS handshake and the
-                // HTTP/2 preface that follows share it, so a silent peer holds
-                // its place for at most `handshake` in all.
-                let deadline = tokio::time::Instant::now() + handshake;
-                let wait = tokio::time::timeout_at(deadline, acceptor.accept(io));
-                let preface = Some((
-                    PREFACE_BYTES,
-                    Box::pin(tokio::time::sleep_until(deadline)) as Pin<Box<Sleep>>,
-                ));
-                match wait.await {
-                    Ok(Ok(stream)) => {
-                        let peer = stream.get_ref().0.peer_of();
-                        // The place goes with the connection, and frees when
-                        // it is dropped, which the gone receiver also does.
-                        let _ = sender
-                            .send(Ok(Connection {
-                                io: stream,
-                                _place: place,
-                                preface,
-                                stalled: Stalled::new(peer, stalled_bytes, metrics, total),
-                                born: std::time::Instant::now(),
-                                first_poll: true,
-                            }))
-                            .await;
-                    }
-                    Ok(Err(error)) => {
-                        tracing::warn!(%error, "a TLS handshake failed");
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            timeout = ?handshake,
-                            "no TLS handshake within the timeout"
-                        );
-                    }
-                }
-            });
+            spawn_tls_accepted(
+                io,
+                acceptor.clone(),
+                accepting.clone(),
+                &places,
+                &waiters,
+                &done,
+                &metrics,
+            );
         }
     });
     ReceiverStream::new(served)
@@ -1033,6 +1141,8 @@ where
     tokio::spawn(async move {
         let mut incoming = pin!(incoming);
         let mut shutdown = pin!(shutdown);
+        let accept_warn = WaitWarn::new(ACCEPT_WARN_INTERVAL);
+        let mut backoff = Backoff::new();
         loop {
             // The shutdown signal itself stops the accept: a client that
             // reconnects after the GOAWAY is refused by its connect, not
@@ -1058,18 +1168,19 @@ where
             // on the connection's first read - the wait it had. The gap
             // between a client's connect and the first line is the
             // accept's delay; the gap to the second is the connection
-            // task's start delay. An accept error is logged here too:
-            // tonic logs it at trace only, below every default filter.
+            // task's start delay. An accept error is logged at debug and
+            // warned rate-limited by the pacer; tonic logs it at trace
+            // only, below every default filter.
             let born = std::time::Instant::now();
             let io = match accepted {
-                Ok(io) => io,
+                Ok(io) => {
+                    backoff.reset();
+                    io
+                }
                 Err(error) => {
-                    tracing::debug!(
-                        error = ?error,
-                        thread = ?std::thread::current().id(),
-                        "the listener failed to yield a socket"
-                    );
-                    if done.send(Err(error)).await.is_err() {
+                    if !pace_after_failed_accept(error, &accept_warn, &metrics, &mut backoff, &done)
+                        .await
+                    {
                         break;
                     }
                     continue;
@@ -1364,6 +1475,7 @@ mod tests {
     use std::path::Path;
     use std::pin::pin;
     use std::sync::Arc;
+    use std::task::{Context, Poll};
 
     use rcgen::{
         BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
@@ -1388,6 +1500,7 @@ mod tests {
         Encoding, GetObjectsRequest, GetRootTreeRequest, GetRootTreeResponse, ObjectKind,
         ObjectPart, ResolveRefRequest, ResolveRefResponse,
     };
+    use tokio::net::TcpStream;
 
     /// A wait that ends at once when nothing holds the call back.
     const HELD: Duration = Duration::from_millis(500);
@@ -1669,6 +1782,127 @@ mod tests {
             }
         });
         (addr, metrics)
+    }
+
+    /// A log writer that collects what the test binary logs.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Captured;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn log() -> Captured {
+        static LOG: std::sync::OnceLock<Captured> = std::sync::OnceLock::new();
+        LOG.get_or_init(Captured::default).clone()
+    }
+
+    fn init_log() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::level_filters::LevelFilter::WARN)
+                .with_writer(log())
+                .finish();
+            tracing::subscriber::set_global_default(subscriber).unwrap();
+        });
+    }
+
+    /// A listener that never yields a socket: every accept fails at once,
+    /// as the process out of file descriptors makes every real listener
+    /// fail.
+    struct AlwaysFail(Arc<std::sync::atomic::AtomicU64>);
+
+    impl Stream for AlwaysFail {
+        type Item = io::Result<TcpStream>;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Poll::Ready(Some(Err(io::Error::other("every accept fails"))))
+        }
+    }
+
+    /// A persistent accept failure must not spin a core: the accept task
+    /// paces itself (10 ms doubling to 1 s, reset by a success), counts
+    /// the failures in `scion_accept_errors_total`, and writes its
+    /// rate-limited warning.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_listener_that_fails_every_accept_is_paced_and_counted() {
+        init_log();
+        let limits = Limits::default();
+        let metrics = Arc::new(Metrics::default());
+        let attempts = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        tokio::spawn({
+            let metrics = Arc::clone(&metrics);
+            let attempts = Arc::clone(&attempts);
+            async move {
+                let pending = std::future::pending();
+                let _ = limits
+                    .serve_with(
+                        &Accepting::of(&limits, &TIMERS),
+                        |mut server: Server| server.add_service(ObjectsServer::new(Stalls)),
+                        AlwaysFail(Arc::clone(&attempts)),
+                        None,
+                        pending,
+                        metrics,
+                    )
+                    .await;
+            }
+        });
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let attempts = attempts.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            attempts > 0 && attempts <= 20,
+            "failed accepts in 3 s: {attempts} - a persistent failure must be paced, \
+             not retried at once"
+        );
+        let text = metrics.render();
+        let line = text
+            .lines()
+            .find(|l| l.starts_with("scion_accept_errors_total "))
+            .unwrap_or_else(|| panic!("the render has no accept errors:\n{text}"));
+        assert_ne!(
+            line, "scion_accept_errors_total 0",
+            "the failed accepts are not counted:\n{text}"
+        );
+        let text = String::from_utf8(log().0.lock().unwrap().clone()).unwrap();
+        let warns: Vec<&str> = text
+            .lines()
+            .filter(|l| {
+                l.contains("the listener failed to accept; waiting before it accepts again")
+            })
+            .collect();
+        assert_eq!(
+            warns.len(),
+            1,
+            "the accept warning must be written once in 3 s, not spam or silence:\n{text}"
+        );
+        let failures = warns[0]
+            .split("failures=")
+            .nth(1)
+            .and_then(|n| n.split(' ').next())
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(0);
+        assert!(
+            failures >= 1,
+            "the warning must name at least one failure: {}",
+            warns[0]
+        );
     }
 
     /// The stub, served within `limits` with `timers`, and its address.

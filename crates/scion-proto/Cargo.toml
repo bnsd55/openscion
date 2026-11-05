@@ -46,6 +46,7 @@ test-hooks = []
 
 [dev-dependencies]
 rcgen.workspace = true
+tracing-subscriber.workspace = true
 tempfile.workspace = true
 # The protocol-surface golden decodes the descriptor set the build
 # wrote: the surface is what the compiler saw, not a hand parse.
