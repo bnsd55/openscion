@@ -818,19 +818,22 @@ async fn run_script(script: &[Op], script_name: &str) -> RunSummary {
     let budget = Duration::from_secs(SCRIPT_BUDGET_SECS);
     let ordinal = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
+    let dir = scion_server::test_support::private_tempdir();
+    let (data, log) = (dir.path().join("data"), dir.path().join("server.log"));
+    create_repo(&data);
+    let db_url = postgres_url(&data);
     let watchdog = Watchdog {
         script_name: script_name.to_owned(),
+        db_url,
         seed: seed(),
         started,
         budget,
         ordinal: Arc::clone(&ordinal),
         stop: Arc::clone(&stop),
     };
+    // The guard starts before the server does: it covers the server
+    // start and the connect, where a wedge has no step yet.
     std::thread::spawn(move || watchdog.run());
-
-    let dir = scion_server::test_support::private_tempdir();
-    let (data, log) = (dir.path().join("data"), dir.path().join("server.log"));
-    create_repo(&data);
     // The gate dir of this run: the server pauses only at points a corpus
     // line or a strategy op armed, and the dir dies with the run's temp
     // dir.
@@ -1346,6 +1349,7 @@ async fn run_script(script: &[Op], script_name: &str) -> RunSummary {
 /// `gc` subprocess has no ceiling at all.
 struct Watchdog {
     script_name: String,
+    db_url: String,
     seed: u64,
     started: std::time::Instant,
     budget: Duration,
@@ -1363,6 +1367,8 @@ impl Watchdog {
                      the run is wedged, aborting the process",
                     self.script_name, self.budget, at, self.seed,
                 ));
+                snapshot_db(&self.db_url);
+                std::process::abort();
                 eprintln!(
                     "{name} passed its budget of {budget:?} at step {at} \
                      (seed {s}); the run is wedged, aborting the process",
@@ -1538,6 +1544,64 @@ async fn finish_lands(scion: &mut Scion, lands: &mut Ledger) {
 /// it is set: the guards' words must survive a wedged thread holding
 /// the stderr lock, so the guards also speak to a file no one else
 /// writes.
+/// Writes what the test database holds when a run wedges: every
+/// connection's state, wait and query, and every lock with its holder.
+/// A retry that waits on a row or advisory lock names its holder here;
+/// a database with no waiting statement puts the wait in the server's
+/// memory, and the land path's own logs take over.
+fn snapshot_db(url: &str) {
+    guard_log("snapshot: begin");
+    let Ok(mut client) = postgres::Client::connect(url, postgres::NoTls) else {
+        guard_log("snapshot: the database refused a connection");
+        return;
+    };
+    let Ok(rows) = client.query(
+        "SELECT pid, state, wait_event_type, wait_event, xact_start, \
+         left(query, 160) AS query FROM pg_stat_activity \
+         WHERE datname = current_database() AND pid <> pg_backend_pid() \
+         ORDER BY pid",
+        &[],
+    ) else {
+        guard_log("snapshot: the activity query failed");
+        return;
+    };
+    for row in &rows {
+        guard_log(&format!(
+            "activity: pid={} state={} wait={}/{} xact={:?} q={}",
+            row.get::<_, i32>(0),
+            row.get::<_, String>(1),
+            row.get::<_, Option<String>>(2).unwrap_or_default(),
+            row.get::<_, Option<String>>(3).unwrap_or_default(),
+            row.get::<_, Option<std::time::SystemTime>>(4),
+            row.get::<_, String>(5).trim(),
+        ));
+    }
+    let Ok(rows) = client.query(
+        "SELECT l.locktype, l.classid, l.objid, l.granted, l.pid, \
+         a.state, left(a.query, 120) AS query FROM pg_locks l \
+         LEFT JOIN pg_stat_activity a ON a.pid = l.pid \
+         WHERE a.datname = current_database() OR a.pid IS NULL \
+         ORDER BY l.pid, l.granted",
+        &[],
+    ) else {
+        guard_log("snapshot: the locks query failed");
+        return;
+    };
+    for row in &rows {
+        guard_log(&format!(
+            "lock: pid={} type={} class={} obj={} granted={} holder_state={} holder_q={}",
+            row.get::<_, Option<i32>>(4).map_or(-1, |p| p),
+            row.get::<_, String>(0),
+            row.get::<_, i32>(1),
+            row.get::<_, Option<i32>>(2).map_or(-1, |o| o),
+            row.get::<_, bool>(3),
+            row.get::<_, Option<String>>(5).unwrap_or_default(),
+            row.get::<_, Option<String>>(6).unwrap_or_default().trim(),
+        ));
+    }
+    guard_log("snapshot: end");
+}
+
 fn guard_log(line: &str) {
     if let Some(path) = std::env::var_os("SCION_TEST_GUARD_LOG") {
         use std::io::Write as _;
