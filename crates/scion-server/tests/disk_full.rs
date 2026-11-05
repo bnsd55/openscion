@@ -814,7 +814,7 @@ fn repo_with_main(store: &Backend) -> scion_core::BlobId {
                 std::collections::BTreeMap::new(),
             )
             .expect("the root fits the format");
-            let (id, _) = tree::store_changeset(c, repo, &root, &mut tree::lens_of(store))?;
+            let (id, _) = tree::store_changeset(c, repo, &root, &mut tree::lens_of(store), None)?;
             assert!(c.cas_ref(repo, "main", None, id)?);
             c.add_repo_blobs(repo, &[blob])?;
             Ok(())

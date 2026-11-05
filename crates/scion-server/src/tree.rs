@@ -92,6 +92,7 @@ pub fn apply(
     base: Option<TreeId>,
     changes: &BTreeMap<RepoPath, Option<FileState>>,
     lens: BlobLens<'_>,
+    deadline: Option<&Deadline>,
 ) -> Result<TreeId> {
     // The stored trees on every changed path, one get_trees per level of
     // depth: a commit that touches many directories loads them in one
@@ -99,9 +100,15 @@ pub fn apply(
     let mut loaded = prefetch(c, base, changes)?;
     let mut root = base.map_or_else(|| Dir::Loaded(BTreeMap::new()), Dir::Stored);
     for (path, _) in changes.iter().filter(|(_, change)| change.is_none()) {
+        if let Some(deadline) = deadline {
+            // A cancelled call's job stops between paths, and frees its
+            // permit, instead of building the tree on. The transaction
+            // rolls the partial build back: no tree names it.
+            deadline.check()?;
+        }
         root.delete(c, &mut loaded, path, &parts(path))?;
     }
-    for (path, state) in changes {
+    for (i, (path, state)) in changes.iter().enumerate() {
         if let Some(state) = state {
             // A gitlink names no blob, so it carries no length; its entry
             // ends at the commit bytes.
@@ -111,6 +118,11 @@ pub fn apply(
             };
             root.put(c, &mut loaded, path, &parts(path), 0, entry)?;
         }
+        // The test seam of the cancelled tree build: the caller parks
+        // here, cancels its call, and lets the job reach the next
+        // path's check.
+        #[cfg(test)]
+        crate::write::PARK_APPLY.park(i);
     }
     let mut rows = Vec::new();
     let tree = root.store(&mut rows)?;
@@ -170,7 +182,7 @@ impl Kind for RootTree {
         parents: Vec<TreeId>,
         lens: BlobLens<'_>,
     ) -> Result<TreeId> {
-        apply(c, parents.first().copied(), changeset.changes(), lens).map_err(|e| match e {
+        apply(c, parents.first().copied(), changeset.changes(), lens, None).map_err(|e| match e {
             Error::Apply(e) => Error::Corrupt(format!("stored changeset {id} does not apply: {e}")),
             other => other,
         })
@@ -252,8 +264,9 @@ pub fn derive_root_tree(
     repo: RepoId,
     cs: ChangesetId,
     lens: BlobLens<'_>,
+    deadline: Option<&Deadline>,
 ) -> Result<TreeId> {
-    derived::derive::<RootTree>(c, repo, cs, lens)
+    derived::derive::<RootTree>(c, repo, cs, lens, deadline)
 }
 
 /// Stores a changeset in `repo` with its root tree: the first parent's tree
@@ -287,6 +300,7 @@ pub fn store_changeset(
     repo: RepoId,
     cs: &Changeset,
     lens: BlobLens<'_>,
+    deadline: Option<&Deadline>,
 ) -> Result<(ChangesetId, TreeId)> {
     // The build reads each kind's value for the parents, then deletes a
     // few old rows per kind: the reads ride one preloaded statement and
@@ -314,9 +328,9 @@ pub fn store_changeset(
     let base = cs
         .parents()
         .first()
-        .map(|&parent| derive_root_tree(c, repo, parent, lens))
+        .map(|&parent| derive_root_tree(c, repo, parent, lens, deadline))
         .transpose()?;
-    let tree = apply(c, base, cs.changes(), lens)?;
+    let tree = apply(c, base, cs.changes(), lens, deadline)?;
     let id = c.insert_changeset(repo, cs)?;
     // One round trip for every blob the changeset puts, however many
     // paths name the same one.

@@ -58,7 +58,7 @@ fn store_with_root(paths: &[&str]) -> (tempfile::TempDir, Backend) {
     store
         .write(|c| {
             let repo = c.create_repo(REPO)?;
-            let (root, _) = tree::store_changeset(c, repo, &root, &mut |_| Ok(0))?;
+            let (root, _) = tree::store_changeset(c, repo, &root, &mut |_| Ok(0), None)?;
             assert!(c.cas_ref(repo, "main", None, root)?);
             for path in paths {
                 c.add_repo_blob(repo, scion_core::BlobId::of(path.as_bytes()))?;

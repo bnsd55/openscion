@@ -922,7 +922,7 @@ mod tests {
                         .collect();
                     let cs = changeset(ids.last().copied().or(parent), &edits);
                     ids.push(if stored {
-                        tree::store_changeset(c, repo, &cs, &mut crate::tree::lens_none())?.0
+                        tree::store_changeset(c, repo, &cs, &mut crate::tree::lens_none(), None)?.0
                     } else {
                         c.insert_changeset(repo, &cs)?
                     });

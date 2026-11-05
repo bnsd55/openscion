@@ -64,7 +64,7 @@ impl Park {
 
     /// Parks the caller while the park file of `id` exists. The ceiling
     /// bounds a park nobody lifts: it fails the holder, not the store.
-    fn park(&self, id: &BlobId) {
+    fn park(&self, id: impl std::fmt::Display) {
         let root = self
             .root
             .lock()
@@ -90,6 +90,13 @@ impl Park {
 /// [`create_changeset`], keyed by the changeset's first put's blob.
 #[cfg(test)]
 pub(crate) static PARK_CREATE: Park = Park {
+    root: std::sync::Mutex::new(None),
+};
+
+/// The park inside the tree build ([`crate::tree::apply`]), at the end
+/// of a put's path: a test holds the caller between two paths' checks.
+#[cfg(test)]
+pub(crate) static PARK_APPLY: Park = Park {
     root: std::sync::Mutex::new(None),
 };
 
@@ -175,7 +182,8 @@ pub fn create_changeset(
                 return Err(bad_blob(blob, path, "is not stored", repo));
             }
         }
-        tree::store_changeset(c, repo_id, &cs, &mut tree::lens_from(&lens)).map(|(id, _)| id)
+        tree::store_changeset(c, repo_id, &cs, &mut tree::lens_from(&lens), Some(deadline))
+            .map(|(id, _)| id)
     })
 }
 

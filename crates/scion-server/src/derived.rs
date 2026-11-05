@@ -603,18 +603,24 @@ pub(crate) fn backfill<K: Kind>(
 ///
 /// [`Error::NotFound`] if `repo` does not have `cs`. Errors of
 /// [`Kind::derive`].
+/// `deadline`: the call's deadline, when the caller serves a request -
+/// the walk and the chain check it per changeset, so a cancelled call's
+/// job stops between changesets instead of holding its permit to the
+/// chain's end. `None` for command and test callers, which have no
+/// request to serve.
 pub(crate) fn derive<K: Kind>(
     c: &mut dyn MetaTx,
     repo: RepoId,
     cs: ChangesetId,
     lens: crate::tree::BlobLens<'_>,
+    deadline: Option<&Deadline>,
 ) -> Result<K::Value> {
     let mut walk = match Walk::start::<K>(c, repo, cs)? {
         ControlFlow::Break(value) => return Ok(value),
         ControlFlow::Continue(walk) => walk,
     };
-    walk.step::<K>(c, usize::MAX)?;
-    let (value, _written) = derive_chain::<K>(c, repo, &walk.into_pending(), lens)?;
+    walk.step::<K>(c, usize::MAX, deadline)?;
+    let (value, _written) = derive_chain::<K>(c, repo, &walk.into_pending(), lens, deadline)?;
     value.ok_or_else(|| Error::NotFound(format!("changeset {cs}")))
 }
 
@@ -679,7 +685,7 @@ fn walk_all<K: Kind>(
         Ok(match Walk::start::<K>(c, repo, cs)? {
             ControlFlow::Continue(mut walk) => {
                 take_walk_bytes(budget, held, &walk)?;
-                walk.step::<K>(c, STEP)?;
+                walk.step::<K>(c, STEP, None)?;
                 ControlFlow::Continue(walk)
             }
             stored @ ControlFlow::Break(_) => stored,
@@ -692,7 +698,7 @@ fn walk_all<K: Kind>(
     while !walk.next.is_empty() {
         check()?;
         take_walk_bytes(budget, held, &walk)?;
-        store.read_unflushed(|c| walk.step::<K>(c, STEP))?;
+        store.read_unflushed(|c| walk.step::<K>(c, STEP, None))?;
     }
     Ok(ControlFlow::Continue(walk.into_pending()))
 }
@@ -759,8 +765,18 @@ impl Walk {
     /// Visits at most `limit` changesets. Each one without a stored value
     /// goes to `pending`, and the walk goes on to the parents that `K`
     /// reads.
-    fn step<K: Kind>(&mut self, c: &mut dyn MetaTx, limit: usize) -> Result<()> {
+    fn step<K: Kind>(
+        &mut self,
+        c: &mut dyn MetaTx,
+        limit: usize,
+        deadline: Option<&Deadline>,
+    ) -> Result<()> {
         for _ in 0..limit {
+            if let Some(deadline) = deadline {
+                // A cancelled call's job stops between changesets, and
+                // frees its permit, instead of walking on.
+                deadline.check()?;
+            }
             let Some((id, generation)) = self.next.pop() else {
                 break;
             };
@@ -843,7 +859,8 @@ fn derive_steps<K: Kind>(
             HashMap::new()
         };
         let (step_value, step_written) = store.commit(|c| {
-            let (value, written) = derive_chain::<K>(c, repo, step, &mut tree::lens_from(&lens))?;
+            let (value, written) =
+                derive_chain::<K>(c, repo, step, &mut tree::lens_from(&lens), deadline)?;
             remove_old::<K>(c)?;
             Ok((value, written))
         })?;
@@ -876,10 +893,14 @@ fn derive_chain<K: Kind>(
     repo: RepoId,
     ids: &[ChangesetId],
     lens: crate::tree::BlobLens<'_>,
+    deadline: Option<&Deadline>,
 ) -> Result<(Option<K::Value>, usize)> {
     let mut value = None;
     let mut written = 0usize;
     for &id in ids {
+        if let Some(deadline) = deadline {
+            deadline.check()?;
+        }
         if let Some(known) = load::<K>(c, id)? {
             value = Some(known);
             continue;
@@ -1341,7 +1362,7 @@ mod tests {
         // The tests store no blob files, so a test lens answers 0 for
         // everything: the trees it builds are only compared to themselves.
         chain_with(c, history, |c, repo, cs| {
-            Ok(tree::store_changeset(c, repo, cs, &mut tree::lens_none())?.0)
+            Ok(tree::store_changeset(c, repo, cs, &mut tree::lens_none(), None)?.0)
         })
     }
 
@@ -1605,7 +1626,7 @@ mod tests {
                 else {
                     panic!("no value is stored yet");
                 };
-                walk.step::<ChangedPathsV1>(c, STEP)?;
+                walk.step::<ChangedPathsV1>(c, STEP, None)?;
                 Ok(walk)
             })
             .unwrap();
@@ -1880,7 +1901,7 @@ mod tests {
         )
         .unwrap();
         store
-            .write(|c| tree::store_changeset(c, repo, &cs, &mut tree::lens_of(&store)))
+            .write(|c| tree::store_changeset(c, repo, &cs, &mut tree::lens_of(&store), None))
             .unwrap();
         // The new row of version 1, and seven rows of version 0 less one
         // step.
@@ -1945,7 +1966,7 @@ mod tests {
                 };
                 let mut visits = 0;
                 while !walk.next.is_empty() {
-                    walk.step::<Ancestry>(c, 1)?;
+                    walk.step::<Ancestry>(c, 1, None)?;
                     let mut ids_in_next: Vec<ChangesetId> =
                         walk.next.iter().map(|&(id, _)| id).collect();
                     let count = ids_in_next.len();
@@ -1973,7 +1994,7 @@ mod tests {
                 let ControlFlow::Continue(mut walk) = Walk::start::<Ancestry>(c, repo, tip)? else {
                     panic!("no value is stored yet");
                 };
-                walk.step::<Ancestry>(c, STEP)?;
+                walk.step::<Ancestry>(c, STEP, None)?;
                 Ok(walk)
             })
             .unwrap();
@@ -2091,7 +2112,7 @@ mod tests {
                         changes,
                     )
                     .expect("changeset fits the format");
-                    ids.push(tree::store_changeset(c, repo, &cs, &mut tree::lens_none())?.0);
+                    ids.push(tree::store_changeset(c, repo, &cs, &mut tree::lens_none(), None)?.0);
                 }
                 Ok((repo, ids))
             })

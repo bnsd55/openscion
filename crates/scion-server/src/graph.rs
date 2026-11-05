@@ -1374,7 +1374,7 @@ mod tests {
         .unwrap();
         let (merge, _) = store
             .write(|c| {
-                crate::tree::store_changeset(c, repo, &cs, &mut crate::tree::lens_of(&store))
+                crate::tree::store_changeset(c, repo, &cs, &mut crate::tree::lens_of(&store), None)
             })
             .unwrap();
         let commits = store.commits();

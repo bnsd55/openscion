@@ -755,7 +755,7 @@ pub(crate) fn create_repo(data: &Path) {
         .write(|c| {
             let repo = c.create_repo(REPO)?;
             let (id, _) =
-                tree::store_changeset(c, repo, &root, &mut tree::lens_of(&store.clone()))?;
+                tree::store_changeset(c, repo, &root, &mut tree::lens_of(&store.clone()), None)?;
             for name in REFS {
                 assert!(c.cas_ref(repo, name, None, id)?);
             }

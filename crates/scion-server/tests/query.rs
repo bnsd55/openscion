@@ -217,7 +217,7 @@ fn chain(store: &Backend, changes: Vec<BTreeMap<RepoPath, Option<FileState>>>) -
                     changes,
                 )
                 .expect("changeset fits the format");
-                ids.push(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0);
+                ids.push(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0, None);
             }
             Ok(ids)
         })
@@ -389,7 +389,7 @@ fn the_bulk_seed_answers_like_the_ordinary_seed() {
         .write(|c| {
             let repo = c.create_repo(REPO)?;
             for cs in &ladder.0 {
-                tree::store_changeset(c, repo, cs, &mut |_| Ok(0))?;
+                tree::store_changeset(c, repo, cs, &mut |_| Ok(0), None)?;
             }
             Ok(())
         })

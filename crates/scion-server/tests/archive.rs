@@ -60,7 +60,7 @@ fn source(data: &Path) -> (Backend, ChangesetId) {
             let mut parent = None;
             for name in ["a", "b", "c"] {
                 let cs = changeset(parent.into_iter().collect(), &[(name, Some(regular(name)))]);
-                parent = Some(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0);
+                parent = Some(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0, None);
             }
             let main = parent.expect("depth > 0");
             assert!(c.cas_ref(repo, "main", None, main)?);
@@ -105,7 +105,7 @@ fn a_section_holds_one_snapshot_when_a_writer_lands_between_its_statements() {
                     None => c.get_ref(repo, "main")?.expect("main").target,
                 };
                 let cs = changeset(vec![parent], &[("h", Some(regular("hook")))]);
-                let id = tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0;
+                let id = tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0;
                 c.add_repo_blob(repo, hook_blob)?;
                 assert!(c.cas_ref(repo, "dev", state.map(|s| s.version), id)?);
                 Ok(())
@@ -167,7 +167,7 @@ fn an_export_beside_a_writer_verifies_and_restores_resolving_main() {
                         None => c.get_ref(repo, "main")?.expect("main").target,
                     };
                     let cs = changeset(vec![parent], &[("w", Some(regular(&content)))]);
-                    let id = tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0;
+                    let id = tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0;
                     c.add_repo_blob(repo, BlobId::of(content.as_bytes()))?;
                     assert!(c.cas_ref(repo, "dev", state.map(|s| s.version), id)?);
                     Ok(id)
@@ -567,7 +567,7 @@ fn an_export_of_two_repos_that_fold_to_one_is_refused() {
             .write(|c| {
                 let repo = c.create_repo(name)?;
                 let cs = changeset(vec![], &[("a", Some(regular("a")))]);
-                let id = tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0;
+                let id = tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0;
                 assert!(c.cas_ref(repo, "main", None, id)?);
                 c.add_repo_blob(repo, BlobId::of(b"a"))?;
                 Ok(())

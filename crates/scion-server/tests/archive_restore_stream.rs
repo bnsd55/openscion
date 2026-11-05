@@ -89,8 +89,10 @@ fn stream_source(data: &Path) -> Backend {
                         parent.into_iter().collect(),
                         &[(&file, Some(regular(content)))],
                     );
-                    parent =
-                        Some(tree::store_changeset(c, repo, &cs, &mut tree::lens_from(&lens))?.0);
+                    parent = Some(
+                        tree::store_changeset(c, repo, &cs, &mut tree::lens_from(&lens))?.0,
+                        None,
+                    );
                     c.add_repo_blob(repo, blob_ids[i])?;
                 }
                 assert!(c.cas_ref(repo, "main", None, parent.expect("a chain"))?);
@@ -255,7 +257,7 @@ fn a_big_restore_stays_under_its_rss_ceiling() {
                     vec![b'x'; MESSAGE_BYTES],
                     &[(&format!("docs/f{i}"), Some(regular(&content)))],
                 );
-                let id = tree::store_changeset(c, repo, &cs, &mut tree::lens_from(&lens))?.0;
+                let id = tree::store_changeset(c, repo, &cs, &mut tree::lens_from(&lens), None)?.0;
                 c.add_repo_blob(repo, blob)?;
                 parent = Some(id);
             }
@@ -492,7 +494,7 @@ fn a_stream_cut_after_the_first_batch_fails_and_leaves_no_store() {
                     vec![b'x'; MESSAGE_BYTES],
                     &[(&format!("docs/f{i}"), Some(regular(&content)))],
                 );
-                let id = tree::store_changeset(c, repo, &cs, &mut tree::lens_from(&lens))?.0;
+                let id = tree::store_changeset(c, repo, &cs, &mut tree::lens_from(&lens), None)?.0;
                 c.add_repo_blob(repo, blob)?;
                 parent = Some(id);
             }

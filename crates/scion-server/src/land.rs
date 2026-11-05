@@ -798,7 +798,16 @@ fn finish(
             Planned::Settled(row) => return Ok(Finished::Outcome(row)),
             Planned::Do(plan) => plan,
         };
-        match settle(lands, store, repo, land_id, &req.target_ref, plan, index) {
+        match settle(
+            lands,
+            store,
+            repo,
+            land_id,
+            &req.target_ref,
+            plan,
+            index,
+            &req.deadline,
+        ) {
             Err(Error::Aborted(detail)) if attempt < MAX_ATTEMPTS => {
                 tracing::info!(land_id, attempt, %detail, "planning the land again");
                 if let Some(metrics) = &lands.metrics {
@@ -889,6 +898,7 @@ fn settle(
     target: &str,
     plan: Plan,
     index: &mut Option<PathIndex>,
+    deadline: &Deadline,
 ) -> Result<Finished> {
     let (rebased, head) = match plan {
         Plan::Derive(head) => return Ok(Finished::Derive(head)),
@@ -921,7 +931,13 @@ fn settle(
     // transaction, so the write connection does no file I/O.
     let lens = tree::lens_of_puts(store, crate::meta::puts(&rebased).map(|(_, blob)| blob))?;
     let landed = store.write_slot_holder(|c| {
-        let (id, _) = tree::store_changeset(c, repo, &rebased, &mut tree::lens_from(&lens))?;
+        let (id, _) = tree::store_changeset(
+            c,
+            repo,
+            &rebased,
+            &mut tree::lens_from(&lens),
+            Some(deadline),
+        )?;
         if !c.cas_ref(repo, target, Some(head.version), id)? {
             // The error rolls back the transaction, rebased changeset included.
             return Err(Error::Aborted(format!(
