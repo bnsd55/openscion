@@ -146,6 +146,38 @@ fn spawn_free_space_poll(
     });
 }
 
+/// Refreshes the blob-count gauge from the metadata, one bounded
+/// query per tick. The latest refresh is the value; a failed query
+/// keeps the last good value and logs once per tick. The poll stops
+/// when the server does.
+fn spawn_blob_count_poll(
+    store: Backend,
+    metrics: Arc<Metrics>,
+    stop: tokio::sync::watch::Receiver<()>,
+) {
+    tokio::spawn(async move {
+        let mut stop = stop;
+        loop {
+            let counted = tokio::task::spawn_blocking({
+                let store = store.clone();
+                move || store.read(|c| c.blob_count())
+            })
+            .await;
+            match counted {
+                Ok(Ok(blobs)) => metrics.set_blob_count(blobs),
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "the blob-count refresh failed");
+                }
+                Err(e) => tracing::warn!(error = %e, "the blob-count poll failed"),
+            }
+            tokio::select! {
+                () = tokio::time::sleep(BLOB_COUNT_POLL) => {}
+                _ = stop.changed() => break,
+            }
+        }
+    });
+}
+
 /// Set when the server's first stale-land sweep has finished. A test
 /// hook: the land round-trip guard waits for it before it resets the
 /// statement counter, so the sweep's own statements cannot fall inside
@@ -206,6 +238,11 @@ const _: () = assert!(READ_BUDGET_BYTES <= u32::MAX as usize);
 
 /// How often the free-space gauge of the data directory is refreshed.
 const FREE_SPACE_POLL: Duration = Duration::from_secs(30);
+
+/// How often the blob-count gauge is refreshed from the metadata: one
+/// bounded query per tick, never a scrape-time walk, and never a
+/// directory listing.
+const BLOB_COUNT_POLL: Duration = Duration::from_secs(60);
 
 /// What a server serves with, besides the data directory and the access
 /// rules: its limits, its per-principal quotas, its TLS, and its metrics.
@@ -321,6 +358,7 @@ pub async fn serve(
         Arc::clone(&metrics),
         stop_rx.clone(),
     ));
+    spawn_blob_count_poll(worker.store(), Arc::clone(&metrics), stop_rx.clone());
     let shutdown = {
         let mut stopped = stop_rx.clone();
         async move {

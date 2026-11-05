@@ -537,3 +537,65 @@ tests:
                 During a key rotation, check the tiers carry both
                 public keys before the old one is dropped
                 (docs/operations.md section 2).
+  # S1 BlobCount70: the share crosses 0.70 at 5m, fires after 15m more.
+  - interval: 1m
+    input_series:
+      - series: 'scion_blob_ceiling_share'
+        values: "0.69 0.69 0.69 0.69 0.69 0.70 0.71 0.71 0.71 0.71 0.71 0.71 0.71 0.71 0.71 0.71 0.71 0.71 0.71 0.71 0.71"
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: BlobCount70
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: BlobCount70
+        exp_alerts:
+          - exp_labels:
+              severity: medium
+            exp_annotations:
+              response: >-
+                The store holds 70% of the 1,000,000 blobs
+                docs/support.md supports. fsck stays fast for now;
+                watch the trend (docs/operations.md section 6).
+
+  # S2 BlobCount85: the share crosses 0.85 at 5m, fires after 15m more.
+  - interval: 1m
+    input_series:
+      - series: 'scion_blob_ceiling_share'
+        values: "0.84 0.84 0.84 0.84 0.84 0.85 0.86 0.86 0.86 0.86 0.86 0.86 0.86 0.86 0.86 0.86 0.86 0.86 0.86 0.86 0.86"
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: BlobCount85
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: BlobCount85
+        exp_alerts:
+          - exp_labels:
+              severity: high
+            exp_annotations:
+              response: >-
+                The store holds 85% of the supported blob count. Give
+                new repos a second store before the walks grow; there
+                is no tool to move existing repos between stores yet
+                (docs/operations.md section 6).
+
+  # S3 BlobCount100: the share crosses 1.0 at 5m, fires after 15m more.
+  - interval: 1m
+    input_series:
+      - series: 'scion_blob_ceiling_share'
+        values: "0.99 0.99 0.99 0.99 0.99 1.00 1.01 1.01 1.01 1.01 1.01 1.01 1.01 1.01 1.01 1.01 1.01 1.01 1.01 1.01 1.01"
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: BlobCount100
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: BlobCount100
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              response: >-
+                The store holds more blobs than docs/support.md
+                supports. The walk is seconds today and grows past
+                them; give new repos a second store now
+                (docs/operations.md section 6).
+

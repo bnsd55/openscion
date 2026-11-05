@@ -4068,6 +4068,17 @@ impl MetaTx for PgTx<'_> {
 
     /// Adds `blob` to the blobs that `repo` may name. Returns whether it is
     /// new.
+    /// One statement over `repo_blobs`: the hash-agg of its distinct
+    /// blobs. Bounded: it reads one table once, and returns one number.
+    fn blob_count(&mut self) -> Result<u64> {
+        let rows = self.c.query(
+            "SELECT count(*) FROM (SELECT DISTINCT blob FROM repo_blobs) t",
+            &[],
+        )?;
+        let n: i64 = rows[0].get(0);
+        Ok(u64::try_from(n).unwrap_or(0))
+    }
+
     fn add_repo_blob(&mut self, repo: RepoId, blob: BlobId) -> Result<bool> {
         let added = self.c.execute(
             "INSERT INTO repo_blobs (repo_id, blob) VALUES ($1, $2)

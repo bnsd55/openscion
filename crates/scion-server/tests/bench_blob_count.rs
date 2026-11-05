@@ -12,6 +12,7 @@
 use std::time::Duration;
 use std::time::Instant;
 
+use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use scion_server::{Backend, fsck, gc};
 
 /// One small blob's content: 64 bytes, unique per blob, so the store
@@ -143,6 +144,49 @@ fn blob_count_costs() {
         fill(&backend, count);
     }
     main_line("blob_bytes", count * 64);
+
+    // The metadata's blob rows: the count gauge's own subject. One row
+    // per stored blob, added in the store's own batch form (one
+    // statement per 4,096), so the count query below reads a table of
+    // the same size as the store's files.
+    if count > 0 {
+        let started = Instant::now();
+        backend
+            .write(|c| {
+                let repo = c.create_repo("bench")?;
+                let mut i = 0u64;
+                while i < count {
+                    let top = (i + 4096).min(count);
+                    let ids: Vec<scion_core::BlobId> = (i..top)
+                        .map(|n| scion_core::BlobId::of(&blob_content(n)))
+                        .collect();
+                    c.add_repo_blobs(repo, &ids)?;
+                    i = top;
+                }
+                Ok(())
+            })
+            .expect("the blob rows are written");
+        main_line(
+            "blob_rows_seconds",
+            format!("{:.3}", started.elapsed().as_secs_f64()),
+        );
+    }
+
+    // The count query the 60 s poll runs: five runs, each printed; the
+    // driver reports the middle one. One bounded statement over the
+    // blob rows, never a directory walk.
+    for run in 0..5 {
+        let started = Instant::now();
+        let counted = backend.read(|c| c.blob_count()).expect("the count runs");
+        main_line(
+            "blob_count_query_ms",
+            format!("{run} {:.3}", started.elapsed().as_secs_f64() * 1000.0),
+        );
+        assert_eq!(
+            counted, count,
+            "the count query counts the rows the run wrote"
+        );
+    }
 
     drop(backend);
 

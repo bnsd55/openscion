@@ -1310,6 +1310,14 @@ the process, scraped from there. The names:
   counts says a drive that cannot keep up with the imports.
 - `scion_data_free_bytes` — free bytes on the filesystem that holds the
   data directory, refreshed every 30 s; alert before it reaches zero.
+- `scion_blob_count` — blobs the store's metadata names, refreshed every
+  60 s by one bounded count query over the blob rows (never a directory
+  walk, never per scrape). At 1,000,000 blobs the query itself costs
+  about 0.6 s of one pooled read connection ([run
+  42040632163](https://github.com/bnsd55/openscion/actions/runs/42040632163)).
+- `scion_blob_ceiling_share` — the blob count as a share of the 1,000,000
+  blobs docs/support.md supports per data directory; the store alerts
+  that watch fsck's future read this gauge, not the count.
 - `scion_derive_walks_in_flight` / `scion_derive_walks_waiting` — derive
   walks that hold a permit, and walks that wait for one; waits that pile
   up while the in-flight count sits at the cap mean a cold history read
@@ -1574,6 +1582,40 @@ Escalate when the ratio stays high with the caps raised and the box's
 memory free: the tier's placement or shape needs its owner.
 
 Proof: crates/scion-server/tests/docs_alerts.rs::tier_miss_ratio_falls_when_the_store_serves_the_second_read
+
+### The store near its blob ceiling
+
+`BlobCount70`, `BlobCount85` and `BlobCount100` fire when
+`scion_blob_ceiling_share` passes 70%, 85% and 100% of the 1,000,000
+blobs docs/support.md supports per data directory, and stays past the
+line for 15 minutes. The share is the count the metadata names, divided
+by the ceiling; the gauge refreshes every 60 s from one bounded query.
+
+Read the share and its trend:
+
+```sh
+curl -s 127.0.0.1:9100/metrics | grep '^scion_blob_ceiling_share'
+```
+
+What to do at each level:
+
+- At 70% (`medium`): nothing is slow yet. Watch the share's trend across
+  a week; a store that adds blobs faster than the gc takes them lands
+  on the next line by itself.
+- At 85% (`high`): plan the move. The first cold `fsck` walk costs about
+  62 s at 1,000,000 blobs (61.7 µs a blob, run 41716921823) and the cost
+  a blob grows with the count: 863 s a walk, 172.6 µs a blob, at
+  5,000,000 (#828). What exists to move to: a second store - its own
+  database, data directory and server, because one server runs per
+  database - that takes new repos. There is no tool to move existing
+  repos between stores yet.
+- At 100% (`critical`): the store is past the count docs/support.md
+  supports. The walk is seconds today and grows past them; the store
+  still works, but nothing below this line is tested. Give new repos a
+  second store now (as at 85%); there is no tool to move existing repos
+  between stores yet.
+
+Proof: crates/scion-server/tests/blob_count_gauge.rs::the_count_is_what_the_metadata_names_not_what_the_folder_holds (behaviour, no command: the runbook's steps are operator actions - watch the trend, plan the split - and each alert's firing is proven by the promtool cases deploy/prometheus/openscion-alerts-test.yml runs, which fire past the threshold and stay quiet just below it).
 
 ## 7. Capacity
 
