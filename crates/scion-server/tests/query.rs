@@ -1258,7 +1258,12 @@ fn similar_files_are_not_searched_past_git_rename_limit() {
             .map(str::to_owned)
             .collect();
         expected.sort();
-        let entries = diff_pages(&store, changeset_of(&store, old), changeset_of(&store, new));
+        let entries = diff_pages(
+            &store,
+            changeset_of(&store, old),
+            changeset_of(&store, new),
+            None,
+        );
         assert_eq!(name_status(&entries), expected);
         assert_eq!(entries.iter().any(|e| e.rename.is_some()), found);
     }

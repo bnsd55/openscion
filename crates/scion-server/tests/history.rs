@@ -238,6 +238,7 @@ fn blame(store: &Backend, cs: ChangesetId, p: &str) -> Blame {
         &path(p),
         &Resume::default(),
         &Bytes::new(1 << 30),
+        None,
     )
     .unwrap()
 }
@@ -262,6 +263,7 @@ fn blame_bounded(
         &path(p),
         &Resume::default(),
         &Bytes::new(cap),
+        None,
     )
 }
 
@@ -398,6 +400,7 @@ fn blame_refuses_what_it_cannot_diff() {
             &path(p),
             &Resume::default(),
             &Bytes::new(1 << 30),
+            None,
         );
         assert!(
             matches!(result, Err(Error::InvalidArgument(_))),
@@ -411,6 +414,7 @@ fn blame_refuses_what_it_cannot_diff() {
         &path("missing"),
         &Resume::default(),
         &Bytes::new(1 << 30),
+        None,
     );
     assert!(matches!(missing, Err(Error::NotFound(_))), "{missing:?}");
 }
@@ -450,8 +454,16 @@ fn blame_calls(
     let mut calls = 0;
     loop {
         calls += 1;
-        let result =
-            blame::blame(store, REPO, cs, &path(p), &resume, &Bytes::new(1 << 30)).unwrap();
+        let result = blame::blame(
+            store,
+            REPO,
+            cs,
+            &path(p),
+            &resume,
+            &Bytes::new(1 << 30),
+            None,
+        )
+        .unwrap();
         paths.extend(result.changesets.into_iter().map(|(id, _, p)| (id, p)));
         // Each reply covers a window of the file: its first range names
         // the window's first line.
@@ -493,9 +505,16 @@ fn blame_calls(
                     &next.window[..next.window.len().min(6)]
                 );
                 let bytes = blame::encode_cursor(&next, REPO, cs, &path(p));
-                let (decoded, hold) =
-                    blame::decode_cursor(store, REPO, &bytes, cs, &path(p), &Bytes::new(1 << 30))
-                        .unwrap();
+                let (decoded, hold) = blame::decode_cursor(
+                    store,
+                    REPO,
+                    &bytes,
+                    cs,
+                    &path(p),
+                    &Bytes::new(1 << 30),
+                    None,
+                )
+                .unwrap();
                 drop(hold);
                 resume = decoded;
             }
@@ -1092,6 +1111,7 @@ fn a_rename_search_goes_on_where_a_call_stopped() {
             &path("new"),
             &resume,
             &Bytes::new(1 << 30),
+            None,
         )
         .unwrap();
         assert_eq!(result.ranges, [range(1, n, None, 1)]);
@@ -1111,6 +1131,7 @@ fn a_rename_search_goes_on_where_a_call_stopped() {
         &path("new"),
         &resume,
         &Bytes::new(1 << 30),
+        None,
     )
     .unwrap();
     assert_eq!(last.resume, None);
@@ -1137,6 +1158,7 @@ fn a_rename_search_goes_on_where_a_call_stopped() {
         &path("new"),
         &Resume::default(),
         &Bytes::new(1 << 30),
+        None,
     )
     .unwrap()
     .resume
@@ -1155,6 +1177,7 @@ fn a_rename_search_goes_on_where_a_call_stopped() {
             &path("new"),
             &resume,
             &Bytes::new(1 << 30),
+            None,
         );
         assert!(
             matches!(result, Err(Error::InvalidArgument(_))),
@@ -1215,6 +1238,7 @@ fn a_rename_search_moves_on_every_call() {
         &path("new"),
         &resume,
         &Bytes::new(1 << 30),
+        None,
     )
     .unwrap();
     assert_eq!(last.resume, None);
@@ -1529,6 +1553,7 @@ fn a_cursor_with_huge_line_numbers_decodes_without_overflow() {
         ids[0],
         &path("f"),
         &Bytes::new(1 << 30),
+        None,
     )
     .expect("a cursor with the biggest line numbers decodes");
     assert_eq!(decoded.after_line, usize::MAX);
@@ -1573,6 +1598,7 @@ fn a_cursor_with_a_run_longer_than_the_word_is_refused() {
         ids[0],
         &path("f"),
         &Bytes::new(1 << 30),
+        None,
     )
     .expect_err("a cursor with a run longer than the word is refused");
     assert!(matches!(err, Error::InvalidArgument(_)), "{err:?}");
@@ -1606,6 +1632,7 @@ fn a_cursor_names_only_changesets_of_its_repo() {
         ids[1],
         &path("f"),
         &Bytes::new(1 << 30),
+        None,
     )
     .unwrap_err();
     assert!(matches!(err, Error::InvalidArgument(_)), "{err:?}");
@@ -1626,6 +1653,7 @@ fn a_cursor_names_only_changesets_of_its_repo() {
         ids[1],
         &path("f"),
         &Bytes::new(1 << 30),
+        None,
     )
     .unwrap_err();
     assert!(matches!(err, Error::InvalidArgument(_)), "{err:?}");
@@ -1663,6 +1691,7 @@ fn a_cursor_of_an_unknown_version_is_refused() {
         ids[0],
         &path("f"),
         &Bytes::new(1 << 20),
+        None,
     );
     assert!(
         matches!(result, Err(Error::InvalidArgument(_))),
@@ -1703,13 +1732,22 @@ fn a_cursor_with_past_bounds_is_refused_before_it_allocates() {
         ids[1],
         &path("f"),
         &Bytes::new(1 << 30),
+        None,
     )
     .unwrap_err();
     assert!(matches!(err, Error::InvalidArgument(_)), "{err:?}");
 
     // A cursor that does not fit the budget is refused too.
-    let err =
-        blame::decode_cursor(&store, REPO, &good, ids[1], &path("f"), &Bytes::new(10)).unwrap_err();
+    let err = blame::decode_cursor(
+        &store,
+        REPO,
+        &good,
+        ids[1],
+        &path("f"),
+        &Bytes::new(10),
+        None,
+    )
+    .unwrap_err();
     assert!(
         matches!(err, Error::ResourceExhausted(_)),
         "a cursor past the budget: {err:?}"
@@ -1773,6 +1811,7 @@ fn a_call_that_holds_budget_never_waits_for_more() {
         &path("f"),
         &Resume::default(),
         &Bytes::new(600),
+        None,
     )
     .unwrap_err();
     assert!(

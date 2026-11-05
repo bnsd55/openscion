@@ -490,11 +490,19 @@ fn two_urls_that_ride_different_schemas_open_side_by_side() {
         .batch_execute("CREATE SCHEMA scion_test_lock_one; CREATE SCHEMA scion_test_lock_two;")
         .unwrap();
     let dir_a = scion_server::test_support::private_tempdir();
-    let a = Backend::open(dir_a.path(), &db.url_riding(Some("scion_test_lock_one")))
-        .expect("the first schema opens");
+    let a = Backend::open(
+        dir_a.path(),
+        &db.url_riding(Some("scion_test_lock_one")),
+        None,
+    )
+    .expect("the first schema opens");
     let dir_b = scion_server::test_support::private_tempdir();
-    let b = Backend::open(dir_b.path(), &db.url_riding(Some("scion_test_lock_two")))
-        .expect("the second schema opens beside it");
+    let b = Backend::open(
+        dir_b.path(),
+        &db.url_riding(Some("scion_test_lock_two")),
+        None,
+    )
+    .expect("the second schema opens beside it");
     // Each store keeps its rows in its own schema: one repo apiece, and
     // the other schema's table stays empty.
     a.write(|c| c.create_repo("one").map(|_| ())).unwrap();
