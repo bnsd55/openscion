@@ -940,7 +940,7 @@ mod tests {
                     for edits in history {
                         let cs = changeset(ids.last().copied(), edits);
                         ids.push(if stored {
-                            store_changeset(c, repo, &cs, &mut lens_of(&store))?.0
+                            store_changeset(c, repo, &cs, &mut lens_of(&store), None)?.0
                         } else {
                             c.insert_changeset(repo, &cs)?
                         });

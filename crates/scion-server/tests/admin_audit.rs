@@ -318,7 +318,7 @@ fn seed_exportable(data: &std::path::Path) {
                     &cs,
                     &mut |_| Ok(0),
                     None,
-                )?
+                , None)?
                 .0;
                 assert!(c.cas_ref(repo, "main", None, id)?);
                 Ok(())

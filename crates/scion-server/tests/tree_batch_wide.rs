@@ -63,7 +63,7 @@ fn a_wide_changeset_builds_under_the_bound() {
     );
     let (base_id, base_root) = store
         .write(
-            |c| tree::store_changeset(c, repo, &base, &mut |_| Ok(0)),
+            |c| tree::store_changeset(c, repo, &base, &mut |_| Ok(0), None),
             None,
         )
         .unwrap();

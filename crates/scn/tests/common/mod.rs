@@ -277,7 +277,7 @@ pub(crate) fn land(store: &Backend, cs: &Changeset) -> ChangesetId {
     store
         .write(|c| {
             let repo = c.create_repo(REPO)?;
-            let (id, _) = tree::store_changeset(c, repo, cs, &mut tree::lens_of(store))?;
+            let (id, _) = tree::store_changeset(c, repo, cs, &mut tree::lens_of(store), None)?;
             let version = c.get_ref(repo, "main")?.map(|r| r.version);
             assert!(c.cas_ref(repo, "main", version, id)?);
             Ok(id)

@@ -64,7 +64,7 @@ fn the_old_rows_a_write_path_deletes_are_gone_after_its_commit() {
     let parent = changeset("parent\n", None);
     let parent_id = store
         .write(
-            |c| Ok(tree::store_changeset(c, repo, &parent, &mut |_| Ok(0))?.0),
+            |c| Ok(tree::store_changeset(c, repo, &parent, &mut |_| Ok(0), None)?.0),
             None,
         )
         .unwrap();
@@ -85,7 +85,7 @@ fn the_old_rows_a_write_path_deletes_are_gone_after_its_commit() {
     let child = changeset("child\n", Some(parent_id));
     store
         .write(
-            |c| tree::store_changeset(c, repo, &child, &mut |_| Ok(0)),
+            |c| tree::store_changeset(c, repo, &child, &mut |_| Ok(0), None),
             None,
         )
         .unwrap();
@@ -107,7 +107,7 @@ fn a_write_that_disagrees_with_a_stored_row_still_refuses() {
     let cs = changeset("root\n", None);
     let id = store
         .write(
-            |c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0),
+            |c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0),
             None,
         )
         .unwrap();
@@ -136,7 +136,7 @@ fn the_write_paths_derived_reads_ride_one_preload() {
     let parent = changeset("parent\n", None);
     let parent_id = store
         .write(
-            |c| Ok(tree::store_changeset(c, repo, &parent, &mut |_| Ok(0))?.0),
+            |c| Ok(tree::store_changeset(c, repo, &parent, &mut |_| Ok(0), None)?.0),
             None,
         )
         .unwrap();
@@ -144,7 +144,7 @@ fn the_write_paths_derived_reads_ride_one_preload() {
     Backend::test_reset_statement_count();
     store
         .write(
-            |c| tree::store_changeset(c, repo, &child, &mut |_| Ok(0)),
+            |c| tree::store_changeset(c, repo, &child, &mut |_| Ok(0), None),
             None,
         )
         .unwrap();

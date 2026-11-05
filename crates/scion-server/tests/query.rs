@@ -217,7 +217,10 @@ fn chain(store: &Backend, changes: Vec<BTreeMap<RepoPath, Option<FileState>>>) -
                     changes,
                 )
                 .expect("changeset fits the format");
-                ids.push(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0, None);
+                ids.push(
+                    tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0,
+                    None,
+                );
             }
             Ok(ids)
         })

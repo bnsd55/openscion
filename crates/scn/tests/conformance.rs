@@ -284,7 +284,7 @@ fn fixture() -> (Tiers, ChangesetId) {
     store
         .write(|c| {
             let repo = c.create_repo("other")?;
-            tree::store_changeset(c, repo, &other, &mut tree::lens_of(&store))
+            tree::store_changeset(c, repo, &other, &mut tree::lens_of(&store), None)
         })
         .unwrap();
     (Tiers::start(data, store), first)

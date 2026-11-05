@@ -60,13 +60,13 @@ fn the_derivation_of_a_hundred_directories_costs_four_statements_more() {
         );
         let base_id = store
             .write(
-                |c| Ok(tree::store_changeset(c, repo, &base, &mut |_| Ok(0))?.0),
+                |c| Ok(tree::store_changeset(c, repo, &base, &mut |_| Ok(0), None)?.0),
                 None,
             )
             .unwrap();
         let (_base_id, base_root) = store
             .write(
-                |c| tree::store_changeset(c, repo, &base, &mut |_| Ok(0)),
+                |c| tree::store_changeset(c, repo, &base, &mut |_| Ok(0), None),
                 None,
             )
             .unwrap();

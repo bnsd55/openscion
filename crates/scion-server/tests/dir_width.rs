@@ -74,7 +74,7 @@ fn store_with_wide_dir(names: usize) -> (tempfile::TempDir, Backend, BlobId) {
                 &root,
                 &mut |_| Ok(0),
                 None,
-            )?;
+            , None)?;
             assert!(c.cas_ref(repo, "main", None, root)?);
             c.add_repo_blob(repo, shared)?;
             c.add_repo_blob(repo, changed)?;

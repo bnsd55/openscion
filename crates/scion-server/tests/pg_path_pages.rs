@@ -64,7 +64,7 @@ fn commit(store: &Backend, repo: RepoId, base: ChangesetId, path: &str) -> Chang
     store.blobs().put(b"changed\n").unwrap();
     store
         .write(
-            |c| Ok(tree::store_changeset(c, repo, &cs, &mut tree::lens_of(store))?.0),
+            |c| Ok(tree::store_changeset(c, repo, &cs, &mut tree::lens_of(store), None)?.0),
             None,
         )
         .unwrap()

@@ -396,7 +396,7 @@ fn chain<S: Into<Option<FileState>>>(
                 .expect("changeset fits the format");
                 // The blobs of this chain are never read, only named; their lengths
                 // are irrelevant to log and blame.
-                ids.push(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0);
+                ids.push(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0);
             }
             Ok(ids)
         })

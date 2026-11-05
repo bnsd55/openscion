@@ -63,7 +63,10 @@ fn source(data: &Path, n: usize) -> Backend {
                 let content = format!("change-{i}\n");
                 store.blobs().put(content.as_bytes()).unwrap();
                 let cs = chain(parent.into_iter().collect(), "f.txt", &content);
-                parent = Some(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0, None);
+                parent = Some(
+                    tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0,
+                    None,
+                );
             }
             assert!(c.cas_ref(repo, "main", None, parent.expect("depth > 0"))?);
             Ok(())

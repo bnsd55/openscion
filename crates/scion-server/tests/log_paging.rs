@@ -58,7 +58,10 @@ fn chain(count: usize) -> (tempfile::TempDir, Backend, Vec<scion_core::Changeset
                     [(RepoPath::new(path).unwrap(), Some(regular))].into(),
                 )
                 .expect("changeset fits the format");
-                ids.push(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0, None);
+                ids.push(
+                    tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0,
+                    None,
+                );
             }
             Ok(ids)
         })

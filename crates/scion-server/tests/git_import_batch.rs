@@ -58,7 +58,7 @@ fn archive_with_provenance(
     let cs = changeset(Vec::new(), "one\n");
     let cs_id = store
         .write(
-            |c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0),
+            |c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0),
             None,
         )
         .unwrap();
@@ -141,14 +141,14 @@ fn a_repeated_provenance_pair_is_a_no_op() {
     let first = changeset(Vec::new(), "one\n");
     let first = store
         .write(
-            |c| Ok(tree::store_changeset(c, repo, &first, &mut |_| Ok(0))?.0),
+            |c| Ok(tree::store_changeset(c, repo, &first, &mut |_| Ok(0), None)?.0),
             None,
         )
         .unwrap();
     let second = changeset(Vec::new(), "two\n");
     let second = store
         .write(
-            |c| Ok(tree::store_changeset(c, repo, &second, &mut |_| Ok(0))?.0),
+            |c| Ok(tree::store_changeset(c, repo, &second, &mut |_| Ok(0), None)?.0),
             None,
         )
         .unwrap();
