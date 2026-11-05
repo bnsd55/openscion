@@ -1294,9 +1294,9 @@ the process, scraped from there. The names:
   a partial reader; a rate that stays high across changesets of one rule
   set means the per-tree memo is not serving and every derivation re-walks.
 - `scion_diff_rename_cache_bytes` — the bytes the paged diffs' shared
-  rename maps hold now; a gauge that sits at its cap means many large
-  paged diffs are caching their rename searches, and the oldest entries
-  age out first.
+  rename cache costs now, the entries' own memory included; a gauge
+  that sits at its cap means many large paged diffs are caching their
+  rename searches, and the oldest entries age out first.
 - `scion_cache_hits_total` / `scion_cache_misses_total` — what a tier
   served from its store against what it fetched upstream.
 - `scion_blob_sync_seconds` — one fsync attempt on the blob write path, failed ones included (temp file, stored file, blob directory, or the drive-cache flush)
