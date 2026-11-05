@@ -6186,7 +6186,7 @@ pub(crate) mod pool_tests {
         assert_eq!(recorded.state, LandState::Pending);
         let pg = store.into_pg();
         // The join answers the ref while it exists.
-        let (row, head, head_tree) = crate::meta::Meta::read(&pg, |c| {
+        let (row, head, _head_tree) = crate::meta::Meta::read(&pg, |c| {
             let repo = c.repo_id("r")?;
             c.land_outcome(repo, &Caller("t".into()), recorded.land_id, Some("main"))
         })
