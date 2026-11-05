@@ -498,9 +498,7 @@ fn a_refusing_open_writes_nothing_to_the_catalog() {
         let mut admin =
             postgres::Client::connect(&base, postgres::NoTls).expect("the test database connects");
         admin
-            .batch_execute(&format!(
-                "CREATE ROLE {role} LOGIN PASSWORD '{password}'"
-            ))
+            .batch_execute(&format!("CREATE ROLE {role} LOGIN PASSWORD '{password}'"))
             .expect("the role is made");
         admin
             .batch_execute(&format!("GRANT USAGE ON SCHEMA {schema} TO {role}"))
