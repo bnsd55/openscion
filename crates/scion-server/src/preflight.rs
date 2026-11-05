@@ -307,7 +307,7 @@ fn store_pairing(data: &Path, db: &postgres::Client) -> Answer {
         .flatten()
         .map(|row| row.get(0));
     match (marker, held) {
-        (Some(marker), Some(held)) if marker == held => {
+        (Some(marker), Some(held)) if marker == *held => {
             Answer::Ok("the data directory and the database name one store".to_owned())
         }
         (Some(marker), Some(held)) => Answer::Fail(format!(
@@ -315,7 +315,7 @@ fn store_pairing(data: &Path, db: &postgres::Client) -> Answer {
              but the database names the store {}: one was restored over \
              the other; give the directory of the database's own store, \
              or a directory the database has never served",
-            hex(marker),
+            hex(&marker),
             hex(&held)
         )),
         (Some(_), None) => {
