@@ -3597,7 +3597,10 @@ fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
     // to prevent. The migration's own error comes first, and the
     // restore's failure answers when the migrations left none.
     let restored = client.execute(
-        &format!("SET statement_timeout = {}", base_statement_timeout()),
+        &format!(
+            "SET statement_timeout = '{}'",
+            base_statement_timeout()
+        ),
         &[],
     );
     // The lock lives on the client's session: it goes back whatever the
