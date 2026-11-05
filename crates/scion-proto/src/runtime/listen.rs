@@ -2285,7 +2285,7 @@ mod tests {
     /// to compare with what FLOOR counts.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_slow_reader_holds_send_buffer_over_the_stream_limit() {
-        let streams = DEFAULT_STREAMS;
+        let streams = u32::from(DEFAULT_STREAMS.get());
         let limits = Limits::default();
         let (addr, metrics) = serve(limits, TIMERS).await;
         let channel = endpoint(addr)
