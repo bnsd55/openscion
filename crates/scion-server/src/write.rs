@@ -64,7 +64,9 @@ impl Park {
 
     /// Parks the caller while the park file of `id` exists. The ceiling
     /// bounds a park nobody lifts: it fails the holder, not the store.
-    fn park(&self, id: &BlobId) {
+    pub(crate) fn park(&self, id: impl std::fmt::Display) {
+        // A path-shaped id names a flat file: the separator comes out.
+        let id = id.to_string().replace('/', "_");
         let root = self
             .root
             .lock()
@@ -90,6 +92,13 @@ impl Park {
 /// [`create_changeset`], keyed by the changeset's first put's blob.
 #[cfg(test)]
 pub(crate) static PARK_CREATE: Park = Park {
+    root: std::sync::Mutex::new(None),
+};
+
+/// The park inside the tree build ([`crate::tree::apply`]), at the end
+/// of a put's path: a test holds the caller between two paths' checks.
+#[cfg(test)]
+pub(crate) static PARK_APPLY: Park = Park {
     root: std::sync::Mutex::new(None),
 };
 
@@ -149,7 +158,7 @@ pub fn create_changeset(
     // while the park file of its first put's blob exists.
     #[cfg(test)]
     if let Some((_, blob)) = db::puts(&cs).next() {
-        PARK_CREATE.park(&blob);
+        PARK_CREATE.park(blob);
     }
     // See `tree::store_changeset`. The write's flush covers these steps.
     tree::fill_root_tree(store, repo_id, parent)?;
@@ -175,7 +184,8 @@ pub fn create_changeset(
                 return Err(bad_blob(blob, path, "is not stored", repo));
             }
         }
-        tree::store_changeset(c, repo_id, &cs, &mut tree::lens_from(&lens)).map(|(id, _)| id)
+        tree::store_changeset_within(c, repo_id, &cs, &mut tree::lens_from(&lens), deadline)
+            .map(|(id, _)| id)
     })
 }
 
@@ -207,7 +217,7 @@ pub fn put_blob(store: &Backend, repo: RepoId, upload: Upload) -> Result<BlobId>
     // The test seam of the collector race: the caller parks here, after
     // the read answered and before the row question is settled.
     #[cfg(test)]
-    PARK_PUT.park(&id);
+    PARK_PUT.park(id);
     store.blobs().put_upload(upload, member)?;
     // The upsert runs even when the read said the row is there: the
     // collector's prune may have taken the row between the read and
@@ -328,7 +338,7 @@ fn check_blobs(
         let problem = match blobs.keep(blob)? {
             BlobStatus::Valid => {
                 #[cfg(test)]
-                PARK_CHECK.park(&blob);
+                PARK_CHECK.park(blob);
                 lens.insert(blob, store.blobs().size(blob)? as u64);
                 continue;
             }

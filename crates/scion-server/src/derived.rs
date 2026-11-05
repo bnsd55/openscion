@@ -603,17 +603,23 @@ pub(crate) fn backfill<K: Kind>(
 ///
 /// [`Error::NotFound`] if `repo` does not have `cs`. Errors of
 /// [`Kind::derive`].
+/// `deadline`: the call's deadline, when the caller serves a request -
+/// the walk and the chain check it per changeset, so a cancelled call's
+/// job stops between changesets instead of holding its permit to the
+/// chain's end. `None` for command and test callers, which have no
+/// request to serve.
 pub(crate) fn derive<K: Kind>(
     c: &mut dyn MetaTx,
     repo: RepoId,
     cs: ChangesetId,
     lens: crate::tree::BlobLens<'_>,
+    deadline: Option<&Deadline>,
 ) -> Result<K::Value> {
     let mut walk = match Walk::start::<K>(c, repo, cs)? {
         ControlFlow::Break(value) => return Ok(value),
         ControlFlow::Continue(walk) => walk,
     };
-    walk.step::<K>(c, usize::MAX)?;
+    walk.step::<K>(c, usize::MAX, deadline)?;
     let (value, _written) = derive_chain::<K>(c, repo, &walk.into_pending(), lens)?;
     value.ok_or_else(|| Error::NotFound(format!("changeset {cs}")))
 }
@@ -679,7 +685,7 @@ fn walk_all<K: Kind>(
         Ok(match Walk::start::<K>(c, repo, cs)? {
             ControlFlow::Continue(mut walk) => {
                 take_walk_bytes(budget, held, &walk)?;
-                walk.step::<K>(c, STEP)?;
+                walk.step::<K>(c, STEP, None)?;
                 ControlFlow::Continue(walk)
             }
             stored @ ControlFlow::Break(_) => stored,
@@ -692,7 +698,7 @@ fn walk_all<K: Kind>(
     while !walk.next.is_empty() {
         check()?;
         take_walk_bytes(budget, held, &walk)?;
-        store.read_unflushed(|c| walk.step::<K>(c, STEP))?;
+        store.read_unflushed(|c| walk.step::<K>(c, STEP, None))?;
     }
     Ok(ControlFlow::Continue(walk.into_pending()))
 }
@@ -759,8 +765,18 @@ impl Walk {
     /// Visits at most `limit` changesets. Each one without a stored value
     /// goes to `pending`, and the walk goes on to the parents that `K`
     /// reads.
-    fn step<K: Kind>(&mut self, c: &mut dyn MetaTx, limit: usize) -> Result<()> {
+    fn step<K: Kind>(
+        &mut self,
+        c: &mut dyn MetaTx,
+        limit: usize,
+        deadline: Option<&Deadline>,
+    ) -> Result<()> {
         for _ in 0..limit {
+            if let Some(deadline) = deadline {
+                // A cancelled call's job stops between changesets, and
+                // frees its permit, instead of walking on.
+                deadline.check()?;
+            }
             let Some((id, generation)) = self.next.pop() else {
                 break;
             };
@@ -1557,7 +1573,7 @@ mod tests {
             Err(Error::NotFound(_))
         ));
         assert!(matches!(
-            store.commit(|c| derive::<ChangedPathsV1>(c, other, tip, &mut tree::lens_none())),
+            store.commit(|c| derive::<ChangedPathsV1>(c, other, tip, &mut tree::lens_none(), None)),
             Err(Error::NotFound(_))
         ));
     }
@@ -1605,7 +1621,7 @@ mod tests {
                 else {
                     panic!("no value is stored yet");
                 };
-                walk.step::<ChangedPathsV1>(c, STEP)?;
+                walk.step::<ChangedPathsV1>(c, STEP, None)?;
                 Ok(walk)
             })
             .unwrap();
@@ -1945,7 +1961,7 @@ mod tests {
                 };
                 let mut visits = 0;
                 while !walk.next.is_empty() {
-                    walk.step::<Ancestry>(c, 1)?;
+                    walk.step::<Ancestry>(c, 1, None)?;
                     let mut ids_in_next: Vec<ChangesetId> =
                         walk.next.iter().map(|&(id, _)| id).collect();
                     let count = ids_in_next.len();
@@ -1973,7 +1989,7 @@ mod tests {
                 let ControlFlow::Continue(mut walk) = Walk::start::<Ancestry>(c, repo, tip)? else {
                     panic!("no value is stored yet");
                 };
-                walk.step::<Ancestry>(c, STEP)?;
+                walk.step::<Ancestry>(c, STEP, None)?;
                 Ok(walk)
             })
             .unwrap();

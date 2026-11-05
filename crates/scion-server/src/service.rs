@@ -3066,6 +3066,65 @@ mod tests {
         (gates, parked)
     }
 
+    /// The measurement #868 asks for, before any fix: N long calls take
+    /// all permits and cancel at once; their jobs detach and run on, as
+    /// a client's cancel leaves them - a job with no deadline check in
+    /// its current phase (one long statement, a large tree store) holds
+    /// its permit to the phase's end. A live call then times its wait
+    /// for a permit. The numbers land in the CI log; the mail to the
+    /// lead carries them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_cancelled_calls_keep_their_permits_until_their_work_ends() {
+        const LONG: Duration = Duration::from_millis(1000);
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let worker = Arc::new(Worker::new(store));
+        // The baseline: a fast call with no load.
+        let started = std::time::Instant::now();
+        worker.run(|_| Ok(())).await.unwrap();
+        let baseline = started.elapsed();
+        // MAX_BLOCKING long calls: a job that sleeps past any check.
+        let tasks: Vec<tokio::task::JoinHandle<()>> = (0..MAX_BLOCKING)
+            .map(|_| {
+                tokio::spawn({
+                    let worker = Arc::clone(&worker);
+                    async move {
+                        let _ = worker
+                            .run(move |_| {
+                                std::thread::sleep(LONG);
+                                Ok(())
+                            })
+                            .await;
+                    }
+                })
+            })
+            .collect();
+        while worker.permits.available_permits() > 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        // The cancels, at once: dropping the await detaches the jobs.
+        for task in &tasks {
+            task.abort();
+        }
+        // A live call times its wait for a permit.
+        let started = std::time::Instant::now();
+        worker.run(|_| Ok(())).await.unwrap();
+        let waited = started.elapsed();
+        eprintln!(
+            "#868: baseline {baseline:?}; after {MAX_BLOCKING} cancelled calls              of {LONG:?} with no check, the live call waited {waited:?}"
+        );
+        // A phase with no check keeps its permit to its end: the wait
+        // is about one phase, the ceiling this PR documents.
+        assert!(
+            waited >= Duration::from_millis(800),
+            "a phase with no check gave up its permit early: {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(5),
+            "the live call never got a permit: {waited:?}"
+        );
+    }
+
     /// A call aborted while its job could not claim it: the intent is
     /// durable, the job never claimed, the drop answers it `cancelled`,
     /// and no land row is recorded. This is the window the test above
@@ -3458,6 +3517,143 @@ mod tests {
             }))
             .await
             .expect("the fresh call answers, deriving now");
+    }
+
+    /// The proof #868 asks for, on a real long phase: a large tree's
+    /// store parks mid-build, its call cancels, and a live call times
+    /// its wait for the permit. With the per-path check in the build,
+    /// the cancelled job stops at the next path and the wait is a check
+    /// interval, not the rest of the build; the number lands in the CI
+    /// log.
+    #[allow(clippy::too_many_lines)] // the large changeset's fixture is the length
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_large_tree_store_frees_its_permit_at_the_next_path() {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let repo_id = store.write(|c| c.create_repo("r")).unwrap();
+        // A large changeset: 2,000 paths, two blobs alternating, so the
+        // build runs long enough to park mid-way.
+        let one = store.blobs().put(b"one\n").unwrap();
+        let two = store.blobs().put(b"two\n").unwrap();
+        let state = |blob| {
+            Some(FileState::Regular {
+                content: blob,
+                executable: false,
+            })
+        };
+        let root = Changeset::new(
+            vec![],
+            IdentityTime::new(b"t".to_vec(), b"t@x".to_vec(), 0, 0)
+                .expect("changeset fits the format"),
+            None,
+            b"root".to_vec(),
+            [(RepoPath::new("seed").unwrap(), state(one))].into(),
+        )
+        .expect("changeset fits the format");
+        let root = store
+            .write(|c| {
+                let root = c.insert_changeset(repo_id, &root)?;
+                assert!(c.cas_ref(repo_id, "main", None, root)?);
+                c.add_repo_blobs(repo_id, &[one, two])?;
+                Ok(root)
+            })
+            .unwrap();
+        let changes: std::collections::BTreeMap<RepoPath, Option<FileState>> = (0..2000)
+            .map(|i| {
+                (
+                    RepoPath::new(format!("cancel-proof/{i:04}")).unwrap(),
+                    state(if i % 2 == 0 { one } else { two }),
+                )
+            })
+            .collect();
+        let cs = Changeset::new(
+            vec![root],
+            IdentityTime::new(b"t".to_vec(), b"t@x".to_vec(), 0, 0)
+                .expect("changeset fits the format"),
+            None,
+            b"a large tree".to_vec(),
+            changes,
+        )
+        .expect("changeset fits the format");
+        let bytes = cs.encode();
+        let service = Arc::new(test_service(store.clone()));
+        // The build parks at the end of its first put's path; the call
+        // cancels while it waits, and the park then lets the job reach
+        // the next path's check, which reads the cancel and stops.
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        write::PARK_APPLY.arm(&hooks);
+        // The park's id is the path: this test's paths name no other
+        // build, so no other job parks on the armed seam.
+        std::fs::write(hooks.join("park-cancel-proof_0000"), b"").unwrap();
+        let call = tokio::spawn({
+            let service = Arc::clone(&service);
+            let bytes = bytes.clone();
+            async move {
+                service
+                    .create_changeset(as_default(scion_proto::v1::CreateChangesetRequest {
+                        repo: "r".into(),
+                        changeset: bytes,
+                    }))
+                    .await
+            }
+        });
+        let parked = hooks.join("parked-cancel-proof_0000");
+        let started = Instant::now();
+        while !parked.exists() {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the build never parked"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        call.abort();
+        // Joining puts the guard's drop (the cancel) before the lift.
+        assert!(call.await.unwrap_err().is_cancelled());
+        // The next path's park stands ready before the lift: a job with
+        // no put-path check reaches path 1 and parks there; the check
+        // stops it before that. The arm stays up for this window.
+        std::fs::write(hooks.join("park-cancel-proof_0001"), b"").unwrap();
+        std::fs::remove_file(hooks.join("park-cancel-proof_0000")).unwrap();
+        // A window for the job to reach path 1 if its check is gone:
+        // the window closes after 500 ms, and a job that parked in it
+        // fails the assert below; the checked job never parks.
+        let started = Instant::now();
+        while !hooks.join("parked-cancel-proof_0001").exists()
+            && started.elapsed() < Duration::from_millis(500)
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            !hooks.join("parked-cancel-proof_0001").exists(),
+            "the cancelled job walked past its next path's check and \
+             parked within {:?}",
+            started.elapsed()
+        );
+        std::fs::remove_file(hooks.join("park-cancel-proof_0001")).unwrap();
+        write::PARK_APPLY.lift();
+        // The live call times its wait for the permit the parked job
+        // held. The job's next path check stops it first.
+        let started = Instant::now();
+        service.worker.run(|_| Ok(())).await.unwrap();
+        let waited = started.elapsed();
+        eprintln!(
+            "#868 real phase: the live call waited {waited:?} for the permit \
+             of a cancelled large tree's store"
+        );
+        assert!(
+            waited < Duration::from_secs(5),
+            "the live call waited past a check interval: {waited:?}"
+        );
+        // The build rolled back: no changeset row, no tree rows.
+        let id = write::decode(&bytes).unwrap().1;
+        let stored = store
+            .read(|c| c.stored_changeset_body_lengths(&[id.as_bytes().to_vec()]))
+            .unwrap();
+        assert!(
+            stored.iter().all(|(_, len)| *len == 0),
+            "the cancelled build wrote nothing"
+        );
     }
 
     /// A call cut while its `CreateChangeset` hashed blobs: the job stops

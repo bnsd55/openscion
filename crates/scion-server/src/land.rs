@@ -806,7 +806,7 @@ fn finish(
             Planned::Settled(row) => return Ok(Finished::Outcome(row)),
             Planned::Do(plan) => plan,
         };
-        match settle(lands, store, repo, land_id, &req.target_ref, plan, index) {
+        match settle(lands, store, repo, land_id, req, plan, index) {
             Err(Error::Aborted(detail)) if attempt < MAX_ATTEMPTS => {
                 tracing::info!(land_id, attempt, %detail, "planning the land again");
                 if let Some(metrics) = &lands.metrics {
@@ -900,10 +900,12 @@ fn settle(
     store: &Backend,
     repo: RepoId,
     land_id: i64,
-    target: &str,
+    req: &LandRequest,
     plan: Plan,
     index: &mut Option<PathIndex>,
 ) -> Result<Finished> {
+    let target = req.target_ref.as_str();
+    let deadline = &req.deadline;
     let (rebased, head, head_tree_stored) = match plan {
         Plan::Derive(head) => return Ok(Finished::Derive(head)),
         Plan::Reject { reason, detail } => {
@@ -946,7 +948,8 @@ fn settle(
     // transaction, so the write connection does no file I/O.
     let lens = tree::lens_of_puts(store, crate::meta::puts(&rebased).map(|(_, blob)| blob))?;
     let landed = store.write_slot_holder(|c| {
-        let (id, _) = tree::store_changeset(c, repo, &rebased, &mut tree::lens_from(&lens))?;
+        let (id, _) =
+            tree::store_changeset_within(c, repo, &rebased, &mut tree::lens_from(&lens), deadline)?;
         if !c.cas_ref(repo, target, Some(head.version), id)? {
             // The error rolls back the transaction, rebased changeset included.
             return Err(Error::Aborted(format!(
@@ -2446,7 +2449,7 @@ mod tests {
                 if crash == Crash::RefMoved {
                     f.move_main(f.commit(f.main().target, &[put("c", "import")]));
                     let land_id = recorded.land_id;
-                    let err = settle(&f.lands, &f.store, repo, land_id, "main", plan, &mut index)
+                    let err = settle(&f.lands, &f.store, repo, land_id, &req, plan, &mut index)
                         .unwrap_err();
                     assert!(matches!(err, Error::Aborted(_)), "{crash:?}: {err}");
                     let kept = f.store.read(|c| c.has_changeset(repo, rebased));
@@ -3020,8 +3023,8 @@ mod tests {
             store
                 .write(|c| {
                     for &tip in &ids {
-                        derived::derive::<CommitGraph>(c, repo, tip, &mut crate::tree::lens_none())?;
-                        derived::derive::<PathHistory>(c, repo, tip, &mut crate::tree::lens_none())?;
+                        derived::derive::<CommitGraph>(c, repo, tip, &mut crate::tree::lens_none(), None)?;
+                        derived::derive::<PathHistory>(c, repo, tip, &mut crate::tree::lens_none(), None)?;
                     }
                     Ok(())
                 })
