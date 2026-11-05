@@ -202,25 +202,26 @@ jobs:
     if: ${{ inputs.profile }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    services:
-      # pg_stat_statements needs a shared preload, so this service is
-      # not the envelope's: the profile names the statements a land
-      # runs, and the envelope counts what the run spends.
-      postgres:
-        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
-        env:
-          POSTGRES_PASSWORD: scion
-          POSTGRES_DB: scion
-          POSTGRES_HOST_AUTH_METHOD: trust
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-          postgres -c shared_preload_libraries=pg_stat_statements
     steps:
+      # pg_stat_statements needs a shared preload, so this job is not
+      # the envelope's services block: a service's options are docker
+      # flags, and the preload is a server argument. The job runs its
+      # own postgres, with the preload on the server command line.
+      - name: the profile's postgres, with the preload on the command line
+        run: |
+          set -euo pipefail
+          docker run -d --name profile-pg -p 5432:5432 \
+            -e POSTGRES_PASSWORD=scion -e POSTGRES_DB=scion_capacity_profile \
+            postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe \
+            postgres -c shared_preload_libraries=pg_stat_statements
+          for i in $(seq 1 60); do
+            if docker exec profile-pg pg_isready -U postgres > /dev/null 2>&1; then
+              echo "postgres is ready" && exit 0
+            fi
+            sleep 2
+          done
+          docker logs profile-pg || true
+          echo "postgres did not get ready" >&2 && exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -231,11 +232,13 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: the harness needs strace and jq
+      - name: the harness needs jq
         run: |
           set -euo pipefail
-          command -v strace > /dev/null || sudo apt-get update -qq && sudo apt-get install -y -qq strace
           command -v jq > /dev/null || sudo apt-get install -y -qq jq
+      - name: the job's postgres stops last
+        if: always()
+        run: docker rm -f profile-pg || true
       - name: profile one land
         env:
           # The harness drops and creates its database, so it runs
