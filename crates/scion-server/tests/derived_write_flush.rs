@@ -92,6 +92,106 @@ fn the_old_rows_a_write_path_deletes_are_gone_after_its_commit() {
     );
 }
 
+/// Two versions of one kind deferred in one transaction: the commit's
+/// flush must delete what the same two deletes would have deleted when
+/// they ran per call, in the call order. The flush's one statement once
+/// miscounted this mix - a row below the lower version joined both of
+/// the call's rows and was counted once per join - so the rows that
+/// remain are read from two identical stores and compared.
+#[test]
+fn the_flush_deletes_what_the_per_call_deletes_delete_in_order() {
+    // This test does not count statements, but its own land on the
+    // process-wide seam would pollute a counting test's window: every
+    // test in the file holds the lock for its whole body.
+    let _log = log_guard();
+    let mut remaining = Vec::new();
+    for defer in [true, false] {
+        let dir = scion_server::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let repo = store.write(|c| c.create_repo(REPO)).unwrap();
+        // Six rows of one kind no write path owns, one version each,
+        // one changeset each: three below the lower delete's version,
+        // three between the two versions.
+        let mut ids = Vec::new();
+        for i in 1..=6u32 {
+            let cs = changeset(&format!("cs-{i}\n"), ids.last().copied());
+            let id = store
+                .write(|c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0))
+                .unwrap();
+            store
+                .write(|c| c.put_derived("test_kind", i, id, format!("v{i}").as_bytes()))
+                .unwrap();
+            ids.push(id);
+        }
+        // The call order is the higher version first, then the lower:
+        // every row below the lower version is below the higher one too,
+        // which is the mix the join miscounted.
+        store
+            .write(|c| {
+                if defer {
+                    c.defer_derived_deletes();
+                }
+                c.delete_derived_below("test_kind", 7, 2)?;
+                c.delete_derived_below("test_kind", 4, 2)
+            })
+            .unwrap();
+        remaining.push(
+            ids.iter()
+                .enumerate()
+                .map(|(i, id)| {
+                    let version = u32::try_from(i).unwrap() + 1;
+                    let present = store
+                        .read(|c| c.get_derived("test_kind", version, *id))
+                        .unwrap()
+                        .is_some();
+                    (version, present)
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert_eq!(
+        remaining[0], remaining[1],
+        "the deferred flush's rows must be the per-call rows: \
+         (version, still-there)"
+    );
+}
+
+/// A batch where every kind appears once - the case every caller is in
+/// today - still rides the commit's one delete statement: the lands'
+/// settle statement bound counts on it. A kind that repeats takes the
+/// fold's two round trips instead (the test above proves its end state).
+#[test]
+fn a_batch_of_one_version_per_kind_still_flows_one_statement() {
+    let _log = log_guard();
+    let dir = scion_server::test_support::private_tempdir();
+    let store = Backend::open_test(dir.path()).unwrap();
+    let repo = store.write(|c| c.create_repo(REPO)).unwrap();
+    let cs = changeset("root\n", None);
+    let id = store
+        .write(|c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0))
+        .unwrap();
+    store
+        .write(|c| c.put_derived("test_kind", 0, id, b"one"))
+        .unwrap();
+    Backend::test_reset_statement_count();
+    store
+        .write(|c| {
+            c.defer_derived_deletes();
+            c.delete_derived_below("test_kind", 1, 1)
+        })
+        .unwrap();
+    let log = Backend::test_statement_log();
+    // The log names a statement by its opening shape: the one-statement
+    // flush opens "WITH k AS", the fold's delete opens "WITH rank AS".
+    let flushes = log.iter().filter(|sql| sql.contains("WITH k AS")).count();
+    let folds = log
+        .iter()
+        .filter(|sql| sql.contains("WITH rank AS"))
+        .count();
+    assert_eq!(flushes, 1, "the common flush is one statement:\n{log:#?}");
+    assert_eq!(folds, 0, "the fold must not run for one version per kind");
+}
+
 #[test]
 fn a_write_that_disagrees_with_a_stored_row_still_refuses() {
     let _log = log_guard();
