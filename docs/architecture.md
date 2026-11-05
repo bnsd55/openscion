@@ -704,14 +704,14 @@ with `INTERNAL`.
 
 **Not planned now:** a lander that rebases a batch of pending lands and moves
 the ref once ([#18](https://github.com/bnsd55/openscion/issues/18)). One
-machine gives 23 to 25 durable lands per second to one ref — measured,
-flat from 2 to 200 writers (section 7 of
-[operations.md](operations.md), the capacity table) — the rate #18 was
-closed on was a tenth of that. The reason batching stays unplanned is
-the cheaper levers first: the land's 37 statements measured in
-[#769](https://github.com/bnsd55/openscion/issues/769) fold one PR at a
-time, fewer round trips under the ref lock first
-([#782](https://github.com/bnsd55/openscion/issues/782)). The
+machine gives 23 to 25 durable lands per second to one ref with no
+readers, flat from 2 to 200 writers — 7.8 to 11.1 with 5 or 20 readers
+beside them (section 7 of [operations.md](operations.md), the capacity
+table). #18 was closed on about 200 a second, eight times the measured
+rate. The reason batching stays unplanned is the cheaper levers first.
+The land's statements (37 when [#769](https://github.com/bnsd55/openscion/issues/769)
+counted them) fold one PR at a time, fewer round trips under the ref
+lock first ([#782](https://github.com/bnsd55/openscion/issues/782)). The
 [scalable backend design](design/scalable-backend.md) says when batching
 itself would be needed: many servers on one database, which the Postgres
 backend does not give yet (one server runs per database). When the folds
