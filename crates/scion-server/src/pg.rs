@@ -5172,7 +5172,7 @@ impl MetaTx for PgTx<'_> {
         // row is written, and the found value warms the cache the
         // separate read warmed.
         let generation =
-            input_gen.ok_or_else(|| Error::NotFound(format!("changeset {:?}", req.changeset)))?;
+            input_gen.ok_or_else(|| Error::NotFound(format!("changeset {}", req.changeset)))?;
         self.gen_cache
             .insert((repo.0, id_bytes(req.changeset.as_bytes())), generation);
         let recorded = if let Some(recorded) = recorded {
