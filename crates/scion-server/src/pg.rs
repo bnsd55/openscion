@@ -2207,7 +2207,8 @@ impl<'a> PgTx<'a> {
                         l.detail, l.result_cs, l.conflict_paths, l.reject_reason
                  FROM repos r
                  LEFT JOIN lands l
-                   ON l.repo_id = r.repo_id AND l.caller = $2 AND l.request_key = $3
+                   ON l.repo_id = r.repo_id AND l.caller = $2
+                   AND (l.request_key = $3 OR l.state = 'pending')
                  WHERE r.name = $1",
                 &[
                     P::text(&req.repo),

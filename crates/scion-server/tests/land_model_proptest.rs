@@ -1568,8 +1568,8 @@ fn snapshot_db(url: &str) {
         ));
     }
     let Ok(rows) = client.query(
-        "SELECT l.locktype, l.classid, l.objid, l.granted, l.pid, \
-         a.state, left(a.query, 120) AS query FROM pg_locks l \
+        "SELECT l.locktype::text, l.classid::text, l.objid::text, l.granted, \
+         l.pid, a.state, left(a.query, 120) AS query FROM pg_locks l \
          LEFT JOIN pg_stat_activity a ON a.pid = l.pid \
          WHERE a.datname = current_database() OR a.pid IS NULL \
          ORDER BY l.pid, l.granted",
@@ -1583,8 +1583,8 @@ fn snapshot_db(url: &str) {
             "lock: pid={} type={} class={} obj={} granted={} holder_state={} holder_q={}",
             row.get::<_, Option<i32>>(4).map_or(-1, |p| p),
             row.get::<_, String>(0),
-            row.get::<_, i32>(1),
-            row.get::<_, Option<i32>>(2).map_or(-1, |o| o),
+            row.get::<_, String>(1),
+            row.get::<_, Option<String>>(2).unwrap_or_default(),
             row.get::<_, bool>(3),
             row.get::<_, Option<String>>(5).unwrap_or_default(),
             row.get::<_, Option<String>>(6).unwrap_or_default().trim(),

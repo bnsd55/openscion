@@ -1,0 +1,25 @@
+   Compiling open-scion-server v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.05s
+     Running tests/land_model_proptest.rs (target/debug/deps/land_model_proptest-3bf7487f2f8e0126)
+
+running 1 test
+test the_seed_corpus_holds ... 6.94s seed 1793911426027 op 1: CutFresh { caller: 0, target: 0, shared: false, cut_ms: 20 }
+7.05s seed 1793911426027 op 2: KillAtPending
+17.40s seed 1793911426027 op 3: Check
+5.04s seed 1793911426027 op 1: Land { caller: 1, target: 0, stale: false, shared: false }
+5.17s seed 1793911426027 op 2: Twin { caller: 2, land: 0 }
+5.19s seed 1793911426027 op 3: Check
+5.29s seed 1793911426027 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.40s seed 1793911426027 op 2: Land { caller: 1, target: 1, stale: false, shared: false }
+5.52s seed 1793911426027 op 3: Gc
+7.46s seed 1793911426027 op 4: Land { caller: 2, target: 0, stale: false, shared: true }
+7.59s seed 1793911426027 op 5: Check
+5.51s seed 1793911426027 op 1: Land { caller: 0, target: 2, stale: false, shared: false }
+5.61s seed 1793911426027 op 2: Check
+5.02s seed 1793911426027 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.14s seed 1793911426027 op 2: Land { caller: 1, target: 0, stale: false, shared: true }
+5.29s seed 1793911426027 op 3: Land { caller: 2, target: 0, stale: true, shared: true }
+5.44s seed 1793911426027 op 4: Check
+5.56s seed 1793911426027 op 1: BurstCut { k: 5, target: 0 }
+6.24s seed 1793911426027 op 2: Gc
+8.04s seed 1793911426027 op 3: Check

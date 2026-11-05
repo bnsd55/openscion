@@ -15,3 +15,16 @@ activity: pid=181298 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
 activity: pid=181299 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
 activity: pid=181300 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
 PANIC: error retrieving column 1: error deserializing column 1
+PANIC: the retry of land 0: Status { code: InvalidArgument, message: "request key \"c0-o1-0\" was already used for a different land", metadata: MetadataMap { headers: {"content-type": "application/grpc", "date": "Thu, 05 Nov 2026 20:44:36 GMT"} }, source: None }
+10-gc-during-pending.txt passed its budget of 240s at step 3 (seed 1793911426027); the run is wedged, aborting the process
+snapshot: begin
+activity: pid=182732 state=idle wait=Client/ClientRead xact=None q=SELECT 1
+activity: pid=182733 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=182734 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=182735 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=182736 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=182737 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=182738 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=182739 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=182740 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+PANIC: error retrieving column 1: error deserializing column 1
