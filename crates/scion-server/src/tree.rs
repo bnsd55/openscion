@@ -694,7 +694,6 @@ mod tests {
                 None,
                 &changes(&[("a/b/c", Some("1")), ("a/d", Some("2")), ("e", Some("3"))]),
                 &mut lens_none(),
-                None,
             )?;
             assert_eq!(files(c, t1), ["a/b/c", "a/d", "e"]);
             let t2 = apply(
@@ -702,7 +701,6 @@ mod tests {
                 Some(t1),
                 &changes(&[("a/b/c", None), ("f/g", Some("4"))]),
                 &mut lens_none(),
-                None,
             )?;
             assert_eq!(files(c, t2), ["a/d", "e", "f/g"], "empty a/b is pruned");
             assert_eq!(
@@ -775,7 +773,6 @@ mod tests {
                     ("\u{3bb}/\u{3c9}", Some("8")),
                 ]),
                 &mut lens_none(),
-                None,
             )?;
             // Every directory level of the tree, with its id.
             let mut dirs = vec![t];
@@ -806,19 +803,12 @@ mod tests {
     #[test]
     fn same_content_gives_same_tree_id() {
         with_db(|c| {
-            let direct = apply(
-                c,
-                None,
-                &changes(&[("x/y", Some("1"))]),
-                &mut lens_none(),
-                None,
-            )?;
+            let direct = apply(c, None, &changes(&[("x/y", Some("1"))]), &mut lens_none())?;
             let t = apply(
                 c,
                 None,
                 &changes(&[("x/y", Some("1")), ("z", Some("2"))]),
                 &mut lens_none(),
-                None,
             )?;
             let via_delete = apply(c, Some(t), &changes(&[("z", None)]), &mut lens_none(), None)?;
             assert_eq!(direct, via_delete);
@@ -829,19 +819,12 @@ mod tests {
     #[test]
     fn file_and_directory_swap_in_one_changeset() {
         with_db(|c| {
-            let t = apply(
-                c,
-                None,
-                &changes(&[("a", Some("1"))]),
-                &mut lens_none(),
-                None,
-            )?;
+            let t = apply(c, None, &changes(&[("a", Some("1"))]), &mut lens_none())?;
             let t = apply(
                 c,
                 Some(t),
                 &changes(&[("a", None), ("a/b", Some("2"))]),
                 &mut lens_none(),
-                None,
             )?;
             assert_eq!(files(c, t), ["a/b"]);
             let t = apply(
@@ -849,7 +832,6 @@ mod tests {
                 Some(t),
                 &changes(&[("a", Some("3")), ("a/b", None)]),
                 &mut lens_none(),
-                None,
             )?;
             assert_eq!(files(c, t), ["a"]);
             Ok(())
@@ -864,7 +846,6 @@ mod tests {
                 None,
                 &changes(&[("a", Some("1")), ("d/x", Some("2"))]),
                 &mut lens_none(),
-                None,
             )?;
             let cases: [(Edits<'_>, ApplyError); 6] = [
                 (

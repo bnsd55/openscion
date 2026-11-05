@@ -630,13 +630,8 @@ mod tests {
         store
             .write(|c| {
                 let repo = c.create_repo(REPO)?;
-                let (id, _) = crate::tree::store_changeset(
-                    c,
-                    repo,
-                    cs,
-                    &mut crate::tree::lens_of(&lens),
-                    None,
-                )?;
+                let (id, _) =
+                    crate::tree::store_changeset(c, repo, cs, &mut crate::tree::lens_of(&lens))?;
                 let version = c.get_ref(repo, "main")?.map(|r| r.version);
                 assert!(c.cas_ref(repo, "main", version, id)?);
                 Ok(id)
