@@ -107,6 +107,7 @@ pub(crate) const ACCEPT_WARN_INTERVAL: Duration = Duration::from_secs(10);
 /// The wait between accepts after a failure, as its own state: the first
 /// wait ([`FIRST_ACCEPT_BACKOFF`]) doubling to [`MAX_ACCEPT_BACKOFF`], and
 /// reset by a success, so a failure that persists cannot spin the task.
+#[derive(Debug)]
 struct Backoff(Duration);
 
 impl Backoff {
