@@ -601,7 +601,7 @@ impl Limits {
         S::Future: Send + 'static,
         S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        let builder =
+        let mut builder =
             hyper_util::server::conn::auto::Builder::new(TokioExecutor::new()).http2_only();
         let mut conn = pin!(
             builder
