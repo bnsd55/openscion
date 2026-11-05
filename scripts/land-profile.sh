@@ -74,6 +74,11 @@ PG_URL=$SCION_PG_URL
 # cell before's server log moves aside, so each cell keeps its own:
 # the profile reads the land's per-phase lines from it.
 reset_cell() {
+  # The cell before's stack stops first: its cache and daemon still
+  # hold the ports the next cell's stack needs.
+  stop server
+  stop cache
+  stop daemon
   psql "$admin_url" -X -q -c "DROP DATABASE IF EXISTS $pg_db" \
     -c "CREATE DATABASE $pg_db" || die "the database reset failed"
   rm -rf "$WORK/server"
