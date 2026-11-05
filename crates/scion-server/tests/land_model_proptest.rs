@@ -55,6 +55,11 @@ use tonic::Status;
 /// Callers that land. Each land names a caller; the fixture's one token
 /// makes them one caller at the server, so the keys carry the identity.
 const CALLERS: usize = 4;
+/// One script's wall-clock bound, in seconds. The corpus measured under
+/// two minutes on Postgres and a random case under five; a wedged
+/// script must die inside a bound that names its script and its step,
+/// not at the CI job's cap, where the log holds no name at all.
+const SCRIPT_BUDGET_SECS: u64 = 240;
 /// A ref that does not exist, for the lands that must be rejected.
 const MISSING: usize = REFS.len();
 /// The ref the run's imports move: it does not exist until the first
@@ -788,34 +793,33 @@ async fn run_import(state: &mut Run, root: &Path, data: &Path) {
 /// script's fired-and-forgotten races run as tasks on it, and a server
 /// that never answers one would hold the runtime's drop past every
 /// ceiling. A straggler dies with the runtime instead of the run.
-fn run_on_rt(script: &[Op]) -> RunSummary {
+fn run_on_rt(script: &[Op], script_name: &str) -> RunSummary {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
         .build()
         .unwrap();
-    let summary = rt.block_on(run_script(script));
+    let summary = rt.block_on(run_script(script, script_name));
     rt.shutdown_timeout(Duration::from_secs(10));
     summary
 }
 
 #[allow(clippy::too_many_lines)] // one arm per op: the dispatch is the table
-async fn run_script(script: &[Op]) -> RunSummary {
-    // The watchdog starts before anything the run does: a run that
-    // wedges in its own setup - a server start, a store open, a connect
-    // - has no op yet, and only the watchdog sees real time whatever
-    // the executor does, so it is the one guard that covers the setup.
+async fn run_script(script: &[Op], script_name: &str) -> RunSummary {
+    // The script's one bound, held by a plain OS thread outside the
+    // runtime it guards: it starts before anything the run does (a run
+    // that wedges in its own setup - a server start, a store open, a
+    // connect - has no step yet), it names the script and the step it
+    // died on, and it exits the process whatever the runtime's threads
+    // hold. The step check between ops is the fast guard; this one sees
+    // an op that blocks inside one call, where a land RPC runs to its
+    // 600 s client deadline and the gc subprocess has no ceiling.
     let started = std::time::Instant::now();
-    let budget = Duration::from_secs(
-        std::env::var("SCION_LANDMODEL_BUDGET_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(240),
-    );
+    let budget = Duration::from_secs(SCRIPT_BUDGET_SECS);
     let ordinal = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let watchdog = Watchdog {
-        script: script.to_vec(),
+        script_name: script_name.to_owned(),
         seed: seed(),
         started,
         budget,
@@ -1341,7 +1345,7 @@ async fn run_script(script: &[Op]) -> RunSummary {
 /// blocks inside one call: a land RPC runs to its 600 s deadline, and a
 /// `gc` subprocess has no ceiling at all.
 struct Watchdog {
-    script: Vec<Op>,
+    script_name: String,
     seed: u64,
     started: std::time::Instant,
     budget: Duration,
@@ -1354,21 +1358,20 @@ impl Watchdog {
         while !self.stop.load(Ordering::Relaxed) {
             if self.started.elapsed() >= self.budget {
                 let at = self.ordinal.load(Ordering::Relaxed);
-                let op = self.script.get(at.saturating_sub(1));
                 let mut err = std::io::stderr().lock();
                 let _ = writeln!(
                     err,
-                    "the random case passed its budget of {budget:?} at op {at} \
-                     (seed {s}): {op:?}; aborting so the cap cannot hide it",
-                    at = at,
+                    "{name} passed its budget of {budget:?} at step {at} \
+                     (seed {s}); the run is wedged, exiting the process",
+                    name = self.script_name,
                     budget = self.budget,
                     s = self.seed,
-                    op = op.map_or_else(String::new, |op| format!("{op:?}")),
+                    at = at,
                 );
                 let _ = err.flush();
-                std::process::abort();
+                std::process::exit(1);
             }
-            std::thread::sleep(Duration::from_secs(5));
+            std::thread::sleep(Duration::from_secs(1));
         }
     }
 }
@@ -2049,7 +2052,7 @@ fn the_seed_corpus_holds() {
     for path in names {
         let text = std::fs::read_to_string(&path).unwrap();
         let script = parse_script(&text);
-        let summary = run_on_rt(&script);
+        let summary = run_on_rt(&script, &path.file_name().unwrap().to_string_lossy());
         // The gate-ordered scripts run twice: the gates make the order
         // exact, so a rerun lands the same outcome shape — and a failing
         // one fails the same way every time.
@@ -2057,7 +2060,7 @@ fn the_seed_corpus_holds() {
             .iter()
             .any(|p| path.file_name().unwrap().to_string_lossy().starts_with(p))
         {
-            let again = run_on_rt(&script);
+            let again = run_on_rt(&script, &path.file_name().unwrap().to_string_lossy());
             assert_eq!(
                 (summary.landed, summary.conflict, summary.rejected),
                 (again.landed, again.conflict, again.rejected),
@@ -2144,7 +2147,7 @@ fn the_model_holds_across_a_random_script() {
         // its script in the log even if shrinking then eats the cap.
         println!("seed: {}", seed());
         println!("script: {script:?}");
-        run_on_rt(&script);
+        run_on_rt(&script, "the random case");
         Ok(())
     });
     if let Err(failure) = verdict {
