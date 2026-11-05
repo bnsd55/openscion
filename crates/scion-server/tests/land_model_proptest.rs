@@ -786,6 +786,29 @@ async fn run_import(state: &mut Run, root: &Path, data: &Path) {
 
 #[allow(clippy::too_many_lines)] // one arm per op: the dispatch is the table
 async fn run_script(script: &[Op]) -> RunSummary {
+    // The watchdog starts before anything the run does: a run that
+    // wedges in its own setup - a server start, a store open, a connect
+    // - has no op yet, and only the watchdog sees real time whatever
+    // the executor does, so it is the one guard that covers the setup.
+    let started = std::time::Instant::now();
+    let budget = Duration::from_secs(
+        std::env::var("SCION_LANDMODEL_BUDGET_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(240),
+    );
+    let ordinal = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let watchdog = Watchdog {
+        script: script.to_vec(),
+        seed: seed(),
+        started,
+        budget,
+        ordinal: Arc::clone(&ordinal),
+        stop: Arc::clone(&stop),
+    };
+    std::thread::spawn(move || watchdog.run());
+
     let dir = scion_server::test_support::private_tempdir();
     let (data, log) = (dir.path().join("data"), dir.path().join("server.log"));
     create_repo(&data);
@@ -810,33 +833,6 @@ async fn run_script(script: &[Op]) -> RunSummary {
         imported: HashMap::new(),
         ops: 0,
     };
-
-    // A wall-clock budget far under the CI job cap, enforced by a
-    // watchdog thread. The between-ops check cannot fire on an op that
-    // blocks inside one call - a land RPC runs to its 600 s client
-    // deadline, and the gc subprocess has no ceiling at all - so the
-    // watchdog, which sees real time whatever the executor does, kills
-    // the process with the seed and the current op. libtest captures
-    // print! and eprint!, but a raw write to the stderr file handle,
-    // and the abort that follows, reach the CI log.
-    let budget = Duration::from_secs(
-        std::env::var("SCION_LANDMODEL_BUDGET_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(240),
-    );
-    let started = std::time::Instant::now();
-    let ordinal = Arc::new(AtomicUsize::new(0));
-    let stop = Arc::new(AtomicBool::new(false));
-    let watchdog = Watchdog {
-        script: script.to_vec(),
-        seed: seed(),
-        started,
-        budget,
-        ordinal: Arc::clone(&ordinal),
-        stop: Arc::clone(&stop),
-    };
-    std::thread::spawn(move || watchdog.run());
 
     for op in script {
         state.ops += 1;
