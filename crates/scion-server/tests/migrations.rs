@@ -481,12 +481,25 @@ fn a_refusing_open_writes_nothing_to_the_catalog() {
         url: base.clone(),
         role: role.clone(),
     };
+    // The role's password is made at run time from the tempdir's unique
+    // name: no password literal in this file, and one that differs per
+    // run.
+    let dir = scion_server::test_support::private_tempdir();
+    let data = dir.path().join("data");
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
+    let password = dir
+        .path()
+        .file_name()
+        .expect("a tempdir with a name")
+        .to_str()
+        .expect("a plain name")
+        .to_string();
     {
         let mut admin =
             postgres::Client::connect(&base, postgres::NoTls).expect("the test database connects");
         admin
             .batch_execute(&format!(
-                "CREATE ROLE {role} LOGIN PASSWORD 'migrations-test'"
+                "CREATE ROLE {role} LOGIN PASSWORD '{password}'"
             ))
             .expect("the role is made");
         admin
@@ -498,11 +511,8 @@ fn a_refusing_open_writes_nothing_to_the_catalog() {
             ))
             .unwrap();
     }
-    let role_url = url_for(&url_with_user(&base, &role, "migrations-test"), schema);
+    let role_url = url_for(&url_with_user(&base, &role, &password), schema);
     let before = catalog_rows(&base, schema);
-    let dir = scion_server::test_support::private_tempdir();
-    let data = dir.path().join("data");
-    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
     let run = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(["--data", data.to_str().unwrap()])
         .env("SCION_POSTGRES_URL", &role_url)
