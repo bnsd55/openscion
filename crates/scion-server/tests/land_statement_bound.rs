@@ -208,7 +208,7 @@ fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound()
         plan_end + 1,
         settle_begin,
         "the stored head's tree fills nothing: between the plan and the \
-         settle sit statements:\n{}",
+         settle sit statements:\n{:?}",
         &log[plan_end + 1..settle_begin]
     );
     let small = land_statement_count(10);
@@ -250,7 +250,7 @@ fn a_land_whose_head_tree_is_missing_fills_before_the_write_transaction() {
     let deleted = raw
         .execute(
             "DELETE FROM derived WHERE kind = 'root_tree' AND cs = $1",
-            &[base.as_bytes().to_vec()],
+            &[&base.as_bytes().to_vec()],
         )
         .unwrap();
     assert_eq!(deleted, 1, "the head's root tree row was there");
