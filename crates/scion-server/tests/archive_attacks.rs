@@ -1095,7 +1095,6 @@ fn a_kill_between_repos_resets_cleanly_on_the_next_restore() {
             std::path::Path::new(&archive),
             std::path::Path::new(&data),
             &url,
-            None,
         );
         return;
     }

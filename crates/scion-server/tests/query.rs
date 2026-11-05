@@ -217,10 +217,7 @@ fn chain(store: &Backend, changes: Vec<BTreeMap<RepoPath, Option<FileState>>>) -
                     changes,
                 )
                 .expect("changeset fits the format");
-                ids.push(
-                    tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0,
-                    None,
-                );
+                ids.push(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0);
             }
             Ok(ids)
         })
@@ -1261,12 +1258,7 @@ fn similar_files_are_not_searched_past_git_rename_limit() {
             .map(str::to_owned)
             .collect();
         expected.sort();
-        let entries = diff_pages(
-            &store,
-            changeset_of(&store, old),
-            changeset_of(&store, new),
-            None,
-        );
+        let entries = diff_pages(&store, changeset_of(&store, old), changeset_of(&store, new));
         assert_eq!(name_status(&entries), expected);
         assert_eq!(entries.iter().any(|e| e.rename.is_some()), found);
     }
