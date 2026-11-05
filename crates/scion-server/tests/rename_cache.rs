@@ -460,7 +460,7 @@ fn empty_map_diff(
                 vec![old],
                 identity(),
                 None,
-                format!("new-{i}\n").as_bytes(),
+                format!("new-{i}\n").into_bytes(),
                 (0..1_100)
                     .map(|j| {
                         (
@@ -529,15 +529,16 @@ fn the_cap_holds_empty_maps_to_its_bound() {
         let new = empty_map_diff(&store, old, i);
         let _page = page(&store, old, new, None);
         let (maps, bytes) = scion_server::test_support::read::test_rename_cache_size();
-        let overhead = scion_server::test_support::read::test_rename_cache_entry_overhead();
         assert!(
             maps <= 4,
             "the cap holds the entries to its bound: {maps} entries after diff {i}"
         );
-        let cap = scion_server::test_support::read::test_rename_cache_entry_overhead() * 4;
-        assert!(
-            (bytes as usize) <= cap,
-            "the kept bytes sit under the cap: {bytes} against {cap}"
+        // An empty map costs exactly its overhead against the cap.
+        let overhead = scion_server::test_support::read::test_rename_cache_entry_overhead();
+        assert_eq!(
+            bytes as usize,
+            maps * overhead,
+            "the kept bytes are the entries' overhead: {bytes} for {maps} entries"
         );
         let gauge = scion_server::test_support::read::test_rename_cache_gauge();
         assert_eq!(gauge, bytes, "the gauge reads the kept total");
