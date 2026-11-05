@@ -68,8 +68,13 @@ fn store_with_wide_dir(names: usize) -> (tempfile::TempDir, Backend, BlobId) {
     store
         .write(|c| {
             let repo = c.create_repo(REPO)?;
-            let (root, _) =
-                scion_server::test_support::tree::store_changeset(c, repo, &root, &mut |_| Ok(0))?;
+            let (root, _) = scion_server::test_support::tree::store_changeset(
+                c,
+                repo,
+                &root,
+                &mut |_| Ok(0),
+                None,
+            )?;
             assert!(c.cas_ref(repo, "main", None, root)?);
             c.add_repo_blob(repo, shared)?;
             c.add_repo_blob(repo, changed)?;
