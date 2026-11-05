@@ -41,7 +41,6 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::auth::Caller;
 use crate::backend::Marker;
-use crate::derived::Kind;
 use crate::error::{Error, Result, Storage};
 use crate::history::NodeId;
 use crate::import::SHA1;
@@ -5189,7 +5188,7 @@ impl MetaTx for PgTx<'_> {
                      LEFT JOIN refs r ON r.repo_id = l.repo_id AND r.name = $4
                      WHERE l.repo_id = $1 AND l.land_id = $2 AND l.caller = $3",
                     RootTree::NAME,
-                    i64::from(<RootTree as Kind>::VERSION),
+                    i64::from(<RootTree as crate::derived::Kind>::VERSION),
                 ),
                 &[
                     P::i64(repo.0),
