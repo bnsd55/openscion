@@ -591,8 +591,8 @@ impl Limits {
         streams: u32,
         stop: watch::Receiver<bool>,
     ) where
-        IO: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
-        S: hyper::service::Service<
+        IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        S: tower::Service<
                 http::Request<hyper::body::Incoming>,
                 Response = http::Response<tonic::body::Body>,
             > + Send
