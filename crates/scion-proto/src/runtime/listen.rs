@@ -2501,7 +2501,7 @@ mod tests {
             }
             phases.push((connections, most));
         }
-        for child in children {
+        for mut child in children {
             let _ = child.kill();
         }
         panic!(
