@@ -214,8 +214,10 @@ impl Server {
         let binary = env!("CARGO_BIN_EXE_scion-server");
         // A section's first block may be a step before the serve (the
         // first boot's preflight); the argv the harness runs is the
-        // block that serves.
-        let raw = runbook_block_with(heading, "serve", &[]);
+        // block that serves. The needle has the leading space: bare
+        // "serve" is a substring of the binary's own name,
+        // `scion-server`, and the preflight block would match.
+        let raw = runbook_block_with(heading, " serve", &[]);
         let token = token_file().to_str().unwrap().to_owned();
         let dir = data.to_str().unwrap().to_owned();
         let mut subs = vec![("./scion-server", binary), ("/srv/scion", dir.as_str())];
@@ -225,7 +227,7 @@ impl Server {
         if raw.contains("127.0.0.1:7878") {
             subs.push(("127.0.0.1:7878", "127.0.0.1:0"));
         }
-        let block = runbook_block_with(heading, "serve", &subs);
+        let block = runbook_block_with(heading, " serve", &subs);
         let line = block
             .lines()
             .find(|l| l.split_whitespace().any(|p| p == "serve"))
