@@ -1534,7 +1534,7 @@ fn preflight_command(args: &ServeArgs) -> (i32, Vec<String>) {
     // The data directory: the open's own refusals, the same words.
     answers.push((
         "data directory",
-        match crate::backend::check_dir(&args.data) {
+        match scion_server::backend::check_dir(&args.data) {
             Ok(()) => Preflight::Ok(format!(
                 "{} is a data directory of the right kind",
                 args.data.display()
@@ -1548,7 +1548,7 @@ fn preflight_command(args: &ServeArgs) -> (i32, Vec<String>) {
     let mut db = match postgres_url_of(args.postgres_url_file.as_ref())
         .map_err(anyhow::Error::from)
         .and_then(|url| {
-            crate::pg::preflight_client(&url, args.postgres_ca.as_deref())
+            scion_server::pg::preflight_client(&url, args.postgres_ca.as_deref())
                 .map_err(anyhow::Error::from)
         })
         .map_err(|error| Preflight::Fail(format!("the database does not answer: {error}")))
@@ -1599,19 +1599,21 @@ fn preflight_command(args: &ServeArgs) -> (i32, Vec<String>) {
         // its top version. Never the open's migrate path, which writes.
         answers.push((
             "schema version",
-            match crate::pg::read_schema_version_raw(db) {
-                Ok(version) if version == crate::pg::PG_SCHEMA_VERSION => Preflight::Ok(format!(
-                    "the schema stands at version {version}, this build's"
-                )),
-                Ok(version) if version < crate::pg::PG_SCHEMA_VERSION => Preflight::Fail(format!(
-                    "the schema stands at version {version}, this build needs {}; \
+            match scion_server::pg::read_schema_version_raw(db) {
+                Ok(version) if version == scion_server::pg::PG_SCHEMA_VERSION => Preflight::Ok(
+                    format!("the schema stands at version {version}, this build's"),
+                ),
+                Ok(version) if version < scion_server::pg::PG_SCHEMA_VERSION => {
+                    Preflight::Fail(format!(
+                        "the schema stands at version {version}, this build needs {}; \
                      run migrate (serve --migrate)",
-                    crate::pg::PG_SCHEMA_VERSION
-                )),
+                        scion_server::pg::PG_SCHEMA_VERSION
+                    ))
+                }
                 Ok(version) => Preflight::Fail(format!(
                     "the schema stands at version {version}, this build speaks {}; \
                      run the build that made the database",
-                    crate::pg::PG_SCHEMA_VERSION
+                    scion_server::pg::PG_SCHEMA_VERSION
                 )),
                 Err(error) => Preflight::Fail(format!("cannot read the schema version: {error}")),
             },
@@ -1696,7 +1698,7 @@ fn preflight_command(args: &ServeArgs) -> (i32, Vec<String>) {
 /// selects: a mismatch is a store restored over a directory, the
 /// open's own refusal to name.
 fn store_pairing(data: &std::path::Path, db: &postgres::Client) -> Preflight {
-    let marker = crate::backend::store_uuid_of(data);
+    let marker = scion_server::backend::store_uuid_of(data);
     let held: Option<Vec<u8>> = db
         .query_opt("SELECT uuid FROM store_uuid WHERE one = 1", &[])
         .ok()
@@ -1748,7 +1750,7 @@ fn live_server(db: &mut postgres::Client) -> Preflight {
         .query_opt(
             "SELECT count(*) FROM pg_locks
              WHERE locktype = 'advisory' AND objid = $1 AND granted",
-            &[&crate::pg::schema_lock_key(&schema)],
+            &[&scion_server::pg::schema_lock_key(&schema)],
         )
         .map(|row| row.map(|row| row.get::<_, i64>(0)).unwrap_or(0));
     match holders {
@@ -1777,13 +1779,13 @@ fn listen_free(listen: std::net::SocketAddr) -> Preflight {
 /// The host's memory against the floor: a warning, as in `serve` - the
 /// floor never refuses.
 fn memory_floor() -> Preflight {
-    match crate::floor::host_memory(&crate::floor::production_paths()) {
-        Some((bytes, source)) if bytes < crate::floor::FLOOR => Preflight::Warn(format!(
+    match scion_server::floor::host_memory(&scion_server::floor::production_paths()) {
+        Some((bytes, source)) if bytes < scion_server::floor::FLOOR => Preflight::Warn(format!(
             "the host has {} GiB ({source}), below the server's floor of \
              {} GiB: the page cache gives way first, and under load the \
              process can reach the OOM killer",
             bytes / (1 << 30),
-            crate::floor::FLOOR / (1 << 30)
+            scion_server::floor::FLOOR / (1 << 30)
         )),
         Some((bytes, source)) => {
             Preflight::Ok(format!("the host has {} GiB ({source})", bytes / (1 << 30)))
@@ -1797,8 +1799,8 @@ fn memory_floor() -> Preflight {
 /// blob count, so the numbers are the answer.
 fn disk_and_inodes(data: &std::path::Path) -> Preflight {
     match (
-        crate::store::free_bytes(data),
-        crate::store::free_inodes(data),
+        scion_server::store::free_bytes(data),
+        scion_server::store::free_inodes(data),
     ) {
         (Ok(bytes), Ok(inodes)) => Preflight::Ok(format!(
             "{} free and {inodes} inodes on {}",
@@ -2402,7 +2404,7 @@ mod preflight_tests {
         holder
             .query_one(
                 "SELECT pg_advisory_lock($1)",
-                &[&crate::pg::schema_lock_key(&schema)],
+                &[&scion_server::pg::schema_lock_key(&schema)],
             )
             .unwrap();
         let (code, lines) = run(dir.path(), Some(&url));
@@ -2414,7 +2416,7 @@ mod preflight_tests {
         holder
             .query_one(
                 "SELECT pg_advisory_unlock($1)",
-                &[&crate::pg::schema_lock_key(&schema)],
+                &[&scion_server::pg::schema_lock_key(&schema)],
             )
             .unwrap();
     }
