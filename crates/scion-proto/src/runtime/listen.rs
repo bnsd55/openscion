@@ -2345,6 +2345,8 @@ mod tests {
         let polls = READ_POLLS.load(Ordering::Relaxed);
         let bytes = READ_BYTES.load(Ordering::Relaxed);
         let over = OVER_FIRED.load(Ordering::Relaxed);
+        let holds = reply::HOLD_CALLS.load(Ordering::Relaxed);
+        let sent = reply::SENT_INTO_TX.load(Ordering::Relaxed);
 
         // If the close comes, the gauge goes to nothing. If it does not,
         // the connection and its stalled bytes are held until the client
