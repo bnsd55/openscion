@@ -443,3 +443,28 @@ fn a_map_past_the_cap_evicts_the_oldest() {
          {survivor_hit} against {evicted_search}"
     );
 }
+
+/// A diff whose rename vector passes its byte bound finds no renames
+/// and says so. The bound counts the bytes of the paths too, so it
+/// trips far under the entry count the same bytes would allow a
+/// short-path diff.
+#[test]
+fn a_diff_past_its_rename_byte_bound_says_renames_may_be_missing() {
+    let _log = log_guard();
+    scion_server::test_support::read::test_clear_rename_cache();
+    let (_dir, store, old, new) = seeded(&[1, 2], &[], &[]);
+    // With the server's bound, the exact renames are found.
+    let found = page(&store, old, new, None);
+    assert!(!found.renames_incomplete);
+    assert_eq!(renames_of(&found), vec![deleted_half(1), deleted_half(2)]);
+    scion_server::test_support::read::test_clear_rename_cache();
+    // With a half-kilobyte bound, the same diff's vector passes it: the
+    // reply says renames may be missing, and none are answered.
+    {
+        let _small = scion_server::test_support::read::test_set_rename_byte_bound(512);
+        let page = page(&store, old, new, None);
+        assert!(page.renames_incomplete, "the byte bound tripped");
+        assert_eq!(renames_of(&page), [] as [(Vec<u8>, Vec<u8>); 0]);
+    }
+    scion_server::test_support::read::test_clear_rename_cache();
+}

@@ -470,17 +470,45 @@ pub const MAX_DIFF_ENTRIES: usize = 1000;
 /// is the same on every call, so every call finds the same renames. Past
 /// it, the search reads no more files, and the reply says so
 /// ([`DiffPage::renames_incomplete`]). Exact renames (step 1) cost no file
-/// reads, so they run for any diff of up to [`MAX_RENAME_ENTRIES`] entries.
+/// reads, so they run for any diff of up to the rename entry bound.
 pub const MAX_RENAME_CHUNKS: usize = 4 << 20;
 
-/// Most entries the rename pass of one `Diff` call walks below its path.
-/// It holds them in memory, at about 150 bytes each (`DiffEntry` is 128 on
-/// the stack, plus the bytes of the path), so a diff of
-/// [`MAX_RENAME_ENTRIES`] entries costs the call about 150 MB. Past it, the
-/// call finds no renames and the reply says so
+/// Most RAM the rename pass of one `Diff` call holds for the entries it
+/// walks below its path. An entry costs about 160 bytes (`DiffEntry` is
+/// 128 on the stack, plus the bytes of the path), so the bound walks about
+/// 400,000 entries - still far past git's default rename limit. Past it,
+/// the call finds no renames and the reply says so
 /// ([`DiffPage::renames_incomplete`]), as git warns when it skips inexact
-/// rename detection.
-pub const MAX_RENAME_ENTRIES: usize = 1_000_000;
+/// rename detection. The floor counts the share for the diffs that run at
+/// once (`service::MAX_DIFFS`).
+pub const MAX_RENAME_BYTES: usize = 64 << 20;
+
+/// The entry cost the byte bound is spelled in, and the count limit it
+/// gives the walk: an a-priori bound that keeps the walk's hold under the
+/// bytes.
+const BYTES_PER_RENAME_ENTRY: usize = 160;
+
+#[cfg(any(test, feature = "test-hooks"))]
+static MAX_RENAME_BYTES_OVERRIDE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// The byte bound this run enforces: the test's small bound, or the
+/// server's.
+fn max_rename_bytes() -> usize {
+    #[cfg(any(test, feature = "test-hooks"))]
+    {
+        let small = MAX_RENAME_BYTES_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
+        if small > 0 {
+            return small;
+        }
+    }
+    MAX_RENAME_BYTES
+}
+
+/// Most entries the rename pass walks: the byte bound in entries.
+fn max_rename_entries() -> usize {
+    max_rename_bytes() / BYTES_PER_RENAME_ENTRY
+}
 
 /// A path whose file differs between two snapshots.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -541,7 +569,7 @@ pub struct DiffPage {
 /// delete and an add. If the page has an added or deleted file, the call
 /// walks the whole diff below `path`, unless the page is all of it. Exact
 /// renames (same content, by blob ID) cost no file reads, so a diff of up
-/// to [`MAX_RENAME_ENTRIES`] entries gets them, whatever its size. The
+/// to the rename entry bound gets them, whatever its size. The
 /// inexact search runs only under git's pair limit ([`similar::MAX_PAIRS`])
 /// and stops at [`MAX_RENAME_CHUNKS`]. When the walk was past its entry
 /// bound, or the inexact search did not run or did not end, the page says
@@ -566,7 +594,7 @@ pub fn diff(
         new,
         path,
         after,
-        MAX_RENAME_ENTRIES,
+        max_rename_entries(),
         deadline,
     )
 }
@@ -586,7 +614,7 @@ pub fn diff(
 /// search finds.
 ///
 /// The cache is bounded by bytes, not by diffs: one map of a
-/// [`MAX_RENAME_ENTRIES`] diff costs about 150 MB, so the cap holds a
+/// rename-entry-bound diff costs about 100 MB, so the cap holds a
 /// few of those or many small ones, and an entry that no page has
 /// asked for within a call deadline's length (`RENAME_CACHE_TTL`:
 /// a client that stops at page 3 never comes back) ages out. Past the
@@ -625,7 +653,7 @@ struct CachedRenames {
 const RENAME_CACHE_TTL: Duration = Duration::from_secs(600);
 
 /// The bytes the stored maps may hold. One map of a
-/// [`MAX_RENAME_ENTRIES`] diff costs about 150 MB (its own comment
+/// rename-entry-bound diff costs about 100 MB (its own comment
 /// carries the arithmetic), so 512 MiB holds a few of the largest maps
 /// a server may see, or many more of the small ones most diffs are.
 fn rename_cache_max_bytes() -> usize {
@@ -766,6 +794,21 @@ fn forget_renames(key: &RenameKey) {
     }
 }
 
+/// Holds a small rename byte bound for the tests that pin it: a diff
+/// whose rename vector passes it says renames may be missing, and the
+/// bound returns when the guard drops.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn test_set_rename_byte_bound(bytes: usize) -> impl Drop {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            MAX_RENAME_BYTES_OVERRIDE.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    MAX_RENAME_BYTES_OVERRIDE.store(bytes, std::sync::atomic::Ordering::Relaxed);
+    Reset
+}
+
 /// The tests' reset of the cache: every map goes and the cap returns
 /// to the server's, so a page after it runs its own search and no
 /// test's small cap reaches another test's maps.
@@ -856,16 +899,21 @@ pub fn diff_with(
             // The renames are among the adds and deletes of the whole
             // diff, not of one page. Exact renames cost no file reads,
             // so the walk has no bound but the memory of holding the
-            // entries: up to [`MAX_RENAME_ENTRIES`] of them, the bound
-            // of one call.
+            // entries: up to the rename entry bound, the bound of one
+            // call.
             let all = if after.is_none() && next_after.is_none() {
                 entries.clone()
             } else {
                 diff_walk(store, roots, path, None, rename_entries)?
             };
-            if all.len() > rename_entries {
+            let all_bytes = all
+                .iter()
+                .map(|entry| 2 * entry.path.as_bytes().len() + BYTES_PER_RENAME_ENTRY)
+                .sum::<usize>();
+            if all.len() > rename_entries || all_bytes > max_rename_bytes() {
                 tracing::debug!(
                     entries = all.len(),
+                    bytes = all_bytes,
                     "a diff with too many entries to find renames"
                 );
                 renames_incomplete = true;
