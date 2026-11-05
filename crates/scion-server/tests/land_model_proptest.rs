@@ -784,6 +784,21 @@ async fn run_import(state: &mut Run, root: &Path, data: &Path) {
     state.heads.entry(name).or_default().push(tip);
 }
 
+/// Runs one script on its own runtime, and bounds the shutdown: the
+/// script's fired-and-forgotten races run as tasks on it, and a server
+/// that never answers one would hold the runtime's drop past every
+/// ceiling. A straggler dies with the runtime instead of the run.
+fn run_on_rt(script: &[Op]) -> RunSummary {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
+    let summary = rt.block_on(run_script(script));
+    rt.shutdown_timeout(Duration::from_secs(10));
+    summary
+}
+
 #[allow(clippy::too_many_lines)] // one arm per op: the dispatch is the table
 async fn run_script(script: &[Op]) -> RunSummary {
     // The watchdog starts before anything the run does: a run that
@@ -2034,12 +2049,7 @@ fn the_seed_corpus_holds() {
     for path in names {
         let text = std::fs::read_to_string(&path).unwrap();
         let script = parse_script(&text);
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(4)
-            .enable_all()
-            .build()
-            .unwrap();
-        let summary = rt.block_on(run_script(&script));
+        let summary = run_on_rt(&script);
         // The gate-ordered scripts run twice: the gates make the order
         // exact, so a rerun lands the same outcome shape — and a failing
         // one fails the same way every time.
@@ -2047,7 +2057,7 @@ fn the_seed_corpus_holds() {
             .iter()
             .any(|p| path.file_name().unwrap().to_string_lossy().starts_with(p))
         {
-            let again = rt.block_on(run_script(&script));
+            let again = run_on_rt(&script);
             assert_eq!(
                 (summary.landed, summary.conflict, summary.rejected),
                 (again.landed, again.conflict, again.rejected),
@@ -2134,12 +2144,7 @@ fn the_model_holds_across_a_random_script() {
         // its script in the log even if shrinking then eats the cap.
         println!("seed: {}", seed());
         println!("script: {script:?}");
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(4)
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(run_script(&script));
+        run_on_rt(&script);
         Ok(())
     });
     if let Err(failure) = verdict {
