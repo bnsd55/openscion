@@ -11,7 +11,7 @@ use std::path::Path;
 use std::process::Command;
 
 /// The scion-server subcommands the guide's commands may use.
-const SUBCOMMANDS: [&str; 9] = [
+const SUBCOMMANDS: [&str; 13] = [
     "serve",
     "hash-token",
     "ticket-key",
@@ -21,6 +21,10 @@ const SUBCOMMANDS: [&str; 9] = [
     "fsck",
     "gc",
     "derive",
+    "migrate",
+    "export",
+    "verify",
+    "restore",
 ];
 
 /// The logical command lines of the guide's shell blocks: a block's
