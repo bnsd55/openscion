@@ -17,9 +17,9 @@ proposal ([`design/scalable-backend.md`](design/scalable-backend.md)).
 |---|---|
 | [`scion-core`](../crates/scion-core) | Object model (`Changeset`, `Tree`, IDs, `RepoPath`) and the v1 encoder and strict decoder. No I/O. |
 | [`scion-proto`](../crates/scion-proto) | gRPC types generated from [`proto/scion.proto`](../proto/scion.proto): the `Scion` and `Objects` services, whose contract is [`protocol-v1.md`](protocol-v1.md). Largest message 64 MiB, stream chunk 1 MiB; a `GetObjects` reply message holds one part of an object, at most 1 MiB plus its header. Also the code that the server and the tiers share: the bearer-token check (`auth.rs`), how an object travels in parts and encodings (`object.rs`), and the `GetObjects` reply rules (`reply.rs`). |
-| [`scion-server`](../crates/scion-server) | One binary: `serve` (the API), `import` (git import), `fsck`, `gc`, `derive`, `hash-token`, `ticket-key`. |
+| [`scion-server`](../crates/scion-server) | One binary: `serve` (the API), `migrate` (the schema moves), `import` (git import), `create-repo`, `create-ref`, `fsck`, `export`, `verify`, `restore`, `gc`, `derive`, `hash-token`, `ticket-key`. |
 | [`scion-tier`](../crates/scion-tier) | The cache tiers (section 7): a `Tier` library and two binaries, `scion-cache` (memory) and `scion-daemon` (disk, Unix socket). |
-| [`scn`](../crates/scn) | Command-line client: `cat`, `ls`, `log`, `blame`, `show`, `merge-base`, `is-ancestor`, `diff`, `checkout`, `commit`, `land`, `bench`. |
+| [`scn`](../crates/scn) | Command-line client: `cat`, `ls`, `log`, `blame`, `show`, `merge-base`, `is-ancestor`, `diff`, `checkout`, `mount`, `unmount`, `commit`, `land`, `bench`. |
 
 ```mermaid
 flowchart LR
@@ -40,8 +40,11 @@ flowchart LR
 How one request flows through the server:
 
 1. The server serves at most 128 connections at once (`--max-connections`).
-   A client beyond that waits, unread, until a connection closes, and the
-   process logs a warning. One connection has at most 256 calls open at
+   A client beyond that is accepted, and waits at most 5 s for another
+   connection to close; if none frees in time, the server closes it and
+   counts it in `scion_connections_refused_total`. At most that many
+   connections wait at once: one over that is closed at once, and counts
+   too. One connection has at most 256 calls open at
    once (`--max-streams`, HTTP/2 `SETTINGS_MAX_CONCURRENT_STREAMS`). Every
    connection closes in time, so a waiting one gets a place:
    - A client that sends no HTTP/2 preface within 20 s of getting its
@@ -53,8 +56,8 @@ How one request flows through the server:
    - After 30 min, the server asks a connection to close (`GOAWAY`). The
      client connects again for new calls. The calls in it get 10 min more
      (at least the 600 s of the longest call), and then the connection is
-     closed. So a connection beyond the cap waits at most 40 min for
-     another to close.
+     closed. So a connection beyond the cap waits at most 5 s for another
+     to close.
 
    Each TCP connection has Nagle's algorithm off, so a small reply does not
    wait for the client's ACK. The tiers share this code
@@ -112,8 +115,9 @@ with the repository. The full snapshot is derived data (section 4).
 A file state is a regular file (blob and executable flag), a symlink (blob
 that holds the target), or a gitlink (a git commit ID, no blob). Only git
 import sets `committer`, creates a changeset with zero or several parents, or
-creates a repo or a ref. No RPC creates a repo or a ref, so a new repo starts
-with `scion-server import`.
+creates a repo or a ref. No RPC creates a repo or a ref: a new repo starts
+with `scion-server create-repo` (its first ref at the root changeset), or
+with an import, which creates the repo it needs.
 
 ```mermaid
 flowchart LR
@@ -148,12 +152,11 @@ guide ([`operations.md`](operations.md), "The metadata in Postgres").
 The blob files stay in the data directory:
 
 ```text
-<data>/lock                    shared by every process that uses <data>
 <data>/open.lock               held while a process opens <data>
-<data>/server.lock             held by the one server process
-<data>/backend                 the marker that binds the directory to its database
+<data>/backend                 names the backend and the store's UUID
 <data>/objects/blob/ab/cd..    one zstd file per blob, named by its ID in hex
-<data>/tmp/                    staging for atomic blob writes and uploads
+<data>/tmp/                    staging for atomic blob writes and uploads,
+                               one folder per process, held with a lock
 ```
 
 **Checking a data directory.** `scion-server --data <dir> fsck` reports the
@@ -186,25 +189,31 @@ steps of the kind remove them (section 4).
 | `git_import` | Git commit ID to changeset, per repo, so a re-import skips known commits. |
 
 Trees live in the database, not in the blob folder, so a derivation that
-writes many trees commits them in one transaction. When a database opens,
-each migration in `migrations/postgres/` that is newer than its version
-runs, in order, in its own transaction. A released migration never
-changes. A build refuses a database with a newer version. The released
-schema is 0001 (the metadata's tables, `repo_blobs` among them), then
-0002 adds the derived roots' own table, 0003 the derived trees, 0004 the
-store's UUID, 0005 the first-parent numbering. There is no data-carrying
+writes many trees commits them in one transaction. The schema moves only
+when the operator asks: `scion-server migrate`, or `serve --migrate`, runs
+each migration in `migrations/postgres/` that is newer than the database's
+version, in order, in its own transaction. A released migration never
+changes. Every other open refuses a database with a newer version, and one
+that is behind, and names the migrate command. The released schema is 0001
+(the metadata's tables, `repo_blobs` among them), then 0002 adds the
+derived roots' own table, 0003 the derived trees, 0004 the store's UUID,
+0005 the first-parent numbering, 0006 the land's reject reason. There is
+no data-carrying
 upgrade step: `repo_blobs` is created with its rows' table, and a
 database a build cannot migrate to is refused, not rewritten.
 
 **Connections.** Each process holds one write connection behind a mutex
 and a pool of read-only clients (at most `store::READERS` at once). The
-migrations run on the write connection before the readers open. A read
-takes an idle read connection, or waits for one; each statement sees its
-own snapshot of the database, and a caller that needs one consistent
-view reads it in one statement. Writes that must read what they are
+schema check runs on the write connection before the readers open; the
+migrations run only when the operator asks (above). A read
+takes an idle read connection, or waits for one; every read runs in one
+transaction at repeatable read (`pg.rs` opens it with `BEGIN TRANSACTION
+ISOLATION LEVEL REPEATABLE READ READ ONLY`), so its statements see one
+snapshot of the database. Writes that must read what they are
 about to change run on the write connection, under the same lock. The
-database is fenced: the first open takes the one-server lock, and a
-process that loses it stops answering (section 3's fence row).
+database is fenced: the first open takes the one-server advisory lock, and
+a process that loses it stops answering (the operations guide, "The
+metadata in Postgres").
 
 **Blob folder.** One zstd file per blob, at most 100 MiB uncompressed. A write
 goes to a temp file in `tmp/`, is flushed, and is renamed into place. The zstd
@@ -264,31 +273,29 @@ Unit tests check where each flush comes. No test cuts the power: the crash
 suite kills the process, and the kernel keeps what it wrote (section 10).
 
 **Processes that share a data directory.** One `serve` runs per database —
-a second fails at open — and an `import` runs beside it: the import takes
-no one-server lock, it writes through its own database session and stages
-its blob files in the same directory. Each process holds its `flock`s on
-the directory until the last `Store` clone is dropped:
+a second fails at open, refused by the database's one-server advisory lock
+(`pg.rs`: "another server holds this store") — and an `import` runs beside
+it, as do `create-repo`, `create-ref`, `gc`, `export` and `fsck`: they take
+no one-server lock, they write through their own database session and
+stage their blob files in the same directory. `serve` and `derive` take
+the one-server lock, held for the process's life: `derive` removes rows
+of older versions of a kind, which a running server of an older build may
+still read. Each process holds its `flock`s on the directory until the
+last `Store` clone is dropped:
 
 | Lock file | Held by |
 |---|---|
-| `<data>/server.lock` | The server, exclusive. Lands are serialized in its memory (section 5), so a second server is refused. `derive` opens as the server too: it removes rows of older versions of a kind, which a running server of an older build may still read. |
-| `<data>/lock` | Every process, shared, for its whole life. An open first tries to take it exclusive, to learn whether another process uses the directory. An older build holds it exclusive for its whole life, so it and this build keep each other out. The file holds the build of the processes that use the directory (below). |
 | `<data>/open.lock` | A process while it opens the directory, so opens take turns. |
 
-- **Alone at open.** A process that opens the directory alone also removes
-  files in `tmp/` of a build older than the folders, and runs schema
-  migrations. Every open, alone or not, removes the folders of `tmp/` that
-  no process holds: each process stages its temp files in its own folder,
-  which it holds with a `flock` for as long as it lives, so the temp files
-  of a crashed import are removed by the next open, of any process
+- **Every open sweeps `tmp/`.** Each process stages its temp files in its
+  own folder of `tmp/`, which it holds with a `flock` for as long as it
+  lives, so the temp files of a crashed import are removed by the next
+  open, of any process
   ([#101](https://github.com/bnsd55/openscion/issues/101)).
-  A shared open of an older schema fails: stop the other processes to
-  upgrade it.
-- **One build.** Each process removes the derived rows of older versions of
-  a kind (section 4), which a process of an older build may still read. So
-  the first process writes its build into `<data>/lock`: the schema version
-  and the version of each kind (`store::build`). An open while other
-  processes run fails unless its build is the same.
+- **The schema lives in the database.** An open refuses a database whose
+  schema is newer than this build's, and one that is behind it, and names
+  the migrate command (above). No open migrates: the schema moves only
+  when the operator asks (`scion-server migrate`, or `serve --migrate`).
 - **Writes take turns.** Each write transaction holds the database's rows
   it touches; a write that waits for another writer's lock gives up after
   5 s and fails with `UNAVAILABLE`, so the client retries. An import ends a
@@ -432,8 +439,9 @@ names stores about 47 KiB of new rows, not the 6.3 MB node of every name
 the directory ever had, and a change rewrites only the chunks its names
 land in. As with trees, no node is ever deleted for a draft that never
 lands, or for a changeset that a land stored again on a new head — but a
-version bump may drop the old-format rows, as migration 0007 did for
-trees, and the new version derives them again. The value is stored when a
+version bump drops the old-format rows: each step deletes up to `STEP`
+rows of older versions of its kind (above), and the new version derives
+them again. The value is stored when a
 changeset is written, if its first parent has one.
 In a database from before path history, the first query that needs it
 derives it in steps. A golden test pins the root nodes of a fixed history.
@@ -543,9 +551,7 @@ sequenceDiagram
   7 days after it finished (`LAND_RETENTION_SECS`). A pending land is kept
   until a retry finishes it. Each new land deletes up to 100 expired lands,
   oldest first, in the transaction that records it. The newest land always
-  stays, so a land ID is never given out twice. The upgrade to schema
-  version 2 gives older finished lands the time of the upgrade, so their
-  7 days start then.
+  stays, so a land ID is never given out twice.
 - **A retry after expiry** is a new land with a new ID, and `GetLand` with
   the old ID returns `NOT_FOUND`. It cannot land the changeset twice: the
   landed copy changed every path of the changeset after its base, so the new
@@ -1249,8 +1255,6 @@ Both binaries are thin wrappers around one type, `Tier`. It serves the
 
 | Call | What a tier does |
 |---|---|
-| Call | What a tier does |
-|---|---|
 | `ResolveRef` | Refused with `UNIMPLEMENTED`: a caller resolves on the server, then brings the ticket of the root tree. |
 | `GetRootTree` | Refused with `UNIMPLEMENTED`: only the server mints tickets. A tier that answered it could mint a ticket for any repo. |
 | `GetObjects` | Serves hits from its store. Fetches the misses from upstream in batched calls, checks each object against its ID, stores it, then sends it. A blob stays one zstd frame from the server's disk to the client. |
@@ -1625,7 +1629,6 @@ The owner of every row is the project owner.
 | `.github/workflows/ci.yml` (the proptest remainder job) | The nightly's proptest budget proof runs as four jobs (three proofs alone, one remainder); the remainder runs the whole suite minus the three proofs, the view proof folded in, at the full 2000 cases, in a 120-minute window. Its step checks the three skipped names still exist and names the missing one, so a renamed proof fails loudly instead of running twice or never. | bounded | The 11-02 nightly's 118 minutes was the one shared job's wall, set by the land proof; the remainder's own proofs measure 33 minutes and less on that wall. | The job passes 70% of its timeout (84 minutes). | Move a proof back into the remainder only if its own job is gone; split a proof by cases otherwise. | the job's own nightly runs | the project owner |
 | `.github/workflows/ci.yml` (the umask 002 job's test parallelism) | The nightly umask 002 job runs the suite with the runner's default test parallelism, uncapped, on its own Postgres service (max_connections 100): no other run competes with it, so the default parallelism is expected to fit. | bounded | The suite's own pool sizes keep it under the service's 100 connections on main (the nightly's worst case, the two proof tests, is 12 readers plus the suite's pools, names at `test_support::PROOF_READERS`' comment in `crates/scion-server/src/lib.rs` (32 connections of 100)); the job's first nightly measures the run whole. | The nightly reports Postgres E53300 ("too many clients"). | Cap the job's `--test-threads` first; raise the service's `max_connections` only if a capped run still exhausts. | the job's own nightly runs | the project owner |
 | `.github/workflows/ci.yml` (the umask 002 job cap) | The 45-minute cap fits the suite the umask 002 job runs: the same whole-workspace Postgres suite the Postgres cells run, on one runner with one Postgres service. | bounded | The measured times of the Postgres cells on main (17-30 min, Oct 2026) are the floor; the job adds no step beyond the suite and the work-tree check. The job's first nightly measures it whole. | The nightly's measured run passes 35 minutes, or the slowest model oracles get a cheaper full walk (the trigger the main job's cap names). | Bring the cap back toward 30, with the main job's. | the job's own nightly runs | the project owner |
-
 | `crates/scion-proto/src/runtime/tls.rs` (the mTLS accept) | The accept of a client certificate checks what webpki checks — the chain to the client CA and the certificate's dates — and nothing more: no revocation, and no check that a certificate's name matches the peer that presents it. | bounded | A client certificate that the client CA signed and that is not expired works for as long as its dates say, until whoever made it replaces it. | A certificate is revoked, or a deployment must pin which certificate each peer presents. | Check revocation at the accept (CRL or OCSP), or pin the leaf certificate per peer. | the TLS suite's verifier tests | the project owner |
 
 ## 10. Testing
@@ -1746,9 +1749,12 @@ into fixed buckets. The values are read on export only.
 | `scion_requests_total{rpc,code}` | counter | Every counted RPC by path (`Scion/Blame`, `Objects/GetObjects`, ...) and gRPC status. |
 | `scion_request_seconds{rpc}` | histogram | A call's duration from the moment the layer sees the request until the reply ends or is dropped. Buckets at 1, 4, 16, 64, 256 ms and 1, 4, 16, 64 s, then `+Inf`. |
 | `scion_rpc_bytes_total{rpc,direction}` | counter | Reply bytes out; request bytes in, counted from the `content-length` header, which a gRPC client does not send. |
+| `scion_connections_refused_total` | counter | Connections the server closed because no place freed within the 5 s wait at the connection cap (`--max-connections`); a client that left while it waited counts here too. A rising rate says `--max-connections` is too small for the clients. |
+| `scion_calls_in_flight` | gauge | Calls whose reply body has not ended, as the count a drain still waits for. A call that never reaches a reply body is given back by the same guard that counted it. |
 | `scion_lands_total{outcome}` | counter | Lands by outcome: `landed`, `conflict`, `rejected`, `retry` (a pending land waits for its retry), then the class of a land that ended in an error: `aborted`, `deadline_exceeded`, `resource_exhausted`, `unavailable`, `not_found`, `invalid_argument`, `permission_denied`, `failed_precondition`, `cancelled` (the call went while its land was planned), `internal`. |
 | `scion_land_replans_total` | counter | Lands whose ref moved under them and were planned again: a rising rate means lands that contend with imports or other writers on one ref. |
 | `scion_view_trees_walked_total` | counter | Real trees a view derivation opened for a partial reader. A count that rises on every changeset of the same rule set says the per-tree memo is not serving and every read re-walks the tree. |
+| `scion_diff_rename_cache_bytes` | gauge | The bytes the paged diffs' rename maps hold in the read path's cache, to `RENAME_CACHE_MAX_BYTES`. A hold that stays while no diff runs is the cache's lazy sweep (section 9). |
 | `scion_cache_hits_total`, `scion_cache_misses_total` | counter | A tier's object reads served from its store or its snapshot, and read from upstream. A tier's scrape also shows its `Objects` calls in `scion_requests_total` and `scion_request_seconds`. |
 | `scion_blob_sync_seconds` | histogram | One fsync attempt on the blob write path, failed ones included: a temp file, a stored file, a blob directory, or the drive-cache flush that batches syncing at the same time share (a caller's duration includes the wait for the flush in progress). A sum that outruns the counts says a drive that cannot keep up with the imports. Same buckets as `scion_request_seconds`. |
 | `scion_data_free_bytes` | gauge | Free bytes for this process's user on the filesystem that holds the data directory, refreshed every 30 s. This is the alarm that fires before the server fails to write. |
