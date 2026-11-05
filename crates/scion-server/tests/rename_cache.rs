@@ -445,9 +445,10 @@ fn a_map_past_the_cap_evicts_the_oldest() {
 }
 
 /// One empty-map diff over the shared old root: every file's content
-/// changed and one file added, so page 1 carries the add, the search
-/// runs and finds no renames, and the map waits for the pages after -
-/// which the test never asks for.
+/// changed and one file added, and the added path sorts before the
+/// changed ones, so page 1 carries the add, the search runs and finds
+/// no renames, and the map waits for the pages after - which the test
+/// never asks for.
 fn empty_map_diff(
     store: &Backend,
     old: scion_core::ChangesetId,
@@ -472,7 +473,7 @@ fn empty_map_diff(
                         )
                     })
                     .chain(std::iter::once((
-                        RepoPath::new(format!("z/{i:04}.txt").as_str()).unwrap(),
+                        RepoPath::new(format!("a/{i:04}.txt").as_str()).unwrap(),
                         Some(FileState::Regular {
                             content: BlobId::of(format!("added-{i}\n").as_bytes()),
                             executable: false,
