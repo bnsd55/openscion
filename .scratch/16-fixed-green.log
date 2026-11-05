@@ -1,0 +1,155 @@
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 8 GiB, 1 slots busy or disk low)
+warning: unreachable statement
+    --> crates/scion-server/tests/land_model_proptest.rs:1372:17
+     |
+1371 |                   std::process::abort();
+     |                   --------------------- any code following this expression is unreachable
+1372 | /                 eprintln!(
+1373 | |                     "{name} passed its budget of {budget:?} at step {at} \
+1374 | |                      (seed {s}); the run is wedged, aborting the process",
+1375 | |                     name = self.script_name,
+...    |
+1378 | |                     at = at,
+1379 | |                 );
+     | |_________________^ unreachable statement
+     |
+     = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+     = note: this warning originates in the macro `eprintln` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: `open-scion-server` (test "land_model_proptest") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.62s
+     Running tests/land_model_proptest.rs (target/debug/deps/land_model_proptest-3bf7487f2f8e0126)
+
+running 3 tests
+test the_model_holds_across_a_random_script ... ok
+test a_restart_waits_for_the_killed_servers_store_lock ... ok
+5.15s seed 1793911182057 op 1: CutFresh { caller: 0, target: 0, shared: false, cut_ms: 20 }
+5.25s seed 1793911182057 op 2: KillAtPending
+15.57s seed 1793911182057 op 3: Check
+5.13s seed 1793911182057 op 1: Land { caller: 1, target: 0, stale: false, shared: false }
+5.26s seed 1793911182057 op 2: Twin { caller: 2, land: 0 }
+5.27s seed 1793911182057 op 3: Check
+4.97s seed 1793911182057 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.10s seed 1793911182057 op 2: Land { caller: 1, target: 1, stale: false, shared: false }
+5.21s seed 1793911182057 op 3: Gc
+7.12s seed 1793911182057 op 4: Land { caller: 2, target: 0, stale: false, shared: true }
+7.24s seed 1793911182057 op 5: Check
+4.95s seed 1793911182057 op 1: Land { caller: 0, target: 2, stale: false, shared: false }
+5.04s seed 1793911182057 op 2: Check
+5.01s seed 1793911182057 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.13s seed 1793911182057 op 2: Land { caller: 1, target: 0, stale: false, shared: true }
+5.26s seed 1793911182057 op 3: Land { caller: 2, target: 0, stale: true, shared: true }
+5.39s seed 1793911182057 op 4: Check
+5.00s seed 1793911182057 op 1: BurstCut { k: 5, target: 0 }
+5.71s seed 1793911182057 op 2: Gc
+7.61s seed 1793911182057 op 3: Check
+4.98s seed 1793911182057 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+test the_seed_corpus_holds has been running for over 60 seconds
+5.11s seed 1793911182057 op 2: Import
+5.50s seed 1793911182057 op 3: SendNoWait { caller: 1, target: 3, stale: false, point: Cas }
+5.56s seed 1793911182057 op 4: AwaitGate { land: 1, point: Cas }
+5.58s seed 1793911182057 op 5: Import
+6.00s seed 1793911182057 op 6: Resume { land: 1, point: Cas }
+6.00s seed 1793911182057 op 7: Retry { caller: 1, land: 1 }
+6.05s seed 1793911182057 op 8: Check
+5.23s seed 1793911182057 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.36s seed 1793911182057 op 2: Import
+5.74s seed 1793911182057 op 3: SendNoWait { caller: 1, target: 3, stale: false, point: Cas }
+5.79s seed 1793911182057 op 4: AwaitGate { land: 1, point: Cas }
+5.82s seed 1793911182057 op 5: Import
+6.23s seed 1793911182057 op 6: Resume { land: 1, point: Cas }
+6.23s seed 1793911182057 op 7: Retry { caller: 1, land: 1 }
+6.27s seed 1793911182057 op 8: Check
+5.12s seed 1793911182057 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.24s seed 1793911182057 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Settled }
+5.31s seed 1793911182057 op 3: AwaitGate { land: 1, point: Settled }
+5.36s seed 1793911182057 op 4: Resume { land: 1, point: Settled }
+5.36s seed 1793911182057 op 5: Retry { caller: 1, land: 1 }
+5.37s seed 1793911182057 op 6: Check
+5.26s seed 1793911182057 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.37s seed 1793911182057 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Settled }
+5.44s seed 1793911182057 op 3: AwaitGate { land: 1, point: Settled }
+5.49s seed 1793911182057 op 4: Resume { land: 1, point: Settled }
+5.49s seed 1793911182057 op 5: Retry { caller: 1, land: 1 }
+5.50s seed 1793911182057 op 6: Check
+5.06s seed 1793911182057 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.18s seed 1793911182057 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Planned }
+5.25s seed 1793911182057 op 3: AwaitGate { land: 1, point: Planned }
+5.28s seed 1793911182057 op 4: Kill
+5.59s seed 1793911182057 op 5: Retry { caller: 1, land: 1 }
+5.63s seed 1793911182057 op 6: Check
+5.15s seed 1793911182057 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.27s seed 1793911182057 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Planned }
+5.34s seed 1793911182057 op 3: AwaitGate { land: 1, point: Planned }
+5.37s seed 1793911182057 op 4: Kill
+5.67s seed 1793911182057 op 5: Retry { caller: 1, land: 1 }
+5.71s seed 1793911182057 op 6: Check
+5.03s seed 1793911182057 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.16s seed 1793911182057 op 2: SendNoWait { caller: 1, target: 0, stale: true, point: Step }
+5.22s seed 1793911182057 op 3: AwaitGate { land: 1, point: Step }
+5.29s seed 1793911182057 op 4: Kill
+5.62s seed 1793911182057 op 5: Retry { caller: 1, land: 1 }
+5.63s seed 1793911182057 op 6: Check
+4.98s seed 1793911182057 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.10s seed 1793911182057 op 2: SendNoWait { caller: 1, target: 0, stale: true, point: Step }
+5.17s seed 1793911182057 op 3: AwaitGate { land: 1, point: Step }
+5.24s seed 1793911182057 op 4: Kill
+5.56s seed 1793911182057 op 5: Retry { caller: 1, land: 1 }
+5.57s seed 1793911182057 op 6: Check
+5.01s seed 1793911182057 op 1: SendNoWait { caller: 1, target: 0, stale: false, point: Record }
+5.08s seed 1793911182057 op 2: AwaitGate { land: 1, point: Record }
+5.11s seed 1793911182057 op 3: Land { caller: 1, target: 0, stale: false, shared: false }
+5.22s seed 1793911182057 op 4: Resume { land: 0, point: Record }
+5.22s seed 1793911182057 op 5: Retry { caller: 1, land: 0 }
+5.28s seed 1793911182057 op 6: Check
+8.86s seed 1793911182057 op 1: SendNoWait { caller: 1, target: 0, stale: false, point: Record }
+8.93s seed 1793911182057 op 2: AwaitGate { land: 1, point: Record }
+8.96s seed 1793911182057 op 3: Land { caller: 1, target: 0, stale: false, shared: false }
+9.08s seed 1793911182057 op 4: Resume { land: 0, point: Record }
+9.08s seed 1793911182057 op 5: Retry { caller: 1, land: 0 }
+9.13s seed 1793911182057 op 6: Check
+test the_seed_corpus_holds ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 129.72s
+

@@ -1,0 +1,101 @@
+   Compiling open-scion-server v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-server)
+warning: unreachable statement
+    --> crates/scion-server/tests/land_model_proptest.rs:1372:17
+     |
+1371 |                   std::process::abort();
+     |                   --------------------- any code following this expression is unreachable
+1372 | /                 eprintln!(
+1373 | |                     "{name} passed its budget of {budget:?} at step {at} \
+1374 | |                      (seed {s}); the run is wedged, aborting the process",
+1375 | |                     name = self.script_name,
+...    |
+1378 | |                     at = at,
+1379 | |                 );
+     | |_________________^ unreachable statement
+     |
+     = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+     = note: this warning originates in the macro `eprintln` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: `open-scion-server` (test "land_model_proptest") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.52s
+     Running tests/land_model_proptest.rs (target/debug/deps/land_model_proptest-3bf7487f2f8e0126)
+
+running 1 test
+test the_seed_corpus_holds ... 9.35s seed 1793909677902 op 1: CutFresh { caller: 0, target: 0, shared: false, cut_ms: 20 }
+9.47s seed 1793909677902 op 2: KillAtPending
+9.82s seed 1793909677902 op 3: Check
+6.38s seed 1793909677902 op 1: Land { caller: 1, target: 0, stale: false, shared: false }
+6.49s seed 1793909677902 op 2: Twin { caller: 2, land: 0 }
+6.51s seed 1793909677902 op 3: Check
+4.93s seed 1793909677902 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.05s seed 1793909677902 op 2: Land { caller: 1, target: 1, stale: false, shared: false }
+5.16s seed 1793909677902 op 3: Gc
+7.03s seed 1793909677902 op 4: Land { caller: 2, target: 0, stale: false, shared: true }
+7.15s seed 1793909677902 op 5: Check
+4.83s seed 1793909677902 op 1: Land { caller: 0, target: 2, stale: false, shared: false }
+4.93s seed 1793909677902 op 2: Check
+5.34s seed 1793909677902 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.46s seed 1793909677902 op 2: Land { caller: 1, target: 0, stale: false, shared: true }
+5.59s seed 1793909677902 op 3: Land { caller: 2, target: 0, stale: true, shared: true }
+5.72s seed 1793909677902 op 4: Check
+4.96s seed 1793909677902 op 1: BurstCut { k: 5, target: 0 }
+5.67s seed 1793909677902 op 2: Gc
+7.54s seed 1793909677902 op 3: Check
+4.90s seed 1793909677902 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.02s seed 1793909677902 op 2: Import
+5.41s seed 1793909677902 op 3: SendNoWait { caller: 1, target: 3, stale: false, point: Cas }
+5.46s seed 1793909677902 op 4: AwaitGate { land: 1, point: Cas }
+5.48s seed 1793909677902 op 5: Import
+5.87s seed 1793909677902 op 6: Resume { land: 1, point: Cas }
+5.87s seed 1793909677902 op 7: Retry { caller: 1, land: 1 }
+5.92s seed 1793909677902 op 8: Check
+5.01s seed 1793909677902 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.14s seed 1793909677902 op 2: Import
+5.54s seed 1793909677902 op 3: SendNoWait { caller: 1, target: 3, stale: false, point: Cas }
+5.59s seed 1793909677902 op 4: AwaitGate { land: 1, point: Cas }
+5.61s seed 1793909677902 op 5: Import
+6.00s seed 1793909677902 op 6: Resume { land: 1, point: Cas }
+6.00s seed 1793909677902 op 7: Retry { caller: 1, land: 1 }
+6.05s seed 1793909677902 op 8: Check
+4.89s seed 1793909677902 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.01s seed 1793909677902 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Settled }
+5.08s seed 1793909677902 op 3: AwaitGate { land: 1, point: Settled }
+5.12s seed 1793909677902 op 4: Resume { land: 1, point: Settled }
+5.12s seed 1793909677902 op 5: Retry { caller: 1, land: 1 }
+5.14s seed 1793909677902 op 6: Check
+4.86s seed 1793909677902 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+4.97s seed 1793909677902 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Settled }
+5.03s seed 1793909677902 op 3: AwaitGate { land: 1, point: Settled }
+5.07s seed 1793909677902 op 4: Resume { land: 1, point: Settled }
+5.07s seed 1793909677902 op 5: Retry { caller: 1, land: 1 }
+5.09s seed 1793909677902 op 6: Check
+4.90s seed 1793909677902 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.01s seed 1793909677902 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Planned }
+5.07s seed 1793909677902 op 3: AwaitGate { land: 1, point: Planned }
+5.10s seed 1793909677902 op 4: Kill
+5.40s seed 1793909677902 op 5: Retry { caller: 1, land: 1 }
+5.44s seed 1793909677902 op 6: Check
+4.94s seed 1793909677902 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.05s seed 1793909677902 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Planned }
+5.12s seed 1793909677902 op 3: AwaitGate { land: 1, point: Planned }
+5.14s seed 1793909677902 op 4: Kill
+5.45s seed 1793909677902 op 5: Retry { caller: 1, land: 1 }
+5.49s seed 1793909677902 op 6: Check
+4.93s seed 1793909677902 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.05s seed 1793909677902 op 2: SendNoWait { caller: 1, target: 0, stale: true, point: Step }
+5.11s seed 1793909677902 op 3: AwaitGate { land: 1, point: Step }
+5.18s seed 1793909677902 op 4: Kill
+5.48s seed 1793909677902 op 5: Retry { caller: 1, land: 1 }
+5.49s seed 1793909677902 op 6: Check
+4.80s seed 1793909677902 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+4.92s seed 1793909677902 op 2: SendNoWait { caller: 1, target: 0, stale: true, point: Step }
+4.99s seed 1793909677902 op 3: AwaitGate { land: 1, point: Step }
+5.06s seed 1793909677902 op 4: Kill
+5.38s seed 1793909677902 op 5: Retry { caller: 1, land: 1 }
+5.39s seed 1793909677902 op 6: Check
+4.98s seed 1793909677902 op 1: SendNoWait { caller: 1, target: 0, stale: false, point: Record }
+5.06s seed 1793909677902 op 2: AwaitGate { land: 1, point: Record }
+5.09s seed 1793909677902 op 3: Land { caller: 1, target: 0, stale: false, shared: false }
+5.20s seed 1793909677902 op 4: Resume { land: 1, point: Record }
+5.20s seed 1793909677902 op 5: Retry { caller: 1, land: 1 }
+5.21s seed 1793909677902 op 6: Check

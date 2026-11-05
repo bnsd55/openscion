@@ -4,6 +4,6 @@
 landnow 1 0 0 record
 awaitgate 1 record
 land 1 0 0 0
-resume 1 record
-retry 1 1
+resume 0 record
+retry 1 0
 check

@@ -1,3 +1,17 @@
 PANIC: the retry of land 0: Status { code: Cancelled, message: "Timeout expired", source: Some(tonic::transport::Error(Transport, TimeoutExpired(()))) }
 PANIC: the twin retry of land 0: Status { code: Cancelled, message: "Timeout expired", source: Some(tonic::transport::Error(Transport, TimeoutExpired(()))) }
 16-by-key-while-parked.txt passed its budget of 240s at step 6 (seed 1793908935931); the run is wedged, aborting the process
+PANIC: the twin retry of land 0: Status { code: Cancelled, message: "Timeout expired", source: Some(tonic::transport::Error(Transport, TimeoutExpired(()))) }PANIC: the retry of land 0: Status { code: Cancelled, message: "Timeout expired", source: Some(tonic::transport::Error(Transport, TimeoutExpired(()))) }
+
+16-by-key-while-parked.txt passed its budget of 240s at step 6 (seed 1793909677902); the run is wedged, aborting the process
+snapshot: begin
+activity: pid=181292 state=idle wait=Client/ClientRead xact=None q=SELECT 1
+activity: pid=181293 state=idle wait=Client/ClientRead xact=None q=SHOW synchronous_commit
+activity: pid=181294 state=idle wait=Client/ClientRead xact=None q=SHOW synchronous_commit
+activity: pid=181295 state=idle wait=Client/ClientRead xact=None q=SHOW synchronous_commit
+activity: pid=181296 state=idle wait=Client/ClientRead xact=None q=SHOW synchronous_commit
+activity: pid=181297 state=idle wait=Client/ClientRead xact=None q=SHOW synchronous_commit
+activity: pid=181298 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=181299 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=181300 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+PANIC: error retrieving column 1: error deserializing column 1

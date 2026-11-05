@@ -1369,15 +1369,6 @@ impl Watchdog {
                 ));
                 snapshot_db(&self.db_url);
                 std::process::abort();
-                eprintln!(
-                    "{name} passed its budget of {budget:?} at step {at} \
-                     (seed {s}); the run is wedged, aborting the process",
-                    name = self.script_name,
-                    budget = self.budget,
-                    s = self.seed,
-                    at = at,
-                );
-                std::process::abort();
             }
             std::thread::sleep(Duration::from_secs(1));
         }
