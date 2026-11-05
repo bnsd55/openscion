@@ -620,7 +620,7 @@ pub(crate) fn derive<K: Kind>(
         ControlFlow::Continue(walk) => walk,
     };
     walk.step::<K>(c, usize::MAX, deadline)?;
-    let (value, _written) = derive_chain::<K>(c, repo, &walk.into_pending(), lens, deadline)?;
+    let (value, _written) = derive_chain::<K>(c, repo, &walk.into_pending(), lens)?;
     value.ok_or_else(|| Error::NotFound(format!("changeset {cs}")))
 }
 
@@ -859,8 +859,7 @@ fn derive_steps<K: Kind>(
             HashMap::new()
         };
         let (step_value, step_written) = store.commit(|c| {
-            let (value, written) =
-                derive_chain::<K>(c, repo, step, &mut tree::lens_from(&lens), deadline)?;
+            let (value, written) = derive_chain::<K>(c, repo, step, &mut tree::lens_from(&lens))?;
             remove_old::<K>(c)?;
             Ok((value, written))
         })?;
@@ -893,7 +892,6 @@ fn derive_chain<K: Kind>(
     repo: RepoId,
     ids: &[ChangesetId],
     lens: crate::tree::BlobLens<'_>,
-    deadline: Option<&Deadline>,
 ) -> Result<(Option<K::Value>, usize)> {
     let mut value = None;
     let mut written = 0usize;

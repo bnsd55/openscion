@@ -110,7 +110,7 @@ pub fn apply(
     }
     #[cfg(test)]
     let mut park_index = 0usize;
-    for (path, state) in changes.iter() {
+    for (path, state) in changes {
         if let Some(state) = state {
             // A gitlink names no blob, so it carries no length; its entry
             // ends at the commit bytes.
