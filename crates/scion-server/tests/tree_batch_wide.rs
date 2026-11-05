@@ -62,10 +62,7 @@ fn a_wide_changeset_builds_under_the_bound() {
             .collect::<Vec<_>>(),
     );
     let (base_id, base_root) = store
-        .write(
-            |c| tree::store_changeset(c, repo, &base, &mut |_| Ok(0), None),
-            None,
-        )
+        .write(|c| tree::store_changeset(c, repo, &base, &mut |_| Ok(0), None))
         .unwrap();
     let commit = changeset(
         &(0..100_000)

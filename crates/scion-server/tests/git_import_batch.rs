@@ -57,10 +57,7 @@ fn archive_with_provenance(
     let repo = store.write(|c| c.create_repo(REPO)).unwrap();
     let cs = changeset(Vec::new(), "one\n");
     let cs_id = store
-        .write(
-            |c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0),
-            None,
-        )
+        .write(|c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0))
         .unwrap();
     store
         .write(|c| c.cas_ref(repo, "main", None, cs_id))
@@ -140,17 +137,11 @@ fn a_repeated_provenance_pair_is_a_no_op() {
     let repo = store.write(|c| c.create_repo(REPO)).unwrap();
     let first = changeset(Vec::new(), "one\n");
     let first = store
-        .write(
-            |c| Ok(tree::store_changeset(c, repo, &first, &mut |_| Ok(0), None)?.0),
-            None,
-        )
+        .write(|c| Ok(tree::store_changeset(c, repo, &first, &mut |_| Ok(0), None)?.0))
         .unwrap();
     let second = changeset(Vec::new(), "two\n");
     let second = store
-        .write(
-            |c| Ok(tree::store_changeset(c, repo, &second, &mut |_| Ok(0), None)?.0),
-            None,
-        )
+        .write(|c| Ok(tree::store_changeset(c, repo, &second, &mut |_| Ok(0), None)?.0))
         .unwrap();
     let oid = gix::hash::ObjectId::from_hex(b"0000000000000000000000000000000000000001").unwrap();
     store

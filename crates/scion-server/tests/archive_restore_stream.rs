@@ -91,7 +91,6 @@ fn stream_source(data: &Path) -> Backend {
                     );
                     parent = Some(
                         tree::store_changeset(c, repo, &cs, &mut tree::lens_from(&lens), None)?.0,
-                        None,
                     );
                     c.add_repo_blob(repo, blob_ids[i])?;
                 }

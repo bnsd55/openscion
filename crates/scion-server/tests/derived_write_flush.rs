@@ -63,10 +63,7 @@ fn the_old_rows_a_write_path_deletes_are_gone_after_its_commit() {
     let repo = store.write(|c| c.create_repo(REPO)).unwrap();
     let parent = changeset("parent\n", None);
     let parent_id = store
-        .write(
-            |c| Ok(tree::store_changeset(c, repo, &parent, &mut |_| Ok(0), None)?.0),
-            None,
-        )
+        .write(|c| Ok(tree::store_changeset(c, repo, &parent, &mut |_| Ok(0), None)?.0))
         .unwrap();
 
     // A row of an older version of the root-tree kind, as a version
@@ -84,10 +81,7 @@ fn the_old_rows_a_write_path_deletes_are_gone_after_its_commit() {
     // gone: the flush ran inside it, so a rollback would have kept it.
     let child = changeset("child\n", Some(parent_id));
     store
-        .write(
-            |c| tree::store_changeset(c, repo, &child, &mut |_| Ok(0), None),
-            None,
-        )
+        .write(|c| tree::store_changeset(c, repo, &child, &mut |_| Ok(0), None))
         .unwrap();
     let after = store
         .read(|c| c.get_derived("root_tree", 0, parent_id))
@@ -106,10 +100,7 @@ fn a_write_that_disagrees_with_a_stored_row_still_refuses() {
     let repo = store.write(|c| c.create_repo(REPO)).unwrap();
     let cs = changeset("root\n", None);
     let id = store
-        .write(
-            |c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0),
-            None,
-        )
+        .write(|c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0))
         .unwrap();
 
     // The second write of the same row in one transaction holds a value
@@ -135,18 +126,12 @@ fn the_write_paths_derived_reads_ride_one_preload() {
     let repo = store.write(|c| c.create_repo(REPO)).unwrap();
     let parent = changeset("parent\n", None);
     let parent_id = store
-        .write(
-            |c| Ok(tree::store_changeset(c, repo, &parent, &mut |_| Ok(0), None)?.0),
-            None,
-        )
+        .write(|c| Ok(tree::store_changeset(c, repo, &parent, &mut |_| Ok(0), None)?.0))
         .unwrap();
     let child = changeset("child\n", Some(parent_id));
     Backend::test_reset_statement_count();
     store
-        .write(
-            |c| tree::store_changeset(c, repo, &child, &mut |_| Ok(0), None),
-            None,
-        )
+        .write(|c| tree::store_changeset(c, repo, &child, &mut |_| Ok(0), None))
         .unwrap();
     let log = Backend::test_statement_log();
     let reads = log

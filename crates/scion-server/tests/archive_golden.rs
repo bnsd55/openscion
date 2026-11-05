@@ -72,10 +72,7 @@ fn source(data: &Path) -> (Backend, ChangesetId) {
             let mut parent = None;
             for name in ["a", "b", "c"] {
                 let cs = changeset(parent.into_iter().collect(), &[(name, regular(name))]);
-                parent = Some(
-                    tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0,
-                    None,
-                );
+                parent = Some(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0);
             }
             let main = parent.expect("depth > 0");
             assert!(c.cas_ref(repo, "main", None, main)?);
