@@ -29,7 +29,7 @@
 //! server's access file knows. A row a second server still needs is
 //! re-derived, at that server's next read.
 
-use scion_core::{ChangesetId, Entry, RepoPath, Tree, TreeId};
+use scion_core::{ChangesetId, Entry, PathElem, RepoPath, Tree, TreeId};
 
 use crate::backend::Backend;
 use crate::deadline::Deadline;
@@ -74,17 +74,104 @@ fn below(ctx: &[Vec<u8>], name: &[u8]) -> Below {
 /// The subtrees derived so far, by (tree ID, context digest), so shared
 /// subtrees are derived once per derivation; the new view trees it built;
 /// and the (real tree, context digest, view) rows it found or derived, for
-/// the one short write that stores them.
+/// the one short write that stores them. Two counters bound the memo's
+/// RAM under [`VIEW_MEMO_BYTES`], the share it reserved: `pending` counts
+/// the trees and rows a part has not written yet, and past
+/// [`VIEW_PART_BYTES`] they leave for the store as a part; the dedupe
+/// map's cost is its entry count, and past [`VIEW_MAP_BYTES`] it clears.
 #[derive(Default)]
 struct Memo {
     derived: std::collections::HashMap<(TreeId, [u8; 32]), Option<TreeId>>,
     trees: Vec<Tree>,
     rows: Vec<(TreeId, [u8; 32], TreeId)>,
+    /// The bytes of the pending trees and rows, estimated at every push.
+    /// The dedupe map's bytes are its entry count times the entry
+    /// estimate, read where the bound is checked - one counter per thing
+    /// that resets, so a part never leaves the map's cost behind.
+    pending: usize,
     /// Real trees the walk opened, one per directory. A per-tree memo hit
     /// skips its whole subtree, so the count says how much the derivation
     /// really read.
     walked: u64,
 }
+
+/// The RAM one view derivation's memo may hold before it writes a part:
+/// the pending trees and rows leave for the store, and the dedupe map
+/// clears (shared subtrees are looked up in the store's memo, whose rows
+/// the parts already wrote - a clear costs re-walks, not wrong results).
+/// The derivation reserves these bytes from a per-store pool of
+/// [`VIEW_DERIVES_MAX`] reservations, so at most that many derivations
+/// hold theirs at once and FLOOR can count the share.
+pub(crate) const VIEW_MEMO_BYTES: usize = 64 << 20;
+
+/// The pending trees and rows one part holds before its own short write
+/// stores them, between two read transactions of the walk: about 32,000
+/// rows, a few seconds in the write lane. Trees
+/// go first, so a row only names a tree the store holds; the root's row
+/// lands in the last part, so a derivation that fails mid-walk leaves
+/// only valid prefix rows.
+const VIEW_PART_BYTES: usize = 4 << 20;
+
+/// The dedupe map's share: past it the map clears, and shared subtrees
+/// are looked up in the store's memo, whose rows the parts wrote - a
+/// clear costs re-walks, not wrong results.
+const VIEW_MAP_BYTES: usize = 60 << 20;
+
+#[cfg(any(test, feature = "test-hooks"))]
+static VIEW_PART_BYTES_OVERRIDE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// The part bound this run enforces: the test's small bound, or the
+/// server's.
+fn view_part_bytes() -> usize {
+    #[cfg(any(test, feature = "test-hooks"))]
+    {
+        let small = VIEW_PART_BYTES_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
+        if small > 0 {
+            return small;
+        }
+    }
+    VIEW_PART_BYTES
+}
+
+/// How many view derivations one store runs at once. A derivation beyond
+/// the cap waits for a reservation, under its call's deadline, with no
+/// store lock and no write lane held - it holds nothing the store needs.
+pub(crate) const VIEW_DERIVES_MAX: usize = 2;
+
+/// Holds a small part bound for the tests that pin the mid-walk flush:
+/// the next derivation writes parts at it, and the bound returns when the
+/// guard drops.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn test_set_view_part_bound(bytes: usize) -> impl Drop {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            VIEW_PART_BYTES_OVERRIDE.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    VIEW_PART_BYTES_OVERRIDE.store(bytes, std::sync::atomic::Ordering::Relaxed);
+    Reset
+}
+
+/// The memo's cost of one derived tree: an estimate, as the walk budget's
+/// per-walked byte count is - an entry's name bytes, the entry itself, and
+/// the table's share, plus the tree's header and ID.
+fn tree_bytes(tree: &Tree) -> usize {
+    64 + tree
+        .entries()
+        .keys()
+        .map(|name| name.as_bytes().len() + 64)
+        .sum::<usize>()
+}
+
+/// The memo's cost of one row: two tree IDs, the digest, and the table's
+/// share.
+const ROW_BYTES: usize = 128;
+
+/// The memo's cost of one dedupe-map entry: the key's tree ID and digest,
+/// the answer, and the table's share.
+const DERIVED_BYTES: usize = 160;
 
 /// The version of the projection. Bumped when the derivation changes, so
 /// views of an old version stop being served: their rows die in the sweep,
@@ -143,15 +230,24 @@ pub(crate) fn view_root(
         return Ok(cached);
     }
     // The derivation reads real trees only: it holds no write lock, and it
-    // gives up when the call that asked for it has gone.
+    // gives up when the call that asked for it has gone. Its memo's RAM is
+    // reserved from the store's pool first: a derivation beyond the cap
+    // waits for a place, under the call's deadline, holding nothing the
+    // store needs.
+    let _reservation = store
+        .view_memo_budget()
+        .take(VIEW_MEMO_BYTES, Some(deadline.at()))?;
     let mut memo = Memo::default();
     // A rule set with prefixes covers at least one path of the repo, but it
     // may cover only paths that this changeset's tree does not have: then
     // the view is the empty tree, which is a valid root. The root is never
     // dropped.
-    let view = if let Some(view) =
-        store.read(|c| project(&mut *c, repo, digest, real, &context, &mut memo, deadline))?
-    {
+    let view = if context.is_empty() {
+        None
+    } else {
+        derive(store, repo, digest, real, context, &mut memo, deadline)?
+    };
+    let view = if let Some(view) = view {
         view
     } else {
         let empty = Tree::default();
@@ -168,109 +264,233 @@ pub(crate) fn view_root(
     // One short write: the new view trees, their rows, and the sweep. All
     // are safe to repeat; a row that another server stored already must
     // agree, or the derivation is not a pure function and that is a bug.
+    // What the walk's part flushes already wrote stays: a view row only
+    // ever points at a tree an earlier part wrote, so the end state of a
+    // cancelled derivation is a prefix of this write's rows, all valid.
     store.write(|c| {
-        for tree in &memo.trees {
-            c.put_tree(tree)?;
-        }
-        for (tree, ctx, view) in &memo.rows {
-            c.put_view_tree(
-                repo,
-                digest,
-                u32::from(PROJECTION_VERSION),
-                *tree,
-                *ctx,
-                *view,
-            )?;
-        }
+        write_memo_part(c, repo, digest, &mut memo)?;
         c.delete_stale_view_trees(repo, live, u32::from(PROJECTION_VERSION), VIEW_EXPIRE_STEP)?;
         Ok(view)
     })
 }
 
-/// Projects the tree `id` under `ctx`, the visible suffixes below it.
-/// Returns `None` when nothing below is visible, so the caller hides the
-/// entry that holds it. Stores nothing: the derived trees wait in `memo`
-/// for the caller's one write.
-///
-/// # Errors
-///
-/// entry that holds it. Stores nothing: the derived trees and their rows
-/// wait in `memo` for the caller's one write. A row in the store's
-/// per-tree memo serves the whole subtree without a walk.
+/// Writes the memo's pending trees, then its pending rows - a tree is in
+/// the store before any row names it - and clears both. Called at the
+/// memo's byte bound mid-derivation and once at the end.
+fn write_memo_part(
+    c: &mut dyn MetaTx,
+    repo: RepoId,
+    digest: &[u8; 32],
+    memo: &mut Memo,
+) -> Result<()> {
+    for tree in &memo.trees {
+        c.put_tree(tree)?;
+    }
+    for (tree, ctx, view) in &memo.rows {
+        c.put_view_tree(
+            repo,
+            digest,
+            u32::from(PROJECTION_VERSION),
+            *tree,
+            *ctx,
+            *view,
+        )?;
+    }
+    memo.trees.clear();
+    memo.rows.clear();
+    memo.pending = 0;
+    Ok(())
+}
+
+/// One directory of the walk: the real tree, the context below it, the
+/// entries the tree holds (None until the walk fetched the tree), the
+/// next entry to process, the view tree under construction, the name the
+/// frame holds in its parent, and the parent's index (None for the
+/// root). The stack of frames outlives any one read transaction, so a
+/// part write can end it and the next read continues where this stopped.
+struct Frame {
+    id: TreeId,
+    ctx: Context,
+    ctx_digest: [u8; 32],
+    /// The name the frame holds in its parent; None for the root.
+    via: Option<PathElem>,
+    entries: Option<Vec<(PathElem, Entry)>>,
+    next: usize,
+    kept: std::collections::BTreeMap<PathElem, Entry>,
+    parent: Option<usize>,
+}
+
+/// Walks the real tree `real` under `context`, and answers the ID of the
+/// view tree it derives, or None when nothing below is visible. The walk
+/// runs in read transactions that end at the memo's part bound; between
+/// two of them the pending trees and rows leave in their own short write,
+/// which holds no read transaction and waits on the write lane holding
+/// nothing the store needs. The trees are content-addressed, so a new
+/// snapshot between two read transactions cannot change what the walk
+/// already read: every tree ID on the stack names an immutable tree.
 ///
 /// # Errors
 ///
 /// Store errors, [`crate::error::Error::DeadlineExceeded`] once `deadline`
 /// passes, or [`crate::error::Error::Cancelled`] once the call has gone.
-fn project(
-    c: &mut dyn MetaTx,
+fn derive(
+    store: &Backend,
     repo: RepoId,
     digest: &[u8; 32],
-    id: TreeId,
-    ctx: &Context,
+    real: TreeId,
+    context: Context,
     memo: &mut Memo,
     deadline: &Deadline,
 ) -> Result<Option<TreeId>> {
-    if ctx.is_empty() {
-        return Ok(None);
+    let ctx_digest = context_digest(&context);
+    let mut stack = vec![Frame {
+        id: real,
+        ctx: context,
+        ctx_digest,
+        via: None,
+        entries: None,
+        next: 0,
+        kept: std::collections::BTreeMap::new(),
+        parent: None,
+    }];
+    loop {
+        let done = store.read(|c| walk(&mut *c, repo, digest, &mut stack, memo, deadline))?;
+        if done {
+            break;
+        }
+        // The read transaction is closed: the part write waits on the
+        // write lane holding nothing the store needs.
+        store.write(|wc| write_memo_part(wc, repo, digest, memo))?;
     }
-    deadline.check()?;
-    let ctx_digest = context_digest(ctx);
-    let key = (id, ctx_digest);
-    if let Some(hit) = memo.derived.get(&key) {
-        return Ok(*hit);
-    }
-    // The store's memo: a row derived by an earlier call serves this
-    // subtree whole, whatever changeset brought the caller here.
-    if let Some(hit) =
-        c.get_view_tree(repo, digest, u32::from(PROJECTION_VERSION), id, ctx_digest)?
-    {
-        memo.derived.insert(key, Some(hit));
-        return Ok(Some(hit));
-    }
-    memo.walked += 1;
-    let tree = c.get_tree(id)?;
-    let mut kept = std::collections::BTreeMap::new();
-    for (name, entry) in tree.entries() {
-        // A file is visible when a prefix names it exactly; a prefix
-        // can name nothing below a file.
-        match entry {
-            Entry::File(_) => {
-                if ctx.iter().any(|prefix| prefix == name.as_bytes()) {
-                    kept.insert(name.clone(), *entry);
-                }
-            }
-            Entry::Dir(child) => match below(ctx, name.as_bytes()) {
-                Below::Whole => {
-                    kept.insert(name.clone(), *entry);
-                }
-                Below::Nothing => {}
-                // The child's view takes its ID; an empty view hides the
-                // entry, the same as a missing one.
-                Below::Some(sub) => {
-                    if let Some(view_id) = project(c, repo, digest, *child, &sub, memo, deadline)? {
-                        kept.insert(name.clone(), Entry::Dir(view_id));
-                    }
-                }
-            },
+    Ok(memo.derived.get(&(real, ctx_digest)).copied().flatten())
+}
+
+/// One step of the walk, inside one read transaction: processes entries
+/// of the top frame until the memo's part bound or the walk's end. The
+/// frame stack carries the state across the transactions.
+///
+/// # Errors
+///
+/// Store errors, [`crate::error::Error::DeadlineExceeded`] once `deadline`
+/// passes, or [`crate::error::Error::Cancelled`] once the call has gone.
+fn walk(
+    c: &mut dyn MetaTx,
+    repo: RepoId,
+    digest: &[u8; 32],
+    stack: &mut Vec<Frame>,
+    memo: &mut Memo,
+    deadline: &Deadline,
+) -> Result<bool> {
+    while !stack.is_empty() {
+        // The part bound ends this read transaction: the caller writes
+        // the part with no read transaction open, and the next read
+        // continues here.
+        if memo.pending >= view_part_bytes() {
+            return Ok(false);
         }
         deadline.check()?;
+        let top = stack.len() - 1;
+        if stack[top].entries.is_none() {
+            // The frame's tree: fetched once, on the frame's first step.
+            memo.walked += 1;
+            let tree = c.get_tree(stack[top].id)?;
+            stack[top].entries = Some(
+                tree.entries()
+                    .iter()
+                    .map(|(name, entry)| (name.clone(), *entry))
+                    .collect(),
+            );
+        }
+        let next = stack[top].next;
+        let len = stack[top].entries.as_ref().expect("fetched above").len();
+        if next < len {
+            let (name, entry) = stack[top].entries.as_ref().expect("fetched above")[next].clone();
+            stack[top].next = next + 1;
+            match entry {
+                // A file is visible when a prefix names it exactly; a
+                // prefix can name nothing below a file.
+                Entry::File(_) => {
+                    if stack[top]
+                        .ctx
+                        .iter()
+                        .any(|prefix| prefix == name.as_bytes())
+                    {
+                        stack[top].kept.insert(name, entry);
+                    }
+                }
+                Entry::Dir(child) => match below(&stack[top].ctx, name.as_bytes()) {
+                    Below::Whole => {
+                        stack[top].kept.insert(name, entry);
+                    }
+                    Below::Nothing => {}
+                    // The child's view takes its ID; an empty view hides
+                    // the entry, the same as a missing one.
+                    Below::Some(sub) => {
+                        let sub_digest = context_digest(&sub);
+                        let key = (child, sub_digest);
+                        if let Some(hit) = memo.derived.get(&key) {
+                            if let Some(view) = *hit {
+                                stack[top].kept.insert(name, Entry::Dir(view));
+                            }
+                        } else if let Some(hit) = c.get_view_tree(
+                            repo,
+                            digest,
+                            u32::from(PROJECTION_VERSION),
+                            child,
+                            sub_digest,
+                        )? {
+                            // The store's memo: a row derived by an
+                            // earlier call - or an earlier part of this
+                            // derivation - serves the subtree whole.
+                            memo.derived.insert(key, Some(hit));
+                            stack[top].kept.insert(name, Entry::Dir(hit));
+                        } else {
+                            stack.push(Frame {
+                                id: child,
+                                ctx: sub,
+                                ctx_digest: sub_digest,
+                                via: Some(name),
+                                entries: None,
+                                next: 0,
+                                kept: std::collections::BTreeMap::new(),
+                                parent: Some(top),
+                            });
+                        }
+                    }
+                },
+            }
+        } else {
+            // The frame is done: its view tree is a row for the next
+            // derivation, and its ID files into the parent's view.
+            let frame = stack.pop().expect("the stack is not empty");
+            let view = if frame.kept.is_empty() {
+                None
+            } else {
+                let tree = Tree::new(frame.kept).expect("tree fits the format");
+                let view_id = tree.encode_with_id().1;
+                memo.pending += tree_bytes(&tree);
+                memo.trees.push(tree);
+                memo.pending += ROW_BYTES;
+                memo.rows.push((frame.id, frame.ctx_digest, view_id));
+                Some(view_id)
+            };
+            memo.derived.insert((frame.id, frame.ctx_digest), view);
+            // The dedupe map's share: past it the map clears, and shared
+            // subtrees are looked up in the store's memo, whose rows the
+            // parts wrote - a clear costs re-walks, never wrong results.
+            if memo.derived.len() * DERIVED_BYTES >= VIEW_MAP_BYTES {
+                memo.derived.clear();
+            }
+            if let Some(parent) = frame.parent {
+                if let (Some(via), Some(view_id)) = (frame.via, view) {
+                    stack[parent].kept.insert(via, Entry::Dir(view_id));
+                }
+            } else {
+                return Ok(true);
+            }
+        }
     }
-    let view = if kept.is_empty() {
-        None
-    } else {
-        let view = Tree::new(kept).expect("tree fits the format");
-        let id = view.encode_with_id().1;
-        memo.trees.push(view);
-        Some(id)
-    };
-    // A derived view is a row for the next derivation: the same real tree
-    // under the same context serves whole, on any changeset.
-    if let Some(view) = view {
-        memo.rows.push((id, ctx_digest, view));
-    }
-    memo.derived.insert(key, view);
-    Ok(view)
+    Ok(true)
 }
 
 /// The digest of a context, so one derivation memoizes shared subtrees by
@@ -292,17 +512,32 @@ mod tests {
     use proptest::test_runner::TestCaseError;
     use scion_core::{Changeset, FileEntry, FileState, PathElem};
     use std::path::Path;
+    use std::sync::{Mutex, MutexGuard};
     use std::time::{Duration, Instant};
+
+    /// The part bound is one process-wide seam, and the tests that pin
+    /// it count the writes it causes: every such test holds the lock for
+    /// its whole body, so a bound window holds only its own derivation.
+    static PART_LOCK: Mutex<()> = Mutex::new(());
+
+    fn part_guard() -> MutexGuard<'static, ()> {
+        PART_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     /// A deadline that no test outlives.
     fn alive() -> Deadline {
         Deadline::new(Instant::now() + Duration::from_secs(600))
     }
 
-    /// A derivation against no repo of the store: the per-tree memo holds
-    /// no rows for it, so every walk does the work.
-    fn bare() -> (RepoId, [u8; 32]) {
-        (RepoId(0), [0; 32])
+    /// A derivation against a repo of the store that holds no rows yet:
+    /// every walk does the work. The repo is real, so a part flush's rows
+    /// name a key that is there, whatever other tests do to the shared
+    /// part bound.
+    fn bare(store: &Backend) -> (RepoId, [u8; 32]) {
+        let repo = store.write(|c| c.create_repo("bare")).unwrap();
+        (repo, [0; 32])
     }
 
     fn file(store: &Backend, content: &[u8]) -> Entry {
@@ -331,7 +566,7 @@ mod tests {
     fn a_view_keeps_visible_files_whole_subtrees_and_drops_hidden_ones() {
         let (_dir, store) = store();
 
-        let (repo, digest) = bare();
+        let (repo, digest) = bare(&store);
         // /README, /src/public, /src/secret, /docs/note, /ops/only-hidden
         let src = Tree::new(
             [
@@ -360,8 +595,7 @@ mod tests {
         // The rule covers README, docs/note and ops/public.
         let ctx: Context = vec![b"README".to_vec(), b"docs".to_vec(), b"ops/public".to_vec()];
         let mut memo = Memo::default();
-        let view = store
-            .read(|c| project(&mut *c, repo, &digest, root_id, &ctx, &mut memo, &alive()))
+        let view = derive(&store, repo, &digest, root_id, ctx, &mut memo, &alive())
             .unwrap()
             .expect("the root keeps a visible path");
         store
@@ -398,9 +632,7 @@ mod tests {
         // The same tree with a context that covers nothing is hidden.
         let ctx: Context = vec![b"absent".to_vec()];
         let mut memo = Memo::default();
-        let none = store
-            .read(|c| project(&mut *c, repo, &digest, root_id, &ctx, &mut memo, &alive()))
-            .unwrap();
+        let none = derive(&store, repo, &digest, root_id, ctx, &mut memo, &alive()).unwrap();
         assert!(none.is_none());
 
         // A context that covers the whole tree names the tree itself: the
@@ -427,7 +659,7 @@ mod tests {
     fn one_derivation_serves_shared_subtrees_once() {
         let (_dir, store) = store();
 
-        let (repo, digest) = bare();
+        let (repo, digest) = bare(&store);
         // Two directories with the same content: one visible, one not.
         let inner = Tree::new(
             [
@@ -457,15 +689,13 @@ mod tests {
         // once per context, and the two contexts differ here.
         let ctx: Context = vec![b"left/a".to_vec()];
         let mut memo = Memo::default();
-        let view = store
-            .read(|c| project(&mut *c, repo, &digest, root_id, &ctx, &mut memo, &alive()))
+        let view = derive(&store, repo, &digest, root_id, ctx, &mut memo, &alive())
             .unwrap()
             .unwrap();
         // The same real tree under the other context derives a second,
         // different view: one tree, two views.
         let ctx2: Context = vec![b"right/b".to_vec()];
-        let view2 = store
-            .read(|c| project(&mut *c, repo, &digest, root_id, &ctx2, &mut memo, &alive()))
+        let view2 = derive(&store, repo, &digest, root_id, ctx2, &mut memo, &alive())
             .unwrap()
             .unwrap();
         assert_ne!(view, view2, "one real tree, two contexts, two views");
@@ -514,7 +744,7 @@ mod tests {
     fn a_fully_visible_folder_keeps_the_real_tree_id() {
         let (_dir, store) = store();
 
-        let (repo, digest) = bare();
+        let (repo, digest) = bare(&store);
         let docs = Tree::new([(name(b"note"), file(&store, b"note\n"))].into())
             .expect("tree fits the format");
         let (docs_id, root_id) = store
@@ -528,8 +758,7 @@ mod tests {
         // The rule covers `docs` whole: the view keeps the real `docs` ID.
         let ctx: Context = vec![b"docs".to_vec()];
         let mut memo = Memo::default();
-        let view = store
-            .read(|c| project(&mut *c, repo, &digest, root_id, &ctx, &mut memo, &alive()))
+        let view = derive(&store, repo, &digest, root_id, ctx, &mut memo, &alive())
             .unwrap()
             .unwrap();
         let shown = store.read(|c| c.get_tree(view)).unwrap();
@@ -785,7 +1014,7 @@ mod tests {
             prop_assume!(!rules.is_empty(), "every rule was covered by another");
             let (_dir, store) = store();
 
-            let (repo, digest) = bare();
+            let (repo, digest) = bare(&store);
             let (dirs, root_id) = build_trees(&store, &paths);
 
             // The rule set, in the canonical form the caller passes.
@@ -794,8 +1023,7 @@ mod tests {
                 .map(|r| RepoPath::new(r.clone()).unwrap().as_bytes().to_vec())
                 .collect();
             let mut memo = Memo::default();
-            let view = store
-                .read(|c| project(&mut *c, repo, &digest, root_id, &ctx, &mut memo, &alive()))
+            let view = derive(&store, repo, &digest, root_id, ctx, &mut memo, &alive())
                 .unwrap();
             // The derivation stores nothing: put the derived trees, then
             // the walk can read the views below.
@@ -818,7 +1046,7 @@ mod tests {
                 blobs: std::collections::BTreeSet::new(),
                 tree_ids: Vec::new(),
             };
-            walk(&mut w, view, "")?;
+            walk_model(&mut w, view, "")?;
 
             // Nothing hidden leaks: a name that is hidden everywhere it
             // exists, the blob of an uncovered file, and the real ID of a
@@ -892,7 +1120,7 @@ mod tests {
 
     /// Walks the view tree, comparing it against the model, and collecting
     /// every name, blob ID and tree ID the view shows.
-    fn walk(w: &mut Walk<'_>, view: Option<TreeId>, dir: &str) -> Result<(), TestCaseError> {
+    fn walk_model(w: &mut Walk<'_>, view: Option<TreeId>, dir: &str) -> Result<(), TestCaseError> {
         let paths: &[String] = w.paths;
         let rules: &[String] = w.rules;
         let shown = match view {
@@ -950,7 +1178,7 @@ mod tests {
                         panic!("{child_path} is a directory in the view");
                     };
                     w.tree_ids.push(*id);
-                    walk(w, Some(*id), &child_path)?;
+                    walk_model(w, Some(*id), &child_path)?;
                 }
                 DirState::Hidden => unreachable!("hidden entries are not shown"),
             }
@@ -1301,5 +1529,317 @@ mod tests {
         }
         out.sort();
         out
+    }
+
+    /// A derivation whose map passes the part bound does not write a
+    /// part per push: the parts run at the pending bound while the walk
+    /// pushes trees and rows, and a later derivation that answers every
+    /// subtree from the store's rows writes no part at all, whatever the
+    /// map's size.
+    #[test]
+    fn a_map_past_the_part_bound_does_not_write_a_part_per_push() {
+        let (_dir, store) = store();
+        // A real repo: the parts' rows name it, and its key must be there.
+        let repo = store.write(|c| c.create_repo("parts")).unwrap();
+        let digest = [7; 32];
+        // Two hundred directories of two files each, one visible one
+        // hidden: every directory is a partial view, so the walk derives
+        // two hundred view trees, and the map holds every one of them
+        // past the four-kilobyte part bound.
+        let root_id = store
+            .write(|c| {
+                let mut entries = std::collections::BTreeMap::new();
+                for i in 0..200 {
+                    let d = name(format!("d{i:03}").as_bytes());
+                    // Distinct content per directory: the trees are
+                    // content-addressed, and identical subtrees share one
+                    // ID - the walk would serve the rest from the map.
+                    let inner = Tree::new(
+                        [
+                            (name(b"see"), file(&store, format!("body-{i}\n").as_bytes())),
+                            (
+                                name(b"hide"),
+                                file(&store, format!("secret-{i}\n").as_bytes()),
+                            ),
+                        ]
+                        .into(),
+                    )
+                    .expect("tree fits the format");
+                    let id = c.put_tree(&inner)?;
+                    entries.insert(d, Entry::Dir(id));
+                }
+                let root = Tree::new(entries).expect("tree fits the format");
+                c.put_tree(&root)
+            })
+            .unwrap();
+        let ctx: Context = (0..200)
+            .map(|i| format!("d{i:03}/see").into_bytes())
+            .collect();
+        // The first derivation: the map fills past the part bound and
+        // stays there, and the parts still run at the pending bound.
+        let before = store.commits();
+        let mut memo1 = Memo::default();
+        let first = {
+            let _lock = part_guard();
+            let _bound = test_set_view_part_bound(4 << 10);
+            derive(
+                &store,
+                repo,
+                &digest,
+                root_id,
+                ctx.clone(),
+                &mut memo1,
+                &alive(),
+            )
+            .unwrap()
+            .expect("the root keeps a visible path")
+        };
+        let parts = store.commits() - before;
+        assert!(
+            (10..=40).contains(&parts),
+            "the parts ran at the pending bound, not one per push: {parts}              (walked {}, pending {}, map {}, rows {}, bound {})",
+            memo1.walked,
+            memo1.pending,
+            memo1.derived.len(),
+            memo1.rows.len(),
+            view_part_bytes(),
+        );
+        // The second derivation: every subtree's row is in the store, so
+        // the pending never grows - no parts, whatever the map's size.
+        let before = store.commits();
+        let second = {
+            let _lock = part_guard();
+            let _bound = test_set_view_part_bound(4 << 10);
+            derive(
+                &store,
+                repo,
+                &digest,
+                root_id,
+                ctx,
+                &mut Memo::default(),
+                &alive(),
+            )
+            .unwrap()
+            .expect("the root keeps a visible path")
+        };
+        assert_eq!(first, second, "the parts changed the view");
+        let parts = store.commits() - before;
+        assert_eq!(
+            parts, 0,
+            "a map past the part bound wrote a part per push: {parts}"
+        );
+    }
+
+    /// A cold view whose part write waits on the write lane answers even
+    /// when the lane stays held past the read transaction's idle bound:
+    /// the walk ends its read transaction before the part write, so the
+    /// wait holds no read transaction, and the next read continues the
+    /// walk where it stopped.
+    #[test]
+    fn a_cold_view_answers_while_a_writer_holds_the_lane_past_the_idle_bound() {
+        let (dir, store) = store();
+        // Ten partial directories: at a one-kilobyte part bound the walk
+        // flushes a part mid-derivation.
+        // Distinct content per directory: the trees are content-addressed,
+        // and identical subtrees share one ID, which would serve the walk
+        // from the map and never reach a mid-walk part.
+        let files: Vec<(RepoPath, Option<FileState>)> = (0..10)
+            .flat_map(|i| {
+                [
+                    (format!("d{i:02}/see"), format!("body-{i}\n")),
+                    (format!("d{i:02}/hide"), format!("secret-{i}\n")),
+                ]
+            })
+            .map(|(p, content)| {
+                (
+                    RepoPath::new(p.as_str()).unwrap(),
+                    Some(FileState::Regular {
+                        content: store.blobs().put(content.as_bytes()).unwrap(),
+                        executable: false,
+                    }),
+                )
+            })
+            .collect();
+        let ada = scion_core::IdentityTime::new(
+            b"Ada".to_vec(),
+            b"ada@example.com".to_vec(),
+            1_700_000_000,
+            0,
+        )
+        .expect("identity fits the format");
+        let tip = store
+            .write(|c| {
+                let repo = c.create_repo("lane")?;
+                c.insert_changeset(
+                    repo,
+                    &Changeset::new(
+                        vec![],
+                        ada,
+                        None,
+                        b"root\n".to_vec(),
+                        files.into_iter().collect(),
+                    )
+                    .expect("changeset fits the format"),
+                )
+            })
+            .unwrap();
+        let repo = store.read(|c| c.repo_id("lane")).unwrap();
+        let prefixes: Vec<RepoPath> = (0..10)
+            .map(|i| RepoPath::new(format!("d{i:02}/see").as_str()).unwrap())
+            .collect();
+        let digest = crate::access::rule_set_digest(Some(&prefixes));
+        let _log = part_guard();
+        let part = test_set_view_part_bound(1 << 10);
+        // A writer holds the store's write key, past the read
+        // transaction's idle bound.
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let schema = Backend::test_schema(dir.path());
+        let holder = std::thread::spawn(move || {
+            let mut c = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+            c.batch_execute(&format!("SET search_path TO {schema}"))
+                .unwrap();
+            c.batch_execute("BEGIN").unwrap();
+            c.batch_execute("SELECT pg_advisory_xact_lock(hashtext(current_schema() || ':gc'))")
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(35));
+            c.batch_execute("COMMIT").unwrap();
+        });
+        // The key is held before the walk starts: the first part write
+        // waits the holder out.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let started = std::time::Instant::now();
+        let view = view_root(
+            &store,
+            repo,
+            &digest,
+            tip,
+            &prefixes,
+            &[digest],
+            &crate::metrics::Metrics::default(),
+            &alive(),
+        )
+        .unwrap();
+        assert!(
+            started.elapsed() >= std::time::Duration::from_secs(30),
+            "the walk never waited on the lane: {:?}",
+            started.elapsed()
+        );
+        // A later read answers from the root's row the derivation wrote.
+        let again = view_root(
+            &store,
+            repo,
+            &digest,
+            tip,
+            &prefixes,
+            &[digest],
+            &crate::metrics::Metrics::default(),
+            &alive(),
+        )
+        .unwrap();
+        assert_eq!(view, again, "the same view");
+        drop(part);
+        holder.join().unwrap();
+    }
+
+    /// A derivation that waits for one of the cap's places waits under
+    /// its call's deadline and ends in time when the deadline passes;
+    /// with a place free, the same derivation runs whole.
+    #[test]
+    fn a_derivation_beyond_the_cap_waits_under_its_deadline() {
+        let (dir, store) = store();
+        let (_dir, store, repo, tip, digest) = repo_of_two_folders_on(dir, store);
+        let prefixes: Vec<RepoPath> = ["left/x", "right/y"]
+            .iter()
+            .map(|p| RepoPath::new(*p).unwrap())
+            .collect();
+        let live = [digest];
+        let metrics = crate::metrics::Metrics::default();
+        // Both places go to the test's hands.
+        let first = store
+            .view_memo_budget()
+            .take(VIEW_MEMO_BYTES, None)
+            .unwrap();
+        let second = store
+            .view_memo_budget()
+            .take(VIEW_MEMO_BYTES, None)
+            .unwrap();
+        // A call whose deadline passes while it waits ends in time, with
+        // the deadline's error.
+        let started = std::time::Instant::now();
+        let short = Deadline::new(started + Duration::from_millis(100));
+        let answer = view_root(
+            &store, repo, &digest, tip, &prefixes, &live, &metrics, &short,
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the waiter ended late: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            matches!(answer, Err(crate::error::Error::DeadlineExceeded(_))),
+            "the waiter passed its deadline: {answer:?}"
+        );
+        // A place frees: the same derivation runs whole.
+        drop(first);
+        let answer = view_root(
+            &store,
+            repo,
+            &digest,
+            tip,
+            &prefixes,
+            &live,
+            &metrics,
+            &alive(),
+        );
+        assert!(answer.is_ok(), "the waiter ran once a place freed");
+        drop(second);
+    }
+
+    /// A part writes its pending trees before its pending rows, so a row
+    /// it stores names a tree the store holds; the root's row lands only
+    /// in the last part, so a derivation that fails mid-walk leaves no
+    /// root row - only valid prefix rows a later read serves.
+    #[test]
+    fn a_part_writes_its_trees_before_its_rows_and_leaves_no_root_row() {
+        let (_dir, store) = store();
+        // A real repo: the part's row names it, and its key must be there.
+        let repo = store.write(|c| c.create_repo("parts")).unwrap();
+        let digest = [9; 32];
+        let real =
+            Tree::new([(name(b"f"), file(&store, b"x\n"))].into()).expect("tree fits the format");
+        let view =
+            Tree::new([(name(b"f"), file(&store, b"x\n"))].into()).expect("tree fits the format");
+        let (real_id, view_id) = store
+            .write(|c| Ok((c.put_tree(&real)?, c.put_tree(&view)?)))
+            .unwrap();
+        // A memo the walk could have been carrying when it failed: its
+        // rows' trees are only in the memo, never yet in the store.
+        let deeper =
+            Tree::new([(name(b"g"), file(&store, b"y\n"))].into()).expect("tree fits the format");
+        let mut memo = Memo::default();
+        memo.trees.push(deeper);
+        memo.trees.push(view);
+        memo.rows
+            .push((real_id, context_digest(&Context::new()), view_id));
+        store
+            .write(|c| write_memo_part(c, repo, &digest, &mut memo))
+            .unwrap();
+        assert!(
+            memo.trees.is_empty() && memo.rows.is_empty(),
+            "the part cleared"
+        );
+        // The part's row is readable, and its view tree is in the store.
+        let row = store
+            .read(|c| {
+                c.get_view_tree(
+                    repo,
+                    &digest,
+                    u32::from(PROJECTION_VERSION),
+                    real_id,
+                    context_digest(&Context::new()),
+                )
+            })
+            .unwrap();
+        assert_eq!(row, Some(view_id), "the part's row is readable");
     }
 }
