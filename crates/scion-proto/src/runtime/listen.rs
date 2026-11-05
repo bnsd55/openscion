@@ -879,6 +879,37 @@ fn warn_refused(refusals: &WaitWarn, max: usize, wait: Duration) {
     }
 }
 
+/// What the accept task does after a failed accept: the debug line, the
+/// rate-limited warn with the failures since its last line, the count in
+/// the metrics, the error handed on to the serve, and the wait that paces
+/// the next attempt - 10 ms doubling to 1 s, reset by a success, so a
+/// failure that persists cannot spin the task. `false` says the serve went
+/// and the task stops.
+async fn pace_after_failed_accept<IO>(
+    error: io::Error,
+    accept_warn: &WaitWarn,
+    metrics: &Metrics,
+    backoff: &mut Backoff,
+    done: &mpsc::Sender<io::Result<Connection<IO>>>,
+) -> bool {
+    tracing::debug!(
+        error = ?error,
+        thread = ?std::thread::current().id(),
+        "the listener failed to yield a socket"
+    );
+    if let Some(failures) = accept_warn.tick() {
+        tracing::warn!(
+            failures,
+            backoff = ?backoff,
+            error = ?error,
+            "the listener failed to accept; waiting before it accepts again"
+        );
+    }
+    metrics.accept_error();
+    backoff.wait().await;
+    done.send(Err(error)).await.is_ok()
+}
+
 /// The TLS connections of `incoming`, at most `max` at once, as
 /// [`accept`] yields plain ones: a connection takes its place first (and
 /// waits at the cap, at most [`CONNECTION_WAIT`], then the server closes
@@ -977,13 +1008,8 @@ where
             let metrics = Arc::clone(&metrics);
             let total = Arc::clone(&total);
             tokio::spawn(async move {
-                // The place first, bounded: a connection over the cap waits
-                // at most `wait`, then the server closes it, so a storm
-                // fails fast instead of queueing behind
-                // `MAX_CONNECTION_AGE`. The wait runs in the connection's
-                // own task, so one waiter never holds the accept loop, and
-                // the waiters are capped, so a storm holds at most `max`
-                // waiting sockets.
+                // The place first, bounded, as [`accept`] describes: a
+                // connection over the cap waits at most `wait`, then closes.
                 let Some(place) = place_within(&places, &waiters, max, wait, &waits).await else {
                     metrics.connection_refused();
                     warn_refused(&refusals, max, wait);
@@ -1038,37 +1064,6 @@ where
 /// place freed in time still serves it, and one that is not is closed,
 /// counted in the refused-connections metric. Each must send the preface
 /// within `handshake` once it has its place.
-/// What the accept task does after a failed accept: the debug line, the
-/// rate-limited warn with the failures since its last line, the count in
-/// the metrics, the error handed on to the serve, and the wait that paces
-/// the next attempt - 10 ms doubling to 1 s, reset by a success, so a
-/// failure that persists cannot spin the task. `false` says the serve went
-/// and the task stops.
-async fn pace_after_failed_accept<IO>(
-    error: io::Error,
-    accept_warn: &WaitWarn,
-    metrics: &Metrics,
-    backoff: &mut Backoff,
-    done: &mpsc::Sender<io::Result<Connection<IO>>>,
-) -> bool {
-    tracing::debug!(
-        error = ?error,
-        thread = ?std::thread::current().id(),
-        "the listener failed to yield a socket"
-    );
-    if let Some(failures) = accept_warn.tick() {
-        tracing::warn!(
-            failures,
-            backoff = ?backoff,
-            error = ?error,
-            "the listener failed to accept; waiting before it accepts again"
-        );
-    }
-    metrics.accept_error();
-    backoff.wait().await;
-    done.send(Err(error)).await.is_ok()
-}
-
 fn accept<I, IO>(
     incoming: I,
     accepting: &Accepting,
