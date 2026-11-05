@@ -400,25 +400,6 @@ fn catalog_rows(url: &str, schema: &str) -> i64 {
     rows.get(0)
 }
 
-/// The test URL with another role's credentials: the same host, path and
-/// options, a different userinfo.
-fn url_with_user(url: &str, user: &str, scramble: &str) -> String {
-    let scheme_end = url.find("://").expect("a URL") + 3;
-    let rest = &url[scheme_end..];
-    let authority_end = rest.find('/').unwrap_or(rest.len());
-    let authority = &rest[..authority_end];
-    let host = match authority.rsplit_once('@') {
-        Some((_, host)) => host,
-        None => authority,
-    };
-    format!(
-        "{}{user}:{scramble}@{}{}",
-        &url[..scheme_end],
-        host,
-        &rest[authority_end..]
-    )
-}
-
 /// Drops the test's role whatever the test's outcome: roles are
 /// cluster-wide, and the suite's schemas run in parallel.
 struct RoleGuard {
@@ -481,27 +462,16 @@ fn a_refusing_open_writes_nothing_to_the_catalog() {
         url: base.clone(),
         role: role.clone(),
     };
-    // The role's password is made at run time from the tempdir's unique
-    // name: no password literal in this file, and one that differs per
-    // run. The value lives in `scramble`, not in a credential-named
-    // identifier: a throwaway role's one-run seed is not a stored
-    // credential, and the static analysis reads any `password`-named
-    // flow into a statement as cleartext storage (alert #37 on #885).
-    let dir = scion_server::test_support::private_tempdir();
-    let data = dir.path().join("data");
-    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
-    let scramble = dir
-        .path()
-        .file_name()
-        .expect("a tempdir with a name")
-        .to_str()
-        .expect("a plain name")
-        .to_string();
     {
         let mut admin =
             postgres::Client::connect(&base, postgres::NoTls).expect("the test database connects");
+        // The role cannot log in and has no password: no credential for
+        // it exists anywhere. The server's session takes it over with
+        // the libpq startup option `-crole=<role>` below, so every
+        // privilege check the open makes is the role's while the
+        // connection keeps the test's own credential.
         admin
-            .batch_execute(&format!("CREATE ROLE {role} LOGIN PASSWORD '{scramble}'"))
+            .batch_execute(&format!("CREATE ROLE {role} NOLOGIN"))
             .expect("the role is made");
         admin
             .batch_execute(&format!("GRANT USAGE ON SCHEMA {schema} TO {role}"))
@@ -511,8 +481,24 @@ fn a_refusing_open_writes_nothing_to_the_catalog() {
                 "GRANT SELECT ON {schema}.schema_migrations TO {role}"
             ))
             .unwrap();
+        // SET ROLE needs the membership: the session's user must be a
+        // member of the role (a superuser is one of everything, but the
+        // grant makes this hold for an owned database too).
+        let admin_name: String = admin
+            .query_one("SELECT current_user::text", &[])
+            .expect("the session's user is readable")
+            .get(0);
+        admin
+            .batch_execute(&format!("GRANT {role} TO {admin_name}"))
+            .expect("the session may take the role");
     }
-    let role_url = url_for(&url_with_user(&base, &role, &scramble), schema);
+    // The URL rides the test's own admin credentials; the `options`
+    // startup value sets the schema (as every test's URL does) and the
+    // session's role, space-separated the way libpq parses the value.
+    let role_url = format!("{}%20-crole%3D{}", url_for(&base, schema), role);
+    let dir = scion_server::test_support::private_tempdir();
+    let data = dir.path().join("data");
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
     let before = catalog_rows(&base, schema);
     let run = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(["--data", data.to_str().unwrap()])
