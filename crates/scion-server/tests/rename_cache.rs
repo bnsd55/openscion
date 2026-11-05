@@ -643,7 +643,7 @@ fn a_page_that_answers_moves_its_entry_to_the_young_end() {
     // the oldest and the biggest; a refresh that moved its stamp
     // keeps it and an empty entry goes instead. The kept total tells
     // the two apart, whatever the search's statement cost.
-    let first = page(&store, old, new_ids[0], None);
+    let _first = page(&store, old, new_ids[0], None);
     let (maps, bytes) = scion_server::test_support::read::test_rename_cache_size();
     assert_eq!(maps, 1);
     let map_bytes = usize::try_from(bytes).unwrap() - overhead;
