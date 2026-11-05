@@ -1806,7 +1806,10 @@ mod tests {
         }
     }
 
-    static LOG: Captured = Captured(Arc::new(std::sync::Mutex::new(Vec::new())));
+    fn log() -> Captured {
+        static LOG: std::sync::OnceLock<Captured> = std::sync::OnceLock::new();
+        LOG.get_or_init(Captured::default).clone()
+    }
 
     fn init_log() {
         static INIT: std::sync::Once = std::sync::Once::new();
@@ -1814,7 +1817,7 @@ mod tests {
             let subscriber = tracing_subscriber::fmt()
                 .with_ansi(false)
                 .with_max_level(tracing::level_filters::LevelFilter::TRACE)
-                .with_writer(LOG.clone())
+                .with_writer(log())
                 .finish();
             tracing::subscriber::set_global_default(subscriber).unwrap();
         });
@@ -1877,7 +1880,7 @@ mod tests {
             line, "scion_accept_errors_total 0",
             "the failed accepts are not counted:\n{text}"
         );
-        let text = String::from_utf8(LOG.0.lock().unwrap().clone()).unwrap();
+        let text = String::from_utf8(log().0.lock().unwrap().clone()).unwrap();
         let warns: Vec<&str> = text
             .lines()
             .filter(|l| {
