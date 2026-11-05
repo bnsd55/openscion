@@ -1943,7 +1943,7 @@ mod tests {
                     changes.into_iter().collect(),
                 )
                 .expect("changeset fits the format");
-                let (id, _) = tree::store_changeset(c, repo, &cs, &mut lens, None)?;
+                let (id, _) = tree::store_changeset(c, repo, &cs, &mut lens)?;
                 let version = c.get_ref(repo, "main")?.map(|r| r.version);
                 c.cas_ref(repo, "main", version, id)?;
                 Ok(id)

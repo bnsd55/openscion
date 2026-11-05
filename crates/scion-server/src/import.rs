@@ -564,7 +564,7 @@ fn record(
     cs: &Changeset,
     lens: crate::tree::BlobLens<'_>,
 ) -> Result<(ChangesetId, TreeId)> {
-    let (id, root) = tree::store_changeset(c, repo, cs, lens, None).map_err(|e| match e {
+    let (id, root) = tree::store_changeset(c, repo, cs, lens).map_err(|e| match e {
         Error::Apply(e) => Error::Corrupt(format!(
             "commit {commit}: changes do not apply to the first parent: {e}"
         )),

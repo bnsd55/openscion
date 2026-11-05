@@ -613,6 +613,27 @@ pub(crate) fn derive<K: Kind>(
     repo: RepoId,
     cs: ChangesetId,
     lens: crate::tree::BlobLens<'_>,
+) -> Result<K::Value> {
+    derive_impl::<K>(c, repo, cs, lens, None)
+}
+
+/// The walk checks the deadline per changeset, so a cancelled call's
+/// job stops between changesets and frees its permit.
+pub(crate) fn derive_within<K: Kind>(
+    c: &mut dyn MetaTx,
+    repo: RepoId,
+    cs: ChangesetId,
+    lens: crate::tree::BlobLens<'_>,
+    deadline: &Deadline,
+) -> Result<K::Value> {
+    derive_impl::<K>(c, repo, cs, lens, Some(deadline))
+}
+
+pub(crate) fn derive_impl<K: Kind>(
+    c: &mut dyn MetaTx,
+    repo: RepoId,
+    cs: ChangesetId,
+    lens: crate::tree::BlobLens<'_>,
     deadline: Option<&Deadline>,
 ) -> Result<K::Value> {
     let mut walk = match Walk::start::<K>(c, repo, cs)? {
@@ -1357,7 +1378,7 @@ mod tests {
         // The tests store no blob files, so a test lens answers 0 for
         // everything: the trees it builds are only compared to themselves.
         chain_with(c, history, |c, repo, cs| {
-            Ok(tree::store_changeset(c, repo, cs, &mut tree::lens_none(), None)?.0)
+            Ok(tree::store_changeset(c, repo, cs, &mut tree::lens_none())?.0)
         })
     }
 
@@ -1573,7 +1594,7 @@ mod tests {
             Err(Error::NotFound(_))
         ));
         assert!(matches!(
-            store.commit(|c| derive::<ChangedPathsV1>(c, other, tip, &mut tree::lens_none(), None)),
+            store.commit(|c| derive::<ChangedPathsV1>(c, other, tip, &mut tree::lens_none())),
             Err(Error::NotFound(_))
         ));
     }
@@ -1896,7 +1917,7 @@ mod tests {
         )
         .unwrap();
         store
-            .write(|c| tree::store_changeset(c, repo, &cs, &mut tree::lens_of(&store), None))
+            .write(|c| tree::store_changeset(c, repo, &cs, &mut tree::lens_of(&store)))
             .unwrap();
         // The new row of version 1, and seven rows of version 0 less one
         // step.
@@ -2107,7 +2128,7 @@ mod tests {
                         changes,
                     )
                     .expect("changeset fits the format");
-                    ids.push(tree::store_changeset(c, repo, &cs, &mut tree::lens_none(), None)?.0);
+                    ids.push(tree::store_changeset(c, repo, &cs, &mut tree::lens_none())?.0);
                 }
                 Ok((repo, ids))
             })

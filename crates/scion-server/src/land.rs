@@ -932,13 +932,8 @@ fn settle(
     // transaction, so the write connection does no file I/O.
     let lens = tree::lens_of_puts(store, crate::meta::puts(&rebased).map(|(_, blob)| blob))?;
     let landed = store.write_slot_holder(|c| {
-        let (id, _) = tree::store_changeset(
-            c,
-            repo,
-            &rebased,
-            &mut tree::lens_from(&lens),
-            Some(deadline),
-        )?;
+        let (id, _) =
+            tree::store_changeset_within(c, repo, &rebased, &mut tree::lens_from(&lens), deadline)?;
         if !c.cas_ref(repo, target, Some(head.version), id)? {
             // The error rolls back the transaction, rebased changeset included.
             return Err(Error::Aborted(format!(
@@ -3005,8 +3000,8 @@ mod tests {
             store
                 .write(|c| {
                     for &tip in &ids {
-                        derived::derive::<CommitGraph>(c, repo, tip, &mut crate::tree::lens_none(), None)?;
-                        derived::derive::<PathHistory>(c, repo, tip, &mut crate::tree::lens_none(), None)?;
+                        derived::derive::<CommitGraph>(c, repo, tip, &mut crate::tree::lens_none())?;
+                        derived::derive::<PathHistory>(c, repo, tip, &mut crate::tree::lens_none())?;
                     }
                     Ok(())
                 })

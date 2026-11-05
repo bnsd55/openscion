@@ -47,16 +47,14 @@ fn fixture() -> &'static (TempDir, Backend, ChangesetId) {
                         )]
                         .into_iter()
                         .collect()).expect("changeset fits the format");
-                    ids.push(
-                        tree::store_changeset(c, repo, &cs, &mut move |b| {
-                            if b == content {
-                                Ok(len)
-                            } else {
-                                Err(scion_server::Error::NotFound(format!("blob {b}")))
-                            }
-                        }, None)?
-                        .0,
-                    );
+                    ids.push(tree::store_changeset(c, repo, &cs, &mut move |b| {
+                        if b == content {
+                            Ok(len)
+                        } else {
+                            Err(scion_server::Error::NotFound(format!("blob {b}")))
+                        }
+                    })?
+                    .0);
                 }
                 Ok(ids)
             })

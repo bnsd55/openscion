@@ -59,7 +59,7 @@ fn two_changesets(store: &Backend) -> Vec<ChangesetId> {
                     files.into_iter().map(|(p, s)| (path(p), s)).collect(),
                 )
                 .expect("changeset fits the format");
-                ids.push(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0);
+                ids.push(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0);
             }
             Ok(ids)
         })

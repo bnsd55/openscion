@@ -62,7 +62,7 @@ fn a_wide_changeset_builds_under_the_bound() {
             .collect::<Vec<_>>(),
     );
     let (base_id, base_root) = store
-        .write(|c| tree::store_changeset(c, repo, &base, &mut |_| Ok(0), None))
+        .write(|c| tree::store_changeset(c, repo, &base, &mut |_| Ok(0)))
         .unwrap();
     let commit = changeset(
         &(0..100_000)
@@ -77,7 +77,7 @@ fn a_wide_changeset_builds_under_the_bound() {
     // root at every level resolves about twice that.
     let before = tree::prefetch_steps();
     store
-        .write(|c| tree::apply(c, Some(base_root), commit.changes(), &mut |_| Ok(0), None))
+        .write(|c| tree::apply(c, Some(base_root), commit.changes(), &mut |_| Ok(0)))
         .unwrap();
     let steps = tree::prefetch_steps() - before;
     let bound: u64 = commit

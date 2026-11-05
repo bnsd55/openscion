@@ -39,7 +39,7 @@ pub fn seed_file_less_ladder(
             cs.changes().len()
         )));
     }
-    let root = tree::store_changeset(c, repo, &css[0], &mut |_| Ok(0), None)?.0;
+    let root = tree::store_changeset(c, repo, &css[0], &mut |_| Ok(0))?.0;
     let root_graph = derived::load::<CommitGraph>(c, root)?
         .ok_or_else(|| Error::Corrupt(format!("commit graph: no node for {root}")))?;
     let root_tree = c

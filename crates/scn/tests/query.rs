@@ -371,7 +371,7 @@ fn two_changesets_lens(
                     changes,
                 )
                 .expect("changeset fits the format");
-                parents.push(tree::store_changeset(c, repo, &cs, &mut *lens, None)?.0);
+                parents.push(tree::store_changeset(c, repo, &cs, &mut *lens)?.0);
             }
             Ok((parents[0], parents[1]))
         })

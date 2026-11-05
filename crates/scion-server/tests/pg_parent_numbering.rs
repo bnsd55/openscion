@@ -35,7 +35,7 @@ fn setup(dir: &std::path::Path) -> (Backend, RepoId, ChangesetId) {
             let repo = c.create_repo(REPO)?;
             let cs = Changeset::new(vec![], author(), None, b"root\n".to_vec(), BTreeMap::new())
                 .expect("changeset fits the format");
-            let id = tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0;
+            let id = tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0;
             assert!(c.cas_ref(repo, "main", None, id)?);
             Ok((repo, id))
         })
@@ -55,7 +55,7 @@ fn child(store: &Backend, repo: RepoId, base: ChangesetId, tag: &str) -> Changes
                 BTreeMap::new(),
             )
             .expect("changeset fits the format");
-            tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None).map(|(id, _)| id)
+            tree::store_changeset(c, repo, &cs, &mut |_| Ok(0)).map(|(id, _)| id)
         })
         .unwrap()
 }
@@ -72,7 +72,7 @@ fn merge_cs(store: &Backend, repo: RepoId, first: ChangesetId, second: Changeset
                 BTreeMap::new(),
             )
             .expect("changeset fits the format");
-            tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None).map(|(id, _)| id)
+            tree::store_changeset(c, repo, &cs, &mut |_| Ok(0)).map(|(id, _)| id)
         })
         .unwrap()
 }
@@ -193,7 +193,7 @@ fn the_bulk_seed_writes_what_the_ordinary_path_writes() {
     let (store, repo, _) = setup(dir.path());
     for cs in ladder() {
         store
-            .write(|c| tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None).map(|_| ()))
+            .write(|c| tree::store_changeset(c, repo, &cs, &mut |_| Ok(0)).map(|_| ()))
             .unwrap();
     }
     // The seeded store: the same changesets through the bulk seed, in a

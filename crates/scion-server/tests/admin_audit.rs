@@ -312,14 +312,11 @@ fn seed_exportable(data: &std::path::Path) {
             .write(|c| {
                 let repo = c.create_repo("hist")?;
                 let cs = one_changeset(Vec::new(), &[("a.txt", Some(regular("a\n")))]);
-                let id = scion_server::test_support::tree::store_changeset(
-                    c,
-                    repo,
-                    &cs,
-                    &mut |_| Ok(0),
-                    None,
-                )?
-                .0;
+                let id =
+                    scion_server::test_support::tree::store_changeset(c, repo, &cs, &mut |_| {
+                        Ok(0)
+                    })?
+                    .0;
                 assert!(c.cas_ref(repo, "main", None, id)?);
                 Ok(())
             })

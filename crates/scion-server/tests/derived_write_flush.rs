@@ -63,7 +63,7 @@ fn the_old_rows_a_write_path_deletes_are_gone_after_its_commit() {
     let repo = store.write(|c| c.create_repo(REPO)).unwrap();
     let parent = changeset("parent\n", None);
     let parent_id = store
-        .write(|c| Ok(tree::store_changeset(c, repo, &parent, &mut |_| Ok(0), None)?.0))
+        .write(|c| Ok(tree::store_changeset(c, repo, &parent, &mut |_| Ok(0))?.0))
         .unwrap();
 
     // A row of an older version of the root-tree kind, as a version
@@ -81,7 +81,7 @@ fn the_old_rows_a_write_path_deletes_are_gone_after_its_commit() {
     // gone: the flush ran inside it, so a rollback would have kept it.
     let child = changeset("child\n", Some(parent_id));
     store
-        .write(|c| tree::store_changeset(c, repo, &child, &mut |_| Ok(0), None))
+        .write(|c| tree::store_changeset(c, repo, &child, &mut |_| Ok(0)))
         .unwrap();
     let after = store
         .read(|c| c.get_derived("root_tree", 0, parent_id))
@@ -116,7 +116,7 @@ fn the_flush_deletes_what_the_per_call_deletes_delete_in_order() {
         for i in 1..=6u32 {
             let cs = changeset(&format!("cs-{i}\n"), ids.last().copied());
             let id = store
-                .write(|c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0))
+                .write(|c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0))
                 .unwrap();
             store
                 .write(|c| c.put_derived("test_kind", i, id, format!("v{i}").as_bytes()))
@@ -168,7 +168,7 @@ fn a_batch_of_one_version_per_kind_still_flows_one_statement() {
     let repo = store.write(|c| c.create_repo(REPO)).unwrap();
     let cs = changeset("root\n", None);
     let id = store
-        .write(|c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0))
+        .write(|c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0))
         .unwrap();
     store
         .write(|c| c.put_derived("test_kind", 0, id, b"one"))
@@ -200,7 +200,7 @@ fn a_write_that_disagrees_with_a_stored_row_still_refuses() {
     let repo = store.write(|c| c.create_repo(REPO)).unwrap();
     let cs = changeset("root\n", None);
     let id = store
-        .write(|c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None)?.0))
+        .write(|c| Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0))
         .unwrap();
 
     // The second write of the same row in one transaction holds a value
@@ -226,12 +226,12 @@ fn the_write_paths_derived_reads_ride_one_preload() {
     let repo = store.write(|c| c.create_repo(REPO)).unwrap();
     let parent = changeset("parent\n", None);
     let parent_id = store
-        .write(|c| Ok(tree::store_changeset(c, repo, &parent, &mut |_| Ok(0), None)?.0))
+        .write(|c| Ok(tree::store_changeset(c, repo, &parent, &mut |_| Ok(0))?.0))
         .unwrap();
     let child = changeset("child\n", Some(parent_id));
     Backend::test_reset_statement_count();
     store
-        .write(|c| tree::store_changeset(c, repo, &child, &mut |_| Ok(0), None))
+        .write(|c| tree::store_changeset(c, repo, &child, &mut |_| Ok(0)))
         .unwrap();
     let log = Backend::test_statement_log();
     let reads = log

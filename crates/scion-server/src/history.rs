@@ -922,7 +922,7 @@ mod tests {
                         .collect();
                     let cs = changeset(ids.last().copied().or(parent), &edits);
                     ids.push(if stored {
-                        tree::store_changeset(c, repo, &cs, &mut crate::tree::lens_none(), None)?.0
+                        tree::store_changeset(c, repo, &cs, &mut crate::tree::lens_none())?.0
                     } else {
                         c.insert_changeset(repo, &cs)?
                     });
@@ -967,7 +967,7 @@ mod tests {
                 .write(|c| {
                     let ids = testing::insert_history(c, repo, &parents, &edits)?;
                     for &tip in &ids {
-                        derived::derive::<PathHistory>(c, repo, tip, &mut crate::tree::lens_none(), None)?;
+                        derived::derive::<PathHistory>(c, repo, tip, &mut crate::tree::lens_none())?;
                     }
                     Ok(ids)
                 })

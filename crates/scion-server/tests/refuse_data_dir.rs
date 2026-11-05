@@ -200,7 +200,7 @@ fn make_archive(into: &Path) -> PathBuf {
     )
     .expect("changeset fits the format");
     let tip = store
-        .write(|c| tree::store_changeset(c, repo, &cs, &mut |_| Ok(0), None).map(|r| r.0))
+        .write(|c| tree::store_changeset(c, repo, &cs, &mut |_| Ok(0)).map(|r| r.0))
         .unwrap();
     store.write(|c| c.cas_ref(repo, "main", None, tip)).unwrap();
     let out = into.join("archive");

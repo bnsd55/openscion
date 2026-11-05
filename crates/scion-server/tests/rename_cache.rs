@@ -144,8 +144,8 @@ fn seeded_sized(
     let new = Changeset::new(vec![], identity(), None, b"new\n".to_vec(), new_files).unwrap();
     let ids = store
         .write(|c| {
-            let old = tree::store_changeset(c, repo, &old, &mut |_| Ok(0), None)?.0;
-            let new = tree::store_changeset(c, repo, &new, &mut |_| Ok(0), None)?.0;
+            let old = tree::store_changeset(c, repo, &old, &mut |_| Ok(0))?.0;
+            let new = tree::store_changeset(c, repo, &new, &mut |_| Ok(0))?.0;
             Ok((old, new))
         })
         .unwrap();
@@ -301,9 +301,9 @@ fn a_diff_never_answers_from_another_diffs_map() {
         .unwrap();
     let (old_id, renames_id, other_id) = store
         .write(|c| {
-            let old = tree::store_changeset(c, repo, &old, &mut |_| Ok(0), None)?.0;
-            let renames = tree::store_changeset(c, repo, &renames, &mut |_| Ok(0), None)?.0;
-            let other = tree::store_changeset(c, repo, &other, &mut |_| Ok(0), None)?.0;
+            let old = tree::store_changeset(c, repo, &old, &mut |_| Ok(0))?.0;
+            let renames = tree::store_changeset(c, repo, &renames, &mut |_| Ok(0))?.0;
+            let other = tree::store_changeset(c, repo, &other, &mut |_| Ok(0))?.0;
             Ok((old, renames, other))
         })
         .unwrap();

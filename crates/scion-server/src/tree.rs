@@ -92,6 +92,27 @@ pub fn apply(
     base: Option<TreeId>,
     changes: &BTreeMap<RepoPath, Option<FileState>>,
     lens: BlobLens<'_>,
+) -> Result<TreeId> {
+    apply_impl(c, base, changes, lens, None)
+}
+
+/// The build checks the deadline per path, so a cancelled call's job
+/// stops between paths and frees its permit instead of building on.
+pub fn apply_within(
+    c: &mut dyn MetaTx,
+    base: Option<TreeId>,
+    changes: &BTreeMap<RepoPath, Option<FileState>>,
+    lens: BlobLens<'_>,
+    deadline: &Deadline,
+) -> Result<TreeId> {
+    apply_impl(c, base, changes, lens, Some(deadline))
+}
+
+fn apply_impl(
+    c: &mut dyn MetaTx,
+    base: Option<TreeId>,
+    changes: &BTreeMap<RepoPath, Option<FileState>>,
+    lens: BlobLens<'_>,
     deadline: Option<&Deadline>,
 ) -> Result<TreeId> {
     // The stored trees on every changed path, one get_trees per level of
@@ -184,7 +205,7 @@ impl Kind for RootTree {
         parents: Vec<TreeId>,
         lens: BlobLens<'_>,
     ) -> Result<TreeId> {
-        apply(c, parents.first().copied(), changeset.changes(), lens, None).map_err(|e| match e {
+        apply(c, parents.first().copied(), changeset.changes(), lens).map_err(|e| match e {
             Error::Apply(e) => Error::Corrupt(format!("stored changeset {id} does not apply: {e}")),
             other => other,
         })
@@ -266,9 +287,20 @@ pub fn derive_root_tree(
     repo: RepoId,
     cs: ChangesetId,
     lens: BlobLens<'_>,
-    deadline: Option<&Deadline>,
 ) -> Result<TreeId> {
-    derived::derive::<RootTree>(c, repo, cs, lens, deadline)
+    derived::derive_impl::<RootTree>(c, repo, cs, lens, None)
+}
+
+/// The walk checks the deadline per changeset, so a cancelled call's
+/// job stops between changesets and frees its permit.
+pub fn derive_root_tree_within(
+    c: &mut dyn MetaTx,
+    repo: RepoId,
+    cs: ChangesetId,
+    lens: BlobLens<'_>,
+    deadline: &Deadline,
+) -> Result<TreeId> {
+    derived::derive_impl::<RootTree>(c, repo, cs, lens, Some(deadline))
 }
 
 /// Stores a changeset in `repo` with its root tree: the first parent's tree
@@ -302,6 +334,27 @@ pub fn store_changeset(
     repo: RepoId,
     cs: &Changeset,
     lens: BlobLens<'_>,
+) -> Result<(ChangesetId, TreeId)> {
+    store_changeset_impl(c, repo, cs, lens, None)
+}
+
+/// The build checks the deadline per path, so a cancelled call's job
+/// stops between paths and frees its permit instead of building on.
+pub fn store_changeset_within(
+    c: &mut dyn MetaTx,
+    repo: RepoId,
+    cs: &Changeset,
+    lens: BlobLens<'_>,
+    deadline: &Deadline,
+) -> Result<(ChangesetId, TreeId)> {
+    store_changeset_impl(c, repo, cs, lens, Some(deadline))
+}
+
+fn store_changeset_impl(
+    c: &mut dyn MetaTx,
+    repo: RepoId,
+    cs: &Changeset,
+    lens: BlobLens<'_>,
     deadline: Option<&Deadline>,
 ) -> Result<(ChangesetId, TreeId)> {
     // The build reads each kind's value for the parents, then deletes a
@@ -330,9 +383,15 @@ pub fn store_changeset(
     let base = cs
         .parents()
         .first()
-        .map(|&parent| derive_root_tree(c, repo, parent, lens, deadline))
+        .map(|&parent| match deadline {
+            Some(deadline) => derive_root_tree_within(c, repo, parent, lens, deadline),
+            None => derive_root_tree(c, repo, parent, lens),
+        })
         .transpose()?;
-    let tree = apply(c, base, cs.changes(), lens, deadline)?;
+    let tree = match deadline {
+        Some(deadline) => apply_within(c, base, cs.changes(), lens, deadline),
+        None => apply(c, base, cs.changes(), lens),
+    }?;
     let id = c.insert_changeset(repo, cs)?;
     // One round trip for every blob the changeset puts, however many
     // paths name the same one.
@@ -961,7 +1020,7 @@ mod tests {
                     for edits in history {
                         let cs = changeset(ids.last().copied(), edits);
                         ids.push(if stored {
-                            store_changeset(c, repo, &cs, &mut lens_of(&store), None)?.0
+                            store_changeset(c, repo, &cs, &mut lens_of(&store))?.0
                         } else {
                             c.insert_changeset(repo, &cs)?
                         });

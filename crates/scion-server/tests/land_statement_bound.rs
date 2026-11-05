@@ -64,13 +64,8 @@ fn store_with_root(paths: &[String]) -> (tempfile::TempDir, Backend) {
     store
         .write(|c| {
             let repo = c.create_repo(REPO)?;
-            let (root, _) = scion_server::test_support::tree::store_changeset(
-                c,
-                repo,
-                &root,
-                &mut |_| Ok(0),
-                None,
-            )?;
+            let (root, _) =
+                scion_server::test_support::tree::store_changeset(c, repo, &root, &mut |_| Ok(0))?;
             assert!(c.cas_ref(repo, "main", None, root)?);
             for path in paths {
                 c.add_repo_blob(repo, scion_core::BlobId::of(path.as_bytes()))?;
@@ -164,15 +159,16 @@ fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound()
     // land over 3 paths costs 37; the read-back fold brought 36; this
     // fold opens each transaction in one round trip - BEGIN and its
     // guard SET LOCALs ride one batch, on the writer transactions and
-    // the reader's alike - and this fold joins the record's repos read
-    // into the key lookup: the land costs 31.
+    // the reader's alike; that fold joined the record's repos read into
+    // the key lookup; and this fold joins the finish's ref read into
+    // the land's outcome read: the land costs 30.
     //
     // This run has no rival writer, so the land settles in one attempt;
     // the log's one verdict UPDATE proves it. On that run the count is
     // exact, so a statement coming back fails the test here, and the
     // bound keeps guarding only the retried case it has slack for.
-    const BOUND: u64 = 39;
-    const EXACT: u64 = 31;
+    const BOUND: u64 = 38;
+    const EXACT: u64 = 30;
     let count = land_statement_count(3);
     {
         let log = Backend::test_statement_log();

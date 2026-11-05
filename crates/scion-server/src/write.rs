@@ -182,7 +182,7 @@ pub fn create_changeset(
                 return Err(bad_blob(blob, path, "is not stored", repo));
             }
         }
-        tree::store_changeset(c, repo_id, &cs, &mut tree::lens_from(&lens), Some(deadline))
+        tree::store_changeset_within(c, repo_id, &cs, &mut tree::lens_from(&lens), deadline)
             .map(|(id, _)| id)
     })
 }

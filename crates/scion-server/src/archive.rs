@@ -856,7 +856,7 @@ fn replay_changesets(
                 lens.insert(*member, store.blobs().size(*member)? as u64);
             }
             for cs in &batch {
-                tree::store_changeset(c, repo_id, cs, &mut tree::lens_from(&lens), None)?;
+                tree::store_changeset(c, repo_id, cs, &mut tree::lens_from(&lens))?;
             }
             Ok(())
         })?;

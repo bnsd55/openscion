@@ -108,13 +108,8 @@ async fn create_repo_run(audit: &Audit, store: Backend, name: &str, trunk: &str)
                     "repo {run_name:?} already has changesets"
                 )));
             }
-            let (id, _) = tree::store_changeset(
-                c,
-                repo_id,
-                &cs,
-                &mut tree::lens_from(&HashMap::new()),
-                None,
-            )?;
+            let (id, _) =
+                tree::store_changeset(c, repo_id, &cs, &mut tree::lens_from(&HashMap::new()))?;
             // The trunk ref at version 1.
             if !c.cas_ref(repo_id, &run_trunk, None, id)? {
                 return Err(Error::FailedPrecondition(format!(

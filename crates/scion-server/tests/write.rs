@@ -424,7 +424,7 @@ fn a_blob_that_a_changeset_of_the_repo_names_needs_no_upload() {
         .write(|c| {
             let repo = c.create_repo("imported")?;
             let root = changeset(vec![], &[("f", Some(file))]);
-            Ok(tree::store_changeset(c, repo, &root, &mut |_| Ok(0), None)?.0)
+            Ok(tree::store_changeset(c, repo, &root, &mut |_| Ok(0))?.0)
         })
         .unwrap();
     // A rename names it again.
