@@ -603,15 +603,16 @@ impl Limits {
     {
         let mut builder =
             hyper_util::server::conn::auto::Builder::new(TokioExecutor::new()).http2_only();
+        let mut builder =
+            hyper_util::server::conn::auto::Builder::new(TokioExecutor::new()).http2_only();
+        let mut h2 = builder.http2();
+        h2.timer(TokioTimer::new())
+            .max_concurrent_streams(Some(streams))
+            .keep_alive_interval(Some(accepting.keepalive))
+            .keep_alive_timeout(accepting.keepalive_timeout)
+            .max_send_buf_size(SEND_BUF);
         let mut conn = pin!(
-            builder
-                .http2()
-                .timer(TokioTimer::new())
-                .max_concurrent_streams(Some(streams))
-                .keep_alive_interval(Some(accepting.keepalive))
-                .keep_alive_timeout(accepting.keepalive_timeout)
-                .max_send_buf_size(SEND_BUF)
-                .serve_connection_with_upgrades(TokioIo::new(io), TowerToHyperService::new(svc))
+            h2.serve_connection_with_upgrades(TokioIo::new(io), TowerToHyperService::new(svc))
         );
         let mut age = Box::pin(age_out(accepting.age, accepting.grace));
         let mut stop = pin!(watch_signal(stop));
