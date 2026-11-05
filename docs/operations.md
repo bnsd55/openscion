@@ -1310,9 +1310,6 @@ the process, scraped from there. The names:
   counts says a drive that cannot keep up with the imports.
 - `scion_data_free_bytes` — free bytes on the filesystem that holds the
   data directory, refreshed every 30 s; alert before it reaches zero.
-- `scion_data_free_inodes` — free inodes on that filesystem, from the
-  same 30 s poll; small blobs cost one inode each, so the inode floor
-  arrives long before the byte floor does.
 - `scion_blob_count` — blobs the store's metadata names, refreshed every
   60 s by one bounded count query over the blob rows (never a directory
   walk, never per scrape). At 1,000,000 blobs the query itself costs
@@ -1615,34 +1612,6 @@ What to do at each level:
   fsck as planned downtime.
 
 Proof: crates/scion-server/tests/blob_count_gauge.rs::the_count_is_what_the_metadata_names_not_what_the_folder_holds (behaviour, no command: the runbook's steps are operator actions - watch the trend, plan the split - and each alert's firing is proven by the promtool cases deploy/prometheus/openscion-alerts-test.yml runs, which fire past the threshold and stay quiet just below it).
-
-### The data directory low on inodes
-
-`DataInodesLow` fires when `scion_data_free_inodes` sits under 100,000
-for 15 minutes, and `DataInodesCritical` when it sits under 10,000 for
-5 minutes. Every small blob costs one inode (a 4 KiB block too, from
-the #823 runs), so a store of small blobs runs out of inodes long
-before it runs out of bytes.
-
-Read the inodes and the bytes together:
-
-```sh
-curl -s 127.0.0.1:9100/metrics | grep -E '^scion_data_free_(inodes|bytes)'
-```
-
-What to do at each level:
-
-- At `DataInodesLow` (`high`): check the byte floor. If
-  `scion_data_free_bytes` is still high, the store fills with small
-  blobs: the inode floor, not the byte floor, is the store's next wall.
-  Plan the split the same way the blob ceiling says.
-- At `DataInodesCritical` (`critical`): puts of new blobs fail once the
-  filesystem runs out of inodes, and clients see their uploads refused.
-  Free inodes (delete repos a section 3 copy keeps nothing of, then run
-  the gc) or grow the volume's inode count; a filesystem whose inode
-  count is fixed needs the split.
-
-Proof: crates/scion-server/tests/disk_full.rs::a_disk_full_runbook_gcs_then_writes_resume (behaviour, no command: the runbook's steps are operator actions - read two gauges, run the gc, split the store - and each alert's firing is proven by the promtool cases deploy/prometheus/openscion-alerts-test.yml runs).
 
 ## 7. Capacity
 

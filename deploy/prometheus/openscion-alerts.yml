@@ -224,26 +224,6 @@ groups:
             The store holds more blobs than docs/support.md supports.
             Expect fsck to take hours; split the store now
             (docs/operations.md section 6).
-      - alert: DataInodesLow
-        expr: scion_data_free_inodes < 100000
-        for: 15m
-        labels:
-          severity: high
-        annotations:
-          response: >-
-            Fewer than 100,000 free inodes on the data directory's
-            filesystem: small blobs cost one inode each, so the store
-            is near its inode floor (docs/operations.md section 6).
-      - alert: DataInodesCritical
-        expr: scion_data_free_inodes < 10000
-        for: 5m
-        labels:
-          severity: critical
-        annotations:
-          response: >-
-            Fewer than 10,000 free inodes left: puts of new blobs
-            fail once they run out. Free inodes or split the store
-            (docs/operations.md section 6).
   - name: gc
     rules:
       - alert: GcStale

@@ -200,7 +200,7 @@ pub struct Metrics {
 pub struct Rpc(usize);
 
 /// The blob count docs/support.md supports per data directory: what
-/// [`scion_blob_ceiling_share`] divides by.
+/// what `scion_blob_ceiling_share` divides by.
 pub const SUPPORTED_BLOBS: u64 = 1_000_000;
 
 /// The blob count as a share of the ceiling. The counts the ceiling
