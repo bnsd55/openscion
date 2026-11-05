@@ -1003,6 +1003,11 @@ so none takes long). Three rules:
   time. A `migrate` beside a live server does not wait: the live server
   holds the one-server lock, so the migrate refuses at once with
   `another server holds this store; stop the server first`.
+- A migration's statements are not bounded by the server's per-statement
+  budget: the migration runner lifts it for the migration window and
+  puts it back before the server serves anything else, so a
+  data-carrying step may run as long as it needs. The refusals above
+  write nothing: a database they refuse is the catalog it was.
 
 ### A failed migration
 

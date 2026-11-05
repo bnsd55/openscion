@@ -1,0 +1,1 @@
+The migration runner lifts the server's per-statement budget for the migration window and puts it back after, so a data-carrying migration is not cut off at the open's ten minutes; and a store open that refuses a database behind the build now refuses before it writes anything, so the database it refuses is the catalog it was.
