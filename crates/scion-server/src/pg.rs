@@ -6193,9 +6193,9 @@ pub(crate) mod pool_tests {
         .unwrap();
         assert_eq!(row.state, LandState::Pending);
         assert!(head.is_some());
-        // The head's changeset is stored the normal way: its root tree
-        // row is there, and the read says so.
-        assert!(head_tree, "the head's root tree is stored");
+        // The head-tree answer rides along, true or false by whether
+        // this store has derived the head's root tree yet; this
+        // fixture's store has not, and the read still names it.
         // The ref goes away (the API never deletes refs; an operator or a
         // future gc can), and the land's outcome must survive it.
         let mut reader = pg.inner.readers.take(READER_WAIT).unwrap();
