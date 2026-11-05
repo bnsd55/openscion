@@ -933,6 +933,7 @@ fn spawn_tls_accepted<IO>(
 {
     let handshake = accepting.handshake;
     let wait = accepting.wait;
+    let max = accepting.max;
     let stalled_bytes = accepting.stalled_bytes;
     let places = Arc::clone(places);
     let waiters = Arc::clone(waiters);
