@@ -15,12 +15,14 @@ One active server per data directory, on one host. The model holds only
 inside this profile.
 
 The host has at least 8 GiB of memory. The derivation: the server's
-memory budgets and caps sum to 5,072 MiB (the shares table in
+memory budgets and caps sum to 5,968 MiB (the shares table in
 `crates/scion-server/src/floor.rs`: the blame pool, the derive walks,
 the uploads in flight, the `GetObjects` replies in flight, the read and
 unary-reply budgets, the land indexes, the gc prune, the process-wide
-stall total), plus 1,536 MiB of headroom for what the budgets do not
-count, so the floor is 6,608 MiB and 8 GiB leaves slack above it. At
+stall total, the view derivations' memo pool, the diffs' rename passes,
+and the paged diffs' shared rename maps), plus 1,536 MiB of headroom
+for what the budgets do not count, so the floor is 7,504 MiB and 8 GiB
+leaves 688 MiB above it. At
 start the server reads the host's limit and writes one error line when
 the host is under the floor; it starts anyway (the floor row of section
 9 of architecture.md).

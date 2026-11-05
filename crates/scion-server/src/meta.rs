@@ -573,7 +573,17 @@ pub trait MetaTx {
     fn expire_lands(&mut self) -> Result<()>;
 
     /// Reads a land that `caller` started in `repo`.
-    fn land_outcome(&mut self, repo: RepoId, caller: &Caller, land_id: i64) -> Result<LandOutcome>;
+    /// Reads a land's outcome, and the ref's state when `ref_name`
+    /// names one: one read sees the land and the ref together, so a ref
+    /// deleted between the record and the finish leaves the land's
+    /// outcome standing beside a missing ref.
+    fn land_outcome(
+        &mut self,
+        repo: RepoId,
+        caller: &Caller,
+        land_id: i64,
+        ref_name: Option<&str>,
+    ) -> Result<(LandOutcome, Option<RefState>)>;
 
     /// Moves a pending land to its final state, and returns the outcome.
     /// `reject_reason` says why a REJECTED land can never succeed; the

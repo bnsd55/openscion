@@ -613,9 +613,10 @@ pub fn diff(
 /// saw. The bound rides the key because it alone changes what the
 /// search finds.
 ///
-/// The cache is bounded by bytes, not by diffs: one map of a
-/// rename-entry-bound diff costs about 100 MB, so the cap holds a
-/// few of those or many small ones, and an entry that no page has
+/// The cache is bounded by bytes, not by diffs: one map costs at most
+/// its walk's bounded entry list (a map's renames pair into the same
+/// paths the walk held, at a smaller per-entry cost), so the cap holds
+/// the maps of many diffs, and an entry that no page has
 /// asked for within a call deadline's length (`RENAME_CACHE_TTL`:
 /// a client that stops at page 3 never comes back) ages out. Past the
 /// cap the oldest entries go first. A miss is always correct: the
@@ -652,10 +653,13 @@ struct CachedRenames {
 /// no page has asked for in that long is a paged read that stopped.
 const RENAME_CACHE_TTL: Duration = Duration::from_secs(600);
 
-/// The bytes the stored maps may hold. One map of a
-/// rename-entry-bound diff costs about 100 MB (its own comment
-/// carries the arithmetic), so 512 MiB holds a few of the largest maps
-/// a server may see, or many more of the small ones most diffs are.
+/// The bytes the stored maps may hold. A map holds one rename per
+/// paired add and delete of its walk's bounded entry list, and each
+/// stored rename's two paths cost less than the walk's cost for those
+/// two entries (`map_bytes` against the walk's per-entry
+/// `2 * path + 160`), so one map never exceeds the walk's own byte
+/// bound (`MAX_RENAME_BYTES`); this cap bounds their sum over the
+/// diffs the process cached.
 fn rename_cache_max_bytes() -> usize {
     #[cfg(any(test, feature = "test-hooks"))]
     {
@@ -667,7 +671,7 @@ fn rename_cache_max_bytes() -> usize {
     RENAME_CACHE_MAX_BYTES
 }
 
-const RENAME_CACHE_MAX_BYTES: usize = 512 << 20;
+pub(crate) const RENAME_CACHE_MAX_BYTES: usize = 512 << 20;
 
 #[cfg(any(test, feature = "test-hooks"))]
 static RENAME_CACHE_MAX_BYTES_OVERRIDE: std::sync::atomic::AtomicUsize =
