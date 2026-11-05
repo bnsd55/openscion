@@ -1483,10 +1483,11 @@ async fn finish_lands(scion: &mut Scion, lands: &mut Ledger) {
         let request = lands[idx].request();
         let mut retry_conn = scion.clone();
         calls.spawn(async move {
-            let reply = retry_conn
-                .land(request)
-                .await
-                .unwrap_or_else(|s| panic!("the retry of land {idx}: {s:?}"));
+            let reply = ceiling(
+                &format!("the retry of land {idx}"),
+                retry_conn.land(request),
+            )
+            .await;
             (idx, reply.into_inner())
         });
         // The twin of a cut call: in flight at the same time.
@@ -1494,10 +1495,11 @@ async fn finish_lands(scion: &mut Scion, lands: &mut Ledger) {
             let request = lands[idx].request();
             let mut twin_conn = scion.clone();
             calls.spawn(async move {
-                let reply = twin_conn
-                    .land(request)
-                    .await
-                    .unwrap_or_else(|s| panic!("the twin retry of land {idx}: {s:?}"));
+                let reply = ceiling(
+                    &format!("the twin retry of land {idx}"),
+                    twin_conn.land(request),
+                )
+                .await;
                 (idx, reply.into_inner())
             });
         }
