@@ -405,7 +405,7 @@ async fn a_unary_reply_over_the_message_limit_is_refused() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(scion_proto::runtime::listen::Limits::default().serve(
-        |mut server| server.add_service(service::into_server(Huge)),
+        || tonic::service::Routes::new(service::into_server(Huge)),
         scion_proto::runtime::listen::tcp(listener),
         None,
         std::future::pending(),
