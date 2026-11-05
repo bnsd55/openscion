@@ -384,3 +384,144 @@ fn a_migrate_beside_a_live_server_refuses_and_moves_nothing() {
         "the migrate runs once the server is gone"
     );
 }
+
+/// The catalog rows of one schema: the count the refused-open test
+/// compares before and after.
+fn catalog_rows(url: &str, schema: &str) -> i64 {
+    let mut client =
+        postgres::Client::connect(url, postgres::NoTls).expect("the test database connects");
+    let rows = client
+        .query_one(
+            "SELECT count(*) FROM pg_class
+             WHERE relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $1)",
+            &[&schema],
+        )
+        .expect("the catalog is readable");
+    rows.get(0)
+}
+
+/// Drops the test's role whatever the test's outcome: roles are
+/// cluster-wide, and the suite's schemas run in parallel.
+struct RoleGuard {
+    url: String,
+    role: String,
+}
+
+impl Drop for RoleGuard {
+    fn drop(&mut self) {
+        if let Ok(mut client) = postgres::Client::connect(&self.url, postgres::NoTls) {
+            let _ = client.batch_execute(&format!("DROP ROLE IF EXISTS {}", self.role));
+        }
+    }
+}
+
+/// A migration statement is the operator's ask, not a lane's call: it
+/// runs under no statement budget. The base budget is shrunk to 250 ms
+/// and the migration's own statement sleeps 1 s — the sleep dies under
+/// the open's budget, and completes under the migrate's.
+#[test]
+fn a_migration_statement_outlives_the_base_statement_budget() {
+    let base = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL must name the test database");
+    let schema = "mig_sleep";
+    let url = url_for(&base, schema);
+    seed_behind_store(&base, schema);
+    let dir = scion_server::test_support::private_tempdir();
+    let data = dir.path().join("data");
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
+    let run = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
+        .args(["--data", data.to_str().unwrap()])
+        .env("SCION_POSTGRES_URL", &url)
+        .args(["migrate"])
+        .env("NO_COLOR", "1")
+        .env("SCION_TEST_STATEMENT_TIMEOUT", "250ms")
+        .env("SCION_TEST_MIGRATION_SLEEP_MS", "1000")
+        .output()
+        .expect("the migrate runs");
+    assert!(
+        run.status.success(),
+        "the migration's own statement is not bounded by the base budget: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let out = String::from_utf8_lossy(&run.stdout);
+    assert!(out.contains("from version 5 to 6"), "{out}");
+}
+
+/// A refusing open of a behind database writes nothing to the catalog:
+/// it refuses before any DDL, so a role that may read the ledger but not
+/// create in the schema reaches the refusal instead of dying on the
+/// ledger's DDL, and the schema's catalog rows are the same after.
+#[test]
+fn a_refusing_open_writes_nothing_to_the_catalog() {
+    let base = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL must name the test database");
+    let schema = "mig_no_create";
+    seed_behind_store(&base, schema);
+    let role = format!("{schema}_role");
+    let guard = RoleGuard {
+        url: base.clone(),
+        role: role.clone(),
+    };
+    {
+        let mut admin =
+            postgres::Client::connect(&base, postgres::NoTls).expect("the test database connects");
+        // The role cannot log in and has no password: no credential for
+        // it exists anywhere. The server's session takes it over with
+        // the libpq startup option `-crole=<role>` below, so every
+        // privilege check the open makes is the role's while the
+        // connection keeps the test's own credential.
+        admin
+            .batch_execute(&format!("CREATE ROLE {role} NOLOGIN"))
+            .expect("the role is made");
+        admin
+            .batch_execute(&format!("GRANT USAGE ON SCHEMA {schema} TO {role}"))
+            .unwrap();
+        admin
+            .batch_execute(&format!(
+                "GRANT SELECT ON {schema}.schema_migrations TO {role}"
+            ))
+            .unwrap();
+        // SET ROLE needs the membership: the session's user must be a
+        // member of the role (a superuser is one of everything, but the
+        // grant makes this hold for an owned database too).
+        let admin_name: String = admin
+            .query_one("SELECT current_user::text", &[])
+            .expect("the session's user is readable")
+            .get(0);
+        admin
+            .batch_execute(&format!("GRANT {role} TO {admin_name}"))
+            .expect("the session may take the role");
+    }
+    // The URL rides the test's own admin credentials; the `options`
+    // startup value sets the schema (as every test's URL does) and the
+    // session's role, space-separated the way libpq parses the value.
+    let role_url = format!("{}%20-crole%3D{}", url_for(&base, schema), role);
+    let dir = scion_server::test_support::private_tempdir();
+    let data = dir.path().join("data");
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
+    let before = catalog_rows(&base, schema);
+    let run = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
+        .args(["--data", data.to_str().unwrap()])
+        .env("SCION_POSTGRES_URL", &role_url)
+        .args(["serve", "--listen", "127.0.0.1:0", "--token-file"])
+        .arg(ensure_token())
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("the refused serve runs");
+    assert!(!run.status.success(), "a behind database is refused");
+    let why = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        why.contains("run `scion-server migrate` first, or pass --migrate to serve"),
+        "the refusal names the fix: {why}"
+    );
+    assert!(
+        !why.contains("permission denied"),
+        "the refusal is not an ACL error: {why}"
+    );
+    let after = catalog_rows(&base, schema);
+    assert_eq!(
+        before, after,
+        "the refused open wrote nothing to the catalog"
+    );
+    drop(guard);
+}

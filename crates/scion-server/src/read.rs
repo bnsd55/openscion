@@ -638,14 +638,19 @@ struct RenameKey {
 }
 
 /// A stored rename map: the map shared with its readers, whether
-/// renames may be missing, its cost in bytes, and the last time a page
-/// asked for it. The map is shared, so a page answers from the entry
-/// without a copy, whatever its size.
+/// renames may be missing, its cost in bytes against the cap, and its
+/// place in the age order. The map is shared, so a page answers from
+/// the entry without a copy, whatever its size.
 struct CachedRenames {
     map: std::sync::Arc<HashMap<RepoPath, Rename>>,
     incomplete: bool,
+    /// The entry's whole cost against the cap: the map's bytes plus the
+    /// entry's own overhead (`entry_bytes`).
     bytes: usize,
-    asked: Instant,
+    /// The entry's stamp: the last time a page asked for it, and the
+    /// sequence number that breaks ties between stamps of the same
+    /// instant. The age order is keyed by it.
+    stamp: (Instant, u64),
 }
 
 /// How long a stored map serves pages: one call deadline's length. A
@@ -677,10 +682,41 @@ pub(crate) const RENAME_CACHE_MAX_BYTES: usize = 512 << 20;
 static RENAME_CACHE_MAX_BYTES_OVERRIDE: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-static RENAME_CACHE: std::sync::LazyLock<Mutex<HashMap<RenameKey, CachedRenames>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+/// The cache: the entries, the age order that walks them old end
+/// first, and the bytes they all cost. One mutex guards the three, so
+/// a page's cache work never scales with the number of entries: every
+/// path is a hash hit plus one order step.
+struct RenameCache {
+    entries: HashMap<RenameKey, CachedRenames>,
+    /// The entries keyed by their stamps, oldest first. The expiry and
+    /// the trim pop from the front; a refresh removes the old stamp and
+    /// inserts the new one.
+    order: std::collections::BTreeMap<(Instant, u64), RenameKey>,
+    /// The bytes every entry costs, overhead included: the trim's
+    /// number, and the gauge's.
+    total: usize,
+}
+
+static RENAME_CACHE: std::sync::LazyLock<Mutex<RenameCache>> = std::sync::LazyLock::new(|| {
+    Mutex::new(RenameCache {
+        entries: HashMap::new(),
+        order: std::collections::BTreeMap::new(),
+        total: 0,
+    })
+});
 
 static RENAME_CACHE_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// The fixed part of one entry's cost against the cap: the key twice
+/// (the map holds one, the age order the other), the entry struct, the
+/// shared map's Arc block (strong and weak counts) and table handle,
+/// and the hash table's per-entry control share. The key's and the
+/// paths' heap bytes ride on top, per entry at insert (`entry_bytes`).
+const RENAME_CACHE_ENTRY_OVERHEAD: usize = 2 * size_of::<RenameKey>()
+    + size_of::<CachedRenames>()
+    + 2 * size_of::<usize>()
+    + size_of::<HashMap<RepoPath, Rename>>()
+    + 8;
 
 static RENAME_CACHE_METRICS: OnceLock<std::sync::Arc<crate::metrics::Metrics>> = OnceLock::new();
 
@@ -690,10 +726,22 @@ pub(crate) fn set_rename_cache_metrics(metrics: std::sync::Arc<crate::metrics::M
     let _ = RENAME_CACHE_METRICS.set(metrics);
 }
 
-fn rename_cache_lock() -> MutexGuard<'static, HashMap<RenameKey, CachedRenames>> {
+fn rename_cache_lock() -> MutexGuard<'static, RenameCache> {
     RENAME_CACHE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// One entry's whole cost against the cap: the map's bytes plus the
+/// entry's own overhead. The paths' heap bytes are the part
+/// `size_of` cannot see; they count twice, once per key the cache
+/// holds.
+fn entry_bytes(key: &RenameKey, map_bytes: usize) -> usize {
+    let path_heap = key
+        .path
+        .as_ref()
+        .map_or(0, |path| path.as_bytes().len() + size_of::<Vec<u8>>());
+    RENAME_CACHE_ENTRY_OVERHEAD + 2 * path_heap + map_bytes
 }
 
 /// A map's bytes: its paths twice (the entry's path and the other
@@ -704,15 +752,10 @@ fn map_bytes(map: &HashMap<RepoPath, Rename>) -> usize {
         .sum()
 }
 
-/// The bytes the stored maps hold, as the cache's gauge reads it.
-fn cache_bytes(maps: &HashMap<RenameKey, CachedRenames>) -> usize {
-    maps.values().map(|cached| cached.bytes).sum()
-}
-
-/// Tells the gauge the bytes the stored maps hold, when the registry
-/// is set.
-fn publish_cache_bytes(maps: &HashMap<RenameKey, CachedRenames>) {
-    let bytes = cache_bytes(maps) as u64;
+/// Tells the gauge the bytes the cache costs, when the registry is
+/// set. The total is kept, not summed: no path walks the entries.
+fn publish_cache_bytes(cache: &RenameCache) {
+    let bytes = cache.total as u64;
     RENAME_CACHE_BYTES.store(bytes, Ordering::Relaxed);
     if let Some(metrics) = RENAME_CACHE_METRICS.get() {
         metrics.set_diff_rename_cache_bytes(bytes);
@@ -726,26 +769,37 @@ fn publish_cache_bytes(maps: &HashMap<RenameKey, CachedRenames>) {
 /// timer, so an idle server may hold up to `RENAME_CACHE_MAX_BYTES` of
 /// ended diffs' maps for their TTL's length; the upgrade is a sweep on
 /// the runtime's own interval).
-fn evict_expired(maps: &mut HashMap<RenameKey, CachedRenames>, all: bool) {
+fn evict_expired(cache: &mut RenameCache, all: bool) {
     if all {
-        maps.clear();
+        cache.entries.clear();
+        cache.order.clear();
+        cache.total = 0;
         return;
     }
     let now = Instant::now();
-    maps.retain(|_, cached| now.duration_since(cached.asked) < RENAME_CACHE_TTL);
+    // The order's front is the oldest stamp: one pop per expired entry,
+    // no pass over the entries that stay.
+    while let Some((stamp, key)) = cache.order.pop_first() {
+        if now.duration_since(stamp.0) < RENAME_CACHE_TTL {
+            cache.order.insert(stamp, key);
+            break;
+        }
+        if let Some(cached) = cache.entries.remove(&key) {
+            cache.total = cache.total.saturating_sub(cached.bytes);
+        }
+    }
 }
 
-/// Drops the oldest entries until the stored maps fit the cap.
-fn trim_to_cap(maps: &mut HashMap<RenameKey, CachedRenames>) {
-    while cache_bytes(maps) > rename_cache_max_bytes() {
-        let Some(oldest) = maps
-            .iter()
-            .min_by_key(|(_, cached)| cached.asked)
-            .map(|(key, _)| key.clone())
-        else {
+/// Drops the oldest entries until the cache fits the cap. The order's
+/// front is the oldest: one pop per dropped entry, no scan, no sum.
+fn trim_to_cap(cache: &mut RenameCache) {
+    while cache.total > rename_cache_max_bytes() {
+        let Some((_, key)) = cache.order.pop_first() else {
             break;
         };
-        maps.remove(&oldest);
+        if let Some(cached) = cache.entries.remove(&key) {
+            cache.total = cache.total.saturating_sub(cached.bytes);
+        }
     }
 }
 
@@ -753,48 +807,76 @@ fn trim_to_cap(maps: &mut HashMap<RenameKey, CachedRenames>) {
 /// holds none: the page then runs its own search. The map hands out
 /// shared, so a page never copies one under the lock.
 fn cached_renames(key: &RenameKey) -> Option<(std::sync::Arc<HashMap<RepoPath, Rename>>, bool)> {
-    let mut maps = rename_cache_lock();
-    evict_expired(&mut maps, false);
-    let answer = match maps.get_mut(key) {
-        Some(cached) => {
-            cached.asked = Instant::now();
+    let mut cache = rename_cache_lock();
+    evict_expired(&mut cache, false);
+    // The entry moves to the young end: the order forgets the old
+    // stamp and takes the new one, so a trim drops another entry
+    // first. The stamp is read out first, so the map borrow ends
+    // before the order moves.
+    let moved = cache.entries.get_mut(key).map(|cached| {
+        let old_stamp = cached.stamp;
+        let stamp = (Instant::now(), next_cache_seq());
+        cached.stamp = stamp;
+        (old_stamp, stamp)
+    });
+    let answer = match moved {
+        Some((old_stamp, stamp)) => {
+            cache.order.remove(&old_stamp);
+            cache.order.insert(stamp, key.clone());
+            let cached = &cache.entries[key];
             Some((std::sync::Arc::clone(&cached.map), cached.incomplete))
         }
         None => None,
     };
     // The gauge follows every path: a miss that evicted nothing still
     // says what the cache holds now.
-    publish_cache_bytes(&maps);
+    publish_cache_bytes(&cache);
     answer
+}
+
+/// The sequence number that breaks ties between stamps of the same
+/// instant.
+fn next_cache_seq() -> u64 {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    SEQ.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Stores a whole diff's map, keeping the cache under its cap.
 fn store_renames(key: RenameKey, map: HashMap<RepoPath, Rename>, incomplete: bool) {
-    let mut maps = rename_cache_lock();
-    evict_expired(&mut maps, false);
-    let bytes = map_bytes(&map);
-    maps.insert(
-        key,
+    let mut cache = rename_cache_lock();
+    evict_expired(&mut cache, false);
+    // The entry costs its map and itself: an empty map holds its place
+    // against the cap, so a caller that opens many paged diffs and
+    // stops at the first page cannot hold entries past the cap's bound.
+    let bytes = entry_bytes(&key, map_bytes(&map));
+    let stamp = (Instant::now(), next_cache_seq());
+    let dropped = cache.entries.insert(
+        key.clone(),
         CachedRenames {
             bytes,
             map: std::sync::Arc::new(map),
             incomplete,
-            asked: Instant::now(),
+            stamp,
         },
     );
-    trim_to_cap(&mut maps);
-    publish_cache_bytes(&maps);
+    if let Some(old) = dropped {
+        cache.order.remove(&old.stamp);
+        cache.total = cache.total.saturating_sub(old.bytes);
+    }
+    cache.total += bytes;
+    cache.order.insert(stamp, key);
+    trim_to_cap(&mut cache);
+    publish_cache_bytes(&cache);
 }
 
 /// Forgets one diff's map: the diff ended within the page that asks,
 /// so no page will ask for its map again.
 fn forget_renames(key: &RenameKey) {
-    let maps = rename_cache_lock();
-    if maps.contains_key(key) {
-        drop(maps);
-        let mut maps = rename_cache_lock();
-        maps.remove(key);
-        publish_cache_bytes(&maps);
+    let mut cache = rename_cache_lock();
+    if let Some(cached) = cache.entries.remove(key) {
+        cache.order.remove(&cached.stamp);
+        cache.total = cache.total.saturating_sub(cached.bytes);
+        publish_cache_bytes(&cache);
     }
 }
 
@@ -844,8 +926,24 @@ pub fn test_set_rename_cache_cap_for_tests(bytes: usize) -> impl Drop {
 #[cfg(any(test, feature = "test-hooks"))]
 #[must_use]
 pub fn test_rename_cache_size() -> (usize, u64) {
-    let maps = rename_cache_lock();
-    (maps.len(), cache_bytes(&maps) as u64)
+    let cache = rename_cache_lock();
+    (cache.entries.len(), cache.total as u64)
+}
+
+/// The gauge, as a reader outside the mutex sees it: the kept total
+/// must equal it after every path.
+#[cfg(any(test, feature = "test-hooks"))]
+#[must_use]
+pub fn test_rename_cache_gauge() -> u64 {
+    RENAME_CACHE_BYTES.load(Ordering::Relaxed)
+}
+
+/// The fixed part of one entry's cost against the cap, for the test
+/// that pins the formula to the types.
+#[cfg(any(test, feature = "test-hooks"))]
+#[must_use]
+pub fn test_rename_cache_entry_overhead() -> usize {
+    RENAME_CACHE_ENTRY_OVERHEAD
 }
 
 /// [`diff`], with the entries that the rename pass may walk bounded by

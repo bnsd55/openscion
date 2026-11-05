@@ -50,6 +50,7 @@ use crate::land::{
 };
 use crate::meta::{FsckDerivedRow, Meta, MetaTx, RefState, RepoChangeset, RepoId, StaleLand};
 use crate::store::Blobs;
+use crate::tree::RootTree;
 
 #[cfg(any(test, feature = "test-hooks"))]
 #[path = "test_support/pg.rs"]
@@ -883,8 +884,27 @@ fn base_options() -> String {
     // bound. A statement itself may walk the graph for minutes, so only
     // the lock is under the short clock.
     format!(
-        "-csynchronous_commit=on -cstatement_timeout=600000 -clock_timeout={LOCK_TIMEOUT_FOR_WRITERS}"
+        "-csynchronous_commit=on -cstatement_timeout={budget} -clock_timeout={LOCK_TIMEOUT_FOR_WRITERS}",
+        budget = base_statement_timeout()
     )
+}
+
+/// The per-statement budget every lane's connection opens with, in
+/// milliseconds: a runaway statement is answered instead of hanging the
+/// lane. The migration runner lifts it for the migration window
+/// (`migrate_under_lock`) and puts it back before the client serves
+/// anything else — a migration is the operator's ask, not a lane's call.
+const BASE_STATEMENT_TIMEOUT_MS: u32 = 600_000;
+
+fn base_statement_timeout() -> String {
+    // The timeout tests shrink the base budget so a statement under it
+    // is reachable in a test: the migrate path must not inherit it.
+    // Release builds never read the env.
+    #[cfg(any(test, feature = "test-hooks"))]
+    if let Ok(shrunk) = std::env::var("SCION_TEST_STATEMENT_TIMEOUT") {
+        return shrunk;
+    }
+    BASE_STATEMENT_TIMEOUT_MS.to_string()
 }
 
 /// The lock clock every writer runs under: a lock a writer waits for is a
@@ -3569,36 +3589,37 @@ fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
     // the taker busy: an open that hits one waits and tries again.
     client.query_opt("SELECT pg_advisory_lock($1)", &[P::i64(SCHEMA_LOCK)])?;
     let outcome = migrate_under_lock(client, allow);
+    // The base statement budget goes back whatever the migrations did:
+    // only the migration window ran without it, and this client — for
+    // `serve --migrate`, the writer the store keeps — must not serve a
+    // statement at a budget the open did not choose. A restore that
+    // fails fails the open, and the operator sees why: an unbounded
+    // writer with no answer is the silent path the base budget exists
+    // to prevent. The migration's own error comes first, and the
+    // restore's failure answers when the migrations left none.
+    let restored = client.execute(
+        &format!("SET statement_timeout = '{}'", base_statement_timeout()),
+        &[],
+    );
     // The lock lives on the client's session: it goes back whatever the
     // migrations did. A client that died mid-migration lost the lock with
     // its connection, and the unlock names a lock the new connection
     // never held, which answers false and costs nothing.
     let _ = client.query_opt("SELECT pg_advisory_unlock($1)", &[P::i64(SCHEMA_LOCK)]);
-    outcome
+    outcome.and_then(|value| restored.map(|_| value))
 }
 
 /// The migrations themselves, under the session's schema lock. `allow`
 /// is the opener's right to move the schema: false turns a behind
 /// database into the refusal that names `scion-server migrate`.
 fn migrate_under_lock(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
-    // The ledger of the versions, made first, in its own transaction: a
-    // migration that fails leaves the ledger and every version before it.
-    client.batch(
-        "CREATE TABLE IF NOT EXISTS schema_migrations (
-             version BIGINT PRIMARY KEY,
-             name    TEXT NOT NULL
-         )",
-    )?;
-    let version: i64 = client
-        .query("SELECT max(version) FROM schema_migrations", &[])?
-        .first()
-        .and_then(|row| row.get::<_, Option<i64>>(0))
-        .unwrap_or(0);
-    let version = u32::try_from(version).map_err(|_| {
-        Error::FailedPrecondition(format!(
-            "database schema version {version} is not a version"
-        ))
-    })?;
+    // The version the database stands at, read without writing: a
+    // missing ledger is version 0. The refusals below run before this
+    // open has written anything, so a refusing open leaves the catalog
+    // alone — and a role that may read the ledger but not create in the
+    // schema still reaches the refusal instead of dying on the ledger's
+    // DDL first.
+    let version = schema_version(client)?;
     if version > PG_SCHEMA_VERSION {
         return Err(Error::FailedPrecondition(format!(
             "database schema version {version} is newer than this build \
@@ -3617,6 +3638,18 @@ fn migrate_under_lock(client: &mut PgClient, allow: bool) -> Result<Option<(u32,
     if version == PG_SCHEMA_VERSION {
         return Ok(None);
     }
+    // The runner will write: a migration is the operator's ask, not a
+    // lane's call, so its statements are not bounded by the open's
+    // per-statement budget. `migrate` puts the base budget back.
+    client.execute("SET statement_timeout = 0", &[])?;
+    // The ledger of the versions, made first, in its own transaction: a
+    // migration that fails leaves the ledger and every version before it.
+    client.batch(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+             version BIGINT PRIMARY KEY,
+             name    TEXT NOT NULL
+         )",
+    )?;
     if version != 0 {
         tracing::info!(
             from_version = version,
@@ -3628,6 +3661,21 @@ fn migrate_under_lock(client: &mut PgClient, allow: bool) -> Result<Option<(u32,
         let n = u32::try_from(n + 1).expect("a schema version fits in a u32");
         if n <= version {
             continue;
+        }
+        // The timeout test's lever: one statement inside the migration
+        // window, longer than the shrunken base budget, so a test can
+        // prove the lifted budget covers the migration's own statements.
+        // Release builds never read the env.
+        #[cfg(any(test, feature = "test-hooks"))]
+        if let Ok(ms) = std::env::var("SCION_TEST_MIGRATION_SLEEP_MS")
+            && let Ok(ms) = ms.parse::<f64>()
+            && ms > 0.0
+        {
+            // Test-only, env-set: the value formats into the statement
+            // (the schema's params are integers, text, and bytes, and a
+            // sleep needs no more than a literal).
+            let sql = format!("SELECT pg_sleep({})", ms / 1000.0);
+            client.execute(&sql, &[])?;
         }
         // One transaction per migration, with its version bump: a
         // migration that fails rolls its own statements back, and the
@@ -5166,16 +5214,23 @@ impl MetaTx for PgTx<'_> {
         caller: &Caller,
         land_id: i64,
         ref_name: Option<&str>,
-    ) -> Result<(LandOutcome, Option<RefState>)> {
+    ) -> Result<(LandOutcome, Option<RefState>, bool)> {
         // The ref rides a LEFT JOIN: a ref deleted between the record and
         // the finish answers no ref columns, and the land's outcome
         // stands alone - the plan then sees a missing ref, as a separate
-        // read would have.
+        // read would have. The head tree's presence rides the same
+        // statement: a scalar subselect on the ref's target, so the
+        // finish knows whether the fill runs before the write
+        // transaction, from the snapshot the head itself rode.
         let row = self
             .c
             .query_opt(
                 "SELECT l.state, l.result_cs, l.detail, l.conflict_paths, l.reject_reason,
-                        r.target, r.version
+                        r.target, r.version,
+                        COALESCE((SELECT d.value IS NOT NULL FROM derived d
+                                  WHERE d.kind = $5 AND d.version = $6
+                                    AND d.cs = r.target),
+                                 false)
                  FROM lands l
                  LEFT JOIN refs r ON r.repo_id = l.repo_id AND r.name = $4
                  WHERE l.repo_id = $1 AND l.land_id = $2 AND l.caller = $3",
@@ -5184,6 +5239,8 @@ impl MetaTx for PgTx<'_> {
                     P::i64(land_id),
                     P::text(&caller.0),
                     P::text(ref_name.unwrap_or_default()),
+                    P::text(<RootTree as crate::derived::Kind>::NAME),
+                    P::i64(i64::from(<RootTree as crate::derived::Kind>::VERSION)),
                 ],
             )?
             .ok_or_else(|| Error::NotFound(format!("land {land_id}")))?;
@@ -5194,6 +5251,7 @@ impl MetaTx for PgTx<'_> {
         let reason: String = row.get(4);
         let ref_target: Option<Vec<u8>> = row.get(5);
         let ref_version: Option<i64> = row.get(6);
+        let head_tree: bool = row.get(7);
         let head = match (ref_target, ref_version) {
             (Some(target), Some(version)) => Some(RefState {
                 target: to_id(&target)?,
@@ -5217,7 +5275,7 @@ impl MetaTx for PgTx<'_> {
                 .ok_or_else(|| Error::Corrupt(format!("land {land_id} conflict paths")))?,
             reject_reason: LandRejectReason::parse(&reason)?,
         };
-        Ok((out, head))
+        Ok((out, head, head_tree))
     }
 
     /// Moves a pending land to its final state and returns the outcome.
@@ -6173,13 +6231,17 @@ pub(crate) mod pool_tests {
         assert_eq!(recorded.state, LandState::Pending);
         let pg = store.into_pg();
         // The join answers the ref while it exists.
-        let (row, head) = crate::meta::Meta::read(&pg, |c| {
+        let (row, head, head_tree) = crate::meta::Meta::read(&pg, |c| {
             let repo = c.repo_id("r")?;
             c.land_outcome(repo, &Caller("t".into()), recorded.land_id, Some("main"))
         })
         .unwrap();
         assert_eq!(row.state, LandState::Pending);
         assert!(head.is_some());
+        // This fixture never derived its head's root tree - no land has
+        // run - so the read answers false while the ref stands, and the
+        // answer still rides the joined row.
+        assert!(!head_tree, "the fixture's head tree was never derived");
         // The ref goes away (the API never deletes refs; an operator or a
         // future gc can), and the land's outcome must survive it.
         let mut reader = pg.inner.readers.take(READER_WAIT).unwrap();
@@ -6188,13 +6250,14 @@ pub(crate) mod pool_tests {
             .execute("DELETE FROM refs WHERE name = 'main'", &[])
             .unwrap();
         drop(reader);
-        let (row, head) = crate::meta::Meta::read(&pg, |c| {
+        let (row, head, head_tree) = crate::meta::Meta::read(&pg, |c| {
             let repo = c.repo_id("r")?;
             c.land_outcome(repo, &Caller("t".into()), recorded.land_id, Some("main"))
         })
         .unwrap();
         assert_eq!(row.state, LandState::Pending, "the land row stands alone");
         assert!(head.is_none(), "the ref half answers None");
+        assert!(!head_tree, "no ref, no head, no tree to fill");
     }
 
     #[test]

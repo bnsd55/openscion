@@ -355,7 +355,7 @@ read-write commit.
 | T2, move the ref | local transaction | one commit, 5 to 15 ms |
 | Durable reply | wait for a shared full drive flush | the commit is durable |
 | One land | not measured | 15 to 45 ms |
-| One ref | measured: about 200 durable lands/s with 200 agents ([README](../../README.md)) | about 50 lands/s without batching (below) |
+| One ref | measured: 23 to 25 durable lands/s to one ref with no readers, 7.8 to 11.1 with 5 or 20 readers ([operations.md](../operations.md), section 7's capacity table) | about 50 lands/s without batching (below) |
 
 **One ref is one row.** Let `t` be the time from the plan's read of the head
 to T2's commit, about 20 ms. Without batching, one ref takes at most about
@@ -396,7 +396,8 @@ twice.
 **More expensive than today.**
 
 - Each land is three network commits instead of two local transactions, and
-  one ref takes about 50 lands per second, not about 200 (table above).
+  one ref takes about 50 lands per second (**estimate**, the proposal
+  column above; one server measures 23 to 25 today with no readers).
 - Each changeset also writes its history nodes, about one per path part of
   each changed path. For 5 changed paths 6 levels deep that is up to 30 tree
   rows and 30 history rows, about 65 rows in all. At 30,000 lands per day
