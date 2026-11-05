@@ -3016,8 +3016,8 @@ mod tests {
             store
                 .write(|c| {
                     for &tip in &ids {
-                        derived::derive::<CommitGraph>(c, repo, tip, &mut crate::tree::lens_none())?;
-                        derived::derive::<PathHistory>(c, repo, tip, &mut crate::tree::lens_none())?;
+                        derived::derive::<CommitGraph>(c, repo, tip, &mut crate::tree::lens_none(), None)?;
+                        derived::derive::<PathHistory>(c, repo, tip, &mut crate::tree::lens_none(), None)?;
                     }
                     Ok(())
                 })

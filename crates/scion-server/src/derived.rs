@@ -613,27 +613,6 @@ pub(crate) fn derive<K: Kind>(
     repo: RepoId,
     cs: ChangesetId,
     lens: crate::tree::BlobLens<'_>,
-) -> Result<K::Value> {
-    derive_impl::<K>(c, repo, cs, lens, None)
-}
-
-/// The walk checks the deadline per changeset, so a cancelled call's
-/// job stops between changesets and frees its permit.
-pub(crate) fn derive_within<K: Kind>(
-    c: &mut dyn MetaTx,
-    repo: RepoId,
-    cs: ChangesetId,
-    lens: crate::tree::BlobLens<'_>,
-    deadline: &Deadline,
-) -> Result<K::Value> {
-    derive_impl::<K>(c, repo, cs, lens, Some(deadline))
-}
-
-pub(crate) fn derive_impl<K: Kind>(
-    c: &mut dyn MetaTx,
-    repo: RepoId,
-    cs: ChangesetId,
-    lens: crate::tree::BlobLens<'_>,
     deadline: Option<&Deadline>,
 ) -> Result<K::Value> {
     let mut walk = match Walk::start::<K>(c, repo, cs)? {

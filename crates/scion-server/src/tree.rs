@@ -288,7 +288,7 @@ pub fn derive_root_tree(
     cs: ChangesetId,
     lens: BlobLens<'_>,
 ) -> Result<TreeId> {
-    derived::derive_impl::<RootTree>(c, repo, cs, lens, None)
+    derived::derive::<RootTree>(c, repo, cs, lens, None)
 }
 
 /// The walk checks the deadline per changeset, so a cancelled call's
@@ -300,7 +300,7 @@ pub fn derive_root_tree_within(
     lens: BlobLens<'_>,
     deadline: &Deadline,
 ) -> Result<TreeId> {
-    derived::derive_impl::<RootTree>(c, repo, cs, lens, Some(deadline))
+    derived::derive::<RootTree>(c, repo, cs, lens, Some(deadline))
 }
 
 /// Stores a changeset in `repo` with its root tree: the first parent's tree
