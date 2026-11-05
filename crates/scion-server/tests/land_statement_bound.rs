@@ -155,6 +155,8 @@ static LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
 fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound() {
+    const BOUND: u64 = 36;
+    const EXACT: u64 = 28;
     let _log = LOG_LOCK.lock().unwrap();
     // Today's count, with slack for one more plan attempt: each fold of
     // the round-trip card lowers this number, and a change that raises
@@ -173,8 +175,6 @@ fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound()
     // exact, so a statement coming back fails the test here, and the
     // bound keeps guarding only the retried case it has slack for.
     let count = land_statement_count(3);
-    const BOUND: u64 = 36;
-    const EXACT: u64 = 28;
     {
         let log = Backend::test_statement_log();
         let settles = log
