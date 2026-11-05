@@ -1220,6 +1220,7 @@ fn a_rename_search_moves_on_every_call() {
             &path("new"),
             &resume,
             &Bytes::new(1 << 30),
+            None,
         )
         .unwrap();
         let search = RenameSearch {

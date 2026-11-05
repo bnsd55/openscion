@@ -3541,11 +3541,12 @@ mod tests {
         std::fs::write(hooks.join("park-0"), b"").unwrap();
         let call = tokio::spawn({
             let service = Arc::clone(&service);
+            let bytes = bytes.clone();
             async move {
                 service
                     .create_changeset(as_default(scion_proto::v1::CreateChangesetRequest {
                         repo: "r".into(),
-                        changeset: bytes.clone(),
+                        changeset: bytes,
                     }))
                     .await
             }
