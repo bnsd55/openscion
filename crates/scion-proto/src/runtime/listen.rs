@@ -1119,9 +1119,8 @@ where
                     io
                 }
                 Err(error) => {
-                    if pace_after_failed_accept(error, &accept_warn, &metrics, &mut backoff, &done)
+                    if !pace_after_failed_accept(error, &accept_warn, &metrics, &mut backoff, &done)
                         .await
-                        .is_err()
                     {
                         break;
                     }
