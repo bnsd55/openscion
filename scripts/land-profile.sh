@@ -15,11 +15,10 @@
 #   statement the lands ran (calls and total time). The round-trip
 #   count is the calls sum, with the caveat that the wire can pipeline
 #   several statements into one round trip;
-# - the blob root's flush: for its own short cell the server runs
-#   under strace, whose log gives the fsync count and per-call time.
-#   strace slows every syscall of the server it wraps, so that cell's
-#   other numbers stand alone and are not compared to the untraced
-#   cells.
+# - the readers beside the writers (the cells with 20 readers): the
+#   same checkout loop the capacity harness runs, through the cache and
+#   the daemon, so the slice's wait columns have the reader load the
+#   capacity envelope saw.
 #
 # The database this harness drops and creates follows the capacity
 # harness's naming rule, for the same reason: an operator URL that
@@ -28,9 +27,15 @@ set -euo pipefail
 # shellcheck source=common.sh source-path=SCRIPTDIR
 . "$(dirname "$0")/common.sh"
 
-PROFILE_LANDS=${PROFILE_LANDS:-200}
-PROFILE_FLUSH_LANDS=${PROFILE_FLUSH_LANDS:-50}
-PROFILE_WRITERS_CELL=${PROFILE_WRITERS_CELL:-"50 400"}
+# The grid: the writers the capacity envelope names, each with no
+# readers and with the envelope's heavy reader count; two repetitions
+# per cell (the envelope's rule; the first rep warms, the second is
+# the steady state). PROFILE_LANDS is the lands per rep: 2 x 1000 is
+# the envelope's 2000 lands per cell.
+PROFILE_CELLS=${PROFILE_CELLS:-"2 50 200"}
+PROFILE_READERS=${PROFILE_READERS:-20}
+PROFILE_LANDS=${PROFILE_LANDS:-1000}
+PROFILE_REPS=${PROFILE_REPS:-2}
 need
 command -v jq > /dev/null || die "needs jq"
 command -v strace > /dev/null || die "needs strace (apt-get install strace)"
@@ -58,6 +63,9 @@ fi
 fetch_dataset
 
 export SCION_TOKEN=smoke
+# The Postgres URL reaches the server through the env (common.sh's
+# start_scion reads it), as the capacity harness sets it.
+export SCION_POSTGRES_URL=$SCION_PG_URL
 # shellcheck disable=SC2034 # common.sh's import_dataset and start read it
 PG_URL=$SCION_PG_URL
 
@@ -73,10 +81,7 @@ reset_cell() {
   import_dataset
   psql "$SCION_PG_URL" -X -q -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" \
     || die "pg_stat_statements did not load (the service needs shared_preload_libraries=pg_stat_statements)"
-  start server serving $WRAP "$BIN/scion-server" --data "$WORK/server" --postgres-url "$PG_URL" serve \
-    --listen "127.0.0.1:$SERVER_PORT" \
-    --ticket-key "$WORK/ticket.key" \
-    --metrics-listen "127.0.0.1:$SERVER_METRICS_PORT"
+  start_scion
 }
 
 stop_server() {
@@ -96,19 +101,71 @@ metrics_land() {
   esac
 }
 
-# One cell: name, writers, lands, the server wrapped in $WRAP.
+# reader NAME: one reader loop (the capacity harness's shape, carried
+# whole): a checkout attempt of main through the cache and the daemon,
+# into a destination of its own, until the sentinel file goes away.
+# A killed reader must never share a path with the attempts after it.
+reader() {
+  local n=0 rc t0 t1 dest
+  while [ -e "$WORK/reads.on" ]; do
+    n=$((n + 1))
+    echo "attempt $n start $(date -u +%T.%3N)" >> "$WORK/reads-$CELL.log"
+    t0=$(date +%s%N)
+    dest=$(mktemp -d "$WORK/reads.XXXXXX")
+    if "$TIMEOUT" 60 "$BIN/scn" --server "$SERVER" --objects "$DAEMON" checkout main \
+      --sparse "$SPARSE_DIR" --into "$dest" > /dev/null 2>> "$WORK/reads-$CELL.log"; then
+      t1=$(date +%s%N)
+      echo $(( (t1 - t0) / 1000000 )) >> "$WORK/read-times-$CELL.csv"
+    else
+      rc=$?
+      echo "attempt $n failed rc=$rc at $(date -u +%T.%3N)" >> "$WORK/reads-$CELL.log"
+    fi
+    rm -rf "$dest"
+  done
+}
+
+# One cell: name, writers, readers. The cell's load is its own reps of
+# the bench; the readers (if any) run beside every rep.
 cell() {
-  local name=$1 writers=$2 lands=$3
-  note "cell $name: $writers writers, $lands lands"
-  reset_cell "$name"
+  local name=$1 writers=$2 readers=$3 rep i
+  note "cell $name: $writers writers, $readers readers"
+  CELL=$name reset_cell "$name"
   curl -fsS "http://127.0.0.1:$SERVER_METRICS_PORT/metrics" \
     > "$WORK/metrics-$name-before.txt" || die "no metrics before the bench"
   psql "$SCION_PG_URL" -X -q -c "SELECT pg_stat_statements_reset()" > /dev/null \
     || die "the statements reset failed"
-  if ! "$TIMEOUT" 900 "$BIN/scn" --server "$SERVER" bench --agents "$writers" \
-    --lands "$lands" --json > "$WORK/bench-$name.json" 2> "$WORK/bench-$name.log"; then
-    tail -n 20 "$WORK/bench-$name.log" >&2
-    die "the bench of cell $name failed"
+  if [ "$readers" -gt 0 ]; then
+    : > "$WORK/reads-$name.log"
+    : > "$WORK/read-times-$name.csv"
+    : > "$WORK/readers.pids"
+    touch "$WORK/reads.on"
+    i=0
+    while [ "$i" -lt "$readers" ]; do
+      i=$((i + 1))
+      loop_bg "readers-$i" reader
+      sed -n 's/^pid=//p' "$WORK/owned/readers-$i" >> "$WORK/readers.pids"
+    done
+  fi
+  rep=1
+  while [ "$rep" -le "$PROFILE_REPS" ]; do
+    if ! "$TIMEOUT" 900 "$BIN/scn" --server "$SERVER" bench --agents "$writers" \
+      --lands "$PROFILE_LANDS" --json > "$WORK/bench-$name-rep$rep.json" \
+      2> "$WORK/bench-$name-rep$rep.log"; then
+      tail -n 20 "$WORK/bench-$name-rep$rep.log" >&2
+      die "the bench of cell $name rep $rep failed"
+    fi
+    rep=$((rep + 1))
+  done
+  if [ "$readers" -gt 0 ]; then
+    rm -f "$WORK/reads.on"
+    # The teardown is the capacity harness's dance: freeze the loops,
+    # kill their in-flight children, then the loops, then CONT delivers
+    # the queued TERMs and the waits reap them.
+    while read -r pid; do kill -STOP "$pid" 2> /dev/null || true; done < "$WORK/readers.pids"
+    while read -r pid; do pkill -TERM -P "$pid" 2> /dev/null || true; done < "$WORK/readers.pids"
+    while read -r pid; do kill -TERM "$pid" 2> /dev/null || true; done < "$WORK/readers.pids"
+    while read -r pid; do kill -CONT "$pid" 2> /dev/null || true; done < "$WORK/readers.pids"
+    while read -r pid; do wait "$pid" 2> /dev/null || true; done < "$WORK/readers.pids"
   fi
   curl -fsS "http://127.0.0.1:$SERVER_METRICS_PORT/metrics" \
     > "$WORK/metrics-$name-after.txt" || die "no metrics after the bench"
@@ -133,25 +190,23 @@ if ! "$BIN/scion-server" --data "$WORK/server" ticket-key --out "$WORK/ticket.ke
   die "ticket-key failed"
 fi
 
-# The solo cell: one writer, so a land's cost carries no queueing.
-WRAP=""
-cell solo 1 "$PROFILE_LANDS"
-
-# The writers cell: the same server at the writer count the measured
-# curve flattens at, so the wait share has a number beside it.
-cell writers $PROFILE_WRITERS_CELL
-
-# The flush cell: the server under strace, only the fsync family.
-WRAP="strace -f -tt -T -e trace=fsync,fdatasync -o $WORK/fsync.log -s 0"
-cell flush 1 "$PROFILE_FLUSH_LANDS"
-WRAP=""
+# The grid: every writer count of the capacity envelope, with no
+# readers and with the envelope's heavy reader count beside it.
+for w in $PROFILE_CELLS; do
+  cell "land-w$w-r0" "$w" 0
+  cell "land-w$w-r$PROFILE_READERS" "$w" "$PROFILE_READERS"
+done
 {
   echo "one land, taken apart (runner: ${CAPACITY_MACHINE:-unspecified})"
-  for name in solo writers flush; do
+  names=""
+  for w in $PROFILE_CELLS; do
+    names="$names land-w$w-r0 land-w$w-r$PROFILE_READERS"
+  done
+  for name in $names; do
     echo ""
     echo "## cell $name"
-    jq -r '"client: landed \(.landed) in \(.seconds)s, land p50 \(.land_ms.p50) ms, p99 \(.land_ms.p99) ms, end-to-end p50 \(.end_to_end_ms.p50) ms"' \
-      "$WORK/bench-$name.json"
+    jq -r '"client (rep 2): landed \(.landed) in \(.seconds)s, land p50 \(.land_ms.p50) ms, p99 \(.land_ms.p99) ms, end-to-end p50 \(.end_to_end_ms.p50) ms"' \
+      "$WORK/bench-$name-rep$PROFILE_REPS.json"
     lands=$(metrics_land COUNT "$WORK/metrics-$name-after.txt")
     lands=$((lands - $(metrics_land COUNT "$WORK/metrics-$name-before.txt")))
     sums=$(metrics_land SUM "$WORK/metrics-$name-after.txt")
@@ -167,13 +222,11 @@ WRAP=""
       'BEGIN { if (l > 0) printf "statements per land: %.1f calls, %.1f ms in Postgres\n", c / l, t / l }'
   done
   echo ""
-  echo "the flush (the strace cell only; its other numbers carry strace's overhead):"
-  if [ -f "$WORK/fsync.log" ]; then
-    n=$(grep -c 'fsync' "$WORK/fsync.log" || true)
-    t=$(grep -o '<[0-9.]*>$' "$WORK/fsync.log" | tr -d '<>' | awk '{ s += $1 } END { printf "%.3f", s }')
-    awk -v n="$n" -v t="$t" -v l="$PROFILE_FLUSH_LANDS" \
-      'BEGIN { printf "fsync calls: %s (%.2f per land), total %s s (%.1f ms per land)\n", n, n / l, t, t * 1000 / l }'
-  fi
+  echo "readers (checkout ms over the cell's attempts):"
+  p50=$(pct "$WORK/read-times-$name.csv" 0.50 2> /dev/null || true)
+  p99=$(pct "$WORK/read-times-$name.csv" 0.99 2> /dev/null || true)
+  tries=$(wc -l < "$WORK/read-times-$name.csv" 2> /dev/null | tr -d ' ')
+  echo "completed $tries checkouts, p50 ${p50:--} ms, p99 ${p99:--} ms"
 } >> "$sum"
 
 # The slice's phases, per cell: the land's own per-phase lines, averaged
@@ -181,7 +234,11 @@ WRAP=""
 # stmt_ms the round-trip time of its statements, stmts their count. The
 # total row is the whole land: the phases nest inside it (settle holds
 # build, cas and set_state), and slot_wait is the queue, not the work.
-for name in solo writers flush; do
+names=""
+for w in $PROFILE_CELLS; do
+  names="$names land-w$w-r0 land-w$w-r$PROFILE_READERS"
+done
+for name in $names; do
   log="$WORK/server-$name.log"
   [ -f "$log" ] || continue
   {
