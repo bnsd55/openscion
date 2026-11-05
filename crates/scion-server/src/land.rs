@@ -798,7 +798,7 @@ fn finish(
             Planned::Settled(row) => return Ok(Finished::Outcome(row)),
             Planned::Do(plan) => plan,
         };
-        match settle(lands, store, repo, land_id, &req, plan, index) {
+        match settle(lands, store, repo, land_id, req, plan, index) {
             Err(Error::Aborted(detail)) if attempt < MAX_ATTEMPTS => {
                 tracing::info!(land_id, attempt, %detail, "planning the land again");
                 if let Some(metrics) = &lands.metrics {

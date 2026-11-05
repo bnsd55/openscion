@@ -3487,6 +3487,7 @@ mod tests {
     /// the cancelled job stops at the next path and the wait is a check
     /// interval, not the rest of the build; the number lands in the CI
     /// log.
+    #[allow(clippy::too_many_lines)] // the large changeset's fixture is the length
     #[tokio::test(flavor = "multi_thread")]
     async fn a_cancelled_large_tree_store_frees_its_permit_at_the_next_path() {
         let dir = crate::test_support::private_tempdir();
