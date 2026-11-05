@@ -438,7 +438,7 @@ fn store_changesets(store: &Backend, cases: &[Files]) -> Vec<ChangesetId> {
                         repo,
                         &root_changeset(files),
                         &mut tree::lens_of(store),
-                    , None)?
+                    )?
                     .0)
                 })
                 .collect()

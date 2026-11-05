@@ -487,8 +487,7 @@ fn seed_repo(data: &Path) -> ChangesetId {
                 repo,
                 &root,
                 &mut scion_server::test_support::tree::lens_of(&store),
-                None,
-            , None)?;
+            )?;
             assert!(c.cas_ref(repo, "main", None, id)?);
             Ok(id)
         })
