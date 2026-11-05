@@ -41,6 +41,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::auth::Caller;
 use crate::backend::Marker;
+use crate::derived::Kind;
 use crate::error::{Error, Result, Storage};
 use crate::history::NodeId;
 use crate::import::SHA1;
@@ -50,7 +51,7 @@ use crate::land::{
 };
 use crate::meta::{FsckDerivedRow, Meta, MetaTx, RefState, RepoChangeset, RepoId, StaleLand};
 use crate::store::Blobs;
-use crate::tree::{Kind as _, RootTree};
+use crate::tree::RootTree;
 
 #[cfg(any(test, feature = "test-hooks"))]
 #[path = "test_support/pg.rs"]

@@ -782,7 +782,7 @@ fn finish(
             if row.state != LandState::Pending {
                 return Ok(Planned::Settled(row));
             }
-            plan(lands, c, repo, req, head, index).map(|plan| Planned::Do((plan, head_tree)))
+            plan(lands, c, repo, req, head, index).map(|plan| Planned::Do(plan, head_tree))
         })?;
         #[cfg(test)]
         let step = lands
@@ -799,7 +799,7 @@ fn finish(
         }
         let (plan, head_tree) = match planned {
             Planned::Settled(row) => return Ok(Finished::Outcome(row)),
-            Planned::Do((plan, head_tree)) => (plan, head_tree),
+            Planned::Do(plan, head_tree) => (plan, head_tree),
         };
         match settle(
             lands,
