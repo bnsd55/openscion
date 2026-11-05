@@ -518,7 +518,10 @@ fn a_refusing_open_writes_nothing_to_the_catalog() {
         why.contains("run `scion-server migrate` first, or pass --migrate to serve"),
         "the refusal names the fix: {why}"
     );
-    assert!(!why.contains("permission denied"), "the refusal is not an ACL error: {why}");
+    assert!(
+        !why.contains("permission denied"),
+        "the refusal is not an ACL error: {why}"
+    );
     let after = catalog_rows(&base, schema);
     assert_eq!(before, after, "the refused open wrote nothing to the catalog");
     drop(guard);

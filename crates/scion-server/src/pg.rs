@@ -3593,8 +3593,10 @@ fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
     // `serve --migrate`, the writer the store keeps — serves no further
     // statement at a budget the open did not choose. The migrate
     // command's client ends here, so its restore is a last no-op.
-    let _ = client
-        .batch_execute(&format!("SET statement_timeout = {BASE_STATEMENT_TIMEOUT_MS}"));
+    let _ = client.execute(
+        &format!("SET statement_timeout = {BASE_STATEMENT_TIMEOUT_MS}"),
+        &[],
+    );
     // The lock lives on the client's session: it goes back whatever the
     // migrations did. A client that died mid-migration lost the lock with
     // its connection, and the unlock names a lock the new connection
@@ -3664,7 +3666,12 @@ fn migrate_under_lock(client: &mut PgClient, allow: bool) -> Result<Option<(u32,
         if let Ok(ms) = std::env::var("SCION_TEST_MIGRATION_SLEEP_MS") {
             if let Ok(ms) = ms.parse::<f64>() {
                 if ms > 0.0 {
-                    client.query("SELECT pg_sleep($1)", &[&(ms / 1000.0)])?;
+                    // Test-only, env-set: the value formats into the
+                    // statement (the schema's params are integers, text,
+                    // and bytes, and a sleep needs no more than a
+                    // literal).
+                    let sql = format!("SELECT pg_sleep({})", ms / 1000.0);
+                    client.execute(&sql, &[])?;
                 }
             }
         }
