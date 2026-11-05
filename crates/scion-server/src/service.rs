@@ -3075,6 +3075,12 @@ mod tests {
         eprintln!(
             "#868: baseline {baseline:?}; after {MAX_BLOCKING} cancelled calls              of {LONG:?} with no check, the live call waited {waited:?}"
         );
+        // A phase with no check keeps its permit to its end: the wait
+        // is about one phase, the ceiling this PR documents.
+        assert!(
+            waited >= Duration::from_millis(800),
+            "a phase with no check gave up its permit early: {waited:?}"
+        );
         assert!(
             waited < Duration::from_secs(5),
             "the live call never got a permit: {waited:?}"
@@ -3563,6 +3569,10 @@ mod tests {
         call.abort();
         // Joining puts the guard's drop (the cancel) before the lift.
         assert!(call.await.unwrap_err().is_cancelled());
+        // The next path's park stands ready before the lift: a job with
+        // no put-path check reaches path 1 and parks there; the check
+        // stops it before that.
+        std::fs::write(hooks.join("park-1"), b"").unwrap();
         std::fs::remove_file(hooks.join("park-0")).unwrap();
         write::PARK_APPLY.lift();
         // The live call times its wait for the permit the parked job
@@ -3573,6 +3583,13 @@ mod tests {
         eprintln!(
             "#868 real phase: the live call waited {waited:?} for the permit \
              of a cancelled large tree's store"
+        );
+        // The job never reached the next path's park: its check stopped
+        // it first.
+        assert!(
+            !hooks.join("parked-1").exists(),
+            "the cancelled job walked past its next path's check; \
+             the live call waited {waited:?}"
         );
         assert!(
             waited < Duration::from_secs(5),

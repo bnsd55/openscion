@@ -134,6 +134,11 @@ fn apply_impl(
         root.delete(c, &mut loaded, path, &parts(path))?;
     }
     for (i, (path, state)) in changes.iter().enumerate() {
+        if let Some(deadline) = deadline {
+            // The same check on the put path: a large tree's store is
+            // all puts, and its job stops between them like a delete's.
+            deadline.check()?;
+        }
         if let Some(state) = state {
             // A gitlink names no blob, so it carries no length; its entry
             // ends at the commit bytes.

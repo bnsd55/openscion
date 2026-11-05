@@ -798,16 +798,7 @@ fn finish(
             Planned::Settled(row) => return Ok(Finished::Outcome(row)),
             Planned::Do(plan) => plan,
         };
-        match settle(
-            lands,
-            store,
-            repo,
-            land_id,
-            &req.target_ref,
-            plan,
-            index,
-            &req.deadline,
-        ) {
+        match settle(lands, store, repo, land_id, &req, plan, index) {
             Err(Error::Aborted(detail)) if attempt < MAX_ATTEMPTS => {
                 tracing::info!(land_id, attempt, %detail, "planning the land again");
                 if let Some(metrics) = &lands.metrics {
@@ -891,17 +882,17 @@ fn plan(
 /// guard the land's own move has in its CAS. An import that moved the
 /// ref in the window aborts the verdict, and `finish` replans against
 /// the head the import made.
-#[allow(clippy::too_many_arguments)] // the land's one settle: the flight's caller, key, plan, index and deadline land together
 fn settle(
     lands: &Lands,
     store: &Backend,
     repo: RepoId,
     land_id: i64,
-    target: &str,
+    req: &LandRequest,
     plan: Plan,
     index: &mut Option<PathIndex>,
-    deadline: &Deadline,
 ) -> Result<Finished> {
+    let target = req.target_ref.as_str();
+    let deadline = &req.deadline;
     let (rebased, head) = match plan {
         Plan::Derive(head) => return Ok(Finished::Derive(head)),
         Plan::Reject { reason, detail } => {
@@ -2437,13 +2428,8 @@ mod tests {
                 if crash == Crash::RefMoved {
                     f.move_main(f.commit(f.main().target, &[put("c", "import")]));
                     let land_id = recorded.land_id;
-                    let deadline = Deadline::new(
-                        std::time::Instant::now() + std::time::Duration::from_secs(60),
-                    );
-                    let err = settle(
-                        &f.lands, &f.store, repo, land_id, "main", plan, &mut index, &deadline,
-                    )
-                    .unwrap_err();
+                    let err = settle(&f.lands, &f.store, repo, land_id, &req, plan, &mut index)
+                        .unwrap_err();
                     assert!(matches!(err, Error::Aborted(_)), "{crash:?}: {err}");
                     let kept = f.store.read(|c| c.has_changeset(repo, rebased));
                     assert!(!kept.unwrap(), "the transaction rolled back");
