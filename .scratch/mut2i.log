@@ -1,0 +1,41 @@
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 10 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 9 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 9 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 9 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 9 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 9 GiB, 1 slots busy or disk low)
+   Compiling open-scion-server v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.72s
+     Running tests/land_model_proptest.rs (target/debug/deps/land_model_proptest-3bf7487f2f8e0126)
+
+running 1 test
+test the_seed_corpus_holds ... 0.00s seed 1793894866478 op 1: CutFresh { caller: 0, target: 0, shared: false, cut_ms: 20 }
+0.10s seed 1793894866478 op 2: KillAtPending
+10.45s seed 1793894866478 op 3: Check
+0.00s seed 1793894866478 op 1: Land { caller: 1, target: 0, stale: false, shared: false }
+0.12s seed 1793894866478 op 2: Twin { caller: 2, land: 0 }
+0.13s seed 1793894866478 op 3: Check
+0.00s seed 1793894866478 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.13s seed 1793894866478 op 2: Land { caller: 1, target: 1, stale: false, shared: false }
+0.26s seed 1793894866478 op 3: Gc
+2.11s seed 1793894866478 op 4: Land { caller: 2, target: 0, stale: false, shared: true }
+2.26s seed 1793894866478 op 5: Check
+0.00s seed 1793894866478 op 1: Land { caller: 0, target: 2, stale: false, shared: false }
+0.09s seed 1793894866478 op 2: Check
+0.00s seed 1793894866478 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.12s seed 1793894866478 op 2: Land { caller: 1, target: 0, stale: false, shared: true }
+0.25s seed 1793894866478 op 3: Land { caller: 2, target: 0, stale: true, shared: true }
+0.38s seed 1793894866478 op 4: Check
+0.00s seed 1793894866478 op 1: BurstCut { k: 5, target: 0 }
+0.71s seed 1793894866478 op 2: Gc
+2.71s seed 1793894866478 op 3: Check
+error: test failed, to rerun pass `-p open-scion-server --test land_model_proptest`
+
+Caused by:
+  process didn't exit successfully: `/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/target/debug/deps/land_model_proptest-3bf7487f2f8e0126 the_seed_corpus_holds --test-threads=1` (signal: 15, SIGTERM: termination signal)

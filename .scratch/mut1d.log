@@ -1,0 +1,85 @@
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 9 GiB, 1 slots busy or disk low)
+   Compiling open-scion-server v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-server)
+warning: unused variable: `changed`
+    --> crates/scion-server/src/pg.rs:4501:13
+     |
+4501 |         let changed = match expected {
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_changed`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `open-scion-server` (lib) generated 1 warning (run `cargo fix --lib -p open-scion-server` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.87s
+     Running tests/land_model_proptest.rs (target/debug/deps/land_model_proptest-3bf7487f2f8e0126)
+
+running 1 test
+test the_seed_corpus_holds ... 0.00s seed 1793889394603 op 1: CutFresh { caller: 0, target: 0, shared: false, cut_ms: 20 }
+0.09s seed 1793889394603 op 2: KillAtPending
+10.41s seed 1793889394603 op 3: Check
+0.00s seed 1793889394603 op 1: Land { caller: 1, target: 0, stale: false, shared: false }
+0.20s seed 1793889394603 op 2: Twin { caller: 2, land: 0 }
+0.24s seed 1793889394603 op 3: Check
+0.00s seed 1793889394603 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.11s seed 1793889394603 op 2: Land { caller: 1, target: 1, stale: false, shared: false }
+0.22s seed 1793889394603 op 3: Gc
+2.07s seed 1793889394603 op 4: Land { caller: 2, target: 0, stale: false, shared: true }
+2.20s seed 1793889394603 op 5: Check
+0.00s seed 1793889394603 op 1: Land { caller: 0, target: 2, stale: false, shared: false }
+0.10s seed 1793889394603 op 2: Check
+0.00s seed 1793889394603 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.13s seed 1793889394603 op 2: Land { caller: 1, target: 0, stale: false, shared: true }
+0.25s seed 1793889394603 op 3: Land { caller: 2, target: 0, stale: true, shared: true }
+0.38s seed 1793889394603 op 4: Check
+0.00s seed 1793889394603 op 1: BurstCut { k: 5, target: 0 }
+0.68s seed 1793889394603 op 2: Gc
+2.51s seed 1793889394603 op 3: Check
+0.00s seed 1793889394603 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.11s seed 1793889394603 op 2: Import
+0.50s seed 1793889394603 op 3: SendNoWait { caller: 1, target: 3, stale: false, point: Cas }
+0.55s seed 1793889394603 op 4: AwaitGate { land: 1, point: Cas }
+0.58s seed 1793889394603 op 5: Import
+0.96s seed 1793889394603 op 6: Resume { land: 1, point: Cas }
+0.96s seed 1793889394603 op 7: Retry { caller: 1, land: 1 }
+0.99s seed 1793889394603 op 8: Check
+PANIC: imported: 1 lands replied LANDED and 1 steps are imports, the chain holds 1
+FAILED
+
+failures:
+
+---- the_seed_corpus_holds stdout ----
+seed 1793889394603: kill-pending saw no pending row; the land finished between two polls, and the kill is a plain kill
+land c0-o1-0: retry=Landed retry=Landed
+land c1-o1-0: land=Landed twin=Landed twin=Landed
+gc: pending rows in the database before the sweep: 0
+gc: 2026-11-05T14:36:58.987980Z  INFO scion_server::gc: the collector swept a batch of files files=1000 removed=0 elapsed_ms=971
+gc: 2026-11-05T14:36:59.481403Z  INFO scion_server::gc: the collector swept a batch of files files=503 removed=0 elapsed_ms=493
+gc: 2026-11-05T14:36:59.481467Z  INFO scion_server::gc: the collector ended repos=1 rows_pruned=0 files_removed=0 rows_young=0 files_young=0 elapsed_ms=1512
+land c0-o1-0: land=Landed
+land c1-o2-1: land=Landed
+land c2-o4-2: land=Landed
+land c0-o1-0: land=Rejected
+land c0-o1-0: land=Landed
+land c1-o2-1: land=Landed
+land c2-o3-2: land=Landed
+gc: pending rows in the database before the sweep: 3
+gc: 2026-11-05T14:37:22.179942Z  INFO scion_server::gc: the collector swept a batch of files files=1000 removed=0 elapsed_ms=952
+gc: 2026-11-05T14:37:22.680953Z  INFO scion_server::gc: the collector swept a batch of files files=507 removed=0 elapsed_ms=500
+gc: 2026-11-05T14:37:22.681012Z  INFO scion_server::gc: the collector ended repos=1 rows_pruned=0 files_removed=0 rows_young=0 files_young=0 elapsed_ms=1502
+land c0-o1-0: retry=Landed retry=Landed
+land c1-o1-1: retry=Landed retry=Landed
+land c2-o1-2: retry=Conflict retry=Conflict
+land c3-o1-3: retry=Landed retry=Landed
+land c0-o1-4: retry=Conflict retry=Conflict
+
+thread 'the_seed_corpus_holds' (456692605) panicked at crates/scion-server/tests/land_model_proptest.rs:1541:5:
+imported: 1 lands replied LANDED and 1 steps are imports, the chain holds 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    the_seed_corpus_holds
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 63.14s
+
+error: test failed, to rerun pass `-p open-scion-server --test land_model_proptest`

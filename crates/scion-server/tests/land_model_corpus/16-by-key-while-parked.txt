@@ -1,0 +1,9 @@
+# a second land from the same caller, sent while the first stands parked
+# at its gate, answers its own key: its row is its own, and the two
+# answers never share a land ID
+landnow 1 0 0 record
+awaitgate 1 record
+land 1 0 0 0
+resume 1 record
+retry 1 1
+check

@@ -1,0 +1,77 @@
+   Compiling open-scion-server v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.47s
+     Running tests/land_model_proptest.rs (target/debug/deps/land_model_proptest-3bf7487f2f8e0126)
+
+running 1 test
+test the_seed_corpus_holds ... PROBE run_script entry ops=3
+PROBE repo created
+PROBE starting server
+PROBE server up
+PROBE connected
+6.61s seed 1793899052845 op 1: CutFresh { caller: 0, target: 0, shared: false, cut_ms: 20 }
+6.72s seed 1793899052845 op 2: KillAtPending
+seed 1793899052845: kill-pending saw no pending row; the land finished between two polls, and the kill is a plain kill
+17.04s seed 1793899052845 op 3: Check
+land c0-o1-0: retry=Landed retry=Landed
+PROBE run_script entry ops=3
+PROBE repo created
+PROBE starting server
+PROBE server up
+PROBE connected
+4.89s seed 1793899052845 op 1: Land { caller: 1, target: 0, stale: false, shared: false }
+5.01s seed 1793899052845 op 2: Twin { caller: 2, land: 0 }
+5.03s seed 1793899052845 op 3: Check
+land c1-o1-0: land=Landed twin=Landed twin=Landed
+PROBE run_script entry ops=5
+PROBE repo created
+PROBE starting server
+PROBE server up
+PROBE connected
+5.08s seed 1793899052845 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.21s seed 1793899052845 op 2: Land { caller: 1, target: 1, stale: false, shared: false }
+5.33s seed 1793899052845 op 3: Gc
+gc: pending rows in the database before the sweep: 0
+gc: 2026-11-05T17:18:03.888218Z  INFO scion_server::gc: the collector swept a batch of files files=1000 removed=0 elapsed_ms=998
+gc: 2026-11-05T17:18:04.388258Z  INFO scion_server::gc: the collector swept a batch of files files=503 removed=0 elapsed_ms=500
+gc: 2026-11-05T17:18:04.388318Z  INFO scion_server::gc: the collector ended repos=1 rows_pruned=0 files_removed=0 rows_young=0 files_young=0 elapsed_ms=1547
+7.22s seed 1793899052845 op 4: Land { caller: 2, target: 0, stale: false, shared: true }
+7.35s seed 1793899052845 op 5: Check
+land c0-o1-0: land=Landed
+land c1-o2-1: land=Landed
+land c2-o4-2: land=Landed
+PROBE run_script entry ops=2
+PROBE repo created
+PROBE starting server
+PROBE server up
+PROBE connected
+4.85s seed 1793899052845 op 1: Land { caller: 0, target: 2, stale: false, shared: false }
+4.96s seed 1793899052845 op 2: Check
+land c0-o1-0: land=Rejected
+PROBE run_script entry ops=4
+PROBE repo created
+PROBE starting server
+PROBE server up
+PROBE connected
+4.80s seed 1793899052845 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+4.92s seed 1793899052845 op 2: Land { caller: 1, target: 0, stale: false, shared: true }
+5.06s seed 1793899052845 op 3: Land { caller: 2, target: 0, stale: true, shared: true }
+5.18s seed 1793899052845 op 4: Check
+land c0-o1-0: land=Landed
+land c1-o2-1: land=Landed
+land c2-o3-2: land=Landed
+PROBE run_script entry ops=3
+PROBE repo created
+PROBE starting server
+PROBE server up
+PROBE connected
+4.89s seed 1793899052845 op 1: BurstCut { k: 5, target: 0 }
+5.58s seed 1793899052845 op 2: Gc
+gc: pending rows in the database before the sweep: 1
+gc: 2026-11-05T17:18:25.774252Z  INFO scion_server::gc: the collector swept a batch of files files=1000 removed=0 elapsed_ms=1001
+gc: 2026-11-05T17:18:26.286315Z  INFO scion_server::gc: the collector swept a batch of files files=507 removed=0 elapsed_ms=512
+gc: 2026-11-05T17:18:26.286383Z  INFO scion_server::gc: the collector ended repos=1 rows_pruned=0 files_removed=0 rows_young=0 files_young=0 elapsed_ms=1560
+7.47s seed 1793899052845 op 3: Check
+error: test failed, to rerun pass `-p open-scion-server --test land_model_proptest`
+
+Caused by:
+  process didn't exit successfully: `/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/target/debug/deps/land_model_proptest-3bf7487f2f8e0126 the_seed_corpus_holds --test-threads=1 --nocapture` (signal: 15, SIGTERM: termination signal)

@@ -1,0 +1,93 @@
+   Compiling open-scion-server v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.25s
+     Running tests/land_model_proptest.rs (target/debug/deps/land_model_proptest-3bf7487f2f8e0126)
+
+running 3 tests
+test the_model_holds_across_a_random_script ... ok
+test a_restart_waits_for_the_killed_servers_store_lock ... ok
+0.00s seed 1793883490639 op 1: CutFresh { caller: 0, target: 0, shared: false, cut_ms: 20 }
+0.10s seed 1793883490639 op 2: KillAtPending
+10.41s seed 1793883490639 op 3: Check
+0.00s seed 1793883490639 op 1: Land { caller: 1, target: 0, stale: false, shared: false }
+0.11s seed 1793883490639 op 2: Twin { caller: 2, land: 0 }
+0.13s seed 1793883490639 op 3: Check
+0.00s seed 1793883490639 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.12s seed 1793883490639 op 2: Land { caller: 1, target: 1, stale: false, shared: false }
+0.24s seed 1793883490639 op 3: Gc
+2.18s seed 1793883490639 op 4: Land { caller: 2, target: 0, stale: false, shared: true }
+2.31s seed 1793883490639 op 5: Check
+0.00s seed 1793883490639 op 1: Land { caller: 0, target: 2, stale: false, shared: false }
+0.10s seed 1793883490639 op 2: Check
+0.00s seed 1793883490639 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.12s seed 1793883490639 op 2: Land { caller: 1, target: 0, stale: false, shared: true }
+0.25s seed 1793883490639 op 3: Land { caller: 2, target: 0, stale: true, shared: true }
+0.39s seed 1793883490639 op 4: Check
+0.00s seed 1793883490639 op 1: BurstCut { k: 5, target: 0 }
+1.02s seed 1793883490639 op 2: Gc
+2.94s seed 1793883490639 op 3: Check
+test the_seed_corpus_holds has been running for over 60 seconds
+0.00s seed 1793883490639 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.13s seed 1793883490639 op 2: Import
+0.53s seed 1793883490639 op 3: SendNoWait { caller: 1, target: 3, stale: false, point: Cas }
+0.58s seed 1793883490639 op 4: AwaitGate { land: 1, point: Cas }
+0.61s seed 1793883490639 op 5: Import
+0.99s seed 1793883490639 op 6: Resume { land: 1, point: Cas }
+0.99s seed 1793883490639 op 7: Retry { caller: 1, land: 1 }
+1.05s seed 1793883490639 op 8: Check
+0.00s seed 1793883490639 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.21s seed 1793883490639 op 2: Import
+0.70s seed 1793883490639 op 3: SendNoWait { caller: 1, target: 3, stale: false, point: Cas }
+0.81s seed 1793883490639 op 4: AwaitGate { land: 1, point: Cas }
+0.85s seed 1793883490639 op 5: Import
+1.29s seed 1793883490639 op 6: Resume { land: 1, point: Cas }
+1.29s seed 1793883490639 op 7: Retry { caller: 1, land: 1 }
+1.38s seed 1793883490639 op 8: Check
+0.00s seed 1793883490639 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.11s seed 1793883490639 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Settled }
+0.18s seed 1793883490639 op 3: AwaitGate { land: 1, point: Settled }
+0.22s seed 1793883490639 op 4: Retry { caller: 1, land: 1 }
+PANIC: retry: Status { code: Cancelled, message: "Timeout expired", source: Some(tonic::transport::Error(Transport, TimeoutExpired(()))) }
+test the_seed_corpus_holds ... FAILED
+
+failures:
+
+---- the_seed_corpus_holds stdout ----
+seed 1793883490639: kill-pending saw no pending row; the land finished between two polls, and the kill is a plain kill
+land c0-o1-0: retry=Landed retry=Landed
+land c1-o1-0: land=Landed twin=Landed twin=Landed
+gc: pending rows in the database before the sweep: 0
+gc: 2026-11-05T12:58:34.983548Z  INFO scion_server::gc: the collector swept a batch of files files=1000 removed=0 elapsed_ms=1025
+gc: 2026-11-05T12:58:35.502753Z  INFO scion_server::gc: the collector swept a batch of files files=503 removed=0 elapsed_ms=519
+gc: 2026-11-05T12:58:35.502812Z  INFO scion_server::gc: the collector ended repos=1 rows_pruned=0 files_removed=0 rows_young=0 files_young=0 elapsed_ms=1593
+land c0-o1-0: land=Landed
+land c1-o2-1: land=Landed
+land c2-o4-2: land=Landed
+land c0-o1-0: land=Rejected
+land c0-o1-0: land=Landed
+land c1-o2-1: land=Landed
+land c2-o3-2: land=Landed
+gc: pending rows in the database before the sweep: 1
+gc: 2026-11-05T12:58:57.960612Z  INFO scion_server::gc: the collector swept a batch of files files=1000 removed=0 elapsed_ms=1017
+gc: 2026-11-05T12:58:58.477402Z  INFO scion_server::gc: the collector swept a batch of files files=507 removed=0 elapsed_ms=516
+gc: 2026-11-05T12:58:58.477493Z  INFO scion_server::gc: the collector ended repos=1 rows_pruned=0 files_removed=0 rows_young=0 files_young=0 elapsed_ms=1585
+land c0-o1-0: retry=Landed retry=Landed
+land c1-o1-1: retry=Landed retry=Landed
+land c2-o1-2: retry=Conflict retry=Conflict
+land c3-o1-3: retry=Landed retry=Landed
+land c0-o1-4: retry=Conflict retry=Conflict
+land c0-o1-0: land=Landed
+land c1-o3-1: retry=Landed
+land c0-o1-0: land=Landed
+land c1-o3-1: retry=Landed
+
+thread 'the_seed_corpus_holds' (456078294) panicked at crates/scion-server/tests/land_model_proptest.rs:424:34:
+retry: Status { code: Cancelled, message: "Timeout expired", source: Some(tonic::transport::Error(Transport, TimeoutExpired(()))) }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    the_seed_corpus_holds
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 106.63s
+
+error: test failed, to rerun pass `-p open-scion-server --test land_model_proptest`

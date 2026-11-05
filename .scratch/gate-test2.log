@@ -1,0 +1,77 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.47s
+     Running tests/land_model_proptest.rs (target/debug/deps/land_model_proptest-3bf7487f2f8e0126)
+
+running 3 tests
+test the_model_holds_across_a_random_script ... ok
+test a_restart_waits_for_the_killed_servers_store_lock ... ok
+0.00s seed 1793881781861 op 1: CutFresh { caller: 0, target: 0, shared: false, cut_ms: 20 }
+0.09s seed 1793881781861 op 2: KillAtPending
+10.42s seed 1793881781861 op 3: Check
+0.00s seed 1793881781861 op 1: Land { caller: 1, target: 0, stale: false, shared: false }
+0.23s seed 1793881781861 op 2: Twin { caller: 2, land: 0 }
+0.27s seed 1793881781861 op 3: Check
+0.00s seed 1793881781861 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.11s seed 1793881781861 op 2: Land { caller: 1, target: 1, stale: false, shared: false }
+0.23s seed 1793881781861 op 3: Gc
+2.12s seed 1793881781861 op 4: Land { caller: 2, target: 0, stale: false, shared: true }
+2.24s seed 1793881781861 op 5: Check
+0.00s seed 1793881781861 op 1: Land { caller: 0, target: 2, stale: false, shared: false }
+0.10s seed 1793881781861 op 2: Check
+0.00s seed 1793881781861 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.12s seed 1793881781861 op 2: Land { caller: 1, target: 0, stale: false, shared: true }
+0.24s seed 1793881781861 op 3: Land { caller: 2, target: 0, stale: true, shared: true }
+0.36s seed 1793881781861 op 4: Check
+0.00s seed 1793881781861 op 1: BurstCut { k: 5, target: 0 }
+0.71s seed 1793881781861 op 2: Gc
+2.54s seed 1793881781861 op 3: Check
+0.00s seed 1793881781861 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.12s seed 1793881781861 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Cas }
+0.19s seed 1793881781861 op 3: AwaitGate { land: 1, point: Cas }
+0.21s seed 1793881781861 op 4: Import { target: 0 }
+PANIC: import to main failed: 2026-11-05T12:30:36.665785Z  INFO scion_server::import: git import planned reachable=2 new=2 to_verify=2
+2026-11-05T12:30:36.695076Z  INFO scion_server::import: importing git commits done=2 total=2 commits_per_sec=54
+Error: ref "main" has diverged from git: it points at 40483bce08b34f6304394e9f5649fee5a48d745b31c2633d66971cb2c37b5f92, which is not an ancestor of the imported tip 81a86c63819ceff85a4ec83eb96a2b401238c36cbf3f61d58484b235e9838284; import into another ref
+
+test the_seed_corpus_holds ... FAILED
+
+failures:
+
+---- the_seed_corpus_holds stdout ----
+seed 1793881781861: kill-pending saw no pending row; the land finished between two polls, and the kill is a plain kill
+land c0-o1-0: retry=Landed retry=Landed
+land c1-o1-0: land=Landed twin=Landed twin=Landed
+gc: pending rows in the database before the sweep: 0
+gc: 2026-11-05T12:30:06.217437Z  INFO scion_server::gc: the collector swept a batch of files files=1000 removed=0 elapsed_ms=1003
+gc: 2026-11-05T12:30:06.720499Z  INFO scion_server::gc: the collector swept a batch of files files=503 removed=0 elapsed_ms=503
+gc: 2026-11-05T12:30:06.720591Z  INFO scion_server::gc: the collector ended repos=1 rows_pruned=0 files_removed=0 rows_young=0 files_young=0 elapsed_ms=1553
+land c0-o1-0: land=Landed
+land c1-o2-1: land=Landed
+land c2-o4-2: land=Landed
+land c0-o1-0: land=Rejected
+land c0-o1-0: land=Landed
+land c1-o2-1: land=Landed
+land c2-o3-2: land=Landed
+gc: pending rows in the database before the sweep: 2
+gc: 2026-11-05T12:30:28.193869Z  INFO scion_server::gc: the collector swept a batch of files files=1000 removed=0 elapsed_ms=960
+gc: 2026-11-05T12:30:28.674557Z  INFO scion_server::gc: the collector swept a batch of files files=507 removed=0 elapsed_ms=480
+gc: 2026-11-05T12:30:28.674612Z  INFO scion_server::gc: the collector ended repos=1 rows_pruned=0 files_removed=0 rows_young=0 files_young=0 elapsed_ms=1490
+land c0-o1-0: retry=Landed retry=Landed
+land c1-o1-1: retry=Landed retry=Landed
+land c2-o1-2: retry=Conflict retry=Conflict
+land c3-o1-3: retry=Landed retry=Landed
+land c0-o1-4: retry=Conflict retry=Conflict
+
+thread 'the_seed_corpus_holds' (455952361) panicked at crates/scion-server/tests/land_model_proptest.rs:1182:17:
+import to main failed: 2026-11-05T12:30:36.665785Z  INFO scion_server::import: git import planned reachable=2 new=2 to_verify=2
+2026-11-05T12:30:36.695076Z  INFO scion_server::import: importing git commits done=2 total=2 commits_per_sec=54
+Error: ref "main" has diverged from git: it points at 40483bce08b34f6304394e9f5649fee5a48d745b31c2633d66971cb2c37b5f92, which is not an ancestor of the imported tip 81a86c63819ceff85a4ec83eb96a2b401238c36cbf3f61d58484b235e9838284; import into another ref
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    the_seed_corpus_holds
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 59.95s
+
+error: test failed, to rerun pass `-p open-scion-server --test land_model_proptest`

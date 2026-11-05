@@ -1,0 +1,64 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.70s
+     Running tests/land_model_proptest.rs (target/debug/deps/land_model_proptest-3bf7487f2f8e0126)
+
+running 1 test
+test the_seed_corpus_holds ... PROBE run_on_rt enter
+PROBE rt built
+7.07s seed 1793902161783 op 1: CutFresh { caller: 0, target: 0, shared: false, cut_ms: 20 }
+7.17s seed 1793902161783 op 2: KillAtPending
+seed 1793902161783: kill-pending saw no pending row; the land finished between two polls, and the kill is a plain kill
+17.49s seed 1793902161783 op 3: Check
+land c0-o1-0: retry=Landed retry=Landed
+PROBE script done
+PROBE rt shut down
+PROBE run_on_rt enter
+PROBE rt built
+4.84s seed 1793902161783 op 1: Land { caller: 1, target: 0, stale: false, shared: false }
+4.96s seed 1793902161783 op 2: Twin { caller: 2, land: 0 }
+4.97s seed 1793902161783 op 3: Check
+land c1-o1-0: land=Landed twin=Landed twin=Landed
+PROBE script done
+PROBE rt shut down
+PROBE run_on_rt enter
+PROBE rt built
+4.82s seed 1793902161783 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+4.94s seed 1793902161783 op 2: Land { caller: 1, target: 1, stale: false, shared: false }
+5.06s seed 1793902161783 op 3: Gc
+gc: pending rows in the database before the sweep: 0
+gc: 2026-11-05T18:09:52.993052Z  INFO scion_server::gc: the collector swept a batch of files files=1000 removed=0 elapsed_ms=964
+gc: 2026-11-05T18:09:53.497212Z  INFO scion_server::gc: the collector swept a batch of files files=503 removed=0 elapsed_ms=504
+gc: 2026-11-05T18:09:53.497284Z  INFO scion_server::gc: the collector ended repos=1 rows_pruned=0 files_removed=0 rows_young=0 files_young=0 elapsed_ms=1521
+6.94s seed 1793902161783 op 4: Land { caller: 2, target: 0, stale: false, shared: true }
+7.07s seed 1793902161783 op 5: Check
+land c0-o1-0: land=Landed
+land c1-o2-1: land=Landed
+land c2-o4-2: land=Landed
+PROBE script done
+PROBE rt shut down
+PROBE run_on_rt enter
+PROBE rt built
+4.88s seed 1793902161783 op 1: Land { caller: 0, target: 2, stale: false, shared: false }
+4.97s seed 1793902161783 op 2: Check
+land c0-o1-0: land=Rejected
+PROBE script done
+PROBE rt shut down
+PROBE run_on_rt enter
+PROBE rt built
+5.01s seed 1793902161783 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.12s seed 1793902161783 op 2: Land { caller: 1, target: 0, stale: false, shared: true }
+5.25s seed 1793902161783 op 3: Land { caller: 2, target: 0, stale: true, shared: true }
+5.39s seed 1793902161783 op 4: Check
+land c0-o1-0: land=Landed
+land c1-o2-1: land=Landed
+land c2-o3-2: land=Landed
+PROBE script done
+PROBE rt shut down
+PROBE run_on_rt enter
+PROBE rt built
+4.83s seed 1793902161783 op 1: BurstCut { k: 5, target: 0 }
+5.55s seed 1793902161783 op 2: Gc
+gc: pending rows in the database before the sweep: 1
+gc: 2026-11-05T18:10:15.498064Z  INFO scion_server::gc: the collector swept a batch of files files=1000 removed=0 elapsed_ms=1035
+gc: 2026-11-05T18:10:16.017707Z  INFO scion_server::gc: the collector swept a batch of files files=507 removed=0 elapsed_ms=519
+gc: 2026-11-05T18:10:16.017782Z  INFO scion_server::gc: the collector ended repos=1 rows_pruned=0 files_removed=0 rows_young=0 files_young=0 elapsed_ms=1604
+7.50s seed 1793902161783 op 3: Check

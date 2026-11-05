@@ -1358,18 +1358,15 @@ impl Watchdog {
         while !self.stop.load(Ordering::Relaxed) {
             if self.started.elapsed() >= self.budget {
                 let at = self.ordinal.load(Ordering::Relaxed);
-                let mut err = std::io::stderr().lock();
-                let _ = writeln!(
-                    err,
+                eprintln!(
                     "{name} passed its budget of {budget:?} at step {at} \
-                     (seed {s}); the run is wedged, exiting the process",
+                     (seed {s}); the run is wedged, aborting the process",
                     name = self.script_name,
                     budget = self.budget,
                     s = self.seed,
                     at = at,
                 );
-                let _ = err.flush();
-                std::process::exit(1);
+                std::process::abort();
             }
             std::thread::sleep(Duration::from_secs(1));
         }
@@ -2023,7 +2020,9 @@ fn the_seed_corpus_holds() {
     // conflict, a missing ref - is these six files, under one minute.
     // The nightly land-model workflow runs the whole corpus there
     // (SCION_LANDMODEL_CASES set).
-    let short_on_postgres = ["02", "03", "05", "06", "08", "10", "12", "13", "14", "15"];
+    let short_on_postgres = [
+        "02", "03", "05", "06", "08", "10", "12", "13", "14", "15", "16",
+    ];
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/land_model_corpus");
     let mut names = Vec::new();
     for entry in std::fs::read_dir(&dir).unwrap() {
@@ -2045,10 +2044,31 @@ fn the_seed_corpus_holds() {
     let (mut landed, mut conflict, mut rejected) = (0, 0, 0);
     let (mut retried_after_kill, mut gc_beside) = (false, false);
     let (mut executable_lands, mut gc_during_pending) = (0, false);
+    // One guard over the whole corpus: each script's guard covers its
+    // own run, and the harness's own work between scripts - a runtime
+    // shutdown, a summary - must never sit unguarded. The bound is the
+    // sum of the script budgets plus a margin for that harness work.
+    let corpus_started = std::time::Instant::now();
+    let corpus_budget = Duration::from_secs(SCRIPT_BUDGET_SECS * (names.len() as u64) + 120);
+    let corpus_stop = Arc::new(AtomicBool::new(false));
+    let corpus_guard_stop = Arc::clone(&corpus_stop);
+    let corpus_guard = std::thread::spawn(move || {
+        while !corpus_guard_stop.load(Ordering::Relaxed) {
+            if corpus_started.elapsed() >= corpus_budget {
+                eprintln!(
+                    "the corpus passed its budget of {budget:?}; the run is \
+                     wedged between scripts, aborting the process",
+                    budget = corpus_budget,
+                );
+                std::process::abort();
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    });
     // The gate-ordered scripts run twice: the gates make the order exact,
     // so a rerun must land the same outcome shape, and a failing one must
     // fail the same way every time.
-    let ordered = ["12", "13", "14", "15"];
+    let ordered = ["12", "13", "14", "15", "16"];
     for path in names {
         let text = std::fs::read_to_string(&path).unwrap();
         let script = parse_script(&text);
@@ -2082,6 +2102,8 @@ fn the_seed_corpus_holds() {
         executable_lands += summary.executable_lands;
         gc_during_pending |= summary.gc_during_pending;
     }
+    corpus_stop.store(true, Ordering::Relaxed);
+    let _ = corpus_guard.join();
     // The corpus must keep making every kind of outcome: a parser or a
     // strategy change cannot empty it without this sounding.
     if landed == 0 {

@@ -1,0 +1,398 @@
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+    Checking cfg-if v1.0.5
+    Checking bytes v1.12.1
+    Checking memchr v2.8.3
+    Checking rand_core v0.10.1
+    Checking smallvec v1.16.3
+    Checking regex-syntax v0.8.11
+    Checking once_cell v1.21.4
+    Checking scopeguard v1.2.0
+    Checking libc v0.2.190
+    Checking tinyvec v1.13.3
+    Checking bitflags v2.13.2
+    Checking lock_api v0.4.14
+    Checking fastrand v2.5.0
+    Checking bytesize v2.7.0
+    Checking human_format v1.2.1
+    Checking allocator-api2 v0.2.21
+    Checking equivalent v1.0.2
+    Checking unicode-normalization v0.1.25
+    Checking itoa v1.0.18
+    Checking foldhash v0.2.0
+    Checking gix-trace v0.3.1
+    Checking crossbeam-utils v0.8.23
+    Checking byteorder v1.5.0
+    Checking same-file v1.0.6
+    Checking stable_deref_trait v1.2.1
+    Checking jiff-core v0.1.1
+    Checking hashbrown v0.17.1
+    Checking sha1dc v0.1.5
+    Checking hash32 v0.3.1
+    Checking walkdir v2.5.0
+    Checking hashbrown v0.14.5
+    Checking getrandom v0.4.3
+    Checking errno v0.3.14
+    Checking parking_lot_core v0.9.12
+    Checking crossbeam-channel v0.5.17
+    Checking signal-hook-registry v1.4.8
+    Checking rustix v1.1.6
+    Checking parking_lot v0.12.5
+    Checking heapless v0.8.0
+    Checking signal-hook v0.4.6
+    Checking memmap2 v0.9.11
+    Checking pin-project-lite v0.2.17
+    Checking prodash v31.0.1
+    Checking gix-parallel v0.50.0
+    Checking dashmap v6.2.1
+    Checking futures-core v0.3.34
+    Checking fnv v1.0.7
+    Checking jiff v0.2.38
+   Compiling jobserver v0.1.35
+    Checking socket2 v0.6.5
+    Checking faster-hex v0.10.1
+    Checking mio v1.2.4
+    Checking futures-sink v0.3.34
+    Checking nonempty v0.12.0
+    Checking regex-automata v0.4.18
+    Checking typenum v1.20.1
+    Checking unicode-bom v2.0.3
+   Compiling cc v1.8.0
+    Checking percent-encoding v2.3.2
+    Checking slab v0.4.12
+    Checking tracing-core v0.1.36
+    Checking cmov v0.5.4
+    Checking tokio v1.54.1
+    Checking crossbeam-epoch v0.9.21
+    Checking http v1.5.0
+    Checking ctutils v0.4.5
+    Checking futures-task v0.3.34
+    Checking const-oid v0.10.2
+    Checking futures-util v0.3.34
+    Checking crossbeam-deque v0.8.8
+    Checking tracing v0.1.44
+    Checking tempfile v3.27.0
+   Compiling anyhow v1.0.104
+    Checking log v0.4.34
+    Checking hybrid-array v0.4.15
+    Checking futures-channel v0.3.34
+    Checking http-body v1.1.0
+    Checking indexmap v2.14.2
+   Compiling prost-derive v0.14.4
+    Checking crossbeam-queue v0.3.14
+    Checking getrandom v0.2.17
+    Checking base64 v0.22.1
+    Checking zeroize v1.9.1
+    Checking block-buffer v0.12.1
+    Checking crypto-common v0.2.2
+    Checking untrusted v0.9.0
+    Checking subtle v2.6.1
+    Checking simdutf8 v0.1.5
+    Checking tower-service v0.3.3
+    Checking encoding_rs v0.8.42
+    Checking rustls-pki-types v1.15.1
+    Checking crossbeam v0.8.5
+    Checking gix-sec v0.16.0
+    Checking digest v0.11.3
+    Checking bstr v1.13.1
+    Checking cpufeatures v0.3.1
+   Compiling ring v0.17.14
+    Checking filetime v0.2.29
+    Checking hashbrown v0.16.1
+    Checking try-lock v0.2.5
+    Checking atomic-waker v1.1.2
+    Checking want v0.3.2
+    Checking sha2 v0.11.1
+    Checking dua-core v4.2.0
+    Checking httparse v1.10.1
+    Checking gix-error v0.5.2
+    Checking httpdate v1.0.3
+    Checking sync_wrapper v1.0.2
+    Checking tower-layer v0.3.3
+    Checking gix-utils v0.5.1
+    Checking gix-validate v0.13.1
+    Checking gix-date v0.18.1
+    Checking gix-chunk v0.10.1
+    Checking gix-path v0.14.1
+    Checking gix-packetline v0.24.1
+    Checking gix-bitmap v0.6.1
+    Checking gix-quote v0.10.1
+    Checking gix-hash v0.28.1
+    Checking gix-actor v0.44.1
+    Checking arrayvec v0.7.8
+   Compiling prost v0.14.4
+   Compiling pulldown-cmark v0.13.6
+    Checking gix-fs v0.24.1
+    Checking gix-command v0.12.1
+    Checking gix-hashtable v0.18.0
+    Checking gix-commitgraph v0.42.0
+    Checking gix-config-value v0.21.1
+    Checking gix-tempfile v26.0.0
+    Checking gix-glob v0.29.1
+    Checking serde_core v1.0.229
+   Compiling zstd-sys v2.1.2+zstd.1.5.7
+    Checking gix-object v0.66.1
+    Checking gix-lock v26.0.0
+    Checking gix-attributes v0.37.1
+    Checking tokio-util v0.7.20
+    Checking gix-ignore v0.24.0
+    Checking http-body-util v0.1.5
+    Checking chacha20 v0.10.2
+    Checking gix-pathspec v0.22.1
+    Checking mime v0.3.17
+    Checking gix-revwalk v0.38.0
+    Checking h2 v0.4.20
+    Checking gix-filter v0.36.1
+    Checking gix-ref v0.69.1
+    Checking gix-traverse v0.64.0
+    Checking axum-core v0.5.6
+    Checking tower v0.5.3
+   Compiling prost-types v0.14.4
+    Checking gix-index v0.58.0
+   Compiling petgraph v0.8.3
+    Checking rand v0.10.3
+   Compiling pulldown-cmark-to-cmark v22.0.3
+    Checking matchit v0.8.4
+    Checking unicode-bidi v0.3.18
+    Checking unicode-properties v0.1.4
+    Checking gix-worktree v0.59.0
+    Checking pin-project v1.1.13
+    Checking tokio-stream v0.1.19
+    Checking gix-url v0.40.1
+    Checking stringprep v0.1.5
+    Checking axum v0.8.9
+    Checking gix-imara-diff v0.3.2
+    Checking hmac v0.13.0
+    Checking md-5 v0.11.0
+   Compiling blake3 v1.8.7
+    Checking objc2-core-foundation v0.3.2
+    Checking utf8parse v0.2.2
+   Compiling prost-build v0.14.4
+    Checking fallible-iterator v0.2.0
+    Checking siphasher v1.0.4
+    Checking anstyle-parse v1.0.0
+    Checking phf_shared v0.13.1
+    Checking gix-diff v0.70.0
+    Checking postgres-protocol v0.6.12
+    Checking objc2-system-configuration v0.3.2
+    Checking hyper v1.12.0
+    Checking signature v3.0.0
+    Checking anstyle-query v1.1.5
+    Checking const-oid v0.9.6
+    Checking colorchoice v1.0.5
+    Checking flagset v0.4.7
+   Compiling tonic-prost-build v0.14.9
+    Checking zlib-rs v0.6.8
+    Checking is_terminal_polyfill v1.70.2
+    Checking constant_time_eq v0.4.2
+    Checking anstyle v1.0.14
+    Checking anstream v1.0.0
+    Checking postgres-types v0.2.14
+    Checking ed25519 v3.0.0
+   Compiling open-scion-proto v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-proto)
+    Checking whoami v2.1.3
+    Checking curve25519-dalek v5.0.0
+    Checking hyper-util v0.1.21
+    Checking crc32fast v1.5.2
+    Checking der v0.7.10
+    Checking phf v0.13.1
+    Checking gix-zlib v0.4.0
+    Checking gix-discover v0.57.1
+    Checking uluru v3.1.0
+    Checking clru v0.6.3
+    Checking lazy_static v1.5.1
+    Checking clap_lex v1.1.1
+    Checking strsim v0.11.1
+    Checking gix-dir v0.32.0
+    Checking gix-pack v0.77.0
+   Compiling libsqlite3-sys v0.38.2
+    Checking clap_builder v4.6.7
+    Checking spki v0.7.3
+    Checking sharded-slab v0.1.7
+    Checking ed25519-dalek v3.0.0
+    Checking hyper-timeout v0.5.2
+    Checking tokio-postgres v0.7.18
+    Checking gix-transport v0.62.0
+    Checking gix-config v0.62.1
+    Checking gix-worktree-stream v0.39.0
+    Checking open-scion-core v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-core)
+    Checking gix-revision v0.52.0
+    Checking gix-shallow v0.15.1
+    Checking gix-prompt v0.19.1
+    Checking gix-refspec v0.47.1
+    Checking matchers v0.2.0
+    Checking tracing-log v0.2.0
+    Checking arc-swap v1.9.2
+    Checking hashlink v0.12.2
+    Checking io-close v0.3.7
+    Checking thread_local v1.1.10
+    Checking nu-ansi-term v0.50.3
+    Checking gix-worktree-state v0.37.0
+    Checking gix-odb v0.87.0
+    Checking gix-protocol v0.68.0
+    Checking gix-merge v0.23.0
+    Checking tracing-subscriber v0.3.23
+    Checking gix-credentials v0.42.1
+    Checking gix-submodule v0.36.1
+    Checking gix-archive v0.39.0
+    Checking clap v4.6.7
+   Compiling rustls v0.23.46
+    Checking x509-cert v0.2.5
+    Checking gix-status v0.37.0
+    Checking zmij v1.0.23
+    Checking gix-blame v0.20.0
+    Checking gix-negotiate v0.38.0
+    Checking gix-note v0.3.1
+    Checking gix-mailmap v0.36.1
+    Checking regex v1.13.1
+    Checking thiserror v2.0.21
+    Checking postgres v0.19.14
+    Checking serde_json v1.0.154
+    Checking wait-timeout v0.2.1
+    Checking quick-error v1.2.3
+    Checking fallible-iterator v0.3.0
+    Checking bit-vec v0.10.1
+    Checking fallible-streaming-iterator v0.1.9
+    Checking rusty-fork v0.3.1
+    Checking rustls-webpki v0.103.16
+    Checking gix v0.90.0
+    Checking num-traits v0.2.19
+    Checking bit-set v0.11.1
+    Checking rand_xorshift v0.5.0
+    Checking core_detect v1.0.0
+    Checking unarray v0.1.4
+    Checking proptest v1.12.0
+   Compiling zstd-safe v8.2.0
+    Checking tokio-rustls v0.26.6
+    Checking tonic v0.14.9
+    Checking tokio-postgres-rustls v0.14.0
+    Checking zstd v0.14.3
+    Checking tonic-prost v0.14.9
+    Checking rusqlite v0.40.2
+    Checking tonic-health v0.14.9
+    Checking open-scion-server v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-server)
+    Checking open-scion-tier v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-tier)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 19.72s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.49s
+   Compiling open-scion-server v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.27s
+     Running tests/land_model_proptest.rs (target/debug/deps/land_model_proptest-3bf7487f2f8e0126)
+
+running 3 tests
+test the_model_holds_across_a_random_script ... ok
+test a_restart_waits_for_the_killed_servers_store_lock ... ok
+5.08s seed 1793904031710 op 1: CutFresh { caller: 0, target: 0, shared: false, cut_ms: 20 }
+5.18s seed 1793904031710 op 2: KillAtPending
+15.51s seed 1793904031710 op 3: Check
+4.82s seed 1793904031710 op 1: Land { caller: 1, target: 0, stale: false, shared: false }
+4.93s seed 1793904031710 op 2: Twin { caller: 2, land: 0 }
+4.95s seed 1793904031710 op 3: Check
+4.77s seed 1793904031710 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+4.89s seed 1793904031710 op 2: Land { caller: 1, target: 1, stale: false, shared: false }
+5.00s seed 1793904031710 op 3: Gc
+6.89s seed 1793904031710 op 4: Land { caller: 2, target: 0, stale: false, shared: true }
+7.02s seed 1793904031710 op 5: Check
+4.77s seed 1793904031710 op 1: Land { caller: 0, target: 2, stale: false, shared: false }
+4.87s seed 1793904031710 op 2: Check
+4.86s seed 1793904031710 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+4.98s seed 1793904031710 op 2: Land { caller: 1, target: 0, stale: false, shared: true }
+5.11s seed 1793904031710 op 3: Land { caller: 2, target: 0, stale: true, shared: true }
+5.23s seed 1793904031710 op 4: Check
+4.86s seed 1793904031710 op 1: BurstCut { k: 5, target: 0 }
+5.61s seed 1793904031710 op 2: Gc
+7.52s seed 1793904031710 op 3: Check
+4.90s seed 1793904031710 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.02s seed 1793904031710 op 2: Import
+5.41s seed 1793904031710 op 3: SendNoWait { caller: 1, target: 3, stale: false, point: Cas }
+5.46s seed 1793904031710 op 4: AwaitGate { land: 1, point: Cas }
+5.48s seed 1793904031710 op 5: Import
+5.87s seed 1793904031710 op 6: Resume { land: 1, point: Cas }
+5.87s seed 1793904031710 op 7: Retry { caller: 1, land: 1 }
+5.91s seed 1793904031710 op 8: Check
+test the_seed_corpus_holds has been running for over 60 seconds
+4.93s seed 1793904031710 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.05s seed 1793904031710 op 2: Import
+5.42s seed 1793904031710 op 3: SendNoWait { caller: 1, target: 3, stale: false, point: Cas }
+5.47s seed 1793904031710 op 4: AwaitGate { land: 1, point: Cas }
+5.50s seed 1793904031710 op 5: Import
+5.88s seed 1793904031710 op 6: Resume { land: 1, point: Cas }
+5.88s seed 1793904031710 op 7: Retry { caller: 1, land: 1 }
+5.93s seed 1793904031710 op 8: Check
+5.27s seed 1793904031710 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.39s seed 1793904031710 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Settled }
+5.46s seed 1793904031710 op 3: AwaitGate { land: 1, point: Settled }
+5.50s seed 1793904031710 op 4: Resume { land: 1, point: Settled }
+5.50s seed 1793904031710 op 5: Retry { caller: 1, land: 1 }
+5.52s seed 1793904031710 op 6: Check
+4.91s seed 1793904031710 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.03s seed 1793904031710 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Settled }
+5.10s seed 1793904031710 op 3: AwaitGate { land: 1, point: Settled }
+5.14s seed 1793904031710 op 4: Resume { land: 1, point: Settled }
+5.14s seed 1793904031710 op 5: Retry { caller: 1, land: 1 }
+5.15s seed 1793904031710 op 6: Check
+4.98s seed 1793904031710 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.10s seed 1793904031710 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Planned }
+5.18s seed 1793904031710 op 3: AwaitGate { land: 1, point: Planned }
+5.21s seed 1793904031710 op 4: Kill
+5.52s seed 1793904031710 op 5: Retry { caller: 1, land: 1 }
+5.56s seed 1793904031710 op 6: Check
+5.32s seed 1793904031710 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.44s seed 1793904031710 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Planned }
+5.51s seed 1793904031710 op 3: AwaitGate { land: 1, point: Planned }
+5.54s seed 1793904031710 op 4: Kill
+5.85s seed 1793904031710 op 5: Retry { caller: 1, land: 1 }
+5.90s seed 1793904031710 op 6: Check
+4.89s seed 1793904031710 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.03s seed 1793904031710 op 2: SendNoWait { caller: 1, target: 0, stale: true, point: Step }
+5.09s seed 1793904031710 op 3: AwaitGate { land: 1, point: Step }
+5.16s seed 1793904031710 op 4: Kill
+5.46s seed 1793904031710 op 5: Retry { caller: 1, land: 1 }
+5.47s seed 1793904031710 op 6: Check
+4.67s seed 1793904031710 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+4.80s seed 1793904031710 op 2: SendNoWait { caller: 1, target: 0, stale: true, point: Step }
+4.87s seed 1793904031710 op 3: AwaitGate { land: 1, point: Step }
+4.94s seed 1793904031710 op 4: Kill
+5.25s seed 1793904031710 op 5: Retry { caller: 1, land: 1 }
+5.26s seed 1793904031710 op 6: Check
+test the_seed_corpus_holds ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 109.20s
+

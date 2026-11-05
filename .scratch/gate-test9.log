@@ -1,0 +1,83 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.71s
+     Running tests/land_model_proptest.rs (target/debug/deps/land_model_proptest-3bf7487f2f8e0126)
+
+running 3 tests
+test the_model_holds_across_a_random_script ... ok
+test a_restart_waits_for_the_killed_servers_store_lock ... ok
+0.00s seed 1793884121684 op 1: CutFresh { caller: 0, target: 0, shared: false, cut_ms: 20 }
+0.09s seed 1793884121684 op 2: KillAtPending
+10.41s seed 1793884121684 op 3: Check
+0.00s seed 1793884121684 op 1: Land { caller: 1, target: 0, stale: false, shared: false }
+0.12s seed 1793884121684 op 2: Twin { caller: 2, land: 0 }
+0.14s seed 1793884121684 op 3: Check
+0.00s seed 1793884121684 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.12s seed 1793884121684 op 2: Land { caller: 1, target: 1, stale: false, shared: false }
+0.23s seed 1793884121684 op 3: Gc
+2.17s seed 1793884121684 op 4: Land { caller: 2, target: 0, stale: false, shared: true }
+2.32s seed 1793884121684 op 5: Check
+0.00s seed 1793884121684 op 1: Land { caller: 0, target: 2, stale: false, shared: false }
+0.10s seed 1793884121684 op 2: Check
+0.00s seed 1793884121684 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.12s seed 1793884121684 op 2: Land { caller: 1, target: 0, stale: false, shared: true }
+0.26s seed 1793884121684 op 3: Land { caller: 2, target: 0, stale: true, shared: true }
+0.39s seed 1793884121684 op 4: Check
+0.00s seed 1793884121684 op 1: BurstCut { k: 5, target: 0 }
+0.70s seed 1793884121684 op 2: Gc
+2.64s seed 1793884121684 op 3: Check
+0.00s seed 1793884121684 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.12s seed 1793884121684 op 2: Import
+test the_seed_corpus_holds has been running for over 60 seconds
+0.53s seed 1793884121684 op 3: SendNoWait { caller: 1, target: 3, stale: false, point: Cas }
+0.58s seed 1793884121684 op 4: AwaitGate { land: 1, point: Cas }
+0.61s seed 1793884121684 op 5: Import
+1.00s seed 1793884121684 op 6: Resume { land: 1, point: Cas }
+1.00s seed 1793884121684 op 7: Retry { caller: 1, land: 1 }
+1.06s seed 1793884121684 op 8: Check
+0.00s seed 1793884121684 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.12s seed 1793884121684 op 2: Import
+0.52s seed 1793884121684 op 3: SendNoWait { caller: 1, target: 3, stale: false, point: Cas }
+0.57s seed 1793884121684 op 4: AwaitGate { land: 1, point: Cas }
+0.59s seed 1793884121684 op 5: Import
+0.98s seed 1793884121684 op 6: Resume { land: 1, point: Cas }
+0.98s seed 1793884121684 op 7: Retry { caller: 1, land: 1 }
+1.04s seed 1793884121684 op 8: Check
+0.00s seed 1793884121684 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.12s seed 1793884121684 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Settled }
+0.19s seed 1793884121684 op 3: AwaitGate { land: 1, point: Settled }
+0.23s seed 1793884121684 op 4: Resume { land: 1, point: Settled }
+0.23s seed 1793884121684 op 5: Retry { caller: 1, land: 1 }
+0.24s seed 1793884121684 op 6: Check
+0.00s seed 1793884121684 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.12s seed 1793884121684 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Settled }
+0.19s seed 1793884121684 op 3: AwaitGate { land: 1, point: Settled }
+0.23s seed 1793884121684 op 4: Resume { land: 1, point: Settled }
+0.23s seed 1793884121684 op 5: Retry { caller: 1, land: 1 }
+0.24s seed 1793884121684 op 6: Check
+0.00s seed 1793884121684 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.12s seed 1793884121684 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Planned }
+0.21s seed 1793884121684 op 3: AwaitGate { land: 1, point: Planned }
+0.23s seed 1793884121684 op 4: Kill
+0.55s seed 1793884121684 op 5: Retry { caller: 1, land: 1 }
+0.60s seed 1793884121684 op 6: Check
+0.00s seed 1793884121684 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.12s seed 1793884121684 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Planned }
+0.20s seed 1793884121684 op 3: AwaitGate { land: 1, point: Planned }
+0.22s seed 1793884121684 op 4: Kill
+0.52s seed 1793884121684 op 5: Retry { caller: 1, land: 1 }
+0.57s seed 1793884121684 op 6: Check
+0.00s seed 1793884121684 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.16s seed 1793884121684 op 2: SendNoWait { caller: 1, target: 0, stale: true, point: Step }
+0.23s seed 1793884121684 op 3: AwaitGate { land: 1, point: Step }
+0.30s seed 1793884121684 op 4: Kill
+0.62s seed 1793884121684 op 5: Retry { caller: 1, land: 1 }
+0.63s seed 1793884121684 op 6: Check
+0.00s seed 1793884121684 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+0.25s seed 1793884121684 op 2: SendNoWait { caller: 1, target: 0, stale: true, point: Step }
+0.42s seed 1793884121684 op 3: AwaitGate { land: 1, point: Step }
+0.51s seed 1793884121684 op 4: Kill
+0.85s seed 1793884121684 op 5: Retry { caller: 1, land: 1 }
+0.88s seed 1793884121684 op 6: Check
+test the_seed_corpus_holds ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 110.92s
+

@@ -1,0 +1,735 @@
+   Compiling open-scion-server v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-server)
+warning: unused variable: `expected`
+    --> crates/scion-server/src/land.rs:1069:9
+     |
+1069 |         expected,
+     |         ^^^^^^^^ help: try ignoring the field: `expected: _`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `open-scion-server` (lib) generated 1 warning (run `cargo fix --lib -p open-scion-server` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.68s
+     Running tests/land_model_proptest.rs (target/debug/deps/land_model_proptest-3bf7487f2f8e0126)
+
+running 1 test
+test the_model_holds_across_a_random_script ... 6.56s seed 1793903035479 op 1: Gc
+8.45s seed 1793903035479 op 2: Land { caller: 0, target: 2, stale: true, shared: true }
+8.56s seed 1793903035479 op 3: Burst { k: 8, target: 0 }
+9.41s seed 1793903035479 op 4: Land { caller: 3, target: 1, stale: true, shared: false }
+9.52s seed 1793903035479 op 5: Land { caller: 2, target: 2, stale: true, shared: false }
+9.61s seed 1793903035479 op 6: KillAtPending
+19.95s seed 1793903035479 op 7: KillAtPending
+30.27s seed 1793903035479 op 8: Check
+30.77s seed 1793903035479 op 9: Burst { k: 8, target: 1 }
+31.64s seed 1793903035479 op 10: Land { caller: 3, target: 0, stale: true, shared: false }
+31.75s seed 1793903035479 op 11: Gc
+33.66s seed 1793903035479 op 12: Land { caller: 3, target: 2, stale: true, shared: false }
+33.76s seed 1793903035479 op 13: Land { caller: 0, target: 0, stale: false, shared: true }
+33.89s seed 1793903035479 op 14: KillAtPending
+44.19s seed 1793903035479 op 15: Land { caller: 0, target: 2, stale: true, shared: true }
+44.32s seed 1793903035479 op 16: Land { caller: 3, target: 0, stale: true, shared: false }
+44.44s seed 1793903035479 op 17: KillAtPending
+54.77s seed 1793903035479 op 18: Land { caller: 3, target: 0, stale: false, shared: true }
+54.91s seed 1793903035479 op 19: Land { caller: 1, target: 1, stale: true, shared: true }
+55.04s seed 1793903035479 op 20: KillAtPending
+65.35s seed 1793903035479 op 21: Burst { k: 8, target: 2 }
+66.01s seed 1793903035479 op 22: CutFresh { caller: 2, target: 2, shared: false, cut_ms: 20 }
+66.10s seed 1793903035479 op 23: Twin { caller: 2, land: 16839778951105740113 }
+66.12s seed 1793903035479 op 24: Burst { k: 2, target: 1 }
+66.35s seed 1793903035479 op 25: Land { caller: 0, target: 1, stale: true, shared: true }
+66.48s seed 1793903035479 op 26: Land { caller: 3, target: 0, stale: true, shared: false }
+66.60s seed 1793903035479 op 27: Land { caller: 0, target: 0, stale: true, shared: true }
+66.73s seed 1793903035479 op 28: Gc
+68.67s seed 1793903035479 op 29: Gc
+70.57s seed 1793903035479 op 30: Twin { caller: 1, land: 8049235448568458557 }
+70.59s seed 1793903035479 op 31: Check
+72.54s seed 1793903035479 op 32: BurstCut { k: 6, target: 1 }
+73.29s seed 1793903035479 op 33: Twin { caller: 3, land: 13040111675914892818 }
+73.31s seed 1793903035479 op 34: BurstCut { k: 6, target: 1 }
+74.09s seed 1793903035479 op 35: Burst { k: 7, target: 0 }
+74.84s seed 1793903035479 op 36: Twin { caller: 3, land: 11994000857742930844 }
+74.86s seed 1793903035479 op 37: Land { caller: 1, target: 0, stale: false, shared: false }
+74.97s seed 1793903035479 op 38: Check
+79.48s seed 1793903035479 op 39: Twin { caller: 3, land: 2438276297145930218 }
+79.50s seed 1793903035479 op 40: Burst { k: 2, target: 1 }
+79.73s seed 1793903035479 op 41: Twin { caller: 0, land: 12259347168286959946 }
+79.75s seed 1793903035479 op 42: Burst { k: 7, target: 2 }
+80.45s seed 1793903035479 op 43: Kill
+80.75s seed 1793903035479 op 44: Land { caller: 3, target: 1, stale: true, shared: false }
+80.87s seed 1793903035479 op 45: Land { caller: 3, target: 0, stale: true, shared: true }
+81.00s seed 1793903035479 op 46: Land { caller: 0, target: 0, stale: true, shared: false }
+81.12s seed 1793903035479 op 47: Cut { caller: 0, land: 5191543175707227869 }
+81.13s seed 1793903035479 op 48: CutFresh { caller: 2, target: 1, shared: true, cut_ms: 20 }
+81.23s seed 1793903035479 op 49: Land { caller: 1, target: 1, stale: false, shared: false }
+81.37s seed 1793903035479 op 50: Burst { k: 5, target: 2 }
+81.78s seed 1793903035479 op 51: Twin { caller: 1, land: 3347922270844527886 }
+81.79s seed 1793903035479 op 52: Land { caller: 2, target: 1, stale: false, shared: false }
+81.90s seed 1793903035479 op 53: Land { caller: 0, target: 1, stale: true, shared: true }
+82.03s seed 1793903035479 op 54: Land { caller: 0, target: 1, stale: false, shared: true }
+82.16s seed 1793903035479 op 55: Land { caller: 3, target: 0, stale: false, shared: true }
+82.29s seed 1793903035479 op 56: Land { caller: 3, target: 2, stale: false, shared: false }
+82.38s seed 1793903035479 op 57: Poll { caller: 1, land: 963934407996141814 }
+82.38s seed 1793903035479 op 58: Land { caller: 1, target: 2, stale: true, shared: false }
+82.47s seed 1793903035479 op 59: Land { caller: 1, target: 2, stale: false, shared: true }
+82.57s seed 1793903035479 op 60: Check
+88.80s seed 1793903035479 op 61: Cut { caller: 0, land: 275576130386304346 }
+88.82s seed 1793903035479 op 62: Land { caller: 2, target: 2, stale: true, shared: false }
+88.91s seed 1793903035479 op 63: Check
+94.96s seed 1793903035479 op 64: Retry { caller: 0, land: 15339461514191047446 }
+94.97s seed 1793903035479 op 65: Land { caller: 1, target: 2, stale: false, shared: true }
+95.09s seed 1793903035479 op 66: Retry { caller: 3, land: 18310406234991341865 }
+95.10s seed 1793903035479 op 67: Land { caller: 3, target: 1, stale: false, shared: true }
+95.22s seed 1793903035479 op 68: Poll { caller: 0, land: 9105479817212061675 }
+95.23s seed 1793903035479 op 69: Poll { caller: 0, land: 5499993588166977572 }
+95.23s seed 1793903035479 op 70: Poll { caller: 1, land: 4190181060836035719 }
+95.24s seed 1793903035479 op 71: Check
+101.77s seed 1793903035479 op 72: Retry { caller: 1, land: 11184522378521560532 }
+101.78s seed 1793903035479 op 73: Land { caller: 1, target: 0, stale: true, shared: false }
+101.90s seed 1793903035479 op 74: CutFresh { caller: 1, target: 0, shared: false, cut_ms: 20 }
+101.99s seed 1793903035479 op 75: CutFresh { caller: 1, target: 0, shared: true, cut_ms: 20 }
+102.09s seed 1793903035479 op 76: Gc
+104.14s seed 1793903035479 op 77: Kill
+104.45s seed 1793903035479 op 78: KillAtPending
+114.78s seed 1793903035479 op 79: Burst { k: 7, target: 0 }
+115.55s seed 1793903035479 op 80: Twin { caller: 3, land: 4303058091288937455 }
+115.57s seed 1793903035479 op 81: Twin { caller: 2, land: 16794370745302841949 }
+115.59s seed 1793903035479 op 82: Cut { caller: 1, land: 1520041911770341991 }
+115.60s seed 1793903035479 op 83: CutFresh { caller: 3, target: 2, shared: true, cut_ms: 20 }
+115.70s seed 1793903035479 op 84: Land { caller: 0, target: 0, stale: false, shared: true }
+115.83s seed 1793903035479 op 85: Kill
+116.13s seed 1793903035479 op 86: Burst { k: 8, target: 0 }
+117.03s seed 1793903035479 op 87: Check
+126.79s seed 1793903035479 op 88: Kill
+127.10s seed 1793903035479 op 89: KillAtPending
+137.40s seed 1793903035479 op 90: Check
+146.75s seed 1793903035479 op 91: Land { caller: 2, target: 1, stale: false, shared: false }
+146.88s seed 1793903035479 op 92: Land { caller: 2, target: 0, stale: false, shared: false }
+147.00s seed 1793903035479 op 93: Twin { caller: 1, land: 9965140028945492246 }
+147.02s seed 1793903035479 op 94: Burst { k: 5, target: 0 }
+4.96s seed 1793903035479 op 1: Land { caller: 1, target: 2, stale: true, shared: false }
+5.06s seed 1793903035479 op 2: KillAtPending
+15.40s seed 1793903035479 op 3: Kill
+15.72s seed 1793903035479 op 4: Land { caller: 1, target: 0, stale: false, shared: false }
+15.84s seed 1793903035479 op 5: Twin { caller: 1, land: 14526810853398357784 }
+15.86s seed 1793903035479 op 6: Land { caller: 0, target: 2, stale: false, shared: false }
+15.94s seed 1793903035479 op 7: KillAtPending
+26.27s seed 1793903035479 op 8: Twin { caller: 3, land: 8592425698682234396 }
+26.29s seed 1793903035479 op 9: KillAtPending
+36.60s seed 1793903035479 op 10: Land { caller: 0, target: 1, stale: false, shared: true }
+36.72s seed 1793903035479 op 11: Cut { caller: 0, land: 2782271296035116828 }
+36.74s seed 1793903035479 op 12: Gc
+38.61s seed 1793903035479 op 13: KillAtPending
+48.94s seed 1793903035479 op 14: Burst { k: 2, target: 1 }
+49.18s seed 1793903035479 op 15: Retry { caller: 3, land: 13873676337178376481 }
+49.19s seed 1793903035479 op 16: Retry { caller: 2, land: 332568162736993654 }
+49.20s seed 1793903035479 op 17: Land { caller: 0, target: 2, stale: true, shared: true }
+49.30s seed 1793903035479 op 18: Twin { caller: 3, land: 13391652399743342484 }
+49.32s seed 1793903035479 op 19: Land { caller: 2, target: 2, stale: false, shared: true }
+49.42s seed 1793903035479 op 20: Twin { caller: 2, land: 8676906980549107892 }
+49.44s seed 1793903035479 op 21: Land { caller: 1, target: 2, stale: false, shared: true }
+49.55s seed 1793903035479 op 22: Check
+49.81s seed 1793903035479 op 23: Burst { k: 5, target: 2 }
+50.21s seed 1793903035479 op 24: BurstCut { k: 6, target: 1 }
+50.97s seed 1793903035479 op 25: Retry { caller: 0, land: 10978783593933401037 }
+51.02s seed 1793903035479 op 26: Land { caller: 2, target: 1, stale: true, shared: false }
+51.13s seed 1793903035479 op 27: Retry { caller: 0, land: 11209318779353170002 }
+51.14s seed 1793903035479 op 28: Land { caller: 1, target: 0, stale: true, shared: false }
+51.26s seed 1793903035479 op 29: Burst { k: 2, target: 1 }
+51.51s seed 1793903035479 op 30: Retry { caller: 3, land: 376873445006401485 }
+51.52s seed 1793903035479 op 31: Poll { caller: 0, land: 6104121494897614280 }
+51.53s seed 1793903035479 op 32: CutFresh { caller: 2, target: 1, shared: true, cut_ms: 20 }
+51.64s seed 1793903035479 op 33: CutFresh { caller: 3, target: 1, shared: true, cut_ms: 20 }
+51.75s seed 1793903035479 op 34: Check
+52.98s seed 1793903035479 op 35: Check
+54.02s seed 1793903035479 op 36: Burst { k: 8, target: 1 }
+54.87s seed 1793903035479 op 37: Land { caller: 0, target: 2, stale: false, shared: false }
+54.96s seed 1793903035479 op 38: Gc
+56.89s seed 1793903035479 op 39: Burst { k: 8, target: 2 }
+57.54s seed 1793903035479 op 40: Cut { caller: 0, land: 16379218480544832317 }
+57.55s seed 1793903035479 op 41: Land { caller: 3, target: 1, stale: false, shared: true }
+57.68s seed 1793903035479 op 42: Land { caller: 1, target: 2, stale: false, shared: false }
+57.77s seed 1793903035479 op 43: Land { caller: 1, target: 0, stale: false, shared: true }
+57.90s seed 1793903035479 op 44: Burst { k: 4, target: 1 }
+58.33s seed 1793903035479 op 45: Land { caller: 2, target: 2, stale: true, shared: false }
+58.42s seed 1793903035479 op 46: Land { caller: 1, target: 0, stale: false, shared: false }
+58.51s seed 1793903035479 op 47: Burst { k: 8, target: 1 }
+59.36s seed 1793903035479 op 48: KillAtPending
+69.67s seed 1793903035479 op 49: Twin { caller: 0, land: 14569103585564138305 }
+69.69s seed 1793903035479 op 50: CutFresh { caller: 1, target: 1, shared: false, cut_ms: 20 }
+69.79s seed 1793903035479 op 51: KillAtPending
+80.11s seed 1793903035479 op 52: Twin { caller: 0, land: 15344692089033517308 }
+80.13s seed 1793903035479 op 53: Land { caller: 3, target: 1, stale: false, shared: true }
+80.25s seed 1793903035479 op 54: Kill
+80.57s seed 1793903035479 op 55: Burst { k: 8, target: 1 }
+81.42s seed 1793903035479 op 56: Land { caller: 0, target: 0, stale: false, shared: true }
+81.54s seed 1793903035479 op 57: BurstCut { k: 6, target: 2 }
+92.30s seed 1793903035479 op 58: KillAtPending
+102.65s seed 1793903035479 op 59: CutFresh { caller: 2, target: 1, shared: false, cut_ms: 20 }
+102.75s seed 1793903035479 op 60: Cut { caller: 1, land: 11390873692374937431 }
+102.77s seed 1793903035479 op 61: Poll { caller: 2, land: 2081101417497323672 }
+102.77s seed 1793903035479 op 62: Land { caller: 1, target: 2, stale: true, shared: true }
+102.88s seed 1793903035479 op 63: Land { caller: 3, target: 0, stale: false, shared: true }
+103.01s seed 1793903035479 op 64: Burst { k: 2, target: 2 }
+103.20s seed 1793903035479 op 65: Land { caller: 2, target: 0, stale: false, shared: true }
+103.33s seed 1793903035479 op 66: Retry { caller: 0, land: 12617016719957895267 }
+103.35s seed 1793903035479 op 67: CutFresh { caller: 0, target: 1, shared: true, cut_ms: 20 }
+103.47s seed 1793903035479 op 68: Gc
+105.49s seed 1793903035479 op 69: Check
+111.99s seed 1793903035479 op 70: Land { caller: 0, target: 2, stale: true, shared: false }
+112.09s seed 1793903035479 op 71: Kill
+112.40s seed 1793903035479 op 72: Poll { caller: 1, land: 11469627311717959562 }
+112.41s seed 1793903035479 op 73: Kill
+112.72s seed 1793903035479 op 74: Land { caller: 0, target: 2, stale: false, shared: true }
+112.83s seed 1793903035479 op 75: Land { caller: 1, target: 2, stale: false, shared: false }
+112.92s seed 1793903035479 op 76: Land { caller: 2, target: 2, stale: true, shared: true }
+113.03s seed 1793903035479 op 77: Land { caller: 2, target: 1, stale: false, shared: false }
+113.14s seed 1793903035479 op 78: Land { caller: 3, target: 1, stale: false, shared: false }
+113.25s seed 1793903035479 op 79: CutFresh { caller: 3, target: 1, shared: false, cut_ms: 20 }
+113.35s seed 1793903035479 op 80: Land { caller: 0, target: 2, stale: true, shared: false }
+113.58s seed 1793903035479 op 81: BurstCut { k: 6, target: 2 }
+124.33s seed 1793903035479 op 82: Land { caller: 2, target: 1, stale: true, shared: false }
+124.45s seed 1793903035479 op 83: KillAtPending
+134.79s seed 1793903035479 op 84: KillAtPending
+145.12s seed 1793903035479 op 85: Land { caller: 2, target: 0, stale: false, shared: true }
+4.92s seed 1793903035479 op 1: Twin { caller: 2, land: 2593208242079598162 }
+4.92s seed 1793903035479 op 2: Burst { k: 2, target: 2 }
+5.10s seed 1793903035479 op 3: Land { caller: 1, target: 2, stale: true, shared: true }
+5.21s seed 1793903035479 op 4: Check
+5.28s seed 1793903035479 op 5: Land { caller: 0, target: 1, stale: true, shared: false }
+5.39s seed 1793903035479 op 6: Burst { k: 2, target: 0 }
+5.63s seed 1793903035479 op 7: Land { caller: 0, target: 0, stale: true, shared: false }
+5.74s seed 1793903035479 op 8: Land { caller: 2, target: 1, stale: true, shared: true }
+5.86s seed 1793903035479 op 9: Retry { caller: 3, land: 16630948117064647369 }
+5.87s seed 1793903035479 op 10: Land { caller: 0, target: 1, stale: false, shared: false }
+5.99s seed 1793903035479 op 11: Land { caller: 0, target: 2, stale: true, shared: false }
+6.08s seed 1793903035479 op 12: Land { caller: 1, target: 2, stale: true, shared: false }
+6.16s seed 1793903035479 op 13: Land { caller: 0, target: 2, stale: true, shared: false }
+6.25s seed 1793903035479 op 14: KillAtPending
+16.58s seed 1793903035479 op 15: CutFresh { caller: 3, target: 1, shared: false, cut_ms: 20 }
+16.69s seed 1793903035479 op 16: Check
+17.10s seed 1793903035479 op 17: BurstCut { k: 6, target: 2 }
+27.87s seed 1793903035479 op 18: Land { caller: 1, target: 1, stale: false, shared: true }
+28.01s seed 1793903035479 op 19: BurstCut { k: 3, target: 1 }
+28.56s seed 1793903035479 op 20: Gc
+30.45s seed 1793903035479 op 21: Land { caller: 0, target: 0, stale: false, shared: true }
+30.59s seed 1793903035479 op 22: Land { caller: 3, target: 2, stale: false, shared: false }
+30.68s seed 1793903035479 op 23: Burst { k: 7, target: 2 }
+31.25s seed 1793903035479 op 24: Cut { caller: 0, land: 4638398575853689876 }
+31.27s seed 1793903035479 op 25: Kill
+31.59s seed 1793903035479 op 26: Poll { caller: 2, land: 3015169681126691109 }
+31.59s seed 1793903035479 op 27: Land { caller: 3, target: 1, stale: false, shared: false }
+31.71s seed 1793903035479 op 28: CutFresh { caller: 1, target: 0, shared: false, cut_ms: 20 }
+31.80s seed 1793903035479 op 29: Poll { caller: 3, land: 13796595077473428188 }
+31.81s seed 1793903035479 op 30: Gc
+33.73s seed 1793903035479 op 31: Gc
+35.62s seed 1793903035479 op 32: Twin { caller: 0, land: 7150990645744693890 }
+35.64s seed 1793903035479 op 33: Retry { caller: 3, land: 6362955407209163815 }
+35.65s seed 1793903035479 op 34: Twin { caller: 1, land: 13434613974239217789 }
+35.67s seed 1793903035479 op 35: Retry { caller: 0, land: 17375856080120722009 }
+35.68s seed 1793903035479 op 36: Land { caller: 0, target: 1, stale: false, shared: true }
+35.80s seed 1793903035479 op 37: Twin { caller: 0, land: 8105842590325915148 }
+35.81s seed 1793903035479 op 38: Land { caller: 0, target: 0, stale: false, shared: true }
+35.93s seed 1793903035479 op 39: Burst { k: 8, target: 2 }
+36.58s seed 1793903035479 op 40: KillAtPending
+36.91s seed 1793903035479 op 41: Cut { caller: 0, land: 14138870030505942760 }
+36.93s seed 1793903035479 op 42: KillAtPending
+37.26s seed 1793903035479 op 43: Land { caller: 1, target: 1, stale: true, shared: true }
+37.40s seed 1793903035479 op 44: Poll { caller: 1, land: 5524429996606470328 }
+37.41s seed 1793903035479 op 45: Land { caller: 3, target: 2, stale: true, shared: false }
+37.50s seed 1793903035479 op 46: Twin { caller: 3, land: 15571033854139687336 }
+37.51s seed 1793903035479 op 47: Cut { caller: 3, land: 9455567474174978267 }
+37.52s seed 1793903035479 op 48: CutFresh { caller: 0, target: 0, shared: false, cut_ms: 20 }
+37.62s seed 1793903035479 op 49: Kill
+37.92s seed 1793903035479 op 50: Retry { caller: 2, land: 17624109235247237450 }
+37.93s seed 1793903035479 op 51: Cut { caller: 1, land: 6648222381126396457 }
+37.95s seed 1793903035479 op 52: Poll { caller: 1, land: 16504971337513958908 }
+37.95s seed 1793903035479 op 53: Land { caller: 1, target: 0, stale: false, shared: true }
+38.07s seed 1793903035479 op 54: Cut { caller: 1, land: 4211965185445204597 }
+38.09s seed 1793903035479 op 55: Land { caller: 0, target: 1, stale: false, shared: false }
+38.21s seed 1793903035479 op 56: Check
+39.75s seed 1793903035479 op 57: Land { caller: 0, target: 1, stale: false, shared: true }
+39.88s seed 1793903035479 op 58: CutFresh { caller: 0, target: 0, shared: false, cut_ms: 20 }
+39.97s seed 1793903035479 op 59: Land { caller: 3, target: 0, stale: false, shared: false }
+40.10s seed 1793903035479 op 60: Land { caller: 3, target: 1, stale: false, shared: true }
+40.23s seed 1793903035479 op 61: Gc
+42.16s seed 1793903035479 op 62: KillAtPending
+52.48s seed 1793903035479 op 63: Land { caller: 0, target: 2, stale: true, shared: true }
+52.62s seed 1793903035479 op 64: Land { caller: 2, target: 0, stale: true, shared: false }
+52.73s seed 1793903035479 op 65: Land { caller: 1, target: 0, stale: false, shared: true }
+52.86s seed 1793903035479 op 66: Land { caller: 1, target: 0, stale: true, shared: false }
+52.98s seed 1793903035479 op 67: Land { caller: 2, target: 0, stale: false, shared: false }
+53.10s seed 1793903035479 op 68: Twin { caller: 2, land: 11441181258609801858 }
+53.12s seed 1793903035479 op 69: Gc
+55.08s seed 1793903035479 op 70: Land { caller: 0, target: 2, stale: false, shared: true }
+55.19s seed 1793903035479 op 71: Land { caller: 1, target: 0, stale: true, shared: false }
+55.29s seed 1793903035479 op 72: Cut { caller: 0, land: 9824844277915431723 }
+55.30s seed 1793903035479 op 73: Land { caller: 3, target: 1, stale: false, shared: true }
+55.42s seed 1793903035479 op 74: Land { caller: 0, target: 1, stale: true, shared: false }
+55.53s seed 1793903035479 op 75: Land { caller: 3, target: 1, stale: false, shared: true }
+55.66s seed 1793903035479 op 76: BurstCut { k: 6, target: 0 }
+56.45s seed 1793903035479 op 77: Burst { k: 7, target: 0 }
+57.31s seed 1793903035479 op 78: Land { caller: 3, target: 0, stale: true, shared: false }
+57.43s seed 1793903035479 op 79: Poll { caller: 2, land: 7184625469082858570 }
+57.43s seed 1793903035479 op 80: Land { caller: 1, target: 2, stale: true, shared: false }
+57.52s seed 1793903035479 op 81: Land { caller: 3, target: 1, stale: false, shared: true }
+57.65s seed 1793903035479 op 82: Burst { k: 8, target: 0 }
+58.53s seed 1793903035479 op 83: Poll { caller: 0, land: 6463789390356318991 }
+58.54s seed 1793903035479 op 84: Twin { caller: 0, land: 1137757794117828708 }
+58.55s seed 1793903035479 op 85: Check
+64.45s seed 1793903035479 op 86: Kill
+64.76s seed 1793903035479 op 87: BurstCut { k: 3, target: 2 }
+75.31s seed 1793903035479 op 88: Cut { caller: 3, land: 2781768685984683739 }
+75.32s seed 1793903035479 op 89: Twin { caller: 2, land: 5393026839037615360 }
+75.34s seed 1793903035479 op 90: Poll { caller: 3, land: 7535745039110911463 }
+75.34s seed 1793903035479 op 91: Poll { caller: 3, land: 5537634109312797076 }
+75.35s seed 1793903035479 op 92: Retry { caller: 2, land: 573668687485072643 }
+75.36s seed 1793903035479 op 93: CutFresh { caller: 0, target: 2, shared: false, cut_ms: 20 }
+75.45s seed 1793903035479 op 94: Kill
+75.75s seed 1793903035479 op 95: Land { caller: 1, target: 1, stale: true, shared: true }
+75.89s seed 1793903035479 op 96: Land { caller: 1, target: 1, stale: false, shared: false }
+76.01s seed 1793903035479 op 97: Land { caller: 3, target: 1, stale: false, shared: false }
+76.15s seed 1793903035479 op 98: Cut { caller: 1, land: 10889614530746298460 }
+76.16s seed 1793903035479 op 99: Twin { caller: 0, land: 2451863141290490391 }
+76.17s seed 1793903035479 op 100: Gc
+78.21s seed 1793903035479 op 101: Check
+84.41s seed 1793903035479 op 102: Land { caller: 0, target: 1, stale: false, shared: false }
+84.52s seed 1793903035479 op 103: CutFresh { caller: 0, target: 0, shared: true, cut_ms: 20 }
+84.63s seed 1793903035479 op 104: Kill
+84.93s seed 1793903035479 op 105: Cut { caller: 0, land: 17915234075316435819 }
+84.94s seed 1793903035479 op 106: Twin { caller: 2, land: 15162821590728387228 }
+84.96s seed 1793903035479 op 107: Land { caller: 0, target: 0, stale: true, shared: false }
+85.08s seed 1793903035479 op 108: Twin { caller: 1, land: 10257083598229843446 }
+85.09s seed 1793903035479 op 109: Cut { caller: 2, land: 17428567451420604821 }
+4.72s seed 1793903035479 op 1: Poll { caller: 3, land: 10392552813657975374 }
+4.72s seed 1793903035479 op 2: Retry { caller: 1, land: 8464916857347460165 }
+4.72s seed 1793903035479 op 3: Land { caller: 0, target: 2, stale: true, shared: false }
+4.81s seed 1793903035479 op 4: Land { caller: 1, target: 2, stale: false, shared: true }
+4.92s seed 1793903035479 op 5: CutFresh { caller: 3, target: 1, shared: false, cut_ms: 20 }
+5.01s seed 1793903035479 op 6: Cut { caller: 3, land: 13316065455582599661 }
+5.03s seed 1793903035479 op 7: CutFresh { caller: 3, target: 0, shared: true, cut_ms: 20 }
+5.13s seed 1793903035479 op 8: Land { caller: 3, target: 1, stale: true, shared: true }
+5.27s seed 1793903035479 op 9: Land { caller: 2, target: 2, stale: false, shared: false }
+5.36s seed 1793903035479 op 10: Check
+5.56s seed 1793903035479 op 11: CutFresh { caller: 0, target: 1, shared: false, cut_ms: 20 }
+5.66s seed 1793903035479 op 12: Land { caller: 1, target: 2, stale: true, shared: false }
+5.76s seed 1793903035479 op 13: Burst { k: 5, target: 2 }
+6.17s seed 1793903035479 op 14: Land { caller: 3, target: 1, stale: true, shared: true }
+6.30s seed 1793903035479 op 15: Kill
+6.61s seed 1793903035479 op 16: Land { caller: 0, target: 1, stale: false, shared: true }
+6.74s seed 1793903035479 op 17: Check
+7.14s seed 1793903035479 op 18: Cut { caller: 3, land: 3735306551316531970 }
+7.15s seed 1793903035479 op 19: Gc
+8.99s seed 1793903035479 op 20: Check
+9.36s seed 1793903035479 op 21: CutFresh { caller: 2, target: 2, shared: false, cut_ms: 20 }
+9.45s seed 1793903035479 op 22: Land { caller: 0, target: 0, stale: false, shared: false }
+9.56s seed 1793903035479 op 23: Cut { caller: 3, land: 14122482860682090160 }
+9.57s seed 1793903035479 op 24: Land { caller: 1, target: 1, stale: false, shared: false }
+9.68s seed 1793903035479 op 25: Kill
+9.99s seed 1793903035479 op 26: CutFresh { caller: 1, target: 1, shared: true, cut_ms: 20 }
+10.10s seed 1793903035479 op 27: Poll { caller: 0, land: 17668735029327364942 }
+10.11s seed 1793903035479 op 28: Land { caller: 3, target: 1, stale: true, shared: true }
+10.22s seed 1793903035479 op 29: Land { caller: 2, target: 0, stale: true, shared: true }
+10.35s seed 1793903035479 op 30: Twin { caller: 3, land: 625925725818793507 }
+4.89s seed 1793903035479 op 1: Cut { caller: 3, land: 14806505252196742197 }
+4.89s seed 1793903035479 op 2: BurstCut { k: 6, target: 2 }
+15.65s seed 1793903035479 op 3: Check
+15.77s seed 1793903035479 op 4: Check
+15.84s seed 1793903035479 op 5: Check
+15.92s seed 1793903035479 op 6: Land { caller: 3, target: 0, stale: true, shared: false }
+16.04s seed 1793903035479 op 7: Land { caller: 3, target: 0, stale: false, shared: false }
+16.16s seed 1793903035479 op 8: KillAtPending
+26.49s seed 1793903035479 op 9: Gc
+28.37s seed 1793903035479 op 10: Land { caller: 3, target: 2, stale: true, shared: false }
+28.47s seed 1793903035479 op 11: Land { caller: 1, target: 1, stale: false, shared: true }
+28.60s seed 1793903035479 op 12: Land { caller: 0, target: 0, stale: true, shared: false }
+28.70s seed 1793903035479 op 13: Land { caller: 1, target: 1, stale: true, shared: false }
+28.81s seed 1793903035479 op 14: Land { caller: 1, target: 1, stale: false, shared: false }
+28.92s seed 1793903035479 op 15: Check
+29.26s seed 1793903035479 op 16: Burst { k: 2, target: 2 }
+29.44s seed 1793903035479 op 17: Cut { caller: 1, land: 5002468827153002631 }
+29.45s seed 1793903035479 op 18: Burst { k: 8, target: 2 }
+30.10s seed 1793903035479 op 19: Land { caller: 2, target: 1, stale: true, shared: false }
+30.22s seed 1793903035479 op 20: Burst { k: 4, target: 1 }
+30.66s seed 1793903035479 op 21: Land { caller: 0, target: 1, stale: true, shared: false }
+30.77s seed 1793903035479 op 22: Land { caller: 0, target: 1, stale: false, shared: true }
+30.90s seed 1793903035479 op 23: Land { caller: 1, target: 1, stale: true, shared: true }
+31.03s seed 1793903035479 op 24: Kill
+31.33s seed 1793903035479 op 25: Gc
+33.24s seed 1793903035479 op 26: Kill
+33.55s seed 1793903035479 op 27: Land { caller: 2, target: 2, stale: true, shared: false }
+33.64s seed 1793903035479 op 28: Check
+34.59s seed 1793903035479 op 29: CutFresh { caller: 2, target: 2, shared: false, cut_ms: 20 }
+34.67s seed 1793903035479 op 30: Burst { k: 7, target: 0 }
+35.41s seed 1793903035479 op 31: Cut { caller: 3, land: 18421565382695541960 }
+35.42s seed 1793903035479 op 32: Check
+36.77s seed 1793903035479 op 33: Land { caller: 3, target: 1, stale: false, shared: true }
+36.91s seed 1793903035479 op 34: Kill
+37.21s seed 1793903035479 op 35: Land { caller: 0, target: 0, stale: false, shared: true }
+37.36s seed 1793903035479 op 36: Land { caller: 3, target: 2, stale: false, shared: true }
+37.47s seed 1793903035479 op 37: Land { caller: 1, target: 1, stale: true, shared: true }
+37.60s seed 1793903035479 op 38: Gc
+39.53s seed 1793903035479 op 39: Land { caller: 3, target: 2, stale: false, shared: false }
+39.63s seed 1793903035479 op 40: BurstCut { k: 3, target: 1 }
+40.18s seed 1793903035479 op 41: Land { caller: 3, target: 2, stale: false, shared: true }
+40.30s seed 1793903035479 op 42: KillAtPending
+40.62s seed 1793903035479 op 43: Retry { caller: 0, land: 7973761167219871429 }
+40.64s seed 1793903035479 op 44: Twin { caller: 0, land: 17583053462814954354 }
+40.65s seed 1793903035479 op 45: Land { caller: 2, target: 0, stale: true, shared: false }
+40.77s seed 1793903035479 op 46: Check
+42.88s seed 1793903035479 op 47: Land { caller: 3, target: 1, stale: false, shared: true }
+43.00s seed 1793903035479 op 48: Land { caller: 3, target: 2, stale: true, shared: false }
+43.09s seed 1793903035479 op 49: Twin { caller: 0, land: 17230721312978728336 }
+43.11s seed 1793903035479 op 50: Check
+45.18s seed 1793903035479 op 51: Twin { caller: 3, land: 8085728334093638890 }
+45.20s seed 1793903035479 op 52: Check
+47.34s seed 1793903035479 op 53: Land { caller: 1, target: 1, stale: true, shared: false }
+47.44s seed 1793903035479 op 54: Gc
+49.36s seed 1793903035479 op 55: Land { caller: 1, target: 2, stale: true, shared: false }
+49.46s seed 1793903035479 op 56: Gc
+51.41s seed 1793903035479 op 57: Twin { caller: 1, land: 17086148101531111783 }
+51.43s seed 1793903035479 op 58: Land { caller: 2, target: 1, stale: true, shared: false }
+51.54s seed 1793903035479 op 59: Retry { caller: 1, land: 4337006134853719172 }
+51.55s seed 1793903035479 op 60: KillAtPending
+4.88s seed 1793903035479 op 1: Check
+4.94s seed 1793903035479 op 2: Land { caller: 2, target: 0, stale: true, shared: true }
+5.08s seed 1793903035479 op 3: CutFresh { caller: 0, target: 1, shared: true, cut_ms: 20 }
+5.19s seed 1793903035479 op 4: KillAtPending
+15.52s seed 1793903035479 op 5: Poll { caller: 0, land: 4064704156078578806 }
+15.53s seed 1793903035479 op 6: Land { caller: 0, target: 2, stale: true, shared: true }
+15.64s seed 1793903035479 op 7: Land { caller: 2, target: 1, stale: false, shared: false }
+15.75s seed 1793903035479 op 8: Land { caller: 0, target: 2, stale: false, shared: true }
+15.85s seed 1793903035479 op 9: Land { caller: 3, target: 2, stale: false, shared: true }
+15.96s seed 1793903035479 op 10: Check
+16.17s seed 1793903035479 op 11: Kill
+16.47s seed 1793903035479 op 12: Land { caller: 3, target: 0, stale: true, shared: true }
+16.60s seed 1793903035479 op 13: Gc
+18.49s seed 1793903035479 op 14: CutFresh { caller: 2, target: 1, shared: false, cut_ms: 20 }
+18.58s seed 1793903035479 op 15: Land { caller: 0, target: 1, stale: false, shared: true }
+18.74s seed 1793903035479 op 16: Check
+19.11s seed 1793903035479 op 17: Burst { k: 5, target: 2 }
+19.53s seed 1793903035479 op 18: Gc
+21.45s seed 1793903035479 op 19: KillAtPending
+31.77s seed 1793903035479 op 20: Cut { caller: 0, land: 10247013689107159189 }
+31.79s seed 1793903035479 op 21: Burst { k: 2, target: 2 }
+31.96s seed 1793903035479 op 22: Burst { k: 2, target: 1 }
+32.19s seed 1793903035479 op 23: Poll { caller: 2, land: 8083245352817713548 }
+32.19s seed 1793903035479 op 24: Cut { caller: 2, land: 14632189424713578598 }
+32.20s seed 1793903035479 op 25: Land { caller: 1, target: 2, stale: true, shared: true }
+32.30s seed 1793903035479 op 26: Kill
+32.60s seed 1793903035479 op 27: Land { caller: 0, target: 1, stale: true, shared: true }
+32.74s seed 1793903035479 op 28: Land { caller: 2, target: 2, stale: false, shared: false }
+32.83s seed 1793903035479 op 29: Check
+33.42s seed 1793903035479 op 30: Land { caller: 1, target: 0, stale: false, shared: false }
+33.53s seed 1793903035479 op 31: Retry { caller: 1, land: 9039268123858811046 }
+33.54s seed 1793903035479 op 32: Gc
+35.45s seed 1793903035479 op 33: Check
+36.11s seed 1793903035479 op 34: Twin { caller: 2, land: 609818390042106462 }
+36.12s seed 1793903035479 op 35: Gc
+38.17s seed 1793903035479 op 36: Land { caller: 2, target: 0, stale: false, shared: true }
+38.30s seed 1793903035479 op 37: Land { caller: 1, target: 1, stale: true, shared: true }
+38.42s seed 1793903035479 op 38: Land { caller: 3, target: 2, stale: true, shared: false }
+38.51s seed 1793903035479 op 39: CutFresh { caller: 3, target: 1, shared: true, cut_ms: 20 }
+38.62s seed 1793903035479 op 40: CutFresh { caller: 3, target: 1, shared: true, cut_ms: 20 }
+4.94s seed 1793903035479 op 1: Land { caller: 1, target: 0, stale: true, shared: true }
+5.08s seed 1793903035479 op 2: Land { caller: 1, target: 2, stale: false, shared: false }
+5.17s seed 1793903035479 op 3: Kill
+5.48s seed 1793903035479 op 4: Gc
+7.35s seed 1793903035479 op 5: KillAtPending
+17.68s seed 1793903035479 op 6: Twin { caller: 2, land: 3654178926314725054 }
+17.70s seed 1793903035479 op 7: CutFresh { caller: 0, target: 1, shared: false, cut_ms: 20 }
+17.79s seed 1793903035479 op 8: Burst { k: 4, target: 2 }
+18.12s seed 1793903035479 op 9: Check
+18.28s seed 1793903035479 op 10: CutFresh { caller: 1, target: 0, shared: false, cut_ms: 20 }
+18.38s seed 1793903035479 op 11: Burst { k: 2, target: 2 }
+18.55s seed 1793903035479 op 12: Twin { caller: 3, land: 11823143018492350381 }
+18.57s seed 1793903035479 op 13: Poll { caller: 1, land: 14867748672823586782 }
+18.57s seed 1793903035479 op 14: Kill
+18.87s seed 1793903035479 op 15: Cut { caller: 1, land: 741942341406204225 }
+18.89s seed 1793903035479 op 16: Land { caller: 1, target: 2, stale: true, shared: false }
+18.98s seed 1793903035479 op 17: Land { caller: 3, target: 2, stale: false, shared: false }
+19.08s seed 1793903035479 op 18: Retry { caller: 0, land: 3723128709222191125 }
+19.09s seed 1793903035479 op 19: Land { caller: 2, target: 1, stale: true, shared: true }
+19.21s seed 1793903035479 op 20: Land { caller: 1, target: 0, stale: true, shared: true }
+19.34s seed 1793903035479 op 21: Land { caller: 1, target: 1, stale: false, shared: true }
+19.46s seed 1793903035479 op 22: Land { caller: 3, target: 1, stale: true, shared: false }
+19.57s seed 1793903035479 op 23: Twin { caller: 0, land: 5406815129328163037 }
+19.59s seed 1793903035479 op 24: Gc
+21.49s seed 1793903035479 op 25: Check
+21.94s seed 1793903035479 op 26: Land { caller: 3, target: 1, stale: false, shared: false }
+22.07s seed 1793903035479 op 27: Gc
+24.02s seed 1793903035479 op 28: Poll { caller: 3, land: 13303791989186963991 }
+24.03s seed 1793903035479 op 29: Burst { k: 7, target: 2 }
+24.61s seed 1793903035479 op 30: Check
+25.12s seed 1793903035479 op 31: Check
+25.63s seed 1793903035479 op 32: BurstCut { k: 3, target: 1 }
+26.20s seed 1793903035479 op 33: Land { caller: 3, target: 2, stale: true, shared: true }
+26.31s seed 1793903035479 op 34: CutFresh { caller: 0, target: 1, shared: true, cut_ms: 20 }
+26.42s seed 1793903035479 op 35: Land { caller: 0, target: 0, stale: false, shared: true }
+26.56s seed 1793903035479 op 36: Burst { k: 2, target: 1 }
+26.80s seed 1793903035479 op 37: Burst { k: 5, target: 2 }
+27.21s seed 1793903035479 op 38: KillAtPending
+27.55s seed 1793903035479 op 39: Kill
+27.85s seed 1793903035479 op 40: Check
+28.93s seed 1793903035479 op 41: Land { caller: 1, target: 2, stale: false, shared: false }
+29.02s seed 1793903035479 op 42: Burst { k: 4, target: 2 }
+29.34s seed 1793903035479 op 43: Land { caller: 2, target: 1, stale: true, shared: false }
+29.46s seed 1793903035479 op 44: Twin { caller: 0, land: 10322299102666351686 }
+29.47s seed 1793903035479 op 45: Gc
+31.38s seed 1793903035479 op 46: Cut { caller: 3, land: 6230959733809654896 }
+31.39s seed 1793903035479 op 47: Check
+32.48s seed 1793903035479 op 48: KillAtPending
+42.79s seed 1793903035479 op 49: BurstCut { k: 6, target: 1 }
+43.55s seed 1793903035479 op 50: Cut { caller: 0, land: 1372377384628150468 }
+43.56s seed 1793903035479 op 51: Burst { k: 5, target: 0 }
+44.09s seed 1793903035479 op 52: Poll { caller: 3, land: 15957069862076047439 }
+44.10s seed 1793903035479 op 53: CutFresh { caller: 2, target: 0, shared: true, cut_ms: 20 }
+44.20s seed 1793903035479 op 54: Check
+46.44s seed 1793903035479 op 55: Twin { caller: 1, land: 5529430102069483606 }
+46.46s seed 1793903035479 op 56: Gc
+48.43s seed 1793903035479 op 57: Burst { k: 4, target: 0 }
+48.86s seed 1793903035479 op 58: Land { caller: 0, target: 2, stale: true, shared: false }
+48.95s seed 1793903035479 op 59: Check
+51.25s seed 1793903035479 op 60: Land { caller: 1, target: 1, stale: false, shared: false }
+51.37s seed 1793903035479 op 61: Land { caller: 2, target: 1, stale: true, shared: false }
+51.48s seed 1793903035479 op 62: Twin { caller: 2, land: 2499699652596093002 }
+51.49s seed 1793903035479 op 63: CutFresh { caller: 3, target: 2, shared: false, cut_ms: 20 }
+51.58s seed 1793903035479 op 64: Land { caller: 2, target: 2, stale: true, shared: false }
+51.67s seed 1793903035479 op 65: BurstCut { k: 6, target: 2 }
+62.52s seed 1793903035479 op 66: Land { caller: 3, target: 0, stale: false, shared: false }
+62.63s seed 1793903035479 op 67: Land { caller: 0, target: 2, stale: false, shared: true }
+62.74s seed 1793903035479 op 68: Check
+65.59s seed 1793903035479 op 69: Land { caller: 1, target: 1, stale: false, shared: false }
+65.70s seed 1793903035479 op 70: Cut { caller: 3, land: 5526340655020787279 }
+65.71s seed 1793903035479 op 71: Land { caller: 0, target: 1, stale: true, shared: false }
+65.82s seed 1793903035479 op 72: Land { caller: 1, target: 0, stale: true, shared: true }
+65.94s seed 1793903035479 op 73: Land { caller: 1, target: 0, stale: true, shared: true }
+66.06s seed 1793903035479 op 74: Cut { caller: 2, land: 11546989208877356083 }
+66.07s seed 1793903035479 op 75: Land { caller: 3, target: 0, stale: true, shared: false }
+66.19s seed 1793903035479 op 76: Check
+69.66s seed 1793903035479 op 77: Gc
+71.64s seed 1793903035479 op 78: Check
+75.13s seed 1793903035479 op 79: Land { caller: 3, target: 2, stale: false, shared: true }
+75.29s seed 1793903035479 op 80: Land { caller: 0, target: 0, stale: false, shared: false }
+75.41s seed 1793903035479 op 81: Land { caller: 1, target: 2, stale: false, shared: true }
+75.51s seed 1793903035479 op 82: Land { caller: 1, target: 2, stale: false, shared: true }
+75.64s seed 1793903035479 op 83: Check
+79.20s seed 1793903035479 op 84: Poll { caller: 1, land: 4628595121945440123 }
+79.21s seed 1793903035479 op 85: Land { caller: 2, target: 2, stale: true, shared: false }
+79.30s seed 1793903035479 op 86: Gc
+81.26s seed 1793903035479 op 87: Land { caller: 0, target: 1, stale: true, shared: true }
+81.40s seed 1793903035479 op 88: Twin { caller: 0, land: 10266936259414516108 }
+81.42s seed 1793903035479 op 89: Check
+85.21s seed 1793903035479 op 90: Cut { caller: 3, land: 13373812544327770987 }
+85.23s seed 1793903035479 op 91: Land { caller: 3, target: 0, stale: true, shared: true }
+85.35s seed 1793903035479 op 92: Land { caller: 2, target: 0, stale: true, shared: true }
+85.48s seed 1793903035479 op 93: Check
+89.60s seed 1793903035479 op 94: KillAtPending
+4.98s seed 1793903035479 op 1: Burst { k: 4, target: 1 }
+5.42s seed 1793903035479 op 2: Retry { caller: 2, land: 8356429275382845717 }
+5.43s seed 1793903035479 op 3: Burst { k: 4, target: 2 }
+5.75s seed 1793903035479 op 4: Burst { k: 2, target: 1 }
+5.98s seed 1793903035479 op 5: Land { caller: 1, target: 0, stale: true, shared: true }
+6.10s seed 1793903035479 op 6: CutFresh { caller: 3, target: 0, shared: true, cut_ms: 20 }
+6.20s seed 1793903035479 op 7: Retry { caller: 1, land: 13446808139194390194 }
+6.21s seed 1793903035479 op 8: Land { caller: 1, target: 2, stale: false, shared: true }
+6.31s seed 1793903035479 op 9: Retry { caller: 2, land: 1512832605710742740 }
+6.32s seed 1793903035479 op 10: Land { caller: 1, target: 2, stale: true, shared: false }
+6.41s seed 1793903035479 op 11: Check
+6.91s seed 1793903035479 op 12: Cut { caller: 1, land: 11740323774829965004 }
+6.93s seed 1793903035479 op 13: Burst { k: 4, target: 2 }
+7.26s seed 1793903035479 op 14: Twin { caller: 2, land: 17925236320493778356 }
+7.27s seed 1793903035479 op 15: Burst { k: 8, target: 2 }
+7.90s seed 1793903035479 op 16: Land { caller: 0, target: 2, stale: true, shared: true }
+8.01s seed 1793903035479 op 17: Land { caller: 0, target: 1, stale: true, shared: false }
+8.11s seed 1793903035479 op 18: Land { caller: 1, target: 0, stale: false, shared: true }
+8.24s seed 1793903035479 op 19: Land { caller: 0, target: 2, stale: true, shared: true }
+8.35s seed 1793903035479 op 20: Land { caller: 1, target: 1, stale: false, shared: false }
+8.46s seed 1793903035479 op 21: KillAtPending
+18.80s seed 1793903035479 op 22: Land { caller: 1, target: 2, stale: false, shared: false }
+18.90s seed 1793903035479 op 23: Check
+19.63s seed 1793903035479 op 24: Poll { caller: 1, land: 10609898402304160695 }
+19.63s seed 1793903035479 op 25: Poll { caller: 1, land: 10572942384607416423 }
+19.64s seed 1793903035479 op 26: Land { caller: 1, target: 2, stale: true, shared: false }
+19.73s seed 1793903035479 op 27: Land { caller: 2, target: 1, stale: true, shared: true }
+19.86s seed 1793903035479 op 28: Land { caller: 1, target: 2, stale: true, shared: true }
+19.96s seed 1793903035479 op 29: KillAtPending
+30.29s seed 1793903035479 op 30: Poll { caller: 0, land: 2309427321661830128 }
+30.29s seed 1793903035479 op 31: Land { caller: 3, target: 1, stale: true, shared: true }
+30.43s seed 1793903035479 op 32: Land { caller: 1, target: 0, stale: true, shared: true }
+30.55s seed 1793903035479 op 33: Retry { caller: 0, land: 9180640495765899623 }
+30.56s seed 1793903035479 op 34: BurstCut { k: 3, target: 2 }
+41.11s seed 1793903035479 op 35: Poll { caller: 0, land: 5027739896987594069 }
+41.12s seed 1793903035479 op 36: Gc
+43.07s seed 1793903035479 op 37: BurstCut { k: 3, target: 0 }
+43.63s seed 1793903035479 op 38: Burst { k: 2, target: 1 }
+43.88s seed 1793903035479 op 39: Land { caller: 0, target: 2, stale: false, shared: false }
+43.96s seed 1793903035479 op 40: Twin { caller: 1, land: 5906849007516160434 }
+43.98s seed 1793903035479 op 41: KillAtPending
+44.31s seed 1793903035479 op 42: Check
+45.80s seed 1793903035479 op 43: Land { caller: 2, target: 1, stale: false, shared: false }
+45.91s seed 1793903035479 op 44: Poll { caller: 0, land: 7403636637013339980 }
+45.92s seed 1793903035479 op 45: Cut { caller: 3, land: 15309945708475099466 }
+45.93s seed 1793903035479 op 46: Land { caller: 3, target: 1, stale: false, shared: false }
+46.04s seed 1793903035479 op 47: Land { caller: 0, target: 2, stale: false, shared: true }
+46.16s seed 1793903035479 op 48: Land { caller: 3, target: 0, stale: false, shared: false }
+46.27s seed 1793903035479 op 49: Cut { caller: 3, land: 5289688109411791822 }
+46.28s seed 1793903035479 op 50: KillAtPending
+56.60s seed 1793903035479 op 51: BurstCut { k: 6, target: 1 }
+57.36s seed 1793903035479 op 52: Check
+59.86s seed 1793903035479 op 53: Land { caller: 0, target: 2, stale: false, shared: true }
+59.96s seed 1793903035479 op 54: Land { caller: 3, target: 0, stale: true, shared: false }
+60.08s seed 1793903035479 op 55: Land { caller: 2, target: 1, stale: true, shared: false }
+60.20s seed 1793903035479 op 56: Twin { caller: 3, land: 13594979235617358195 }
+60.21s seed 1793903035479 op 57: Check
+4.91s seed 1793903035479 op 1: Land { caller: 1, target: 1, stale: false, shared: true }
+5.04s seed 1793903035479 op 2: Burst { k: 5, target: 0 }
+5.57s seed 1793903035479 op 3: Land { caller: 2, target: 2, stale: false, shared: true }
+5.67s seed 1793903035479 op 4: Gc
+7.57s seed 1793903035479 op 5: CutFresh { caller: 0, target: 0, shared: true, cut_ms: 20 }
+7.69s seed 1793903035479 op 6: Poll { caller: 2, land: 18418524817829955439 }
+7.69s seed 1793903035479 op 7: Poll { caller: 0, land: 3882408284009404705 }
+7.70s seed 1793903035479 op 8: Burst { k: 5, target: 2 }
+8.12s seed 1793903035479 op 9: Burst { k: 8, target: 0 }
+8.96s seed 1793903035479 op 10: Land { caller: 0, target: 1, stale: false, shared: true }
+9.09s seed 1793903035479 op 11: Land { caller: 2, target: 2, stale: true, shared: true }
+9.20s seed 1793903035479 op 12: Burst { k: 2, target: 1 }
+9.43s seed 1793903035479 op 13: KillAtPending
+19.76s seed 1793903035479 op 14: Check
+20.85s seed 1793903035479 op 15: Land { caller: 3, target: 2, stale: true, shared: false }
+20.95s seed 1793903035479 op 16: Check
+22.04s seed 1793903035479 op 17: Land { caller: 0, target: 2, stale: true, shared: true }
+22.15s seed 1793903035479 op 18: KillAtPending
+32.45s seed 1793903035479 op 19: Retry { caller: 1, land: 9898099659282953671 }
+32.47s seed 1793903035479 op 20: CutFresh { caller: 0, target: 1, shared: false, cut_ms: 20 }
+32.57s seed 1793903035479 op 21: Burst { k: 4, target: 2 }
+32.89s seed 1793903035479 op 22: Gc
+34.90s seed 1793903035479 op 23: Check
+36.18s seed 1793903035479 op 24: Land { caller: 1, target: 2, stale: true, shared: false }
+36.27s seed 1793903035479 op 25: Check
+37.50s seed 1793903035479 op 26: Land { caller: 3, target: 1, stale: false, shared: false }
+37.61s seed 1793903035479 op 27: Check
+38.91s seed 1793903035479 op 28: Land { caller: 3, target: 2, stale: true, shared: false }
+39.00s seed 1793903035479 op 29: Land { caller: 3, target: 1, stale: false, shared: true }
+39.13s seed 1793903035479 op 30: Check
+40.48s seed 1793903035479 op 31: Land { caller: 1, target: 0, stale: false, shared: false }
+40.59s seed 1793903035479 op 32: Kill
+40.89s seed 1793903035479 op 33: Cut { caller: 2, land: 4983401604142286239 }
+40.91s seed 1793903035479 op 34: Land { caller: 1, target: 1, stale: false, shared: true }
+41.04s seed 1793903035479 op 35: Land { caller: 2, target: 1, stale: false, shared: false }
+41.15s seed 1793903035479 op 36: Twin { caller: 3, land: 11426478988684000655 }
+41.16s seed 1793903035479 op 37: BurstCut { k: 6, target: 1 }
+41.92s seed 1793903035479 op 38: Cut { caller: 1, land: 4945888050354646677 }
+41.93s seed 1793903035479 op 39: Poll { caller: 2, land: 4028081370330806018 }
+41.93s seed 1793903035479 op 40: Land { caller: 0, target: 0, stale: true, shared: true }
+42.05s seed 1793903035479 op 41: Kill
+42.35s seed 1793903035479 op 42: CutFresh { caller: 1, target: 0, shared: true, cut_ms: 20 }
+42.47s seed 1793903035479 op 43: Land { caller: 0, target: 2, stale: true, shared: false }
+42.56s seed 1793903035479 op 44: Gc
+44.47s seed 1793903035479 op 45: Land { caller: 0, target: 2, stale: true, shared: false }
+44.56s seed 1793903035479 op 46: Land { caller: 2, target: 2, stale: false, shared: true }
+44.67s seed 1793903035479 op 47: Twin { caller: 3, land: 7040926559379566221 }
+44.68s seed 1793903035479 op 48: Gc
+46.63s seed 1793903035479 op 49: Poll { caller: 3, land: 9776147350536472138 }
+46.64s seed 1793903035479 op 50: Poll { caller: 0, land: 2736957670194052512 }
+46.64s seed 1793903035479 op 51: Retry { caller: 1, land: 9419297938990369461 }
+46.66s seed 1793903035479 op 52: Land { caller: 2, target: 2, stale: false, shared: true }
+46.76s seed 1793903035479 op 53: Land { caller: 1, target: 1, stale: true, shared: false }
+46.87s seed 1793903035479 op 54: KillAtPending
+47.21s seed 1793903035479 op 55: Check
+49.96s seed 1793903035479 op 56: Poll { caller: 3, land: 132783487719483610 }
+49.97s seed 1793903035479 op 57: Cut { caller: 2, land: 12529804655803050190 }
+49.99s seed 1793903035479 op 58: Check
+52.55s seed 1793903035479 op 59: Land { caller: 3, target: 1, stale: false, shared: false }
+52.67s seed 1793903035479 op 60: Burst { k: 4, target: 1 }
+53.11s seed 1793903035479 op 61: Land { caller: 0, target: 1, stale: true, shared: false }
+53.22s seed 1793903035479 op 62: Land { caller: 0, target: 0, stale: false, shared: true }
+53.34s seed 1793903035479 op 63: Land { caller: 2, target: 0, stale: false, shared: true }
+53.47s seed 1793903035479 op 64: Land { caller: 1, target: 1, stale: false, shared: true }
+5.03s seed 1793903035479 op 1: KillAtPending
+15.36s seed 1793903035479 op 2: Land { caller: 3, target: 1, stale: true, shared: false }
+15.48s seed 1793903035479 op 3: CutFresh { caller: 3, target: 2, shared: false, cut_ms: 20 }
+15.57s seed 1793903035479 op 4: Land { caller: 1, target: 2, stale: false, shared: true }
+15.67s seed 1793903035479 op 5: Land { caller: 1, target: 2, stale: true, shared: true }
+15.78s seed 1793903035479 op 6: Check
+15.90s seed 1793903035479 op 7: Gc
+17.80s seed 1793903035479 op 8: Land { caller: 1, target: 1, stale: false, shared: false }
+17.93s seed 1793903035479 op 9: Gc
+19.83s seed 1793903035479 op 10: Land { caller: 3, target: 2, stale: true, shared: true }
+19.94s seed 1793903035479 op 11: Land { caller: 0, target: 1, stale: false, shared: false }
+20.05s seed 1793903035479 op 12: Poll { caller: 2, land: 3669741133128668087 }
+20.06s seed 1793903035479 op 13: Cut { caller: 1, land: 5787388254571234057 }
+20.07s seed 1793903035479 op 14: Gc
+21.98s seed 1793903035479 op 15: Land { caller: 1, target: 0, stale: true, shared: false }
+22.10s seed 1793903035479 op 16: Retry { caller: 2, land: 18231366067063674190 }
+22.11s seed 1793903035479 op 17: KillAtPending
+32.43s seed 1793903035479 op 18: Land { caller: 2, target: 2, stale: false, shared: false }
+32.53s seed 1793903035479 op 19: Gc
+34.42s seed 1793903035479 op 20: Retry { caller: 0, land: 7697130303571013921 }
+34.44s seed 1793903035479 op 21: Burst { k: 2, target: 2 }
+34.61s seed 1793903035479 op 22: Poll { caller: 0, land: 4296952281018922878 }
+34.62s seed 1793903035479 op 23: Land { caller: 3, target: 0, stale: true, shared: true }
+34.74s seed 1793903035479 op 24: Check
+35.02s seed 1793903035479 op 25: Retry { caller: 1, land: 4449459970976886979 }
+35.03s seed 1793903035479 op 26: Land { caller: 3, target: 2, stale: false, shared: true }
+35.14s seed 1793903035479 op 27: Cut { caller: 2, land: 13673277586050813195 }
+35.15s seed 1793903035479 op 28: Land { caller: 0, target: 0, stale: true, shared: true }
+35.28s seed 1793903035479 op 29: Cut { caller: 2, land: 18435476410490780598 }
+35.29s seed 1793903035479 op 30: Cut { caller: 2, land: 7815479221650387626 }
+35.30s seed 1793903035479 op 31: BurstCut { k: 3, target: 1 }
+35.86s seed 1793903035479 op 32: Burst { k: 7, target: 2 }
+36.44s seed 1793903035479 op 33: Check
+37.07s seed 1793903035479 op 34: Land { caller: 1, target: 0, stale: true, shared: false }
+37.18s seed 1793903035479 op 35: Land { caller: 1, target: 2, stale: false, shared: true }
+37.29s seed 1793903035479 op 36: KillAtPending
+47.60s seed 1793903035479 op 37: Land { caller: 1, target: 0, stale: true, shared: true }
+47.75s seed 1793903035479 op 38: Twin { caller: 3, land: 18127864970146062580 }
+47.76s seed 1793903035479 op 39: CutFresh { caller: 1, target: 2, shared: false, cut_ms: 20 }
+47.85s seed 1793903035479 op 40: KillAtPending
+58.16s seed 1793903035479 op 41: BurstCut { k: 6, target: 2 }
+68.92s seed 1793903035479 op 42: Twin { caller: 3, land: 6669718427827321403 }
+68.93s seed 1793903035479 op 43: Land { caller: 2, target: 2, stale: false, shared: true }
+69.03s seed 1793903035479 op 44: Cut { caller: 3, land: 18278482719968791089 }
+69.04s seed 1793903035479 op 45: Retry { caller: 0, land: 16304339647156333406 }
+69.05s seed 1793903035479 op 46: Kill
+69.36s seed 1793903035479 op 47: Check
+70.07s seed 1793903035479 op 48: Land { caller: 3, target: 2, stale: false, shared: true }
+70.19s seed 1793903035479 op 49: Land { caller: 0, target: 2, stale: false, shared: true }
+70.30s seed 1793903035479 op 50: Cut { caller: 2, land: 8028173120638482749 }
+70.32s seed 1793903035479 op 51: Twin { caller: 2, land: 8974575573946967580 }
+70.33s seed 1793903035479 op 52: Twin { caller: 1, land: 6649868005346380561 }
+70.34s seed 1793903035479 op 53: Retry { caller: 1, land: 3677165908472561036 }
+70.35s seed 1793903035479 op 54: Cut { caller: 0, land: 11587804598906667513 }
+70.36s seed 1793903035479 op 55: Land { caller: 0, target: 0, stale: true, shared: true }
+70.49s seed 1793903035479 op 56: Kill
+70.80s seed 1793903035479 op 57: Land { caller: 0, target: 1, stale: true, shared: false }
+70.91s seed 1793903035479 op 58: Twin { caller: 3, land: 13515138156304603241 }
+70.93s seed 1793903035479 op 59: KillAtPending
+81.26s seed 1793903035479 op 60: Retry { caller: 1, land: 15976371947637006445 }
+81.28s seed 1793903035479 op 61: Land { caller: 2, target: 2, stale: true, shared: true }
+81.39s seed 1793903035479 op 62: Check
+82.25s seed 1793903035479 op 63: Check
+83.08s seed 1793903035479 op 64: Retry { caller: 1, land: 7090932218528365920 }
+83.09s seed 1793903035479 op 65: Poll { caller: 2, land: 15543389533947338881 }
+83.10s seed 1793903035479 op 66: Land { caller: 2, target: 2, stale: true, shared: false }
+83.19s seed 1793903035479 op 67: Retry { caller: 2, land: 8262894185408663460 }
+83.20s seed 1793903035479 op 68: Land { caller: 3, target: 2, stale: false, shared: true }
+83.31s seed 1793903035479 op 69: Gc
+85.26s seed 1793903035479 op 70: Twin { caller: 2, land: 7983535455973865944 }
+85.28s seed 1793903035479 op 71: Land { caller: 2, target: 1, stale: false, shared: false }
+85.38s seed 1793903035479 op 72: Land { caller: 0, target: 2, stale: true, shared: false }
+85.47s seed 1793903035479 op 73: BurstCut { k: 6, target: 1 }
+86.24s seed 1793903035479 op 74: Check
+87.84s seed 1793903035479 op 75: Check
+89.20s seed 1793903035479 op 76: Land { caller: 3, target: 0, stale: false, shared: true }
+89.33s seed 1793903035479 op 77: Kill
+89.64s seed 1793903035479 op 78: Twin { caller: 1, land: 1027482736740116367 }
+89.66s seed 1793903035479 op 79: Land { caller: 1, target: 2, stale: true, shared: false }
+89.76s seed 1793903035479 op 80: Check
+91.23s seed 1793903035479 op 81: Burst { k: 2, target: 0 }
+91.48s seed 1793903035479 op 82: Land { caller: 3, target: 0, stale: true, shared: true }
+91.61s seed 1793903035479 op 83: KillAtPending
+101.94s seed 1793903035479 op 84: Land { caller: 1, target: 2, stale: false, shared: true }
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 952.97s
+
