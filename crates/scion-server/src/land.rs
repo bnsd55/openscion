@@ -2402,7 +2402,9 @@ mod tests {
             assert_eq!(recorded.state, LandState::Pending);
             if crash != Crash::AfterRecord {
                 let mut index = None;
-                let plan = f.store.read(|c| plan(&f.lands, c, repo, &req, &mut index));
+                let plan = f
+                    .store
+                    .read(|c| plan(&f.lands, c, repo, &req, None, &mut index));
                 let plan = plan.unwrap();
                 let Plan::Land { rebased, .. } = &plan else {
                     panic!("{crash:?}: the land should plan to land");
