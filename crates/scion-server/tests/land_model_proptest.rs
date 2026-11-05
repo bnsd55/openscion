@@ -37,8 +37,9 @@
 
 mod common;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write as _;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -107,7 +108,73 @@ enum Op {
     BurstCut { k: usize, target: usize },
     /// Retry what never answered, then check the model.
     Check,
+    /// A new land whose call is sent and never awaited: the reply is
+    /// lost, and the land parks at the named gate point on its way —
+    /// the arm file the runner writes first is what makes it park.
+    SendNoWait {
+        caller: usize,
+        target: usize,
+        stale: bool,
+        point: GatePoint,
+    },
+    /// Wait until the named land stands at the named gate point, or has
+    /// decided without reaching it (a rejected land never parks).
+    AwaitGate { land: usize, point: GatePoint },
+    /// Release the land parked at the named gate point.
+    Resume { land: usize, point: GatePoint },
+    /// Import a git repo into the model's repo, pointing the named ref
+    /// at a fresh tip: the one ref mover that takes no land lock, so a
+    /// land parked before its compare-and-swap loses the CAS to it.
+    Import { target: usize },
 }
+
+/// The gate points the runner can name, spelled as the server's marker
+/// files spell them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GatePoint {
+    /// After the record transaction committed.
+    Record,
+    /// After the plan's read, before the settle.
+    Planned,
+    /// Before the settle's compare-and-swap.
+    Cas,
+    /// After the settle committed, before the reply.
+    Settled,
+    /// Between the derive steps of the finish's walk.
+    Step,
+}
+
+impl GatePoint {
+    /// The point's name in the gate files.
+    fn name(self) -> &'static str {
+        match self {
+            GatePoint::Record => "record-committed",
+            GatePoint::Planned => "planned",
+            GatePoint::Cas => "before-cas",
+            GatePoint::Settled => "settled",
+            GatePoint::Step => "finish-step",
+        }
+    }
+
+    fn from_word(word: &str) -> GatePoint {
+        match word {
+            "record" => GatePoint::Record,
+            "planned" => GatePoint::Planned,
+            "cas" => GatePoint::Cas,
+            "settled" => GatePoint::Settled,
+            "step" => GatePoint::Step,
+            other => panic!("a gate point the runner does not know: {other}"),
+        }
+    }
+}
+
+const GATE_POINTS: [GatePoint; 5] = [
+    GatePoint::Record,
+    GatePoint::Planned,
+    GatePoint::Cas,
+    GatePoint::Settled,
+    GatePoint::Step,
+];
 
 fn op_strategy() -> impl Strategy<Value = Op> {
     prop_oneof![
@@ -138,6 +205,25 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         1 => Just(Op::Kill),
         1 => Just(Op::KillAtPending),
         1 => Just(Op::Gc),
+        1 => (any::<usize>(), any::<usize>(), any::<bool>(), any::<usize>()).prop_map(
+            |(c, t, s, p)| Op::SendNoWait {
+                caller: c % CALLERS,
+                target: t % (REFS.len() + 1),
+                stale: s,
+                point: GATE_POINTS[p % GATE_POINTS.len()],
+            },
+        ),
+        1 => (any::<usize>(), any::<usize>()).prop_map(|(l, p)| Op::AwaitGate {
+            land: l,
+            point: GATE_POINTS[p % GATE_POINTS.len()],
+        }),
+        1 => (any::<usize>(), any::<usize>()).prop_map(|(l, p)| Op::Resume {
+            land: l,
+            point: GATE_POINTS[p % GATE_POINTS.len()],
+        }),
+        1 => any::<usize>().prop_map(|t| Op::Import {
+            target: t % (REFS.len() + 1),
+        }),
         2 => (2usize..=8, any::<usize>()).prop_map(|(k, t)| {
             if k % 3 == 0 {
                 Op::BurstCut {
@@ -250,6 +336,23 @@ fn parse_script(text: &str) -> Vec<Op> {
                     target: num(target),
                 },
                 ["check"] => Op::Check,
+                ["landnow", caller, target, stale, point] => Op::SendNoWait {
+                    caller: num(caller),
+                    target: num(target),
+                    stale: *stale == "stale" || *stale == "1",
+                    point: GatePoint::from_word(point),
+                },
+                ["awaitgate", land, point] => Op::AwaitGate {
+                    land: num(land),
+                    point: GatePoint::from_word(point),
+                },
+                ["resume", land, point] => Op::Resume {
+                    land: num(land),
+                    point: GatePoint::from_word(point),
+                },
+                ["import", target] => Op::Import {
+                    target: num(target),
+                },
                 other => panic!("a corpus line the runner does not know: {other:?}"),
             }
         })
@@ -534,6 +637,72 @@ fn target_name(target: usize) -> &'static str {
     }
 }
 
+/// Sends a new land whose reply is never read, with the named gate point
+/// armed: the server parks the land there on its way, and the script's
+/// later `awaitgate` and `resume` drive the ordering. The changeset and
+/// its row exist as any land's do; the reply is dropped.
+async fn send_land_nowait(
+    state: &mut Run,
+    caller: usize,
+    target: usize,
+    base: ChangesetId,
+    point: GatePoint,
+) -> usize {
+    let op = state.ops;
+    let key = format!("c{caller}-o{op}-{j}", j = state.lands.len());
+    // The arm goes down before the call: the server reaches the gate only
+    // inside the land this call starts.
+    if let Some(dir) = &state.gates {
+        std::fs::create_dir_all(dir.join("arm")).unwrap();
+        std::fs::write(dir.join("arm").join(format!("{}-{key}", point.name())), b"").unwrap();
+    }
+    let changes = build_changes(
+        &mut state.scion,
+        op,
+        state.lands.len(),
+        false,
+        None,
+        &mut state.put,
+    )
+    .await;
+    let original = Changeset::new(vec![base], author(), None, key.as_bytes().to_vec(), changes)
+        .expect("changeset fits the format");
+    let (bytes, id) = original.encode_with_id();
+    let reply = ceiling(
+        &format!("CreateChangeset {key}"),
+        state.scion.create_changeset(CreateChangesetRequest {
+            repo: REPO.into(),
+            changeset: bytes,
+        }),
+    )
+    .await
+    .into_inner();
+    assert_eq!(changeset_id(&reply.changeset_id), id);
+    let rec = Rec {
+        caller,
+        key,
+        original,
+        id,
+        base,
+        target: target_name(target).to_owned(),
+        decided_head: None,
+        m2_phase: None,
+        replies: Vec::new(),
+    };
+    state.lands.push(rec);
+    let idx = state.lands.len() - 1;
+    // The call runs on its own: its reply is lost, like a Cut's.
+    let request = state.lands[idx].request();
+    let mut conn = state.scion.clone();
+    tokio::spawn(async move {
+        // The reply goes nowhere: the ledger holds no reply for this
+        // land, and the retry phase (or the script's own retry op)
+        // finishes it.
+        let _ = conn.land(request).await;
+    });
+    idx
+}
+
 /// The runner's mutable state.
 struct Run {
     /// The ref the M2 trio plays on: the first caller-1 non-shared land
@@ -558,6 +727,13 @@ struct Run {
     /// The bytes of every blob this script put, by ID: the read-back
     /// check compares a landed tree's files to what the client sent.
     put: HashMap<BlobId, Vec<u8>>,
+    /// The gate dir the server was spawned with, when the run's spawn
+    /// carried `SCION_TEST_GATE_DIR`.
+    gates: Option<PathBuf>,
+    /// The tips the script's imports pointed refs at, per ref: the model
+    /// holds them as foreign steps of the chain (K2), changesets no land
+    /// sent.
+    imported: HashMap<String, Vec<ChangesetId>>,
     ops: usize,
 }
 
@@ -587,7 +763,11 @@ async fn run_script(script: &[Op]) -> RunSummary {
     let dir = scion_server::test_support::private_tempdir();
     let (data, log) = (dir.path().join("data"), dir.path().join("server.log"));
     create_repo(&data);
-    let mut server = Server::start(&data, &log);
+    // The gate dir of this run: the server pauses only at points a corpus
+    // line or a strategy op armed, and the dir dies with the run's temp
+    // dir.
+    let gates = dir.path().join("gates");
+    let mut server = Server::start_with_env(&data, &log, &[("SCION_TEST_GATE_DIR", &gates)]);
     let (scion, objects) = connect(&server.url).await.unwrap();
     let mut state = Run {
         scion,
@@ -600,6 +780,8 @@ async fn run_script(script: &[Op]) -> RunSummary {
         gc_during_pending: false,
         put: HashMap::new(),
         m2_ref: None,
+        gates: Some(gates),
+        imported: HashMap::new(),
         ops: 0,
     };
 
@@ -893,6 +1075,122 @@ async fn run_script(script: &[Op]) -> RunSummary {
                 }
                 assert!(status.success(), "gc failed: {err}");
             }
+            Op::SendNoWait {
+                caller,
+                target,
+                stale,
+                point,
+            } => {
+                let name = target_name(*target);
+                let head = match resolve_ref(&mut state.objects, name).await {
+                    Ok(head) => Some(head),
+                    Err(_) if *target == MISSING => None,
+                    Err(status) => panic!("ResolveRef {name}: {status:?}"),
+                };
+                let base = match head {
+                    Some(head) => {
+                        state.heads.entry(name).or_default().push(head);
+                        // A stale land bases on the oldest head the run
+                        // saw, so the finish must derive (the walk the
+                        // finish-step gate stands in).
+                        if *stale { state.heads[name][0] } else { head }
+                    }
+                    None => resolve_ref(&mut state.objects, REFS[0]).await.unwrap(),
+                };
+                send_land_nowait(&mut state, *caller, *target, base, *point).await;
+            }
+            Op::AwaitGate { land, point } => {
+                if state.lands.is_empty() {
+                    continue;
+                }
+                let idx = land % state.lands.len();
+                let key = state.lands[idx].key.clone();
+                let Some(dir) = &state.gates else {
+                    continue;
+                };
+                let pause = dir.join("pause").join(format!("{}-{key}", point.name()));
+                let arm = dir.join("arm").join(format!("{}-{key}", point.name()));
+                let mut reader = common::LandsReader::open(&data);
+                let give_up = std::time::Instant::now() + Duration::from_secs(60);
+                loop {
+                    if pause.exists() {
+                        break;
+                    }
+                    // The land may have decided without ever reaching the
+                    // point (a rejected land never parks): the arm stays
+                    // for nothing, and the wait ends instead of blowing
+                    // its ceiling on a random script.
+                    if reader
+                        .state_of_key(&key)
+                        .is_some_and(|row| row != "pending")
+                    {
+                        let _ = std::fs::remove_file(&arm);
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < give_up,
+                        "the land {key} never parked at {} though the arm stood",
+                        point.name()
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+            Op::Resume { land, point } => {
+                if state.lands.is_empty() {
+                    continue;
+                }
+                let idx = land % state.lands.len();
+                let key = state.lands[idx].key.clone();
+                if let Some(dir) = &state.gates {
+                    std::fs::create_dir_all(dir.join("resume")).unwrap();
+                    std::fs::write(
+                        dir.join("resume").join(format!("{}-{key}", point.name())),
+                        b"",
+                    )
+                    .unwrap();
+                }
+            }
+            Op::Import { target } => {
+                use std::fmt::Write as _;
+                let name = target_name(*target);
+                // The git repo lives in the run's temp dir, beside the
+                // data dir; the first import makes it with one commit,
+                // every import adds one more, so the tip moves and the
+                // ref's version with it.
+                let git_dir = dir.path().join("git");
+                if !git_dir.join(".git").exists() {
+                    std::fs::create_dir_all(&git_dir).unwrap();
+                    common::git(&git_dir, &["init", "--initial-branch=main"]);
+                    std::fs::write(git_dir.join("import-note.txt"), "import 0\n").unwrap();
+                    common::git(&git_dir, &["add", "."]);
+                    common::git(&git_dir, &["commit", "-m", "the model's import seed"]);
+                }
+                let mut note = std::fs::read_to_string(git_dir.join("import-note.txt")).unwrap();
+                writeln!(note, "import {}", state.ops).unwrap();
+                std::fs::write(git_dir.join("import-note.txt"), &note).unwrap();
+                common::git(&git_dir, &["add", "."]);
+                common::git(&git_dir, &["commit", "-m", "the model's import"]);
+                let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"));
+                cmd.arg("--data")
+                    .arg(&data)
+                    .env("SCION_POSTGRES_URL", common::postgres_url(&data))
+                    .args(["import", "--repo", REPO, "--ref", name])
+                    .arg(&git_dir)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::piped());
+                let out = cmd.output().unwrap();
+                assert!(
+                    out.status.success(),
+                    "import to {name} failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                // The import's tip is the ref's head now: a foreign
+                // changeset no land sent, which the chain check holds as
+                // the model's own import.
+                let tip = resolve_ref(&mut state.objects, name).await.unwrap();
+                state.imported.entry(name.to_owned()).or_default().push(tip);
+                state.heads.entry(name).or_default().push(tip);
+            }
             Op::Burst { k, target } => {
                 let name = target_name(*target);
                 let base = match resolve_ref(&mut state.objects, name).await {
@@ -1136,8 +1434,13 @@ async fn check(state: &mut Run) {
     finish_lands(&mut state.scion, &mut state.lands).await;
     check_keys(&state.lands);
     for target in REFS {
+        let foreign: HashSet<ChangesetId> = state
+            .imported
+            .get(target)
+            .map(|tips| tips.iter().copied().collect())
+            .unwrap_or_default();
         let (mut scion, mut objects) = (state.scion.clone(), state.objects.clone());
-        check_chain(&mut scion, &mut objects, target, &state.lands).await;
+        check_chain(&mut scion, &mut objects, target, &state.lands, &foreign).await;
         check_conflict(&mut scion, &mut objects, target, &state.lands).await;
         check_durability(
             &mut scion,
@@ -1323,13 +1626,26 @@ impl Chain {
 /// K2: each ref's chain is constructible by the model's rebase rule, and
 /// each landed result is the change its land sent, rebased onto its
 /// parent; every land that replied LANLED is on it, exactly once.
-async fn check_chain(scion: &mut Scion, objects: &mut Objects, target: &str, lands: &Ledger) {
+async fn check_chain(
+    scion: &mut Scion,
+    objects: &mut Objects,
+    target: &str,
+    lands: &Ledger,
+    foreign: &HashSet<ChangesetId>,
+) {
     let chain = Chain::walk(scion, objects, target, lands).await;
+    // The changesets the script's imports pointed refs at: on the chain
+    // as steps, but no land's result.
+    let mut foreign_steps = 0usize;
     for (i, (id, changeset, land)) in chain.steps.iter().enumerate() {
         if i == 0 {
             if !(land.is_none()) {
                 fail_check("{target}: the root {id} is a land's result");
             }
+            continue;
+        }
+        if foreign.contains(id) {
+            foreign_steps += 1;
             continue;
         }
         let rec_idx = land.unwrap_or_else(|| {
@@ -1355,7 +1671,8 @@ async fn check_chain(scion: &mut Scion, objects: &mut Objects, target: &str, lan
         );
     }
     // Every land that replied LANDED for this ref is on it, exactly once:
-    // the chain holds one step per land, and no step twice.
+    // the chain holds one step per land, and no step twice. The script's
+    // imports hold the steps between them.
     let landed = lands
         .iter()
         .filter(|rec| {
@@ -1366,8 +1683,9 @@ async fn check_chain(scion: &mut Scion, objects: &mut Objects, target: &str, lan
         })
         .count();
     check_assert!(
-        chain.steps.len() - 1 == landed,
-        "{target}: {landed} lands replied LANDED, the chain holds {}",
+        chain.steps.len() - 1 == landed + foreign_steps,
+        "{target}: {landed} lands replied LANDED and {foreign_steps} steps are imports, \
+         the chain holds {}",
         chain.steps.len() - 1
     );
     // R4: the chain is constructible. Walking root-first, each step's
@@ -1672,7 +1990,7 @@ fn the_seed_corpus_holds() {
     // conflict, a missing ref - is these six files, under one minute.
     // The nightly land-model workflow runs the whole corpus there
     // (SCION_LANDMODEL_CASES set).
-    let short_on_postgres = ["02", "03", "05", "06", "08", "10"];
+    let short_on_postgres = ["02", "03", "05", "06", "08", "10", "12", "13", "14", "15"];
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/land_model_corpus");
     let mut names = Vec::new();
     for entry in std::fs::read_dir(&dir).unwrap() {
@@ -1694,6 +2012,10 @@ fn the_seed_corpus_holds() {
     let (mut landed, mut conflict, mut rejected) = (0, 0, 0);
     let (mut retried_after_kill, mut gc_beside) = (false, false);
     let (mut executable_lands, mut gc_during_pending) = (0, false);
+    // The gate-ordered scripts run twice: the gates make the order exact,
+    // so a rerun must land the same outcome shape, and a failing one must
+    // fail the same way every time.
+    let ordered = ["12", "13", "14", "15"];
     for path in names {
         let text = std::fs::read_to_string(&path).unwrap();
         let script = parse_script(&text);
@@ -1703,6 +2025,27 @@ fn the_seed_corpus_holds() {
             .build()
             .unwrap();
         let summary = rt.block_on(run_script(&script));
+        // The gate-ordered scripts run twice: the gates make the order
+        // exact, so a rerun lands the same outcome shape — and a failing
+        // one fails the same way every time.
+        if ordered
+            .iter()
+            .any(|p| path.file_name().unwrap().to_string_lossy().starts_with(p))
+        {
+            let again = rt.block_on(run_script(&script));
+            assert_eq!(
+                (summary.landed, summary.conflict, summary.rejected),
+                (again.landed, again.conflict, again.rejected),
+                "{}: the ordered script's rerun landed another outcome",
+                path.display()
+            );
+            assert_eq!(
+                summary.retried_after_kill,
+                again.retried_after_kill,
+                "{}: the rerun's retry-after-kill differs",
+                path.display()
+            );
+        }
         landed += summary.landed;
         conflict += summary.conflict;
         rejected += summary.rejected;

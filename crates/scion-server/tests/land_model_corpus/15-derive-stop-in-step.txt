@@ -1,0 +1,10 @@
+# the finish's walk stops between its two kinds: the commit-graph steps
+# are committed, the path-history steps are not, the kill lands there,
+# and the retry's walk starts from what the database holds, so no
+# changeset derives twice
+land 0 0 0 0
+landnow 1 0 1 step
+awaitgate 1 step
+kill
+retry 1 1
+check

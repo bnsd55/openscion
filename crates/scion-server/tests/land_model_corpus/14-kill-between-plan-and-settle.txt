@@ -1,0 +1,8 @@
+# a kill between the plan and the settle: the row stays pending, and the
+# retry after the restart finishes the land
+land 0 0 0 0
+landnow 1 0 0 planned
+awaitgate 1 planned
+kill
+retry 1 1
+check
