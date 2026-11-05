@@ -62,7 +62,6 @@ jobs:
         run: |
           set -u
           rm -f /tmp/red.txt /tmp/green.txt
-          FILTER="${PAIR:-0}"
           for i in $(seq 1 "${RUNS:-60}"); do
             if [ "${PAIR:-0}" = "1" ]; then
               sel=(-E 'test(a_schema_a_connection_still_names_survives_the_sweep) or test(a_sweep_drops_at_most_fifty_oldest_first)')
