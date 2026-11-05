@@ -4685,7 +4685,13 @@ impl MetaTx for PgTx<'_> {
     /// preloaded, then the database: the batch's derives chain through
     /// the values it inserted, and the reads of the ancestors outside
     /// the transaction cost what the preload already paid for.
-    fn get_derived(
+    /// The derived rows the transaction already holds: the batching's
+    /// pending buffer first, then the preload's. One read filled the
+    /// preload at the start of a write path, and every put of this
+    /// transaction keeps it true. A row it deleted is of an older
+    /// version, which no read of this kind asks for, so no stale answer
+    /// can hide there.
+    fn held_derived(
         &mut self,
         kind: &str,
         version: u32,
@@ -4702,17 +4708,57 @@ impl MetaTx for PgTx<'_> {
                 }
             }
         }
-        // The transaction's own memory of the derived rows it preloaded
-        // or wrote: one statement filled it at the start of a write path,
-        // and every put of this transaction keeps it true. A row it
-        // deleted is of an older version, which no read of this kind
-        // asks for, so no stale answer can hide there.
-        if let Some(value) = self
+        Ok(self
             .derived_preload
             .as_deref()
             .and_then(|preload| preload.get(&(kind.to_owned(), version, key.clone())))
-        {
-            return Ok(Some(value.clone()));
+            .cloned())
+    }
+
+    /// One statement for the walk's start: the generation rides the
+    /// repo-membership join (the guard), the value is a left join on the
+    /// same row. A hold in the transaction's memory answers without a
+    /// statement, its generation `None` - the caller that breaks on a
+    /// stored value needs no generation.
+    fn generation_and_stored(
+        &mut self,
+        repo: RepoId,
+        kind: &str,
+        version: u32,
+        cs: ChangesetId,
+    ) -> Result<(Option<i64>, Option<Vec<u8>>)> {
+        if let Some(bytes) = self.held_derived(kind, version, cs)? {
+            return Ok((None, Some(bytes)));
+        }
+        let version = i64::from(version);
+        let key = id_bytes(cs.as_bytes());
+        let row = self
+            .c
+            .query_opt(
+                "SELECT gen, value FROM changesets
+                 JOIN repo_changesets ON cs = id
+                 LEFT JOIN derived
+                   ON derived.cs = changesets.id AND kind = $2 AND version = $3
+                 WHERE repo_id = $1 AND changesets.id = $4",
+                &[
+                    P::i64(repo.0),
+                    P::text(kind),
+                    P::i64(version),
+                    P::bytes(&key),
+                ],
+            )?
+            .ok_or_else(|| Error::NotFound(format!("changeset {cs}")))?;
+        Ok((Some(row.get(0)), row.get(1)))
+    }
+
+    fn get_derived(
+        &mut self,
+        kind: &str,
+        version: u32,
+        cs: ChangesetId,
+    ) -> Result<Option<Vec<u8>>> {
+        if let Some(bytes) = self.held_derived(kind, version, cs)? {
+            return Ok(Some(bytes));
         }
         Ok(self
             .c

@@ -333,6 +333,22 @@ pub trait MetaTx {
     fn get_derived(&mut self, kind: &str, version: u32, cs: ChangesetId)
     -> Result<Option<Vec<u8>>>;
 
+    /// The generation of a changeset that `repo` may see, and the stored
+    /// bytes of a derived value for it, one statement. The join with the
+    /// repo's membership is the check that a stored value does not leak
+    /// to a repo that cannot see the changeset; no row is
+    /// [`Error::NotFound`], the same words `generation` answers with. A
+    /// value the transaction already holds comes back without a
+    /// statement, and its generation is `None` - the caller that breaks
+    /// on a stored value needs no generation.
+    fn generation_and_stored(
+        &mut self,
+        repo: RepoId,
+        kind: &str,
+        version: u32,
+        cs: ChangesetId,
+    ) -> Result<(Option<i64>, Option<Vec<u8>>)>;
+
     /// The stored bytes of up to [`DERIVED_BATCH`] derived values, in the
     /// order asked. One read transaction, one statement: a land between two
     /// ids of the batch cannot mix two states.
