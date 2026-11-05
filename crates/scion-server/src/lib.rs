@@ -79,6 +79,8 @@ pub(crate) mod graph;
 pub(crate) mod history;
 pub(crate) mod import;
 pub(crate) mod land;
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) mod land_gates;
 pub(crate) mod memory;
 pub(crate) mod meta;
 pub(crate) mod metrics;
