@@ -887,7 +887,7 @@ async fn main() -> anyhow::Result<()> {
         // `preflight` reports a missing directory as a failed check, so
         // it runs before the refusal and writes nothing anywhere.
         Command::Preflight(args) => {
-            let report = scion_server::preflight::run(&preflight_options(args));
+            let report = scion_server::preflight::run(&preflight_options(&cli, &args));
             for line in report.lines {
                 println!("{line}");
             }
@@ -1513,12 +1513,14 @@ fn secret_file(file: &Path) -> anyhow::Result<String> {
 /// opens the store needs one: the metadata has nowhere else to live.
 /// The fields come in one at a time, because a caller that matched its
 /// command out of `Cli` holds a partially moved value.
-/// The options of a `preflight` run, as the flags hand them over.
-fn preflight_options(args: &ServeArgs) -> scion_server::preflight::PreflightOptions {
+/// The options of a `preflight` run, as the flags hand them over. The
+/// data directory, the URL file and the CA ride the command line's
+/// global flags; the rest are serve's own.
+fn preflight_options(cli: &Cli, args: &ServeArgs) -> scion_server::preflight::PreflightOptions {
     scion_server::preflight::PreflightOptions {
-        data: args.data.clone(),
-        postgres_url_file: args.postgres_url_file.clone(),
-        postgres_ca: args.postgres_ca.clone(),
+        data: cli.data.clone(),
+        postgres_url_file: cli.postgres_url_file.clone(),
+        postgres_ca: cli.postgres_ca.clone(),
         token_file: args.token_file.clone(),
         access: args.access.clone(),
         tls_cert: args.tls_cert.clone(),
