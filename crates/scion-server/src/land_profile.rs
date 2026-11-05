@@ -93,11 +93,15 @@ struct Slot {
     stmt_ns: u128,
 }
 
-/// The counters of one land.
+/// The counters of one land. The current phase is a stack: the guards
+/// nest (build, cas and `set_state` ride inside the settle's commit), and
+/// a flat "current" leaked the enclosing phase's statements into the
+/// last inner phase that dropped.
 #[derive(Default, Clone, Copy)]
 pub(crate) struct Trace {
     slots: [Slot; PHASES.len()],
-    current: Option<Phase>,
+    stack: [Option<Phase>; PHASES.len()],
+    depth: usize,
     pub(crate) attempts: u64,
 }
 
@@ -140,15 +144,33 @@ impl Trace {
 
     fn add_stmt(self, ns: u128) -> Self {
         let mut trace = self;
-        let slot = trace.current.unwrap_or(Phase::Other).slot();
+        let slot = trace
+            .stack
+            .get(trace.depth.wrapping_sub(1))
+            .copied()
+            .flatten()
+            .unwrap_or(Phase::Other)
+            .slot();
         trace.slots[slot].stmts += 1;
         trace.slots[slot].stmt_ns += ns;
         trace
     }
 
-    fn set_phase(self, phase: Phase) -> Self {
+    fn push_phase(self, phase: Phase) -> Self {
         let mut trace = self;
-        trace.current = Some(phase);
+        if trace.depth < trace.stack.len() {
+            trace.stack[trace.depth] = Some(phase);
+            trace.depth += 1;
+        }
+        trace
+    }
+
+    fn pop_phase(self) -> Self {
+        let mut trace = self;
+        if trace.depth > 0 {
+            trace.depth -= 1;
+            trace.stack[trace.depth] = None;
+        }
         trace
     }
 
@@ -195,7 +217,7 @@ pub(crate) struct Guard {
 impl Guard {
     pub(crate) fn enter(phase: Phase) -> Guard {
         if let Some(trace) = Trace::get() {
-            Trace::put(&trace.set_phase(phase));
+            Trace::put(&trace.push_phase(phase));
         }
         Guard {
             phase,
@@ -208,7 +230,7 @@ impl Drop for Guard {
     fn drop(&mut self) {
         let ns = self.started.elapsed().as_nanos();
         if let Some(trace) = Trace::get() {
-            Trace::put(&trace.add_wall(self.phase, ns));
+            Trace::put(&trace.add_wall(self.phase, ns).pop_phase());
         }
     }
 }
