@@ -239,6 +239,12 @@ jobs:
       - name: the job's postgres stops last
         if: always()
         run: docker rm -f profile-pg || true
+      - name: the postgres is still up from the harness's side
+        run: |
+          set -euo pipefail
+          docker ps --filter name=profile-pg
+          docker exec profile-pg pg_isready -U postgres
+          (cat < /dev/null > /dev/tcp/127.0.0.1/5432) && echo "the host port answers"
       - name: profile one land
         env:
           # The harness drops and creates its database, so it runs
