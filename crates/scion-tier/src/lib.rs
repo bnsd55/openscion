@@ -680,7 +680,7 @@ impl<S: Store> Tier<S> {
         // watch never flips on its own.
         let (_ready, ready) = tokio::sync::watch::channel(true);
         let (health, shutdown) = listen::health(&["scion.v1.Objects"], shutdown, ready).await;
-        let router = |mut server: Server| server.add_service(health).add_service(objects);
+        let router = || tonic::service::Routes::new(health).add_service(objects);
         limits
             .serve(
                 router,
