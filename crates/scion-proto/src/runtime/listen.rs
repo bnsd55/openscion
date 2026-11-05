@@ -2476,7 +2476,7 @@ mod tests {
             // The connections the phase adds: each a child process in the
             // client mode above.
             while children.len() < connections as usize {
-                let child = std::process::Command::new(&exe)
+                let mut child = std::process::Command::new(&exe)
                     .arg("--exact")
                     .arg(
                         "runtime::listen::tests::a_slow_reader_holds_send_buffer_over_the_stream_limit",
