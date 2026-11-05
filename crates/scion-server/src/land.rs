@@ -2399,7 +2399,7 @@ mod tests {
                 if crash == Crash::RefMoved {
                     f.move_main(f.commit(f.main().target, &[put("c", "import")]));
                     let land_id = recorded.land_id;
-                    let err = settle(&f.lands, &f.store, repo, land_id, "main", plan, &mut index)
+                    let err = settle(&f.lands, &f.store, repo, land_id, "main", plan, &mut index, &deadline)
                         .unwrap_err();
                     assert!(matches!(err, Error::Aborted(_)), "{crash:?}: {err}");
                     let kept = f.store.read(|c| c.has_changeset(repo, rebased));
@@ -2973,7 +2973,7 @@ mod tests {
             store
                 .write(|c| {
                     for &tip in &ids {
-                        derived::derive::<CommitGraph>(c, repo, tip, &mut crate::tree::lens_none())?;
+                        derived::derive::<CommitGraph>(c, repo, tip, &mut crate::tree::lens_none(), None)?;
                         derived::derive::<PathHistory>(c, repo, tip, &mut crate::tree::lens_none())?;
                     }
                     Ok(())

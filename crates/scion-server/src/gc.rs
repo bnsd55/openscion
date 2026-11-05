@@ -1116,6 +1116,7 @@ mod tests {
                         )],
                     ),
                     &mut crate::tree::lens_of(&store.clone()),
+                    None,
                 )?;
                 Ok(())
             })

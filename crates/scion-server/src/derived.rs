@@ -1578,7 +1578,7 @@ mod tests {
             Err(Error::NotFound(_))
         ));
         assert!(matches!(
-            store.commit(|c| derive::<ChangedPathsV1>(c, other, tip, &mut tree::lens_none())),
+            store.commit(|c| derive::<ChangedPathsV1>(c, other, tip, &mut tree::lens_none(), None)),
             Err(Error::NotFound(_))
         ));
     }

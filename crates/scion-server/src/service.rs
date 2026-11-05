@@ -3505,7 +3505,7 @@ mod tests {
             [(RepoPath::new("seed").unwrap(), state(one))].into(),
         )
         .expect("changeset fits the format");
-        let (root, _) = store
+        let root = store
             .write(|c| {
                 let root = c.insert_changeset(repo_id, &root)?;
                 assert!(c.cas_ref(repo_id, "main", None, root)?);
@@ -3516,7 +3516,7 @@ mod tests {
         let changes: std::collections::BTreeMap<RepoPath, Option<FileState>> = (0..2000)
             .map(|i| {
                 (
-                    RepoPath::new(&format!("p/{i}")).unwrap(),
+                    RepoPath::new(format!("p/{i}")).unwrap(),
                     state(if i % 2 == 0 { one } else { two }),
                 )
             })
