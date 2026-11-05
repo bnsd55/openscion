@@ -3590,11 +3590,14 @@ fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
     let outcome = migrate_under_lock(client, allow);
     // The base statement budget goes back whatever the migrations did:
     // only the migration window ran without it, and this client — for
-    // `serve --migrate`, the writer the store keeps — serves no further
-    // statement at a budget the open did not choose. The migrate
-    // command's client ends here, so its restore is a last no-op.
-    let _ = client.execute(
-        &format!("SET statement_timeout = {BASE_STATEMENT_TIMEOUT_MS}"),
+    // `serve --migrate`, the writer the store keeps — must not serve a
+    // statement at a budget the open did not choose. A restore that
+    // fails fails the open, and the operator sees why: an unbounded
+    // writer with no answer is the silent path the base budget exists
+    // to prevent. The migration's own error comes first, and the
+    // restore's failure answers when the migrations left none.
+    let restored = client.execute(
+        &format!("SET statement_timeout = {}", base_statement_timeout()),
         &[],
     );
     // The lock lives on the client's session: it goes back whatever the
@@ -3602,7 +3605,7 @@ fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
     // its connection, and the unlock names a lock the new connection
     // never held, which answers false and costs nothing.
     let _ = client.query_opt("SELECT pg_advisory_unlock($1)", &[P::i64(SCHEMA_LOCK)]);
-    outcome
+    outcome.and_then(|value| restored.map(|_| value))
 }
 
 /// The migrations themselves, under the session's schema lock. `allow`
