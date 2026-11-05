@@ -5871,7 +5871,7 @@ pub(crate) mod pool_tests {
         // A statement_timeout above the bigint range fails the batch's
         // second command; the BEGIN in the same batch has already run.
         let huge = std::time::Duration::from_millis(u64::MAX);
-        let Err(error) = PgTx::begin_read(
+        let Err(_) = PgTx::begin_read(
             client,
             ReadIsolation::ReadCommitted,
             huge,
