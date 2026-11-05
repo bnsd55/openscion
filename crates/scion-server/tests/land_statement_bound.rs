@@ -156,18 +156,17 @@ fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound()
     // Today's count, with slack for one more plan attempt: each fold of
     // the round-trip card lowers this number, and a change that raises
     // it must say why. Measured in CI (probe run 41899707438): main's
-    // land over 3 paths costs 37; this branch costs 36. The one saved
-    // statement is the outcome read after the insert: main's record
-    // reads the row back, and this record answers from the columns its
-    // lookup and insert already carry, so the read runs once - the
-    // finish's - not twice.
+    // land over 3 paths costs 37; the read-back fold brought 36; this
+    // fold opens each transaction in one round trip - BEGIN and its
+    // guard SET LOCALs ride one batch, on the writer transactions and
+    // the reader's alike - so the land costs 32.
     //
     // This run has no rival writer, so the land settles in one attempt;
     // the log's one verdict UPDATE proves it. On that run the count is
-    // exact, so the read coming back fails the test here, and the bound
-    // keeps guarding only the retried case it has slack for.
-    const BOUND: u64 = 44;
-    const EXACT: u64 = 36;
+    // exact, so a statement coming back fails the test here, and the
+    // bound keeps guarding only the retried case it has slack for.
+    const BOUND: u64 = 40;
+    const EXACT: u64 = 32;
     let count = land_statement_count(3);
     {
         let log = Backend::test_statement_log();

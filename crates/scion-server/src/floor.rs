@@ -75,6 +75,12 @@ pub(crate) const PRUNE_BODY: u64 = crate::gc::PRUNE_BODY_BUDGET as u64;
 /// scion-proto's runtime/listen.rs).
 pub(crate) const STALL_TOTAL: u64 = scion_proto::runtime::listen::STALLED_TOTAL_BYTES;
 
+/// The RAM the view derivations' memos hold at once: the memo pool's cap,
+/// [`crate::views::VIEW_DERIVES_MAX`] reservations of
+/// [`crate::views::VIEW_MEMO_BYTES`].
+pub(crate) const VIEW_MEMO: u64 =
+    (crate::views::VIEW_MEMO_BYTES * crate::views::VIEW_DERIVES_MAX) as u64;
+
 /// Slack for what the budgets do not count: the interpreter, the
 /// allocators' overhead, the connection and TLS buffers, the stacks of
 /// the worker threads.
@@ -91,6 +97,7 @@ pub(crate) const FLOOR: u64 = BLAME
     + LAND_INDEX
     + PRUNE_BODY
     + STALL_TOTAL
+    + VIEW_MEMO
     + HEADROOM;
 
 /// The files the host-limit reader reads, so a test can point them at a
@@ -299,6 +306,7 @@ pub(crate) fn check_startup_memory(
                 land_index_bytes = LAND_INDEX,
                 gc_bytes = PRUNE_BODY,
                 stall_total_bytes = STALL_TOTAL,
+                view_memo_bytes = VIEW_MEMO,
                 "the host has less memory than the server's floor: \
                  the page cache gives way first, and under load the \
                  process can reach the OOM killer"
@@ -336,9 +344,10 @@ mod tests {
                 + LAND_INDEX
                 + PRUNE_BODY
                 + STALL_TOTAL
+                + VIEW_MEMO
                 + HEADROOM
         );
-        assert_eq!(FLOOR, 6608 << 20);
+        assert_eq!(FLOOR, 6736 << 20);
     }
 
     #[test]

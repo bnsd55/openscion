@@ -381,6 +381,13 @@ impl Backend {
         self.pg.derive_flights()
     }
 
+    /// The pool the view derivations of this backend reserve their memos
+    /// from: the cap bounds how many derivations hold a memo at once, so
+    /// the floor can count the share.
+    pub(crate) fn view_memo_budget(&self) -> &crate::memory::Bytes {
+        self.pg.view_memo_budget()
+    }
+
     /// How many writers wait for the write connection.
     #[cfg(test)]
     #[must_use]

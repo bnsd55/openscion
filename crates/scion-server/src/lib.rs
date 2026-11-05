@@ -349,6 +349,11 @@ pub mod test_support {
     pub mod write {
         pub use crate::write::*;
     }
+    /// The view derivations behind the filtered reads, and their
+    /// part-flush seam.
+    pub mod views {
+        pub use crate::views::*;
+    }
     /// The bulk seed for deep file-less ladders, for the tests that
     /// measure the queries instead of the seeding.
     pub mod seed {

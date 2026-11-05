@@ -221,7 +221,7 @@ fn a_path_pages_walk_continues_at_its_cursor() {
 /// The statements one read transaction frames: the guard's room for
 /// framing comes from this count, not from a guess.
 #[test]
-fn a_read_transaction_frames_four_statements() {
+fn a_read_transaction_frames_three_statements() {
     // The whole test, its seed included, holds the lock: the statement
     // counter is one process-global number, and another test's reads must
     // not land in a page's count.
@@ -234,8 +234,8 @@ fn a_read_transaction_frames_four_statements() {
     let _ = store.read(|c| c.repo_id(REPO)).unwrap();
     let statements = Backend::test_statement_count();
     assert_eq!(
-        statements, 5,
-        "one repo lookup plus BEGIN, 2 SETs, ROLLBACK"
+        statements, 3,
+        "one repo lookup plus the open batch (BEGIN and its 2 SETs), ROLLBACK"
     );
 }
 
