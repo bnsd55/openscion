@@ -890,6 +890,7 @@ fn plan(
 /// guard the land's own move has in its CAS. An import that moved the
 /// ref in the window aborts the verdict, and `finish` replans against
 /// the head the import made.
+#[allow(clippy::too_many_arguments)] // the land's one settle: the flight's caller, key, plan, index and deadline land together
 fn settle(
     lands: &Lands,
     store: &Backend,

@@ -898,9 +898,6 @@ fn derive_chain<K: Kind>(
     let mut value = None;
     let mut written = 0usize;
     for &id in ids {
-        if let Some(deadline) = deadline {
-            deadline.check()?;
-        }
         if let Some(known) = load::<K>(c, id)? {
             value = Some(known);
             continue;
