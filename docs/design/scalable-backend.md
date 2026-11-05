@@ -355,7 +355,7 @@ read-write commit.
 | T2, move the ref | local transaction | one commit, 5 to 15 ms |
 | Durable reply | wait for a shared full drive flush | the commit is durable |
 | One land | not measured | 15 to 45 ms |
-| One ref | measured: about 200 durable lands/s with 200 agents ([README](../../README.md)) | about 50 lands/s without batching (below) |
+| One ref | measured: 23 to 25 durable lands/s to one ref, flat from 2 to 200 writers ([operations.md](../operations.md), section 7's capacity table) | about 50 lands/s without batching (below) |
 
 **One ref is one row.** Let `t` be the time from the plan's read of the head
 to T2's commit, about 20 ms. Without batching, one ref takes at most about

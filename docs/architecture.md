@@ -703,11 +703,20 @@ it stay. If the head still has no path history after that, the land fails
 with `INTERNAL`.
 
 **Not planned now:** a lander that rebases a batch of pending lands and moves
-the ref once ([#18](https://github.com/bnsd55/openscion/issues/18), closed: one
-machine already gives about 200 durable lands/s). The
-[scalable backend design](design/scalable-backend.md) says when it would be
-needed: many servers on one database, which the Postgres backend does not
-give yet (one server runs per database).
+the ref once ([#18](https://github.com/bnsd55/openscion/issues/18)). One
+machine gives 23 to 25 durable lands per second to one ref — measured,
+flat from 2 to 200 writers (section 7 of
+[operations.md](operations.md), the capacity table) — the rate #18 was
+closed on was a tenth of that. The reason batching stays unplanned is
+the cheaper levers first: the land's 37 statements measured in
+[#769](https://github.com/bnsd55/openscion/issues/769) fold one PR at a
+time, fewer round trips under the ref lock first
+([#782](https://github.com/bnsd55/openscion/issues/782)). The
+[scalable backend design](design/scalable-backend.md) says when batching
+itself would be needed: many servers on one database, which the Postgres
+backend does not give yet (one server runs per database). When the folds
+are spent, whether the measured rate still carries the demand is open
+again.
 
 ## 6. Git import
 
