@@ -523,6 +523,10 @@ fn the_cap_holds_empty_maps_to_its_bound() {
             Ok(tree::store_changeset(c, repo, &old, &mut |_| Ok(0))?.0)
         })
         .unwrap();
+    let overhead = scion_server::test_support::read::test_rename_cache_entry_overhead();
+    // The cap holds four empty-map entries: the trim drops the oldest
+    // whenever a fifth arrives.
+    let _cap = scion_server::test_support::read::test_set_rename_cache_cap_for_tests(overhead * 4);
     for i in 0..16 {
         store
             .blobs()
@@ -536,7 +540,6 @@ fn the_cap_holds_empty_maps_to_its_bound() {
             "the cap holds the entries to its bound: {maps} entries after diff {i}"
         );
         // An empty map costs exactly its overhead against the cap.
-        let overhead = scion_server::test_support::read::test_rename_cache_entry_overhead();
         assert_eq!(
             usize::try_from(bytes),
             Ok(maps * overhead),
@@ -590,43 +593,84 @@ fn a_page_that_answers_moves_its_entry_to_the_young_end() {
             Ok(tree::store_changeset(c, repo, &old, &mut |_| Ok(0))?.0)
         })
         .unwrap();
+    // The first diff deletes d/0000 and adds a/0000 with the same
+    // content - an exact rename the search finds - over the changed
+    // rest; the other diffs are empty-map diffs over the same root.
+    let first_new = {
+        let mut changes: std::collections::BTreeMap<RepoPath, Option<FileState>> = (1..1_100)
+            .map(|j| {
+                (
+                    RepoPath::new(format!("d/{j:04}.txt").as_str()).unwrap(),
+                    Some(FileState::Regular {
+                        content: BlobId::of(format!("second-{j}\n").as_bytes()),
+                        executable: false,
+                    }),
+                )
+            })
+            .collect();
+        changes.insert(RepoPath::new("d/0000.txt").unwrap(), None);
+        changes.insert(
+            RepoPath::new("a/0000.txt").unwrap(),
+            Some(FileState::Regular {
+                content: BlobId::of(b"first-0\n"),
+                executable: false,
+            }),
+        );
+        store
+            .write(|c| {
+                let repo = c.repo_id(REPO)?;
+                let new = Changeset::new(
+                    vec![old],
+                    identity(),
+                    None,
+                    b"first-diff\n".to_vec(),
+                    changes,
+                )
+                .unwrap();
+                Ok(tree::store_changeset(c, repo, &new, &mut |_| Ok(0))?.0)
+            })
+            .unwrap()
+    };
     let overhead = scion_server::test_support::read::test_rename_cache_entry_overhead();
-    // The cap holds exactly three entries.
-    let _cap = scion_server::test_support::read::test_set_rename_cache_cap_for_tests(overhead * 3);
-    let mut new_ids = Vec::new();
-    for i in 0..3 {
+    let mut new_ids = vec![first_new];
+    for i in 1..3 {
         new_ids.push(empty_map_diff(&store, old, i));
     }
-    // Page 1 of the first two diffs: two entries, one older.
-    let _p1 = page(&store, old, new_ids[0], None);
+    // The first diff's entry carries a real rename: the deleted file's
+    // content moves to the added path, so its map holds a rename and
+    // costs the overhead plus the map's bytes - more than an empty
+    // entry's. A trim that forgot a refresh would drop it first, as
+    // the oldest and the biggest; a refresh that moved its stamp
+    // keeps it and an empty entry goes instead. The kept total tells
+    // the two apart, whatever the search's statement cost.
+    let first = page(&store, old, new_ids[0], None);
+    let (maps, bytes) = scion_server::test_support::read::test_rename_cache_size();
+    assert_eq!(maps, 1);
+    let map_bytes = usize::try_from(bytes).unwrap() - overhead;
+    // The cap holds this entry and two empty ones exactly: the fourth
+    // entry must trim one away.
+    let _cap = scion_server::test_support::read::test_set_rename_cache_cap_for_tests(
+        overhead * 3 + map_bytes,
+    );
+    // Page 1 of the second diff: two entries, the first one older.
     let _p2 = page(&store, old, new_ids[1], None);
-    // A page of the first diff again: it answers from its entry, which
-    // moves to the young end - past the second diff's entry.
-    Backend::test_reset_statement_count();
-    let again = page(&store, old, new_ids[0], None);
-    let hit = Backend::test_statement_count();
-    assert!(hit > 0);
-    let _ = again;
-    // The third diff's entry cannot fit: the trim drops the second
-    // diff's entry, the older one, not the one the page just used.
-    let third = empty_map_diff(&store, old, 3);
-    let _p3 = page(&store, old, third, None);
-    let (maps, _) = scion_server::test_support::read::test_rename_cache_size();
-    assert_eq!(maps, 3);
-    // The first diff's page still answers from its map: the refresh
-    // kept it young. Its cost is one page's statements, not a search.
-    Backend::test_reset_statement_count();
+    // A page of the first diff again: it answers from its entry,
+    // which moves to the young end - past the second diff's entry.
     let _again = page(&store, old, new_ids[0], None);
-    let still_hit = Backend::test_statement_count();
-    // The second diff's entry was the one trimmed: its page runs the
-    // search again, more statements than the survivor's hit.
-    Backend::test_reset_statement_count();
-    let _second_again = page(&store, old, new_ids[1], None);
-    let evicted = Backend::test_statement_count();
-    assert!(
-        still_hit < evicted,
+    // Page 1 of the third diff: four entries are stored in all.
+    let _p3 = page(&store, old, new_ids[2], None);
+    // The fourth entry cannot fit: the trim drops the second diff's
+    // entry, the oldest stamp, not the one the page just refreshed.
+    let third = empty_map_diff(&store, old, 3);
+    let _p4 = page(&store, old, third, None);
+    let (maps, bytes) = scion_server::test_support::read::test_rename_cache_size();
+    assert_eq!(maps, 3);
+    assert_eq!(
+        usize::try_from(bytes),
+        Ok(overhead * 3 + map_bytes),
         "the refreshed entry survived the trim and the older one went: \
-         {still_hit} against {evicted}"
+         the kept bytes are its map plus three overheads, not three \
+         overheads alone"
     );
 }
 
