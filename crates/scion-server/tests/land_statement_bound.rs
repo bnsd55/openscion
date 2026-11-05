@@ -172,9 +172,9 @@ fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound()
     // the log's one verdict UPDATE proves it. On that run the count is
     // exact, so a statement coming back fails the test here, and the
     // bound keeps guarding only the retried case it has slack for.
+    let count = land_statement_count(3);
     const BOUND: u64 = 36;
     const EXACT: u64 = 28;
-    let count = land_statement_count(3);
     {
         let log = Backend::test_statement_log();
         let settles = log
