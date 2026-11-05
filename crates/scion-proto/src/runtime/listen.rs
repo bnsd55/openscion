@@ -934,6 +934,7 @@ fn spawn_tls_accepted<IO>(
         wait,
         stalled_bytes,
         total,
+        waits,
         refusals,
         ..
     } = accepting;
