@@ -2433,9 +2433,7 @@ mod tests {
                 // stored.
                 let (_, head, head_tree) = f
                     .store
-                    .read(|c| {
-                        Ok(c.land_outcome(repo, &caller(), recorded.land_id, Some("main"))?)
-                    })
+                    .read(|c| c.land_outcome(repo, &caller(), recorded.land_id, Some("main")))
                     .unwrap();
                 let plan = f
                     .store
