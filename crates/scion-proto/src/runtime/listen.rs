@@ -948,7 +948,10 @@ fn spawn_tls_accepted<IO>(
     tokio::spawn(async move {
         // The place first, bounded: a connection over the cap waits at
         // most `wait`, then the server closes it, so a storm fails fast
-        // instead of queueing behind `MAX_CONNECTION_AGE`.
+        // instead of queueing behind `MAX_CONNECTION_AGE`. The wait runs
+        // in the connection's own task, so one waiter never holds the
+        // accept loop, and the waiters are capped, so a storm holds at
+        // most `max` waiting sockets.
         let Some(place) = place_within(&places, &waiters, max, wait, &waits).await else {
             metrics.connection_refused();
             warn_refused(&refusals, max, wait);
@@ -1160,8 +1163,14 @@ where
                 // listener with this task.
                 () = done.closed() => break,
             };
-            // The accept's marks (issue #795), and the accept error's only
-            // log under any filter: tonic logs it at trace.
+            // The accept's marks (issue #795): the moment the listener's
+            // socket reaches this task, on the thread that saw it, and -
+            // on the connection's first read - the wait it had. The gap
+            // between a client's connect and the first line is the
+            // accept's delay; the gap to the second is the connection
+            // task's start delay. An accept error is logged at debug and
+            // warned rate-limited by the pacer; tonic logs it at trace
+            // only, below every default filter.
             let born = std::time::Instant::now();
             let io = match accepted {
                 Ok(io) => {
@@ -1775,7 +1784,42 @@ mod tests {
         (addr, metrics)
     }
 
-    /// The stub, served within `limits` with `timers`, and its address.
+    /// A log writer that collects what the test binary logs.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Captured;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    static LOG: Captured = Captured(Arc::new(std::sync::Mutex::new(Vec::new())));
+
+    fn init_log() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::level_filters::LevelFilter::TRACE)
+                .with_writer(LOG.clone())
+                .finish();
+            tracing::subscriber::set_global_default(subscriber).unwrap();
+        });
+    }
+
     /// A listener that never yields a socket: every accept fails at once,
     /// as the process out of file descriptors makes every real listener
     /// fail.
@@ -1796,6 +1840,7 @@ mod tests {
     /// rate-limited warning.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_listener_that_fails_every_accept_is_paced_and_counted() {
+        init_log();
         let limits = Limits::default();
         let metrics = Arc::new(Metrics::default());
         let attempts = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1832,8 +1877,32 @@ mod tests {
             line, "scion_accept_errors_total 0",
             "the failed accepts are not counted:\n{text}"
         );
+        let text = String::from_utf8(LOG.0.lock().unwrap().clone()).unwrap();
+        let warns: Vec<&str> = text
+            .lines()
+            .filter(|l| {
+                l.contains("the listener failed to accept; waiting before it accepts again")
+            })
+            .collect();
+        assert_eq!(
+            warns.len(),
+            1,
+            "the accept warning must be written once in 3 s, not spam or silence:\n{text}"
+        );
+        let failures = warns[0]
+            .split("failures=")
+            .nth(1)
+            .and_then(|n| n.split(' ').next())
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(0);
+        assert!(
+            failures >= 1,
+            "the warning must name at least one failure: {}",
+            warns[0]
+        );
     }
 
+    /// The stub, served within `limits` with `timers`, and its address.
     async fn serve(limits: Limits, timers: Timers) -> (SocketAddr, Arc<Metrics>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
