@@ -351,12 +351,11 @@ fn memory_floor() -> Answer {
     }
 }
 
-/// # SHORTCUT: 12 MiB, the `disk_full` run's own margin, as a warn; a
-/// real disk budget needs a doc row naming the store's spend per blob
-/// and per land. The `disk_full` wet run leaves 12 MiB for the open,
-/// the repo and the first lands; a filesystem below it cannot boot a
-/// store.
-const DISK_MARGIN: u64 = 12 << 20;
+/// # SHORTCUT: 1 GiB, about 10,000 lands of headroom by the capacity
+/// table (about 35 to 87 MB of database and 5.6 MB of blobs per 1,000
+/// lands, docs/operations.md §capacity), as a warn. The upgrade path
+/// is a size taken from the store's own growth, not a constant.
+const DISK_MARGIN: u64 = 1 << 30;
 
 /// The data directory's filesystem: free bytes against the margin the
 /// store's own disk evidence names, and the inodes free. Inodes have no
@@ -383,11 +382,11 @@ fn disk_and_inodes(data: &Path) -> Answer {
     };
     if bytes < DISK_MARGIN {
         return Answer::Warn(format!(
-            "{} free on {}, below the {} MiB the store's open and first \
-             lands spend: grow the filesystem before the first boot",
+            "{} free on {}, below the 1 GiB of headroom (about 10,000 \
+             lands by the capacity table): grow the filesystem before \
+             the first boot",
             human_bytes(bytes),
-            data.display(),
-            DISK_MARGIN / (1 << 20)
+            data.display()
         ));
     }
     Answer::Ok(format!(
