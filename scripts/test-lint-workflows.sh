@@ -2,9 +2,9 @@
 # Tests the download path of scripts/lint-workflows.sh against a local
 # HTTP server (#897): an HTTP error must die with the download message
 # before any hash is read, and a download of wrong bytes must still
-# fail with the pin message unchanged. The pins, the directory and the
-# URL base are the script's own override points; the script runs whole,
-# twice, and its verdict is read from its output.
+# fail with the pin message unchanged. The directory and the URL base
+# are the script's own override points; the script runs whole, twice,
+# and its verdict is read from its output.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -47,12 +47,9 @@ for _ in $(seq 1 100); do
 done
 [ -n "$port" ] || { echo "test-lint-workflows: the fixture server did not start" >&2; exit 1; }
 
-# Run the script against the fixture, with the pin and the download
-# directory overridden. The PATH drops the machine's actionlint (CI's
-# runner has none): the download branch must run for the test to test
-# it. The workflows under the repo lint fine, so a run that cleared
-# download and pin would carry on to actionlint - which the fixture is
-# not: a healthy path's verdict is 1, from actionlint, never 0.
+# Run the script against the fixture, with the download directory
+# overridden. The PATH drops any installed actionlint, so the download
+# branch runs.
 run() {
   local dir=$1 path=$2
   PATH=$(getconf PATH) ACTIONLINT_URL_BASE="http://127.0.0.1:$port$path" \
