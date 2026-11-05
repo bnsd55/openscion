@@ -62,7 +62,11 @@ else
 fi
 fetch_dataset
 
-export SCION_TOKEN=smoke
+# The cache and the daemon authenticate their upstream fetches with
+# SCION_UPSTREAM_TOKEN, which common.sh set to its own random value:
+# both tokens move together, or the readers' object fetches die as
+# unauthenticated (the first reader run's 39466 failures).
+export SCION_TOKEN=smoke SCION_UPSTREAM_TOKEN=smoke
 # The Postgres URL reaches the server through the env (common.sh's
 # start_scion reads it), as the capacity harness sets it.
 export SCION_POSTGRES_URL=$SCION_PG_URL
