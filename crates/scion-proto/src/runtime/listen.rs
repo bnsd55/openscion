@@ -595,7 +595,8 @@ impl Limits {
         S: tower::Service<
                 http::Request<hyper::body::Incoming>,
                 Response = http::Response<tonic::body::Body>,
-            > + Send
+            > + Clone
+            + Send
             + 'static,
         S::Future: Send + 'static,
         S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
