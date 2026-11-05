@@ -1358,6 +1358,11 @@ impl Watchdog {
         while !self.stop.load(Ordering::Relaxed) {
             if self.started.elapsed() >= self.budget {
                 let at = self.ordinal.load(Ordering::Relaxed);
+                guard_log(&format!(
+                    "{} passed its budget of {:?} at step {} (seed {}); \
+                     the run is wedged, aborting the process",
+                    self.script_name, self.budget, at, self.seed,
+                ));
                 eprintln!(
                     "{name} passed its budget of {budget:?} at step {at} \
                      (seed {s}); the run is wedged, aborting the process",
@@ -1529,12 +1534,35 @@ async fn finish_lands(scion: &mut Scion, lands: &mut Ledger) {
 /// cannot capture - before the harness holds the test's output, so a
 /// panic is in the CI log even when the job is cancelled before the
 /// summary runs.
+/// Appends one guard line to the file SCION_TEST_GUARD_LOG names, when
+/// it is set: the guards' words must survive a wedged thread holding
+/// the stderr lock, so the guards also speak to a file no one else
+/// writes.
+fn guard_log(line: &str) {
+    if let Some(path) = std::env::var_os("SCION_TEST_GUARD_LOG") {
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+}
+
 fn install_panic_hook() {
     static HOOK: OnceLock<()> = OnceLock::new();
     HOOK.get_or_init(|| {
         let default = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             use std::io::Write as _;
+            guard_log(&format!(
+                "PANIC: {}",
+                info.payload()
+                    .downcast_ref::<String>()
+                    .map_or("panic", String::as_str)
+            ));
             let _ = writeln!(
                 std::io::stderr().lock(),
                 "PANIC: {}",
@@ -2056,6 +2084,11 @@ fn the_seed_corpus_holds() {
     let corpus_guard = std::thread::spawn(move || {
         while !corpus_guard_stop.load(Ordering::Relaxed) {
             if corpus_started.elapsed() >= corpus_budget {
+                guard_log(&format!(
+                    "the corpus passed its budget of {:?}; the run is \
+                     wedged between scripts, aborting the process",
+                    corpus_budget,
+                ));
                 eprintln!(
                     "the corpus passed its budget of {corpus_budget:?}; the \
                      run is wedged between scripts, aborting the process",
