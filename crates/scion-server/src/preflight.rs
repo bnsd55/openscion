@@ -13,24 +13,44 @@ use crate::error::Result;
 /// shell hands them over. The Postgres URL stays unresolved, so the
 /// URL's own check can name the missing piece.
 pub struct PreflightOptions {
+    /// The data directory the checks read, and whose filesystem the
+    /// disk check gauges.
     pub data: PathBuf,
+    /// The file holding the Postgres URL, read like any secret; the
+    /// URL may ride `SCION_POSTGRES_URL` instead.
     pub postgres_url_file: Option<PathBuf>,
+    /// The CA that verifies the database's certificate, when the URL
+    /// names a host that is not local.
     pub postgres_ca: Option<PathBuf>,
+    /// The file holding the one principal's token, checked like a
+    /// secret.
     pub token_file: Option<PathBuf>,
+    /// The access file: tokens and rules for many principals.
     pub access: Option<PathBuf>,
+    /// The server's certificate chain (PEM).
     pub tls_cert: Option<PathBuf>,
+    /// The server's private key (PEM).
     pub tls_key: Option<PathBuf>,
+    /// The CA that verifies a client's certificate, when mTLS is on.
     pub tls_client_ca: Option<PathBuf>,
+    /// The ticket signing key's seed file.
     pub ticket_key: Option<PathBuf>,
+    /// The previous ticket key's public file, which a rotation keeps
+    /// alive.
     pub ticket_key_old: Option<PathBuf>,
+    /// The address the gRPC listener would bind.
     pub listen: SocketAddr,
+    /// The address the metrics listener would bind, when given.
     pub metrics_listen: Option<SocketAddr>,
 }
 
 /// What a run answers: one line per check, and the shell's exit code -
 /// 0 all pass, 1 one warns, 2 one fails.
+#[must_use = "a preflight run answers with its report: print the lines, exit with the code"]
 pub struct Report {
+    /// One line per check, `ok`, `warn` or `fail`, in check order.
     pub lines: Vec<String>,
+    /// The shell's exit code: 0, 1 or 2.
     pub code: i32,
 }
 
@@ -45,6 +65,7 @@ enum Answer {
 /// Every check, in the order an operator fixes them: the directory,
 /// the database, the schema, the keys and files, the address, the
 /// host. Nothing is written: no marker, no schema move, no lock.
+#[must_use]
 pub fn run(opts: &PreflightOptions) -> Report {
     let mut answers: Vec<(&'static str, Answer)> = Vec::new();
 
@@ -137,7 +158,7 @@ pub fn run(opts: &PreflightOptions) -> Report {
         answers.push(("store pairing", store_pairing(&opts.data, db)));
 
         // A live server on this store: the one-server lock's key, read
-        // from pg_locks - never taken.
+        // from `pg_locks` - never taken.
         answers.push(("one-server lock", live_server(db)));
     }
 
@@ -292,11 +313,11 @@ fn tickets(opts: &PreflightOptions) -> Answer {
     }
     match crate::Keys::load(&seed, &old) {
         Ok(_) => Answer::Ok("the ticket key loads".to_owned()),
-        Err(why) => Answer::Fail(format!("{why}")),
+        Err(why) => Answer::Fail(why.to_string()),
     }
 }
 
-/// The marker's UUID beside the database's store_uuid row, plain
+/// The marker's UUID beside the database's `store_uuid` row, plain
 /// selects: a mismatch is a store restored over a directory, the
 /// open's own refusal to name.
 fn store_pairing(data: &Path, db: &mut postgres::Client) -> Answer {
@@ -330,11 +351,16 @@ fn store_pairing(data: &Path, db: &mut postgres::Client) -> Answer {
 
 /// 16 bytes as 32 lowercase hex digits, for the pairing refusal.
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
-/// A live server on this store, read from pg_locks: the advisory key
-/// the one-server lock takes, asked, never taken.
+/// A live server on this store, read from `pg_locks`: the advisory
+/// key the one-server lock takes, asked, never taken.
 fn live_server(db: &mut postgres::Client) -> Answer {
     let schema: Option<String> = match db
         .query_one("SELECT current_schema()::text", &[])
@@ -354,7 +380,7 @@ fn live_server(db: &mut postgres::Client) -> Answer {
              WHERE locktype = 'advisory' AND objid = $1 AND granted",
             &[&crate::pg::schema_lock_key(&schema)],
         )
-        .map(|row| row.map(|row| row.get::<_, i64>(0)).unwrap_or(0));
+        .map_or(0, |row| row.map(|row| row.get::<_, i64>(0)).unwrap_or(0));
     match holders {
         Ok(0) => Answer::Ok("no server holds this store".to_owned()),
         Ok(n) => Answer::Warn(format!(
