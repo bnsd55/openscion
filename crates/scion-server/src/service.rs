@@ -79,7 +79,7 @@ const _: () = assert!(MAX_GRAPH_QUERIES < crate::store::READERS);
 /// Most `Diff` calls running at once. One call can read and compare files
 /// for about a second to find renames (`read::MAX_RENAME_CHUNKS`), so diffs
 /// never take more than this many of the `MAX_BLOCKING` permits either.
-const MAX_DIFFS: usize = 4;
+pub(crate) const MAX_DIFFS: usize = 4;
 /// Longest a request may take before the server gives up on it.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 /// Most bytes that all `ReadFile` replies together hold: the parts read and

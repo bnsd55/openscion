@@ -189,7 +189,8 @@ crates/scion-server/src/service.rs); the third is the unary-reply budget
 (`REPLY_MEMORY_BUDGET` in crates/scion-server/src/reply.rs). Size the
 server's memory from that sum plus its fixed shares (the blame, derive,
 land and gc budgets, the uploads in flight, the view derivations' memo
-share, the diffs' rename share), which together make the memory floor
+share, the diffs' rename share - four diffs' 64 MiB rename bounds at
+once), which together make the memory floor
 (floor.rs): at start the server sets the floor and the host's limit as
 gauges, and an error line at start says when the host is under the
 floor. The shares bound what the work holds: a view derivation writes

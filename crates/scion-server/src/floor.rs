@@ -81,6 +81,12 @@ pub(crate) const STALL_TOTAL: u64 = scion_proto::runtime::listen::STALLED_TOTAL_
 pub(crate) const VIEW_MEMO: u64 =
     (crate::views::VIEW_MEMO_BYTES * crate::views::VIEW_DERIVES_MAX) as u64;
 
+/// What the diffs' rename passes hold at once: the diffs that run at
+/// once (`service::MAX_DIFFS`) each holding the rename pass's byte
+/// bound (`read::MAX_RENAME_BYTES`).
+pub(crate) const RENAME_WORK: u64 =
+    (crate::read::MAX_RENAME_BYTES * crate::service::MAX_DIFFS) as u64;
+
 /// Slack for what the budgets do not count: the interpreter, the
 /// allocators' overhead, the connection and TLS buffers, the stacks of
 /// the worker threads.
@@ -98,6 +104,7 @@ pub(crate) const FLOOR: u64 = BLAME
     + PRUNE_BODY
     + STALL_TOTAL
     + VIEW_MEMO
+    + RENAME_WORK
     + HEADROOM;
 
 /// The files the host-limit reader reads, so a test can point them at a
@@ -307,6 +314,7 @@ pub(crate) fn check_startup_memory(
                 gc_bytes = PRUNE_BODY,
                 stall_total_bytes = STALL_TOTAL,
                 view_memo_bytes = VIEW_MEMO,
+                rename_work_bytes = RENAME_WORK,
                 "the host has less memory than the server's floor: \
                  the page cache gives way first, and under load the \
                  process can reach the OOM killer"
@@ -345,9 +353,18 @@ mod tests {
                 + PRUNE_BODY
                 + STALL_TOTAL
                 + VIEW_MEMO
+                + RENAME_WORK
                 + HEADROOM
         );
-        assert_eq!(FLOOR, 6736 << 20);
+        assert_eq!(FLOOR, 6992 << 20);
+    }
+
+    /// The rename share is the diffs that run at once, each holding its
+    /// rename pass's byte bound. A drift in either constant shows here
+    /// before it shows in a host check.
+    #[test]
+    fn the_rename_share_is_the_diffs_at_once_times_their_bound() {
+        assert_eq!(RENAME_WORK, 256 << 20);
     }
 
     #[test]
