@@ -4519,7 +4519,7 @@ impl MetaTx for PgTx<'_> {
                 ],
             )?,
         };
-        Ok(changed == 1)
+        Ok(true)
     }
 
     fn restore_ref(&mut self, repo: RepoId, name: &str, target: &[u8], version: i64) -> Result<()> {
