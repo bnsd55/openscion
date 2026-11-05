@@ -40,8 +40,8 @@ summary_line() {
 step "blob-count costs (issue #823)"
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   summary_line ""
-  summary_line "| blobs | open (s) | reopen (s) | fill (s) | fsck (s) | gc --dry-run (s) | blob bytes | objects bytes | inodes used | inodes free |"
-  summary_line "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+  summary_line "| blobs | open (s) | reopen (s) | fill (s) | blob rows (s) | count query (ms) | fsck (s) | gc --dry-run (s) | blob bytes | objects bytes | inodes used | inodes free |"
+  summary_line "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
 fi
 
 # The inode table row of the filesystem that holds the store, as one
@@ -90,6 +90,9 @@ for count in $COUNTS; do
   fsck_s="$(facts fsck_seconds)"
   gc_s="$(facts gc_dry_run_seconds)"
   blob_bytes="$(facts blob_bytes)"
+  blob_rows_s="$(facts blob_rows_seconds)"
+  count_query_ms="$(grep '^BENCH blob_count_query_ms ' "/tmp/blob-bench-run-$count.txt" | awk '{ print $4 }' | sort -n | sed -n '3p')"
+  # empty when the store has no rows: the column stays empty, not 0
 
   # The bytes on disk against the blob bytes: the per-file overhead of
   # one file per blob (block rounding, the directory tree, the tmp
@@ -107,7 +110,7 @@ for count in $COUNTS; do
   inodes_used_after="$(awk 'NR==2 { print $3 }' "/tmp/blob-bench-df-after-$count.txt")"
   inodes_free_after="$(awk 'NR==2 { print $4 }' "/tmp/blob-bench-df-after-$count.txt")"
 
-  summary_line "| $count | $open_s | $reopen_s | $fill_s | $fsck_s | $gc_s | $blob_bytes | $objects_bytes | $((inodes_used_after - inodes_used_before)) | $inodes_free_after |"
+  summary_line "| $count | $open_s | $reopen_s | $fill_s | $blob_rows_s | $count_query_ms | $fsck_s | $gc_s | $blob_bytes | $objects_bytes | $((inodes_used_after - inodes_used_before)) | $inodes_free_after |"
 
   # The store is the measurement's subject; the next count starts
   # clean. On the runner the whole scratch directory goes with the job.

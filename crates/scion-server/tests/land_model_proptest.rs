@@ -2012,6 +2012,7 @@ fn a_restart_waits_for_the_killed_servers_store_lock() {
 /// The checked-in seed corpus: each file is one script, run first, so a
 /// regression here reads like a sentence.
 #[test]
+#[allow(clippy::too_many_lines)] // the corpus's guards and its kinds
 fn the_seed_corpus_holds() {
     install_panic_hook();
     // Postgres pays per-op commits and a full server restart per script:
@@ -2056,9 +2057,8 @@ fn the_seed_corpus_holds() {
         while !corpus_guard_stop.load(Ordering::Relaxed) {
             if corpus_started.elapsed() >= corpus_budget {
                 eprintln!(
-                    "the corpus passed its budget of {budget:?}; the run is \
-                     wedged between scripts, aborting the process",
-                    budget = corpus_budget,
+                    "the corpus passed its budget of {corpus_budget:?}; the \
+                     run is wedged between scripts, aborting the process",
                 );
                 std::process::abort();
             }

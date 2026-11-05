@@ -50,6 +50,7 @@ use crate::land::{
 };
 use crate::meta::{FsckDerivedRow, Meta, MetaTx, RefState, RepoChangeset, RepoId, StaleLand};
 use crate::store::Blobs;
+use crate::tree::RootTree;
 
 #[cfg(any(test, feature = "test-hooks"))]
 #[path = "test_support/pg.rs"]
@@ -4067,6 +4068,17 @@ impl MetaTx for PgTx<'_> {
 
     /// Adds `blob` to the blobs that `repo` may name. Returns whether it is
     /// new.
+    /// One statement over `repo_blobs`: the hash-agg of its distinct
+    /// blobs. Bounded: it reads one table once, and returns one number.
+    fn blob_count(&mut self) -> Result<u64> {
+        let rows = self.c.query(
+            "SELECT count(*) FROM (SELECT DISTINCT blob FROM repo_blobs) t",
+            &[],
+        )?;
+        let n: i64 = rows[0].get(0);
+        Ok(u64::try_from(n).unwrap_or(0))
+    }
+
     fn add_repo_blob(&mut self, repo: RepoId, blob: BlobId) -> Result<bool> {
         let added = self.c.execute(
             "INSERT INTO repo_blobs (repo_id, blob) VALUES ($1, $2)
@@ -5213,16 +5225,23 @@ impl MetaTx for PgTx<'_> {
         caller: &Caller,
         land_id: i64,
         ref_name: Option<&str>,
-    ) -> Result<(LandOutcome, Option<RefState>)> {
+    ) -> Result<(LandOutcome, Option<RefState>, bool)> {
         // The ref rides a LEFT JOIN: a ref deleted between the record and
         // the finish answers no ref columns, and the land's outcome
         // stands alone - the plan then sees a missing ref, as a separate
-        // read would have.
+        // read would have. The head tree's presence rides the same
+        // statement: a scalar subselect on the ref's target, so the
+        // finish knows whether the fill runs before the write
+        // transaction, from the snapshot the head itself rode.
         let row = self
             .c
             .query_opt(
                 "SELECT l.state, l.result_cs, l.detail, l.conflict_paths, l.reject_reason,
-                        r.target, r.version
+                        r.target, r.version,
+                        COALESCE((SELECT d.value IS NOT NULL FROM derived d
+                                  WHERE d.kind = $5 AND d.version = $6
+                                    AND d.cs = r.target),
+                                 false)
                  FROM lands l
                  LEFT JOIN refs r ON r.repo_id = l.repo_id AND r.name = $4
                  WHERE l.repo_id = $1 AND l.land_id = $2 AND l.caller = $3",
@@ -5231,6 +5250,8 @@ impl MetaTx for PgTx<'_> {
                     P::i64(land_id),
                     P::text(&caller.0),
                     P::text(ref_name.unwrap_or_default()),
+                    P::text(<RootTree as crate::derived::Kind>::NAME),
+                    P::i64(i64::from(<RootTree as crate::derived::Kind>::VERSION)),
                 ],
             )?
             .ok_or_else(|| Error::NotFound(format!("land {land_id}")))?;
@@ -5241,6 +5262,7 @@ impl MetaTx for PgTx<'_> {
         let reason: String = row.get(4);
         let ref_target: Option<Vec<u8>> = row.get(5);
         let ref_version: Option<i64> = row.get(6);
+        let head_tree: bool = row.get(7);
         let head = match (ref_target, ref_version) {
             (Some(target), Some(version)) => Some(RefState {
                 target: to_id(&target)?,
@@ -5264,7 +5286,7 @@ impl MetaTx for PgTx<'_> {
                 .ok_or_else(|| Error::Corrupt(format!("land {land_id} conflict paths")))?,
             reject_reason: LandRejectReason::parse(&reason)?,
         };
-        Ok((out, head))
+        Ok((out, head, head_tree))
     }
 
     /// Moves a pending land to its final state and returns the outcome.
@@ -6220,13 +6242,17 @@ pub(crate) mod pool_tests {
         assert_eq!(recorded.state, LandState::Pending);
         let pg = store.into_pg();
         // The join answers the ref while it exists.
-        let (row, head) = crate::meta::Meta::read(&pg, |c| {
+        let (row, head, head_tree) = crate::meta::Meta::read(&pg, |c| {
             let repo = c.repo_id("r")?;
             c.land_outcome(repo, &Caller("t".into()), recorded.land_id, Some("main"))
         })
         .unwrap();
         assert_eq!(row.state, LandState::Pending);
         assert!(head.is_some());
+        // This fixture never derived its head's root tree - no land has
+        // run - so the read answers false while the ref stands, and the
+        // answer still rides the joined row.
+        assert!(!head_tree, "the fixture's head tree was never derived");
         // The ref goes away (the API never deletes refs; an operator or a
         // future gc can), and the land's outcome must survive it.
         let mut reader = pg.inner.readers.take(READER_WAIT).unwrap();
@@ -6235,13 +6261,14 @@ pub(crate) mod pool_tests {
             .execute("DELETE FROM refs WHERE name = 'main'", &[])
             .unwrap();
         drop(reader);
-        let (row, head) = crate::meta::Meta::read(&pg, |c| {
+        let (row, head, head_tree) = crate::meta::Meta::read(&pg, |c| {
             let repo = c.repo_id("r")?;
             c.land_outcome(repo, &Caller("t".into()), recorded.land_id, Some("main"))
         })
         .unwrap();
         assert_eq!(row.state, LandState::Pending, "the land row stands alone");
         assert!(head.is_none(), "the ref half answers None");
+        assert!(!head_tree, "no ref, no head, no tree to fill");
     }
 
     #[test]

@@ -21,6 +21,10 @@ ACTIONLINT_DARWIN_ARM64=aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6
 note() { printf '%s %s\n' "lint-workflows:" "$*"; }
 die() { printf '%s %s\n' "lint-workflows:" "$*" >&2; exit 1; }
 
+# The release URL's base. A test points it at a local fixture server
+# (#897); unset, it is the real release host.
+url_base=${ACTIONLINT_URL_BASE:-https://github.com/rhysd/actionlint/releases/download}
+
 # A pinned actionlint, downloaded only if the PATH has none.
 ACTIONLINT=$(command -v actionlint || true)
 if [ -z "$ACTIONLINT" ]; then
@@ -29,12 +33,17 @@ if [ -z "$ACTIONLINT" ]; then
     Darwin-arm64) asset=darwin_arm64; want=$ACTIONLINT_DARWIN_ARM64 ;;
     *) die "no pinned actionlint for $(uname -s)-$(uname -m)" ;;
   esac
-  dir=${TMPDIR:-/tmp}/actionlint-$ACTIONLINT_VERSION-bin
+  dir=${ACTIONLINT_DIR:-${TMPDIR:-/tmp}/actionlint-$ACTIONLINT_VERSION-bin}
   mkdir -p "$dir"
   tarball=$dir/actionlint.tar.gz
   if [ ! -x "$dir/actionlint" ]; then
-    url="https://github.com/rhysd/actionlint/releases/download/v$ACTIONLINT_VERSION/actionlint_${ACTIONLINT_VERSION}_${asset}.tar.gz"
-    curl -sL -o "$tarball" "$url"
+    url="$url_base/v$ACTIONLINT_VERSION/actionlint_${ACTIONLINT_VERSION}_${asset}.tar.gz"
+    # -f fails on an HTTP error before any byte is kept: without it an
+    # error body becomes the tarball and the hash check reads like a
+    # changed release (#897). A transient error retries; a lasting one
+    # dies here with the status, before any hash.
+    curl -fsSL --retry 3 --retry-all-errors -o "$tarball" "$url" \
+      || die "the actionlint download failed ($url)"
     if command -v sha256sum > /dev/null; then
       got=$(sha256sum "$tarball" | cut -d' ' -f1)
     else

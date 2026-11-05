@@ -297,6 +297,12 @@ scion_pg_collector_key_wait_seconds_count
 # HELP scion_data_free_bytes Free bytes of the filesystem that holds the data directory.
 # TYPE scion_data_free_bytes gauge
 scion_data_free_bytes
+# HELP scion_blob_count Blobs the metadata names; docs/support.md supports 1,000,000 per data directory.
+# TYPE scion_blob_count gauge
+scion_blob_count
+# HELP scion_blob_ceiling_share The blob count as a share of the 1,000,000 blobs docs/support.md supports per data directory.
+# TYPE scion_blob_ceiling_share gauge
+scion_blob_ceiling_share
 # HELP scion_derive_walks_in_flight Derive walks holding a permit now.
 # TYPE scion_derive_walks_in_flight gauge
 scion_derive_walks_in_flight
@@ -326,6 +332,9 @@ scion_pg_tx_age_seconds
 # HELP scion_connections_refused_total Connections the server closed because no place freed within its wait at the connection cap; a client that left while it waited counts here too.
 # TYPE scion_connections_refused_total counter
 scion_connections_refused_total
+# HELP scion_accept_errors_total Accepts the listener failed; a persistent failure leaves new clients unserved, and the accept task paces itself after failures.
+# TYPE scion_accept_errors_total counter
+scion_accept_errors_total
 # HELP scion_calls_in_flight Calls whose reply body has not ended, as the count a drain still waits for.
 # TYPE scion_calls_in_flight gauge
 scion_calls_in_flight

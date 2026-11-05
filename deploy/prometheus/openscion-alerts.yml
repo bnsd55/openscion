@@ -192,6 +192,39 @@ groups:
             check CacheDown and the tier's memory caps (--max-bytes,
             --snapshot-bytes), and raise or restart it
             (docs/operations.md#tier-miss-rate).
+  - name: store
+    rules:
+      - alert: BlobCount70
+        expr: scion_blob_ceiling_share > 0.70
+        for: 15m
+        labels:
+          severity: medium
+        annotations:
+          response: >-
+            The store holds 70% of the 1,000,000 blobs
+            docs/support.md supports. fsck stays fast for now; watch
+            the trend (docs/operations.md section 6).
+      - alert: BlobCount85
+        expr: scion_blob_ceiling_share > 0.85
+        for: 15m
+        labels:
+          severity: high
+        annotations:
+          response: >-
+            The store holds 85% of the supported blob count. Give new
+            repos a second store before the walks grow; there is no
+            tool to move existing repos between stores yet
+            (docs/operations.md section 6).
+      - alert: BlobCount100
+        expr: scion_blob_ceiling_share > 1.0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          response: >-
+            The store holds more blobs than docs/support.md supports.
+            The walk is seconds today and grows past them; give new
+            repos a second store now (docs/operations.md section 6).
   - name: gc
     rules:
       - alert: GcStale

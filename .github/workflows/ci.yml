@@ -192,6 +192,8 @@ jobs:
       # actionlint release is pinned by version and sha256.
       - name: the workflows parse (actionlint)
         run: scripts/lint-workflows.sh
+      - name: the actionlint download fails as a download (#897)
+        run: scripts/test-lint-workflows.sh
       - name: the capacity reader counters count the log's own shapes
         run: scripts/test-capacity-counters.sh
       - name: a script that dies leaves no owned process
