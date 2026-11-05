@@ -2426,13 +2426,14 @@ mod tests {
                 // The head the finish plans on rides the joined read,
                 // as it does in Lands::land: the land's own row beside
                 // the ref's state.
-                let head = f
+                // The head the finish plans on rides the joined read,
+                // as it does in Lands::land: the land's own row beside
+                // the ref's state, and whether the head's tree is
+                // stored.
+                let (_, head, head_tree) = f
                     .store
                     .read(|c| {
-                        Ok(
-                            c.land_outcome(repo, &caller(), recorded.land_id, Some("main"))?
-                                .1,
-                        )
+                        Ok(c.land_outcome(repo, &caller(), recorded.land_id, Some("main"))?)
                     })
                     .unwrap();
                 let plan = f
@@ -2446,8 +2447,10 @@ mod tests {
                 if crash == Crash::RefMoved {
                     f.move_main(f.commit(f.main().target, &[put("c", "import")]));
                     let land_id = recorded.land_id;
-                    let err = settle(&f.lands, &f.store, repo, land_id, "main", plan, &mut index)
-                        .unwrap_err();
+                    let err = settle(
+                        &f.lands, &f.store, repo, land_id, "main", plan, &mut index, head_tree,
+                    )
+                    .unwrap_err();
                     assert!(matches!(err, Error::Aborted(_)), "{crash:?}: {err}");
                     let kept = f.store.read(|c| c.has_changeset(repo, rebased));
                     assert!(!kept.unwrap(), "the transaction rolled back");
