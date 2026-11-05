@@ -7,39 +7,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::{
-    Client, Error, Job, Kind, Marker, P, Path, Pg, PgClient, Reply, Result, connect_with,
-    map_pg_error,
-};
-
-impl PgClient {
-    /// Runs one closure with the client on the worker thread. The sync
-    /// client must never be touched from a tokio thread, which this
-    /// keeps true for the few setup statements a caller needs. Only the
-    /// test schema's preparation calls it.
-    #[cfg(any(test, feature = "test-hooks"))]
-    pub(super) fn as_raw(
-        &self,
-        f: impl FnOnce(&mut Client) -> Result<()> + Send + 'static,
-    ) -> Result<()> {
-        let (reply, rx) = std::sync::mpsc::channel();
-        self.jobs
-            .send(Job {
-                sql: String::new(),
-                params: Vec::new(),
-                kind: Kind::Raw,
-                reply,
-                raw: Some(Box::new(f)),
-            })
-            .map_err(|_| Error::Corrupt(super::WORKER_STOPPED.into()))?;
-        match rx.recv() {
-            Ok(Ok(Reply::Count(_))) => Ok(()),
-            Ok(Ok(_)) => unreachable!("a raw job replies with a count"),
-            Ok(Err(error)) => Err(error),
-            Err(_) => Err(Error::Corrupt(super::WORKER_STOPPED.into())),
-        }
-    }
-}
+use super::{Client, Error, Marker, P, Path, Pg, PgClient, Result, connect_with, map_pg_error};
 
 /// The name prefix of every schema the test helpers make. The sweep
 /// drops nothing outside it, and the test schema helper spells it: a
@@ -298,7 +266,7 @@ pub(crate) fn register_test_schema(
 #[cfg(any(test, feature = "test-hooks"))]
 fn prepare_test_schema(url: &str, schema: &str, dir: &Path) -> Result<()> {
     let preparer = connect(url, None)?;
-    preparer.as_raw({
+    preparer.raw(Box::new({
         let name = schema.to_owned();
         move |client| {
             client
@@ -308,13 +276,13 @@ fn prepare_test_schema(url: &str, schema: &str, dir: &Path) -> Result<()> {
                 ))
                 .map_err(map_pg_error)
         }
-    })?;
+    }))?;
     // The run's own sweep runs once; every preparation then drains a
     // few stale schemas, so the suite's leftovers never outgrow its
     // concurrency (#849).
     drop_stale_schemas(&preparer, true, SWEEP_CAP);
     drop_stale_schemas(&preparer, false, DRAIN_CAP);
-    preparer.as_raw({
+    preparer.raw(Box::new({
         let name = schema.to_owned();
         let dir = dir.to_path_buf();
         move |client| {
@@ -323,7 +291,7 @@ fn prepare_test_schema(url: &str, schema: &str, dir: &Path) -> Result<()> {
                 .map_err(map_pg_error)?;
             register_test_schema(client, &name, &dir).map_err(map_pg_error)
         }
-    })?;
+    }))?;
     Ok(())
 }
 
@@ -339,11 +307,11 @@ fn prepare_test_schema(url: &str, schema: &str, dir: &Path) -> Result<()> {
 #[cfg(any(test, feature = "test-hooks"))]
 pub(crate) fn sweep_stale_test_schemas(url: &str) -> Result<(usize, usize)> {
     let preparer = connect(url, None)?;
-    preparer.as_raw(move |client| {
+    preparer.raw(Box::new(move |client| {
         client
             .batch_execute("SET application_name TO ''")
             .map_err(map_pg_error)
-    })?;
+    }))?;
     Ok(drop_stale_schemas(&preparer, false, SWEEP_CAP))
 }
 

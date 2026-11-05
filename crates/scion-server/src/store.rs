@@ -1007,9 +1007,32 @@ fn too_large() -> Error {
 ///
 /// The `statvfs` of `dir` failed (a directory that is gone).
 pub fn free_bytes(dir: &Path) -> std::io::Result<u64> {
+    #[cfg(any(test, feature = "test-hooks"))]
+    if let Some(bytes) = *TEST_FREE_BYTES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    {
+        return Ok(bytes);
+    }
     let stats = rustix::fs::statvfs(dir)?;
     Ok(stats.f_bavail.saturating_mul(stats.f_frsize))
 }
+
+/// The free-bytes read's test override: the tests that need a small
+/// filesystem set a value, and reset it to `None` on the way out. The
+/// override is process-global, so the tests that touch it share the
+/// preflight's test lock. The lib tests of other crates' features do
+/// not reach it; the dead-code lint is told, not fought.
+#[cfg(any(test, feature = "test-hooks"))]
+#[allow(dead_code)]
+pub(crate) fn test_set_free_bytes(value: Option<u64>) {
+    *TEST_FREE_BYTES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = value;
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+static TEST_FREE_BYTES: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
 
 /// The inodes free for this user on the filesystem that holds `dir`:
 /// the other wall of a blob store, one file per blob. `f_favail`, not

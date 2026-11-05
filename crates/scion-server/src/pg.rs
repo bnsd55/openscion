@@ -751,6 +751,34 @@ fn open_transaction(c: &PgClient, open: &str) -> Result<()> {
 }
 
 impl PgClient {
+    /// Runs one closure with the client on the worker thread: the sync
+    /// client must never be touched from a tokio thread, so the setup
+    /// and read paths that need the client whole send it here, where a
+    /// blocking statement is just a blocking statement.
+    ///
+    /// # Errors
+    ///
+    /// The worker is gone (its log line names why), or the closure
+    /// failed.
+    fn raw(&self, f: RawFn) -> Result<()> {
+        let (reply, rx) = std::sync::mpsc::channel();
+        self.jobs
+            .send(Job {
+                sql: String::new(),
+                params: Vec::new(),
+                kind: Kind::Raw,
+                reply,
+                raw: Some(f),
+            })
+            .map_err(|_| Error::Corrupt(WORKER_STOPPED.into()))?;
+        match rx.recv() {
+            Ok(Ok(Reply::Count(_))) => Ok(()),
+            Ok(Ok(_)) => unreachable!("a raw job replies with a count"),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(Error::Corrupt(WORKER_STOPPED.into())),
+        }
+    }
+
     /// Puts `client` on its own worker thread.
     ///
     /// # Errors
@@ -899,15 +927,8 @@ const LOCK_TIMEOUT_FOR_WRITERS: &str = "5s";
 /// queue drains as fast as the writers commit.
 const LOCK_TIMEOUT_FOR_KEY: &str = "60s";
 
-/// The identity of this database, minted at the first open. The marker
-/// file of the data directory carries the same UUID, and an open that
-/// finds the two different refuses: a database restored on a directory
-/// of another store would name blobs of another disk. The comparison and
-/// the mint run before anything else is written, so a refusal leaves the
-/// schema untouched.
-/// What the marker and the database's store row decide together: the
-/// one decision an open and a preflight both need, made here so the two
-/// cannot drift.
+/// The one decision an open and a preflight both need, made here so
+/// the two cannot drift.
 pub(crate) enum Pairing {
     /// The marker and the row name one store.
     Agree,
@@ -921,13 +942,13 @@ pub(crate) enum Pairing {
     Refuse(Error),
 }
 
-/// The marker's pairing with the database's store row. `served`: the
-/// schema holds at least one repo row, so the database was served by a
-/// store whose directory carried the marker.
+/// The marker's pairing with the database's store row. `has_repos`:
+/// the schema holds at least one repo row, so a store ever served it -
+/// the one meaning the flag carries at every call.
 pub(crate) fn pairing_decision(
     marker: Option<[u8; 16]>,
     held: Option<[u8; 16]>,
-    served: bool,
+    has_repos: bool,
 ) -> Pairing {
     match (marker, held) {
         (Some(marker_uuid), Some(held_uuid)) if marker_uuid == held_uuid => Pairing::Agree,
@@ -942,24 +963,34 @@ pub(crate) fn pairing_decision(
                 hex16(&held_uuid)
             )))
         }
-        (None, Some(held_uuid)) if served => Pairing::Refuse(Error::FailedPrecondition(format!(
-            "this database names the store {}, but the data \
+        (None, Some(held_uuid)) if has_repos => {
+            Pairing::Refuse(Error::FailedPrecondition(format!(
+                "this database names the store {}, but the data \
                  directory carries no marker of it: give the \
                  directory the database was served with, or a \
                  directory it has never served",
-            hex16(&held_uuid)
-        ))),
+                hex16(&held_uuid)
+            )))
+        }
         (None, Some(_)) => Pairing::AdoptCut,
-        (Some(marker_uuid), None) if served => Pairing::Refuse(Error::FailedPrecondition(format!(
-            "this data directory belongs to the store whose UUID \
+        (Some(marker_uuid), None) if !has_repos => {
+            Pairing::Refuse(Error::FailedPrecondition(format!(
+                "this data directory belongs to the store whose UUID \
                  is {}, but this database holds no store: check \
                  SCION_POSTGRES_URL and its search_path",
-            hex16(&marker_uuid)
-        ))),
+                hex16(&marker_uuid)
+            )))
+        }
         (Some(_) | None, None) => Pairing::Fresh,
     }
 }
 
+/// The identity of this database, minted at the first open. The marker
+/// file of the data directory carries the same UUID, and an open that
+/// finds the two different refuses: a database restored on a directory
+/// of another store would name blobs of another disk. The comparison and
+/// the mint run before anything else is written, so a refusal leaves the
+/// schema untouched.
 fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
     let first = writer.query("SELECT uuid FROM store_uuid WHERE one = 1", &[])?;
     if let Some(row) = first.first() {
@@ -971,9 +1002,8 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
         let uuid = uuid_of(row.get::<_, Vec<u8>>("uuid"))?;
         // The repos probe only decides the no-marker case: a schema
         // that holds repos was served, one that holds none was not.
-        let served =
-            marker.uuid.is_none() && !writer.query("SELECT 1 FROM repos LIMIT 1", &[])?.is_empty();
-        match pairing_decision(marker.uuid, Some(uuid), served) {
+        let has_repos = !writer.query("SELECT 1 FROM repos LIMIT 1", &[])?.is_empty();
+        match pairing_decision(marker.uuid, Some(uuid), has_repos) {
             Pairing::Agree => {}
             Pairing::AdoptCut => {
                 // A first open cut between its store's UUID row and
@@ -1007,8 +1037,8 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
         // served - and every caller would read "repo not found"
         // with no error at the start. An empty schema refuses while
         // the marker names a store, and mints when it names none.
-        let served = writer.query("SELECT 1 FROM repos LIMIT 1", &[])?.is_empty();
-        let fresh = match pairing_decision(marker.uuid, None, served) {
+        let has_repos = !writer.query("SELECT 1 FROM repos LIMIT 1", &[])?.is_empty();
+        let fresh = match pairing_decision(marker.uuid, None, has_repos) {
             Pairing::Agree | Pairing::AdoptCut => unreachable!("the database holds no store"),
             Pairing::Fresh => marker.uuid.unwrap_or_else(uuid_new),
             Pairing::Refuse(error) => return Err(error),
@@ -2593,7 +2623,7 @@ fn uuid_new() -> [u8; 16] {
 
 /// The 16 bytes of a UUID row, checked: a row of another length is a
 /// database that is not this backend's.
-fn uuid_of(raw: Vec<u8>) -> Result<[u8; 16]> {
+pub(crate) fn uuid_of(raw: Vec<u8>) -> Result<[u8; 16]> {
     let len = raw.len();
     raw.try_into().map_err(|_| {
         Error::Corrupt(format!(
@@ -3444,7 +3474,7 @@ fn make_tls(ca: &Path) -> Result<MakeRustlsConnect> {
 
 /// What every store opener answers when the database is behind this
 /// build and the opener may not migrate: the fix is named.
-fn pending_migration_message(db: u32, build: u32) -> String {
+pub(crate) fn pending_migration_message(db: u32, build: u32) -> String {
     format!(
         "the database is at schema version {db}, this build ships {build}; \
          run `scion-server migrate` first, or pass --migrate to serve"
@@ -3472,15 +3502,17 @@ pub(crate) fn preflight_client(url: &str, ca: Option<&Path>) -> Result<Client> {
 /// version 0 is a database with no schema yet. The check and the open's
 /// pending-migration refusal read it; the migration itself runs under
 /// the schema's lock, and its first step makes the ledger.
-fn schema_version(client: &mut PgClient) -> Result<u32> {
+fn schema_version(client: &mut Client) -> Result<u32> {
     let ledger: Option<String> = client
-        .query_opt("SELECT to_regclass('schema_migrations')::text", &[])?
+        .query_opt("SELECT to_regclass('schema_migrations')::text", &[])
+        .map_err(map_pg_error)?
         .and_then(|row| row.get(0));
     if ledger.is_none() {
         return Ok(0);
     }
     let version: i64 = client
-        .query("SELECT max(version) FROM schema_migrations", &[])?
+        .query("SELECT max(version) FROM schema_migrations", &[])
+        .map_err(map_pg_error)?
         .first()
         .and_then(|row| row.get::<_, Option<i64>>(0))
         .unwrap_or(0);
@@ -3535,8 +3567,29 @@ impl SchemaCheck {
 /// What the database returns, and the newer-schema refusal a newer
 /// database gives every opener.
 pub fn check_schema(url: &str, ca: Option<&Path>) -> Result<SchemaCheck> {
-    let mut client = connect_with(url, ca, &base_options(), None)?;
-    let db_version = schema_version(&mut client)?;
+    let client = connect_with(url, ca, &base_options(), None)?;
+    // The read runs on the worker thread, where the sync client
+    // belongs, and hands its answer back through the channel.
+    let (reply, received) = std::sync::mpsc::channel();
+    client.raw(Box::new(move |client| {
+        let _ = reply.send(check_schema_on(client));
+        Ok(())
+    }))?;
+    received
+        .recv()
+        .map_err(|_| Error::Corrupt(WORKER_STOPPED.into()))?
+}
+
+/// [`check_schema`]'s decision, on a caller's connection: the preflight
+/// runs it on its read-only session, so the check opens no second
+/// session outside that discipline.
+///
+/// # Errors
+///
+/// What the database returns, and the newer-schema refusal a newer
+/// database gives every opener.
+pub(crate) fn check_schema_on(client: &mut Client) -> Result<SchemaCheck> {
+    let db_version = schema_version(client)?;
     if db_version > PG_SCHEMA_VERSION {
         return Err(Error::FailedPrecondition(format!(
             "database schema version {db_version} is newer than this build \
@@ -5908,8 +5961,53 @@ impl Meta for Pg {
 #[cfg(test)]
 mod tests {
     use super::{Client, NoTls, delete_prefixes, merged_options};
-    use crate::pg::Pg;
+    use crate::pg::{Pairing, Pg, pairing_decision};
     use std::sync::Arc;
+
+    /// The pairing decision's whole table: every arm of the match, on
+    /// both sides of the repos flag. A rename or an arm that flips
+    /// shows here, not in a store that refuses or adopts wrongly.
+    #[test]
+    fn the_pairing_table_covers_every_case() {
+        let marker = [1u8; 16];
+        let held = [2u8; 16];
+        let refuse = |pairing: Pairing| matches!(pairing, Pairing::Refuse(_));
+        // One store on both sides agrees, whatever the schema holds.
+        assert!(matches!(
+            pairing_decision(Some(marker), Some(marker), true),
+            Pairing::Agree
+        ));
+        assert!(matches!(
+            pairing_decision(Some(marker), Some(marker), false),
+            Pairing::Agree
+        ));
+        // Two stores on one disk refuse, whatever the schema holds.
+        assert!(refuse(pairing_decision(Some(marker), Some(held), true)));
+        assert!(refuse(pairing_decision(Some(marker), Some(held), false)));
+        // A served database with no marker refuses; a schema that
+        // never served is a first open's cut, and the marker is
+        // written.
+        assert!(refuse(pairing_decision(None, Some(held), true)));
+        assert!(matches!(
+            pairing_decision(None, Some(held), false),
+            Pairing::AdoptCut
+        ));
+        // A marker over a schema that holds no store and no repos is
+        // the wrong-URL refusal; over one that holds repos it is a
+        // dump beside its own directory, and the open mints the row.
+        assert!(refuse(pairing_decision(Some(marker), None, false)));
+        assert!(matches!(
+            pairing_decision(Some(marker), None, true),
+            Pairing::Fresh
+        ));
+        // Neither side names a store: a first boot, whatever the
+        // schema holds.
+        assert!(matches!(pairing_decision(None, None, true), Pairing::Fresh));
+        assert!(matches!(
+            pairing_decision(None, None, false),
+            Pairing::Fresh
+        ));
+    }
 
     #[test]
     fn the_delete_prefix_folds_the_calls_of_one_kind_in_order() {
@@ -5949,9 +6047,9 @@ mod tests {
         let url = crate::backend::test_hooks::test_url().unwrap();
         let client = super::test_hooks::connect(&url, None).unwrap();
         let error = client
-            .as_raw(|_| -> crate::error::Result<()> {
+            .raw(Box::new(|_| -> crate::error::Result<()> {
                 panic!("the worker's test panic");
-            })
+            }))
             .unwrap_err();
         assert!(
             error.to_string().contains("its log line names why"),

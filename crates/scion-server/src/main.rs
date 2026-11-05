@@ -888,11 +888,15 @@ async fn main() -> anyhow::Result<()> {
         // it runs before the refusal and writes nothing anywhere.
         Command::Preflight(ref args) => {
             // The flags' rules are serve's own: the token source, the
-            // listen rules, the TLS and ticket files. One error, the
-            // first serve would refuse at, is the line.
-            if let Err(error) = serve_flags(args) {
-                println!("fail serve flags: {error}");
-                std::process::exit(2);
+            // listen rules, the TLS and ticket files. A failure here is
+            // one failed check, not the whole answer: the line prints
+            // and the checks still run - one bad flag must not hide
+            // every other check, which is what this command exists to
+            // stop. The chain prints whole ({error:#}), as serve's own
+            // exit does, so the cause shows.
+            let flags_error = serve_flags(args).err();
+            if let Some(error) = &flags_error {
+                println!("fail serve flags: {error:#}");
             }
             let options = preflight_options(&cli, args);
             // The checks' database reads are synchronous, and main runs
@@ -904,7 +908,10 @@ async fn main() -> anyhow::Result<()> {
             for line in report.lines {
                 println!("{line}");
             }
-            std::process::exit(report.code);
+            // The higher of the checks' code and the flags' failure: a
+            // warn with a bad flag still exits 2, and a fail without
+            // one does too.
+            std::process::exit(report.code.max(if flags_error.is_some() { 2 } else { 0 }));
         }
         Command::Verify { archive } => verify_command(&archive),
         // `hash-token` reads none of the store: it runs before the URL
