@@ -3663,17 +3663,15 @@ fn migrate_under_lock(client: &mut PgClient, allow: bool) -> Result<Option<(u32,
         // prove the lifted budget covers the migration's own statements.
         // Release builds never read the env.
         #[cfg(any(test, feature = "test-hooks"))]
-        if let Ok(ms) = std::env::var("SCION_TEST_MIGRATION_SLEEP_MS") {
-            if let Ok(ms) = ms.parse::<f64>() {
-                if ms > 0.0 {
-                    // Test-only, env-set: the value formats into the
-                    // statement (the schema's params are integers, text,
-                    // and bytes, and a sleep needs no more than a
-                    // literal).
-                    let sql = format!("SELECT pg_sleep({})", ms / 1000.0);
-                    client.execute(&sql, &[])?;
-                }
-            }
+        if let Ok(ms) = std::env::var("SCION_TEST_MIGRATION_SLEEP_MS")
+            && let Ok(ms) = ms.parse::<f64>()
+            && ms > 0.0
+        {
+            // Test-only, env-set: the value formats into the statement
+            // (the schema's params are integers, text, and bytes, and a
+            // sleep needs no more than a literal).
+            let sql = format!("SELECT pg_sleep({})", ms / 1000.0);
+            client.execute(&sql, &[])?;
         }
         // One transaction per migration, with its version bump: a
         // migration that fails rolls its own statements back, and the
