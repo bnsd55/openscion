@@ -1310,6 +1310,16 @@ the process, scraped from there. The names:
   counts says a drive that cannot keep up with the imports.
 - `scion_data_free_bytes` — free bytes on the filesystem that holds the
   data directory, refreshed every 30 s; alert before it reaches zero.
+- `scion_data_free_inodes` — free inodes on that filesystem, from the
+  same 30 s poll; small blobs cost one inode each, so the inode floor
+  arrives long before the byte floor does.
+- `scion_blob_count` — blobs the store's metadata names, refreshed every
+  60 s by one bounded count query over the blob rows (never a directory
+  walk, never per scrape). At 1,000,000 blobs the query itself costs
+  about 0.2-0.4 s of one pooled read connection.
+- `scion_blob_ceiling_share` — the blob count as a share of the 1,000,000
+  blobs docs/support.md supports per data directory; the store alerts
+  that watch fsck's future read this gauge, not the count.
 - `scion_derive_walks_in_flight` / `scion_derive_walks_waiting` — derive
   walks that hold a permit, and walks that wait for one; waits that pile
   up while the in-flight count sits at the cap mean a cold history read
@@ -1574,6 +1584,65 @@ Escalate when the ratio stays high with the caps raised and the box's
 memory free: the tier's placement or shape needs its owner.
 
 Proof: crates/scion-server/tests/docs_alerts.rs::tier_miss_ratio_falls_when_the_store_serves_the_second_read
+
+### The store near its blob ceiling
+
+`BlobCount70`, `BlobCount85` and `BlobCount100` fire when
+`scion_blob_ceiling_share` passes 70%, 85% and 100% of the 1,000,000
+blobs docs/support.md supports per data directory, and stays past the
+line for 15 minutes. The share is the count the metadata names, divided
+by the ceiling; the gauge refreshes every 60 s from one bounded query.
+
+Read the share and its trend:
+
+```sh
+curl -s 127.0.0.1:9100/metrics | grep '^scion_blob_ceiling_share'
+```
+
+What to do at each level:
+
+- At 70% (`medium`): nothing is slow yet. Watch the share's trend across
+  a week; a store that adds blobs faster than the gc takes them lands
+  on the next line by itself.
+- At 85% (`high`): plan the move. The first cold `fsck` walk costs about
+  62 µs a blob at this size and grows with the count, so plan while the
+  walk is minutes, not hours: a second data directory (a stop, a copy
+  per section 3, a start at the new path), or point new repos at a new
+  store.
+- At 100% (`critical`): the store is past the count docs/support.md
+  supports. fsck's walk takes hours at this size; the store still works,
+  but nothing below this line is tested. Split the store now; treat an
+  fsck as planned downtime.
+
+Proof: crates/scion-server/tests/blob_count_gauge.rs::the_count_is_what_the_metadata_names_not_what_the_folder_holds (behaviour, no command: the runbook's steps are operator actions - watch the trend, plan the split - and each alert's firing is proven by the promtool cases deploy/prometheus/openscion-alerts-test.yml runs, which fire past the threshold and stay quiet just below it).
+
+### The data directory low on inodes
+
+`DataInodesLow` fires when `scion_data_free_inodes` sits under 100,000
+for 15 minutes, and `DataInodesCritical` when it sits under 10,000 for
+5 minutes. Every small blob costs one inode (a 4 KiB block too, from
+the #823 runs), so a store of small blobs runs out of inodes long
+before it runs out of bytes.
+
+Read the inodes and the bytes together:
+
+```sh
+curl -s 127.0.0.1:9100/metrics | grep -E '^scion_data_free_(inodes|bytes)'
+```
+
+What to do at each level:
+
+- At `DataInodesLow` (`high`): check the byte floor. If
+  `scion_data_free_bytes` is still high, the store fills with small
+  blobs: the inode floor, not the byte floor, is the store's next wall.
+  Plan the split the same way the blob ceiling says.
+- At `DataInodesCritical` (`critical`): puts of new blobs fail once the
+  filesystem runs out of inodes, and clients see their uploads refused.
+  Free inodes (delete repos a section 3 copy keeps nothing of, then run
+  the gc) or grow the volume's inode count; a filesystem whose inode
+  count is fixed needs the split.
+
+Proof: crates/scion-server/tests/disk_full.rs::a_disk_full_runbook_gcs_then_writes_resume (behaviour, no command: the runbook's steps are operator actions - read two gauges, run the gc, split the store - and each alert's firing is proven by the promtool cases deploy/prometheus/openscion-alerts-test.yml runs).
 
 ## 7. Capacity
 

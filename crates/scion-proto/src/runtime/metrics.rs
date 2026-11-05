@@ -153,6 +153,10 @@ pub struct Metrics {
     /// latest poll saw them (`data_free_set` says whether any poll ran).
     data_free_bytes: AtomicU64,
     data_free_set: std::sync::atomic::AtomicBool,
+    /// Blobs the metadata names, as the latest refresh saw them
+    /// (`blob_count_set` says whether any refresh ran).
+    blob_count: AtomicU64,
+    blob_count_set: std::sync::atomic::AtomicBool,
     /// The memory floor the server's budgets sum to, set at start
     /// (`memory_floor_set` says the start-up check ran).
     memory_floor_bytes: AtomicU64,
@@ -194,6 +198,21 @@ pub struct Metrics {
 /// A metric name, as the index of its RPC.
 #[derive(Clone, Copy)]
 pub struct Rpc(usize);
+
+/// The blob count docs/support.md supports per data directory: what
+/// [`scion_blob_ceiling_share`] divides by.
+pub const SUPPORTED_BLOBS: u64 = 1_000_000;
+
+/// The blob count as a share of the ceiling. The counts the ceiling
+/// names stay far under 2^52, so the f64 divide loses nothing.
+#[must_use]
+pub fn share_of_ceiling(count: u64) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let count = count as f64;
+    #[allow(clippy::cast_precision_loss)]
+    let ceiling = SUPPORTED_BLOBS as f64;
+    count / ceiling
+}
 
 impl Metrics {
     /// The counter of the RPC at `path` (like `/scion.v1.Scion/Blame`).
@@ -315,6 +334,12 @@ impl Metrics {
     pub fn data_free_bytes(&self, bytes: u64) {
         self.data_free_bytes.store(bytes, Ordering::Relaxed);
         self.data_free_set.store(true, Ordering::Relaxed);
+    }
+
+    /// Sets the blob count the metadata names, from the latest refresh.
+    pub fn set_blob_count(&self, blobs: u64) {
+        self.blob_count.store(blobs, Ordering::Relaxed);
+        self.blob_count_set.store(true, Ordering::Relaxed);
     }
 
     /// Sets the memory floor the server's budgets sum to, at start.
@@ -464,6 +489,25 @@ impl Metrics {
                  # TYPE scion_data_free_bytes gauge\n\
                  scion_data_free_bytes {}",
                 self.data_free_bytes.load(Ordering::Relaxed)
+            );
+        }
+        if self.blob_count_set.load(Ordering::Relaxed) {
+            let count = self.blob_count.load(Ordering::Relaxed);
+            let _ = writeln!(
+                text,
+                "# HELP scion_blob_count Blobs the metadata names; docs/support.md supports 1,000,000 per data directory.
+\
+                 # TYPE scion_blob_count gauge
+\
+                 scion_blob_count {}
+\
+                 # HELP scion_blob_ceiling_share The blob count as a share of the 1,000,000 blobs docs/support.md supports per data directory.
+\
+                 # TYPE scion_blob_ceiling_share gauge
+\
+                 scion_blob_ceiling_share {}",
+                count,
+                share_of_ceiling(count)
             );
         }
         if self.memory_floor_set.load(Ordering::Relaxed) {
@@ -1350,6 +1394,25 @@ mod tests {
         );
     }
 
+    /// The blob-count gauge renders the count and its share of the
+    /// supported ceiling, and nothing until the first refresh set it.
+    #[test]
+    fn the_blob_count_renders_the_count_and_its_share() {
+        let metrics = std::sync::Arc::new(Metrics::default());
+        let text = metrics.render();
+        assert!(!text.contains("scion_blob_count"), "{text}");
+        metrics.set_blob_count(3);
+        let text = metrics.render();
+        assert!(text.contains("scion_blob_count 3\n"), "{text}");
+        assert!(
+            text.contains("scion_blob_ceiling_share 0.000003\n"),
+            "{text}"
+        );
+        metrics.set_blob_count(500_000);
+        let text = metrics.render();
+        assert!(text.contains("scion_blob_ceiling_share 0.5\n"), "{text}");
+    }
+
     /// A body dropped before its trailers counts the call as cancelled.
     #[test]
     fn a_dropped_body_counts_the_call_as_cancelled() {
@@ -1396,6 +1459,7 @@ mod tests {
         let text = metrics.render();
         assert!(!text.contains("scion_blob_sync_seconds"), "{text}");
         assert!(!text.contains("scion_data_free_bytes"), "{text}");
+        assert!(!text.contains("scion_blob_count"), "{text}");
         assert!(!text.contains("scion_derive_walks"), "{text}");
         assert!(!text.contains("scion_pg_collector_key_wait"), "{text}");
 

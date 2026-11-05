@@ -534,6 +534,10 @@ pub trait MetaTx {
     /// The length of a tree's stored bytes, without reading them.
     fn tree_size(&mut self, id: TreeId) -> Result<usize>;
 
+    /// The number of distinct blobs the store's metadata names: the
+    /// authoritative count, whatever the blob folder holds.
+    fn blob_count(&mut self) -> Result<u64>;
+
     /// Adds a blob to the blobs that `repo` may name. `Ok(true)` if new.
     fn add_repo_blob(&mut self, repo: RepoId, blob: BlobId) -> Result<bool>;
 

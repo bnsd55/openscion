@@ -1,0 +1,1 @@
+`scion_blob_count` and `scion_blob_ceiling_share` gauges, refreshed every 60 s from one bounded count query over the metadata's blob rows (never a scrape-time directory walk); the share divides by the 1,000,000 blobs docs/support.md supports per data directory.

@@ -537,3 +537,105 @@ tests:
                 During a key rotation, check the tiers carry both
                 public keys before the old one is dropped
                 (docs/operations.md section 2).
+  # S1 BlobCount70: the share crosses 0.70 at 5m, fires after 15m more.
+  - interval: 1m
+    input_series:
+      - series: 'scion_blob_ceiling_share'
+        values: "0.69 0.69 0.69 0.69 0.69 0.70 0.71 0.71 0.71 0.71 0.71 0.71 0.71 0.71 0.71 0.71 0.71 0.71 0.71 0.71 0.71"
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: BlobCount70
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: BlobCount70
+        exp_alerts:
+          - exp_labels:
+              severity: medium
+            exp_annotations:
+              response: >-
+                The store holds 70% of the 1,000,000 blobs
+                docs/support.md supports. fsck stays fast for now;
+                watch the trend (docs/operations.md section 6).
+
+  # S2 BlobCount85: the share crosses 0.85 at 5m, fires after 15m more.
+  - interval: 1m
+    input_series:
+      - series: 'scion_blob_ceiling_share'
+        values: "0.84 0.84 0.84 0.84 0.84 0.85 0.86 0.86 0.86 0.86 0.86 0.86 0.86 0.86 0.86 0.86 0.86 0.86 0.86 0.86 0.86"
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: BlobCount85
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: BlobCount85
+        exp_alerts:
+          - exp_labels:
+              severity: high
+            exp_annotations:
+              response: >-
+                The store holds 85% of the supported blob count. Plan
+                the move to more data directories before fsck turns
+                slow (docs/operations.md section 6).
+
+  # S3 BlobCount100: the share crosses 1.0 at 5m, fires after 15m more.
+  - interval: 1m
+    input_series:
+      - series: 'scion_blob_ceiling_share'
+        values: "0.99 0.99 0.99 0.99 0.99 1.00 1.01 1.01 1.01 1.01 1.01 1.01 1.01 1.01 1.01 1.01 1.01 1.01 1.01 1.01 1.01"
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: BlobCount100
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: BlobCount100
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              response: >-
+                The store holds more blobs than docs/support.md
+                supports. Expect fsck to take hours; split the store
+                now (docs/operations.md section 6).
+
+  # S4 DataInodesLow: free inodes drop below 100,000 at 5m, fires
+  # after 15m more, and stays quiet at 100,001.
+  - interval: 1m
+    input_series:
+      - series: 'scion_data_free_inodes'
+        values: "100001 100001 100001 100001 100001 99999 99998 99998 99998 99998 99998 99998 99998 99998 99998 99998 99998 99998 99998 99998 99998"
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: DataInodesLow
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: DataInodesLow
+        exp_alerts:
+          - exp_labels:
+              severity: high
+            exp_annotations:
+              response: >-
+                Fewer than 100,000 free inodes on the data directory's
+                filesystem: small blobs cost one inode each, so the
+                store is near its inode floor (docs/operations.md
+                section 6).
+
+  # S5 DataInodesCritical: free inodes drop below 10,000 at 5m, fires
+  # after 5m more, and stays quiet at 10,001.
+  - interval: 1m
+    input_series:
+      - series: 'scion_data_free_inodes'
+        values: "10001 10001 10001 10001 10001 9999 9998 9998 9998 9998 9998"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: DataInodesCritical
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: DataInodesCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              response: >-
+                Fewer than 10,000 free inodes left: puts of new blobs
+                fail once they run out. Free inodes or split the store
+                (docs/operations.md section 6).

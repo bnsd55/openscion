@@ -192,6 +192,58 @@ groups:
             check CacheDown and the tier's memory caps (--max-bytes,
             --snapshot-bytes), and raise or restart it
             (docs/operations.md#tier-miss-rate).
+  - name: store
+    rules:
+      - alert: BlobCount70
+        expr: scion_blob_ceiling_share > 0.70
+        for: 15m
+        labels:
+          severity: medium
+        annotations:
+          response: >-
+            The store holds 70% of the 1,000,000 blobs
+            docs/support.md supports. fsck stays fast for now; watch
+            the trend (docs/operations.md section 6).
+      - alert: BlobCount85
+        expr: scion_blob_ceiling_share > 0.85
+        for: 15m
+        labels:
+          severity: high
+        annotations:
+          response: >-
+            The store holds 85% of the supported blob count. Plan the
+            move to more data directories before fsck turns slow
+            (docs/operations.md section 6).
+      - alert: BlobCount100
+        expr: scion_blob_ceiling_share > 1.0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          response: >-
+            The store holds more blobs than docs/support.md supports.
+            Expect fsck to take hours; split the store now
+            (docs/operations.md section 6).
+      - alert: DataInodesLow
+        expr: scion_data_free_inodes < 100000
+        for: 15m
+        labels:
+          severity: high
+        annotations:
+          response: >-
+            Fewer than 100,000 free inodes on the data directory's
+            filesystem: small blobs cost one inode each, so the store
+            is near its inode floor (docs/operations.md section 6).
+      - alert: DataInodesCritical
+        expr: scion_data_free_inodes < 10000
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          response: >-
+            Fewer than 10,000 free inodes left: puts of new blobs
+            fail once they run out. Free inodes or split the store
+            (docs/operations.md section 6).
   - name: gc
     rules:
       - alert: GcStale
