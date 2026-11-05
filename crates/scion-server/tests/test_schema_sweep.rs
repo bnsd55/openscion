@@ -4,7 +4,10 @@
 //! over - the data directory is gone and no connection still names the
 //! schema - and never a schema whose directory or owner is alive.
 //! These proofs fail if the sweep drops a live schema or keeps a dead
-//! one.
+//! one. The tests share one registry and one database, and nextest runs
+//! them as concurrent processes, so every test that drives the sweep
+//! holds one advisory lock for its whole body: a test's fixture is
+//! never another test's sweep's input (#863).
 
 use std::path::Path;
 
@@ -17,6 +20,21 @@ fn connect() -> postgres::Client {
     let url = std::env::var("SCION_TEST_POSTGRES_URL")
         .expect("SCION_TEST_POSTGRES_URL must name the test database");
     postgres::Client::connect(&url, postgres::NoTls).unwrap()
+}
+
+/// One client whose session holds the sweep tests' advisory lock for
+/// the caller's whole body. The sweep is global - it reads every
+/// registry row in the database - so a test that shapes the registry
+/// while another test's sweep reads it makes that sweep see a database
+/// the test never shaped; the cap test's fifty rows would spend the
+/// sweep's whole cap before another test's younger schema came up. The
+/// lock releases when the client drops, a panic included.
+fn locked() -> postgres::Client {
+    let mut client = connect();
+    client
+        .batch_execute("SELECT pg_advisory_lock(hashtext('scion_test_sweep_tests'))")
+        .unwrap();
+    client
 }
 
 /// Whether the database still has the schema.
@@ -89,6 +107,7 @@ fn wait_unnamed(client: &mut postgres::Client, schema: &str) {
 /// registry row goes with it.
 #[test]
 fn a_finished_tests_schema_drops_at_a_later_sweep() {
+    let _lock = locked();
     let dir = private_tempdir();
     let schema = Backend::test_schema(dir.path());
     {
@@ -126,6 +145,7 @@ fn a_finished_tests_schema_drops_at_a_later_sweep() {
 /// keeps its data. This is the check the age-only rule got wrong.
 #[test]
 fn a_schema_whose_directory_lives_survives_the_sweep() {
+    let _lock = locked();
     let dir = private_tempdir();
     let schema = Backend::test_schema(dir.path());
     {
@@ -147,6 +167,7 @@ fn a_schema_whose_directory_lives_survives_the_sweep() {
 /// process keeps its schema for its whole life.
 #[test]
 fn a_schema_a_connection_still_names_survives_the_sweep() {
+    let _lock = locked();
     let dir = private_tempdir();
     let schema = Backend::test_schema(dir.path());
     {
@@ -215,6 +236,15 @@ fn snapshot(client: &mut postgres::Client, schema: &str) -> String {
 /// and the helper's own names always carry the prefix.
 #[test]
 fn the_sweep_drops_only_the_names_the_test_helper_makes() {
+    let _lock = locked();
+    // The registry comes with the first open, and this test shapes it
+    // before any store of its own exists: it opens one first, so the
+    // table is there under any scheduling.
+    let dir = private_tempdir();
+    {
+        let _store = Backend::open_test(dir.path()).unwrap();
+    }
+    dir.close().unwrap();
     let mut client = connect();
     let foreign = "not_a_test_schema_of_the_sweep";
     client
@@ -248,6 +278,15 @@ fn the_sweep_drops_only_the_names_the_test_helper_makes() {
 /// own schemas are the oldest ones the sweep sees.
 #[test]
 fn a_sweep_drops_at_most_fifty_oldest_first() {
+    let _lock = locked();
+    // The registry comes with the first open, and this test shapes it
+    // before any store of its own exists: it opens one first, so the
+    // table is there under any scheduling.
+    let dir = private_tempdir();
+    {
+        let _store = Backend::open_test(dir.path()).unwrap();
+    }
+    dir.close().unwrap();
     let mut client = connect();
     let pid = std::process::id();
     // A failed earlier run of this test must not shape this one: its
@@ -315,6 +354,15 @@ fn a_sweep_drops_at_most_fifty_oldest_first() {
 /// predates the comment still cleans.
 #[test]
 fn a_schema_the_comment_predates_drops_when_it_is_old_and_unused() {
+    let _lock = locked();
+    // The registry comes with the first open, and this test shapes it
+    // before any store of its own exists: it opens one first, so the
+    // table is there under any scheduling.
+    let dir = private_tempdir();
+    {
+        let _store = Backend::open_test(dir.path()).unwrap();
+    }
+    dir.close().unwrap();
     let mut client = connect();
     let pid = std::process::id();
     let legacy = format!("scion_test_legacy{pid}");
@@ -358,6 +406,15 @@ fn the_recorded_directory_is_the_one_the_name_hashes() {
 /// them - and this test fails on such a read.
 #[test]
 fn the_drain_reaches_past_the_schemas_it_keeps() {
+    let _lock = locked();
+    // The registry comes with the first open, and this test shapes it
+    // before any store of its own exists: it opens one first, so the
+    // table is there under any scheduling.
+    let dir = private_tempdir();
+    {
+        let _store = Backend::open_test(dir.path()).unwrap();
+    }
+    dir.close().unwrap();
     let mut client = connect();
     let pid = std::process::id();
     // A failed earlier run of this test must not shape this one.

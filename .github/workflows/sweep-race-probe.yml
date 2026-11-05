@@ -1,0 +1,93 @@
+# The stale-schema sweep tests' race, proven and then fixed (#863): the
+# file's tests share one registry and one database, and nextest runs
+# them as concurrent processes. On the probe branch (this file over
+# main's tree) the loop reproduces the failure the coverage measure
+# hit; on the fix branch the same loop must hold green over the same
+# count. Dispatch-only: this lane is a proof, not a gate.
+name: sweep-race-probe
+on:
+  push:
+    branches: [sweep-race-probe, sweep-test-lock]
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: 'how many nextest runs of the file the loop makes'
+        required: false
+        default: '100'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  race:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.11
+        env:
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: scion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          --shm-size 256mb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
+        with:
+          tool: protoc
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
+        with:
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: 'false'
+      - name: build the sweep suite
+        run: cargo nextest run -p open-scion-server --test test_schema_sweep --no-run
+        env:
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+      - name: the registry the pair assumes
+        run: |
+          PGPASSWORD=scion psql -h localhost -U postgres -d scion \
+            -c "CREATE TABLE IF NOT EXISTS public.scion_test_schemas (schema TEXT PRIMARY KEY, started BIGINT NOT NULL)"
+      - name: the loop
+        run: |
+          set -u
+          rm -f /tmp/red.txt /tmp/green.txt
+          FILTER="${PAIR:-0}"
+          for i in $(seq 1 "${RUNS:-60}"); do
+            if [ "${PAIR:-0}" = "1" ]; then
+              sel=(-E 'test(a_schema_a_connection_still_names_survives_the_sweep) or test(a_sweep_drops_at_most_fifty_oldest_first)')
+            else
+              sel=(--test test_schema_sweep)
+            fi
+            if cargo nextest run -p open-scion-server "${sel[@]}" \
+                 --retries 0 >> /tmp/loop.log 2>&1; then
+              echo "run $i: green" >> /tmp/green.txt
+            else
+              echo "run $i: RED" >> /tmp/red.txt
+              # The failing test's own snapshot goes on the record.
+              grep -B2 -A6 "panicked at" /tmp/loop.log | tail -40 >> /tmp/red.log || true
+              tail -60 /tmp/loop.log > "/tmp/fail-$i.log"
+            fi
+            : > /tmp/loop.log
+          done
+          echo "green: $(wc -l < /tmp/green.txt 2>/dev/null || echo 0), red: $(wc -l < /tmp/red.txt 2>/dev/null || echo 0)"
+          if [ -s /tmp/red.txt ]; then
+            echo '::error::the sweep tests raced; the run counts and snapshots follow'
+            cat /tmp/red.txt
+            cat /tmp/red.log 2>/dev/null || true
+            exit 1
+          fi
+          echo 'the whole loop held green'
+        env:
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+          RUNS: ${{ github.event.inputs.runs || '100' }}
