@@ -1551,10 +1551,16 @@ mod tests {
                 let mut entries = std::collections::BTreeMap::new();
                 for i in 0..200 {
                     let d = name(format!("d{i:03}").as_bytes());
+                    // Distinct content per directory: the trees are
+                    // content-addressed, and identical subtrees share one
+                    // ID - the walk would serve the rest from the map.
                     let inner = Tree::new(
                         [
-                            (name(b"see"), file(&store, b"body\n")),
-                            (name(b"hide"), file(&store, b"secret\n")),
+                            (name(b"see"), file(&store, format!("body-{i}\n").as_bytes())),
+                            (
+                                name(b"hide"),
+                                file(&store, format!("secret-{i}\n").as_bytes()),
+                            ),
                         ]
                         .into(),
                     )
@@ -1634,11 +1640,14 @@ mod tests {
         let (dir, store) = store();
         // Ten partial directories: at a one-kilobyte part bound the walk
         // flushes a part mid-derivation.
+        // Distinct content per directory: the trees are content-addressed,
+        // and identical subtrees share one ID, which would serve the walk
+        // from the map and never reach a mid-walk part.
         let files: Vec<(RepoPath, Option<FileState>)> = (0..10)
             .flat_map(|i| {
                 [
-                    (format!("d{i:02}/see"), b"body\n".as_slice()),
-                    (format!("d{i:02}/hide"), b"secret\n".as_slice()),
+                    (format!("d{i:02}/see"), format!("body-{i}\n")),
+                    (format!("d{i:02}/hide"), format!("secret-{i}\n")),
                 ]
             })
             .map(|(p, content)| {
