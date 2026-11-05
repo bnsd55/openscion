@@ -236,9 +236,6 @@ jobs:
         run: |
           set -euo pipefail
           command -v jq > /dev/null || sudo apt-get install -y -qq jq
-      - name: the job's postgres stops last
-        if: always()
-        run: docker rm -f profile-pg || true
       - name: the postgres is still up from the harness's side
         run: |
           set -euo pipefail
@@ -259,3 +256,6 @@ jobs:
           name: land-profile-artifacts
           path: ${{ runner.temp }}/land-profile-artifacts/
           if-no-files-found: error
+      - name: the job's postgres stops last
+        if: always()
+        run: docker rm -f profile-pg || true
