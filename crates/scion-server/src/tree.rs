@@ -98,6 +98,10 @@ pub fn apply(
 
 /// The build checks the deadline per path, so a cancelled call's job
 /// stops between paths and frees its permit instead of building on.
+///
+/// # Errors
+///
+/// As [`apply`].
 pub fn apply_within(
     c: &mut dyn MetaTx,
     base: Option<TreeId>,
@@ -293,6 +297,10 @@ pub fn derive_root_tree(
 
 /// The walk checks the deadline per changeset, so a cancelled call's
 /// job stops between changesets and frees its permit.
+///
+/// # Errors
+///
+/// As [`derive_root_tree`].
 pub fn derive_root_tree_within(
     c: &mut dyn MetaTx,
     repo: RepoId,
@@ -340,6 +348,10 @@ pub fn store_changeset(
 
 /// The build checks the deadline per path, so a cancelled call's job
 /// stops between paths and frees its permit instead of building on.
+///
+/// # Errors
+///
+/// As [`store_changeset`].
 pub fn store_changeset_within(
     c: &mut dyn MetaTx,
     repo: RepoId,
