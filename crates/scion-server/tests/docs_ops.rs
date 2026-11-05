@@ -11,8 +11,9 @@ use std::path::Path;
 use std::process::Command;
 
 /// The scion-server subcommands the guide's commands may use.
-const SUBCOMMANDS: [&str; 13] = [
+const SUBCOMMANDS: [&str; 14] = [
     "serve",
+    "preflight",
     "hash-token",
     "ticket-key",
     "import",
