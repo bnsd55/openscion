@@ -3422,6 +3422,46 @@ fn pending_migration_message(db: u32, build: u32) -> String {
 /// version 0 is a database with no schema yet. The check and the open's
 /// pending-migration refusal read it; the migration itself runs under
 /// the schema's lock, and its first step makes the ledger.
+/// One raw connection for preflight: the URL's own TLS and option
+/// rules, the pool's connect discipline, and no setup - no schema
+/// write, and no lock of any kind: the one-server lock and the
+/// schema's shared lock both stay untouched. The connection carries no
+/// `synchronous_commit` option, so its `SHOW` answers the database's
+/// own setting, not the session's.
+pub(crate) fn preflight_client(url: &str, ca: Option<&Path>) -> Result<Client> {
+    connect_on(
+        url,
+        ca,
+        &format!("-cstatement_timeout=600000 -clock_timeout={LOCK_TIMEOUT_FOR_WRITERS}"),
+    )
+}
+
+/// The schema version a raw client reads, for preflight: the ledger's
+/// presence, then its top version. The same two statements the open's
+/// migrate path reads (see [`schema_version`]) - change them together.
+///
+/// # Errors
+///
+/// A database that does not answer, or a version that is not a number.
+pub(crate) fn read_schema_version_raw(client: &mut Client) -> Result<u32> {
+    let ledger: Option<String> = client
+        .query_opt("SELECT to_regclass('schema_migrations')::text", &[])?
+        .and_then(|row| row.get(0));
+    if ledger.is_none() {
+        return Ok(0);
+    }
+    let version: i64 = client
+        .query("SELECT max(version) FROM schema_migrations", &[])?
+        .first()
+        .and_then(|row| row.get::<_, Option<i64>>(0))
+        .unwrap_or(0);
+    u32::try_from(version).map_err(|_| {
+        Error::FailedPrecondition(format!(
+            "database schema version {version} is not a version"
+        ))
+    })
+}
+
 fn schema_version(client: &mut PgClient) -> Result<u32> {
     let ledger: Option<String> = client
         .query_opt("SELECT to_regclass('schema_migrations')::text", &[])?

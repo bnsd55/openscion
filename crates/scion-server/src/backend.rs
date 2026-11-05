@@ -125,6 +125,17 @@ pub(crate) fn store_uuid_of(data: &Path) -> Option<[u8; 16]> {
     marker_uuid(data)
 }
 
+/// The directory checks an open runs before it reads the marker: the
+/// kind refusals of the object store, a damaged marker, a directory
+/// that holds a sqlite store. Preflight runs the same three, so the
+/// two cannot drift.
+pub(crate) fn check_dir(data: &Path) -> Result<()> {
+    crate::store::refuse_bad_dir(data)?;
+    refuse_damaged_marker(data)?;
+    refuse_sqlite_dir(data)?;
+    Ok(())
+}
+
 fn marker_uuid(data: &Path) -> Option<[u8; 16]> {
     let text = std::fs::read_to_string(data.join(MARKER)).ok()?;
     let line = text.lines().nth(1)?.trim();

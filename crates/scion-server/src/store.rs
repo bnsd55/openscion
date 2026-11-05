@@ -1011,6 +1011,18 @@ pub fn free_bytes(dir: &Path) -> std::io::Result<u64> {
     Ok(stats.f_bavail.saturating_mul(stats.f_frsize))
 }
 
+/// The inodes free for this user on the filesystem that holds `dir`:
+/// the other wall of a blob store, one file per blob. `f_favail`, not
+/// `f_ffree`: the inodes a non-root process can really get.
+///
+/// # Errors
+///
+/// The `statvfs` of `dir` failed (a directory that is gone).
+pub fn free_inodes(dir: &Path) -> std::io::Result<u64> {
+    let stats = rustix::fs::statvfs(dir)?;
+    Ok(stats.f_favail)
+}
+
 /// Blobs written but not yet durable. Call [`BlobBatch::sync`] before
 /// committing any metadata that names them.
 ///
