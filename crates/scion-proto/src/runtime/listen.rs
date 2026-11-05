@@ -601,8 +601,8 @@ impl Limits {
         S::Future: Send + 'static,
         S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
-        builder.http2_only();
+        let builder =
+            hyper_util::server::conn::auto::Builder::new(TokioExecutor::new()).http2_only();
         let mut conn = pin!(
             builder
                 .http2()
@@ -688,7 +688,7 @@ impl tower::Service<http::Request<hyper::body::Incoming>> for ServeRoutes {
         Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        tower::Service::poll_ready(&mut self.inner, cx)
+        tower::Service::<http::Request<tonic::body::Body>>::poll_ready(&mut self.inner, cx)
     }
 
     fn call(&mut self, mut request: http::Request<hyper::body::Incoming>) -> Self::Future {
