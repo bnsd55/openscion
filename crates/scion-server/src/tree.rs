@@ -810,7 +810,7 @@ mod tests {
                 &changes(&[("x/y", Some("1")), ("z", Some("2"))]),
                 &mut lens_none(),
             )?;
-            let via_delete = apply(c, Some(t), &changes(&[("z", None)]), &mut lens_none(), None)?;
+            let via_delete = apply(c, Some(t), &changes(&[("z", None)]), &mut lens_none())?;
             assert_eq!(direct, via_delete);
             Ok(())
         });
@@ -868,7 +868,7 @@ mod tests {
                 ),
             ];
             for (edits, expected) in cases {
-                match apply(c, Some(t), &changes(edits), &mut lens_none(), None) {
+                match apply(c, Some(t), &changes(edits), &mut lens_none()) {
                     Err(Error::Apply(e)) => assert_eq!(e, expected),
                     other => panic!("expected {expected:?}, got {other:?}"),
                 }
@@ -955,7 +955,7 @@ mod tests {
                     let flat_changes = edits.iter().map(|(p, c)| ((*p).to_owned(), *c)).collect();
                     match (
                         apply_flat(&model, &flat_changes),
-                        apply(c, tree, &changes, &mut lens_none(), None),
+                        apply(c, tree, &changes, &mut lens_none()),
                     ) {
                         (Some(next), Ok(next_tree)) => {
                             assert_eq!(snapshot(c, next_tree), next);
