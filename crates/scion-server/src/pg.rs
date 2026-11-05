@@ -2262,12 +2262,18 @@ impl<'a> PgTx<'a> {
         &mut self,
         caller: &Caller,
         req: &LandRequest,
-    ) -> Result<(RepoId, Option<LandOutcome>)> {
+    ) -> Result<(RepoId, Option<i64>, Option<LandOutcome>)> {
+        // The input's generation rides the lookup as a column: the
+        // record's existence guard for the changeset, one round trip
+        // instead of two (NULL when no changeset has this id in this
+        // repo).
         let row = self
             .c
             .query_opt(
                 "SELECT r.repo_id, l.land_id, l.input_cs, l.target_ref, l.state,
-                        l.detail, l.result_cs, l.conflict_paths, l.reject_reason
+                        l.detail, l.result_cs, l.conflict_paths, l.reject_reason,
+                        (SELECT gen FROM changesets JOIN repo_changesets ON cs = id
+                         WHERE repo_id = r.repo_id AND id = $4) AS input_gen
                  FROM repos r
                  LEFT JOIN lands l
                    ON l.repo_id = r.repo_id AND l.caller = $2 AND l.request_key = $3
@@ -2276,6 +2282,7 @@ impl<'a> PgTx<'a> {
                     P::text(&req.repo),
                     P::text(&caller.0),
                     P::text(&req.request_key),
+                    P::bytes(&id_bytes(req.changeset.as_bytes())),
                 ],
             )?
             .map(|row| {
@@ -2289,14 +2296,25 @@ impl<'a> PgTx<'a> {
                     row.get::<_, Option<Option<Vec<u8>>>>(6),
                     row.get::<_, Option<Vec<u8>>>(7),
                     row.get::<_, Option<String>>(8),
+                    row.get::<_, Option<i64>>(9),
                 )
             })
             .ok_or_else(|| Error::NotFound(format!("repo {:?}", req.repo)))?;
-        let (repo_id, land_id, input, target, state, detail, result_cs, conflict_paths, reason) =
-            row;
+        let (
+            repo_id,
+            land_id,
+            input,
+            target,
+            state,
+            detail,
+            result_cs,
+            conflict_paths,
+            reason,
+            input_gen,
+        ) = row;
         let repo = RepoId(repo_id);
         let Some(land_id) = land_id else {
-            return Ok((repo, None));
+            return Ok((repo, input_gen, None));
         };
         // A LEFT JOIN's land columns are all set or all null together: the
         // row exists only when the join found the land.
@@ -2335,20 +2353,18 @@ impl<'a> PgTx<'a> {
             .map(|bytes| ChangesetId::try_from(bytes.as_slice()))
             .transpose()
             .map_err(|e| Error::Corrupt(format!("land {land_id} result: {e}")))?;
-        Ok((
-            repo,
-            Some(LandOutcome {
-                moved: false,
-                land_id,
-                state: LandState::parse(&state)?,
-                result,
-                previous: None,
-                detail,
-                conflict_paths: decode_paths(&conflict_paths)
-                    .ok_or_else(|| Error::Corrupt(format!("land {land_id} conflict paths")))?,
-                reject_reason: LandRejectReason::parse(&reason)?,
-            }),
-        ))
+        let recorded = LandOutcome {
+            moved: false,
+            land_id,
+            state: LandState::parse(&state)?,
+            result,
+            previous: None,
+            detail,
+            conflict_paths: decode_paths(&conflict_paths)
+                .ok_or_else(|| Error::Corrupt(format!("land {land_id} conflict paths")))?,
+            reject_reason: LandRejectReason::parse(&reason)?,
+        };
+        Ok((repo, input_gen, Some(recorded)))
     }
 
     /// Reads the land a request key recorded back, for the ON CONFLICT
@@ -5259,13 +5275,21 @@ impl MetaTx for PgTx<'_> {
     ) -> Result<(RepoId, LandOutcome)> {
         // The outcome's columns ride the lookup the record already runs:
         // the caller learns a settled twin without a second read of the
-        // row, and the repo's id rides the same statement, so the record
-        // pays no separate repos read. A row that is still pending must
-        // be finished: the land's own next step reads the outcome in its
-        // first transaction, where a twin that settles between the
-        // record and the finish answers.
-        let (repo, recorded) = self.repo_and_land_by_key(caller, req)?;
-        self.generation(repo, req.changeset)?;
+        // row, the repo's id rides the same statement, so the record
+        // pays no separate repos read, and the input's generation rides
+        // it as a column, so the record pays no separate gen read. A row
+        // that is still pending must be finished: the land's own next
+        // step reads the outcome in its first transaction, where a twin
+        // that settles between the record and the finish answers.
+        let (repo, input_gen, recorded) = self.repo_and_land_by_key(caller, req)?;
+        // The generation ride is the input's existence guard: a land
+        // whose changeset does not exist fails here, before any pending
+        // row is written, and the found value warms the cache the
+        // separate read warmed.
+        let generation =
+            input_gen.ok_or_else(|| Error::NotFound(format!("changeset {}", req.changeset)))?;
+        self.gen_cache
+            .insert((repo.0, id_bytes(req.changeset.as_bytes())), generation);
         let recorded = if let Some(recorded) = recorded {
             recorded
         } else {

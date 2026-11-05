@@ -156,7 +156,7 @@ static LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[test]
 fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound() {
     const BOUND: u64 = 36;
-    const EXACT: u64 = 28;
+    const EXACT: u64 = 27;
     let _log = LOG_LOCK.lock().unwrap();
     // Today's count, with slack for one more plan attempt: each fold of
     // the round-trip card lowers this number, and a change that raises
@@ -166,9 +166,12 @@ fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound()
     // guard SET LOCALs ride one batch, on the writer transactions and
     // the reader's alike; the next fold joined the record's repos read
     // into the key lookup; the next joined the finish's ref read into
-    // the land's outcome read: 30. This fold asks the same read whether
+    // the land's outcome read: 30. That fold asked the same read whether
     // the head's root tree is stored, and the pre-settle fill runs only
-    // when it is missing: the land costs 28.
+    // when it is missing: the land costs 28. The next fold rides the
+    // input's generation into the record's key lookup as a column, and
+    // the record's discarded gen guard becomes the column's NULL check:
+    // the land costs 27.
     //
     // This run has no rival writer, so the land settles in one attempt;
     // the log's one verdict UPDATE proves it. On that run the count is
