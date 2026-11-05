@@ -3037,6 +3037,7 @@ mod tests {
     /// lead carries them.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_cancelled_calls_keep_their_permits_until_their_work_ends() {
+        const LONG: Duration = Duration::from_millis(1000);
         let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test(dir.path()).unwrap();
         let worker = Arc::new(Worker::new(store));
@@ -3045,7 +3046,6 @@ mod tests {
         worker.run(|_| Ok(())).await.unwrap();
         let baseline = started.elapsed();
         // MAX_BLOCKING long calls: a job that sleeps past any check.
-        const LONG: Duration = Duration::from_millis(1000);
         let tasks: Vec<tokio::task::JoinHandle<()>> = (0..MAX_BLOCKING)
             .map(|_| {
                 tokio::spawn({
