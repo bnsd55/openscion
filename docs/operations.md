@@ -14,7 +14,7 @@ The pieces:
 
 - `scion-server` — the one process that stores and lands. One data directory
   holds the blob files and the marker: `objects/` (one zstd file per blob),
-  `tmp/` (staging), and three lock files; the metadata (changesets, trees,
+  `tmp/` (staging), and one lock file; the metadata (changesets, trees,
   refs) sits in Postgres, at the schema the URL names. A second server on
   the same directory refuses to start.
 - `scion-cache` — a regional tier in front of the server. Keeps objects in
@@ -69,10 +69,11 @@ SCION_SERVER=http://127.0.0.1:7878 scn --token-file /srv/scion-token log main
 The client's global flags (`--server`, `--token-file`) go before the
 subcommand; the environment forms are `SCION_SERVER` and `SCION_TOKEN`.
 The import can run while the server serves. Every subcommand that opens
-the store — `import`, `fsck`, `gc`, `derive`, `ticket-key`, `restore` —
-takes the same metadata flags as `serve` (see "The metadata in
-Postgres"): a Postgres-backed import without them answers
-"no Postgres URL".
+the store — `import`, `fsck`, `gc`, `derive`, `create-repo`, `create-ref`,
+`export`, `restore` — takes the same metadata flags as `serve` (see "The
+metadata in Postgres"): a Postgres-backed import without them answers
+"no Postgres URL". (`ticket-key` and `hash-token` read no store, so they
+take none of them.)
 
 Proof: crates/scion-server/tests/first_boot.rs::a_first_boot_serves_probes_and_reads_back
 
@@ -424,9 +425,13 @@ SCION_POSTGRES_URL='postgres://user@dbhost/scion?sslmode=require' \
 - The open refuses a database whose schema is behind this build's
   version: the answer names the fix ("run `scion-server migrate` first,
   or pass --migrate to serve"). Only `migrate` and `serve --migrate`
-  move the schema, one transaction per migration, under a database lock
-  with the same 5 s clock: a second that waits longer answers busy, and
-  the caller retries. A database of a newer build is refused: run that
+  move the schema, one transaction per migration. The move takes the
+  schema's advisory lock: one process migrates at a time, and two opens
+  that start together on one fresh database take turns under it — one
+  that waits past the 5 s clock answers busy, and the caller retries. A
+  `migrate` beside a live server does not wait at all: it refuses at
+  once with the one-server answer (below). A database of a newer build
+  is refused: run that
   build's server. A fresh, empty database is created by the open.
 - One server process serves one store - a data directory, or a Postgres
   schema: a second `serve` on the same URL (and schema)
@@ -847,7 +852,7 @@ restore, whatever was happening in the meantime.
 Proof: crates/scion-server/tests/backup.rs::a_backup_taken_while_serving_restores_whole (behaviour, no command: the section states the durability rules in prose, and no shell command reproduces an acknowledged write; the test holds the recovery point the section promises)
 
 A data directory is the blob files in `objects/` plus the `backend`
-marker; the lock files and `tmp/` are process state, not data, and the
+marker; the lock file and `tmp/` are process state, not data, and the
 metadata itself lives in the database, not in the directory. A backup is
 the metadata's dump plus the blob files plus the marker.
 
@@ -929,7 +934,29 @@ Proof: crates/scion-server/tests/restore_bench.rs::a_restore_of_a_stated_store_t
 
 Proof: crates/scion-server/tests/backup.rs::a_backup_taken_while_serving_restores_whole (behaviour, no command: the section's sample numbers are measured by the workflow, not reproducible as one command; the test holds the backup-while-serving behaviour the section names)
 
-On Postgres, a restore's staging schema carries a `restore_staging`
+The store's own backup is an archive: a directory of plain files whose
+format `docs/archive-format.md` is the contract for. `export` writes it,
+`verify` checks it against the format without the store's code, and
+`restore` replays it into an empty data directory. The export reads one
+snapshot, so it is safe beside a live server, like the dump above:
+
+```sh
+scion-server --data /srv/scion --postgres-url-file /etc/scion/db-url \
+  export --all --out /backups/scion-archive-$(date +%F)
+scion-server verify --archive /backups/scion-archive-2026-11-05
+```
+
+`export` takes `--all`, or `--repo R` for one repository, and refuses an
+`--out` that exists. `verify` exits 0 when it saw no damage, 1 when it
+did, 2 when it could not run. `restore` takes `--archive` and the same
+`--data` and Postgres flags as every store command; its target must be
+an empty directory, the replay goes through the store's own write path
+so every object ID carries over, the refs go back with the versions the
+export read, and the pending lands are recorded again, so a retry with
+the same request key resumes. It exits 2 when it could not finish, and
+records its run in the restored store's own audit file.
+
+On Postgres, an archive restore's staging schema carries a `restore_staging`
 mark from its first transaction until publication, so a restore drops
 only what a restore made: a schema that names a store and no mark is
 refused ("a restore refuses to drop a store it did not make"), never
@@ -971,8 +998,9 @@ so none takes long). Three rules:
   fresh, empty database is not behind: `serve` and `import` still
   create it, so a first boot needs no migrate step.
 - The move takes the schema's advisory lock: one process migrates at a
-  time, and a second that waits longer than 5 s answers busy, and the
-  caller retries.
+  time. A `migrate` beside a live server does not wait: the live server
+  holds the one-server lock, so the migrate refuses at once with
+  `another server holds this store; stop the server first`.
 
 ### A failed migration
 
@@ -986,9 +1014,12 @@ is the rule that names the case:
    in the database by hand: the version is the migration's bookmark,
    and a hand-moved one leaves the database half-migrated in a way no
    migration can finish.
-2. The migrate answers busy (the 5 s clock above): another server holds
-   the schema's migration lock. It finishes its migration; this one
-   retries.
+2. The migrate refuses with `another server holds this store; stop the
+   server first`: a server (or an unattended start's `serve --migrate`)
+   holds the one-server lock. Stop it — the drain of section 1 — and run
+   the migrate again. No lock waits for another server's migration to
+   finish: the refusal is the answer, not a busy clock to retry
+   against.
 
 After the fix, the server starts and serves; `fsck` says the store is
 whole.
@@ -1112,9 +1143,10 @@ The routines are these:
   the server starts.
 
   Proof: crates/scion-server/tests/storage.rs::a_failing_disk_runbook_fscks_restores_and_serves (behaviour, no command: the section's only command block is the collector's; the fsck-restore proof holds the stop-and-restore behaviour the guide states in prose)
-- `tmp/` needs no attention: every open removes the staging folders of dead
-  processes, and a lone open also removes files a build older than the
-  schema left there.
+- `tmp/` needs no attention: every open removes the staging folders of
+  processes that no longer hold them (a crash's leftovers, the blob
+  writes that were never renamed included), and each one-shot command
+  removes its own staging folder when it ends.
 - Pending lands sweep themselves: a land pending longer than
   `--land-stale-secs` (a day, by default) is rejected by a sweep that runs
   at start and then hourly. `finished` rows of the lands table are dropped
@@ -1165,7 +1197,9 @@ in the scrape.
   one-server lock, so run it with the server stopped (beside a live
   server it refuses with "another server holds this store"). It is safe
   to repeat and removes rows of older
-  versions itself.
+  versions itself. A step of a deadline-less walk yields to writers that
+  wait for at most 2 s in total, then takes its turn: a write load that
+  never stops delays the walk, it does not starve the writers.
 - A cache is stateless except its snapshots: its whole state is memory plus
   the snapshot files, so restart it whenever you like.
 
@@ -1257,6 +1291,10 @@ the process, scraped from there. The names:
 - `scion_view_trees_walked_total` — real trees a view derivation opened for
   a partial reader; a rate that stays high across changesets of one rule
   set means the per-tree memo is not serving and every derivation re-walks.
+- `scion_diff_rename_cache_bytes` — the bytes the paged diffs' shared
+  rename maps hold now; a gauge that sits at its cap means many large
+  paged diffs are caching their rename searches, and the oldest entries
+  age out first.
 - `scion_cache_hits_total` / `scion_cache_misses_total` — what a tier
   served from its store against what it fetched upstream.
 - `scion_blob_sync_seconds` — one fsync attempt on the blob write path, failed ones included (temp file, stored file, blob directory, or the drive-cache flush)
