@@ -2165,6 +2165,109 @@ impl<'a> PgTx<'a> {
 
     /// Reads back the land another writer recorded for this request key
     /// first: its land wins, and its input must match this one's.
+    /// The repo's id and the land a request key recorded, in one read:
+    /// the record's first statement names the repo and the key together.
+    /// A repo with no such land answers its id and no land; a repo that
+    /// does not exist answers [`Error::NotFound`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotFound`] when no repository has that name;
+    /// [`Error::InvalidArgument`] when the key named a different land;
+    /// [`Error::Corrupt`] when the row's bytes do not decode.
+    fn repo_and_land_by_key(
+        &mut self,
+        caller: &Caller,
+        req: &LandRequest,
+    ) -> Result<(RepoId, Option<LandOutcome>)> {
+        let row = self
+            .c
+            .query_opt(
+                "SELECT r.repo_id, l.land_id, l.input_cs, l.target_ref, l.state,
+                        l.detail, l.result_cs, l.conflict_paths, l.reject_reason
+                 FROM repos r
+                 LEFT JOIN lands l
+                   ON l.repo_id = r.repo_id AND l.caller = $2 AND l.request_key = $3
+                 WHERE r.name = $1",
+                &[
+                    P::text(&req.repo),
+                    P::text(&caller.0),
+                    P::text(&req.request_key),
+                ],
+            )?
+            .map(|row| {
+                (
+                    row.get::<_, i64>(0),
+                    row.get::<_, Option<i64>>(1),
+                    row.get::<_, Option<Vec<u8>>>(2),
+                    row.get::<_, Option<String>>(3),
+                    row.get::<_, Option<String>>(4),
+                    row.get::<_, Option<String>>(5),
+                    row.get::<_, Option<Option<Vec<u8>>>>(6),
+                    row.get::<_, Option<Vec<u8>>>(7),
+                    row.get::<_, Option<String>>(8),
+                )
+            })
+            .ok_or_else(|| Error::NotFound(format!("repo {:?}", req.repo)))?;
+        let (repo_id, land_id, input, target, state, detail, result_cs, conflict_paths, reason) =
+            row;
+        let repo = RepoId(repo_id);
+        let Some(land_id) = land_id else {
+            return Ok((repo, None));
+        };
+        // A LEFT JOIN's land columns are all set or all null together: the
+        // row exists only when the join found the land.
+        let input = input.ok_or_else(|| {
+            Error::Corrupt(format!(
+                "land {land_id} of repo {} lost its columns",
+                repo.0
+            ))
+        })?;
+        let target = target.ok_or_else(|| {
+            Error::Corrupt(format!(
+                "land {land_id} of repo {} lost its columns",
+                repo.0
+            ))
+        })?;
+        let state = state.ok_or_else(|| {
+            Error::Corrupt(format!(
+                "land {land_id} of repo {} lost its columns",
+                repo.0
+            ))
+        })?;
+        let detail = detail.unwrap_or_default();
+        let reason = reason.unwrap_or_default();
+        let conflict_paths = conflict_paths.unwrap_or_default();
+        if input != req.changeset.as_bytes() || target != req.target_ref {
+            return Err(Error::InvalidArgument(format!(
+                "request key {:?} was already used for a different land",
+                req.request_key
+            )));
+        }
+        // The join wraps the column's own null in the row's presence: one
+        // flatten answers the column, which the early return above already
+        // proved present.
+        let result = result_cs
+            .flatten()
+            .map(|bytes| ChangesetId::try_from(bytes.as_slice()))
+            .transpose()
+            .map_err(|e| Error::Corrupt(format!("land {land_id} result: {e}")))?;
+        Ok((
+            repo,
+            Some(LandOutcome {
+                moved: false,
+                land_id,
+                state: LandState::parse(&state)?,
+                result,
+                previous: None,
+                detail,
+                conflict_paths: decode_paths(&conflict_paths)
+                    .ok_or_else(|| Error::Corrupt(format!("land {land_id} conflict paths")))?,
+                reject_reason: LandRejectReason::parse(&reason)?,
+            }),
+        ))
+    }
+
     /// Reads the land a request key recorded back, for the ON CONFLICT
     /// race: a twin recorded the same key in the same instant, so this
     /// insert wrote nothing and the twin's row is the answer.
@@ -4980,15 +5083,16 @@ impl MetaTx for PgTx<'_> {
         req: &LandRequest,
         pending_limit: Option<usize>,
     ) -> Result<(RepoId, LandOutcome)> {
-        let repo = self.repo_id(&req.repo)?;
-        self.generation(repo, req.changeset)?;
         // The outcome's columns ride the lookup the record already runs:
         // the caller learns a settled twin without a second read of the
-        // row. A row that is still pending must be finished: the land's
-        // own next step reads the outcome in its first transaction,
-        // where a twin that settles between the record and the finish
-        // answers.
-        let recorded = if let Some(recorded) = self.land_by_key(repo, caller, req)? {
+        // row, and the repo's id rides the same statement, so the record
+        // pays no separate repos read. A row that is still pending must
+        // be finished: the land's own next step reads the outcome in its
+        // first transaction, where a twin that settles between the
+        // record and the finish answers.
+        let (repo, recorded) = self.repo_and_land_by_key(caller, req)?;
+        self.generation(repo, req.changeset)?;
+        let recorded = if let Some(recorded) = recorded {
             recorded
         } else {
             self.record_new_land(repo, caller, req, pending_limit)?

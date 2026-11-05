@@ -1828,6 +1828,32 @@ mod tests {
         );
     }
 
+    /// A land into a repo the store does not hold is a `NotFound`
+    /// error, named by the repo - the record's joined read answers it
+    /// before any land row is written.
+    #[test]
+    fn a_land_in_a_missing_repo_is_not_found() {
+        let _slot = damage::slot();
+        let f = fixture_shared();
+        let cs = f.commit(f.root, &[put("a/x", "A")]);
+        let err = f
+            .lands
+            .land(
+                &f.store,
+                &caller(),
+                &LandRequest {
+                    repo: "nope".into(),
+                    changeset: cs,
+                    target_ref: "main".into(),
+                    request_key: "knorepo".into(),
+                    deadline: Deadline::new(Instant::now() + std::time::Duration::from_secs(600)),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)), "{err:?}");
+        assert!(err.to_string().contains("nope"), "{err}");
+    }
+
     /// A land aimed at a ref that does not exist is a Rejected verdict,
     /// recorded and named - never an error and never a move.
     #[test]
