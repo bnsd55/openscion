@@ -397,7 +397,7 @@ twice.
 
 - Each land is three network commits instead of two local transactions, and
   one ref takes about 50 lands per second (**estimate**, the proposal
-  column above; the machine today measures 23 to 25 with no readers).
+  column above; one server measures 23 to 25 today with no readers).
 - Each changeset also writes its history nodes, about one per path part of
   each changed path. For 5 changed paths 6 levels deep that is up to 30 tree
   rows and 30 history rows, about 65 rows in all. At 30,000 lands per day
