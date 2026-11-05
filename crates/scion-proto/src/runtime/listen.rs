@@ -60,7 +60,7 @@ use crate::runtime::metrics::Metrics;
 use crate::runtime::request_id;
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::{TcpListener, UnixListener, UnixStream};
+use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::time::Sleep;
 use tokio_rustls::rustls::ServerConfig;
@@ -936,25 +936,12 @@ where
                     io
                 }
                 Err(error) => {
-                    tracing::debug!(
-                        error = ?error,
-                        thread = ?std::thread::current().id(),
-                        "the listener failed to yield a socket"
-                    );
-                    if let Some(failures) = accept_warn.tick() {
-                        tracing::warn!(
-                            failures,
-                            backoff = ?backoff,
-                            error = ?error,
-                            "the listener failed to accept; waiting before it accepts again"
-                        );
-                    }
-                    metrics.accept_error();
-                    if done.send(Err(error)).await.is_err() {
+                    if pace_after_failed_accept(error, &accept_warn, &metrics, &mut backoff, &done)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(MAX_ACCEPT_BACKOFF);
                     continue;
                 }
             };
@@ -1028,6 +1015,41 @@ where
 /// place freed in time still serves it, and one that is not is closed,
 /// counted in the refused-connections metric. Each must send the preface
 /// within `handshake` once it has its place.
+/// What the accept task does after a failed accept: the debug line, the
+/// rate-limited warn with the failures since its last line, the count in
+/// the metrics, the error handed on to the serve, and the wait that paces
+/// the next attempt - 10 ms doubling to 1 s, reset by a success, so a
+/// failure that persists cannot spin the task. `Err` says the serve went
+/// and the task stops.
+async fn pace_after_failed_accept<IO>(
+    error: io::Error,
+    accept_warn: &WaitWarn,
+    metrics: &Metrics,
+    backoff: &mut Duration,
+    done: &mpsc::Sender<io::Result<Connection<IO>>>,
+) -> Result<(), io::Error> {
+    tracing::debug!(
+        error = ?error,
+        thread = ?std::thread::current().id(),
+        "the listener failed to yield a socket"
+    );
+    if let Some(failures) = accept_warn.tick() {
+        tracing::warn!(
+            failures,
+            backoff = ?backoff,
+            error = ?error,
+            "the listener failed to accept; waiting before it accepts again"
+        );
+    }
+    metrics.accept_error();
+    tokio::time::sleep(*backoff).await;
+    *backoff = (*backoff * 2).min(MAX_ACCEPT_BACKOFF);
+    done.send(Err(error))
+        .await
+        .map(|_| ())
+        .map_err(|sent| sent.0)
+}
+
 fn accept<I, IO>(
     incoming: I,
     accepting: &Accepting,
@@ -1101,28 +1123,12 @@ where
                     io
                 }
                 Err(error) => {
-                    tracing::debug!(
-                        error = ?error,
-                        thread = ?std::thread::current().id(),
-                        "the listener failed to yield a socket"
-                    );
-                    // One warn per interval, with how many accepts failed
-                    // since the last line, so a persistent failure is seen
-                    // without a busy log.
-                    if let Some(failures) = accept_warn.tick() {
-                        tracing::warn!(
-                            failures,
-                            backoff = ?backoff,
-                            error = ?error,
-                            "the listener failed to accept; waiting before it accepts again"
-                        );
-                    }
-                    metrics.accept_error();
-                    if done.send(Err(error)).await.is_err() {
+                    if pace_after_failed_accept(error, &accept_warn, &metrics, &mut backoff, &done)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(MAX_ACCEPT_BACKOFF);
                     continue;
                 }
             };
