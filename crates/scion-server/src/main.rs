@@ -887,6 +887,13 @@ async fn main() -> anyhow::Result<()> {
         // `preflight` reports a missing directory as a failed check, so
         // it runs before the refusal and writes nothing anywhere.
         Command::Preflight(ref args) => {
+            // The flags' rules are serve's own: the token source, the
+            // listen rules, the TLS and ticket files. One error, the
+            // first serve would refuse at, is the line.
+            if let Err(error) = serve_flags(args) {
+                println!("fail serve flags: {error}");
+                std::process::exit(2);
+            }
             let options = preflight_options(&cli, args);
             // The checks' database reads are synchronous, and main runs
             // in tokio's runtime: the run takes a thread of its own,
@@ -1516,11 +1523,6 @@ fn secret_file(file: &Path) -> anyhow::Result<String> {
     Ok(token.to_owned())
 }
 
-/// The Postgres URL of the CLI, required: a checked file named by
-/// `--postgres-url-file`, or `SCION_POSTGRES_URL`. Every command that
-/// opens the store needs one: the metadata has nowhere else to live.
-/// The fields come in one at a time, because a caller that matched its
-/// command out of `Cli` holds a partially moved value.
 /// The options of a `preflight` run, as the flags hand them over. The
 /// data directory, the URL file and the CA ride the command line's
 /// global flags; the rest are serve's own.
@@ -1529,18 +1531,16 @@ fn preflight_options(cli: &Cli, args: &ServeArgs) -> scion_server::preflight::Pr
         data: cli.data.clone(),
         postgres_url_file: cli.postgres_url_file.clone(),
         postgres_ca: cli.postgres_ca.clone(),
-        token_file: args.token_file.clone(),
-        access: args.access.clone(),
-        tls_cert: args.tls_cert.clone(),
-        tls_key: args.tls_key.clone(),
-        tls_client_ca: args.tls_client_ca.clone(),
-        ticket_key: args.ticket_key.clone(),
-        ticket_key_old: args.ticket_key_old.clone(),
         listen: args.listen,
         metrics_listen: args.metrics_listen,
     }
 }
 
+/// The Postgres URL of the CLI, required: a checked file named by
+/// `--postgres-url-file`, or `SCION_POSTGRES_URL`. Every command that
+/// opens the store needs one: the metadata has nowhere else to live.
+/// The fields come in one at a time, because a caller that matched its
+/// command out of `Cli` holds a partially moved value.
 fn postgres_url_of(url_file: Option<&PathBuf>) -> anyhow::Result<String> {
     let url = if let Some(file) = url_file {
         secret_file(file)?

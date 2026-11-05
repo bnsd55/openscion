@@ -181,16 +181,16 @@ pub(crate) struct HostLimit {
     pub source: &'static str,
 }
 
-/// Reads the host's memory limit: the cgroup the process runs in first
-/// (a container's limit is the one that bounds it), then the host's
-/// total, then `hw.memsize` where the files do not exist. `None`: no
-/// source answered, and the start-up line says the limit is unknown.
 /// The host's memory limit, as a number for preflight's warn line: the
 /// same read the start-up check makes, without the registry or the log.
 pub(crate) fn host_memory(paths: &Paths) -> Option<(u64, &'static str)> {
     host_limit(paths, macos_memsize).map(|limit| (limit.bytes, limit.source))
 }
 
+/// Reads the host's memory limit: the cgroup the process runs in first
+/// (a container's limit is the one that bounds it), then the host's
+/// total, then `hw.memsize` where the files do not exist. `None`: no
+/// source answered, and the start-up line says the limit is unknown.
 pub(crate) fn host_limit(paths: &Paths, macos: impl Fn() -> Option<u64>) -> Option<HostLimit> {
     if let Ok(cgroups) = std::fs::read_to_string(&paths.self_cgroup) {
         // cgroup v2, the unified hierarchy: `0::/path`.

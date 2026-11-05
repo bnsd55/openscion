@@ -27,18 +27,33 @@ The pieces:
 
 ### First boot
 
-A first start on a fresh machine is a token file and three commands,
-and each command promises something. The token goes in a file, not in
-argv: any user of the machine reads argv with `ps`.
+A first start on a fresh machine is a token file, a preflight, and a
+serve, and each command promises something. The token goes in a file,
+not in argv: any user of the machine reads argv with `ps`.
 
 ```sh
 umask 077
 printf %s "$SCION_TOKEN" > /srv/scion-token
+./scion-server --data /srv/scion preflight \
+  --postgres-url-file /srv/scion-db-url --token-file /srv/scion-token
+```
+
+The `umask 077` and the printf make the token file private (0600). The
+preflight runs every check a first boot needs and prints one line per
+check - `ok`, `warn` or `fail`, the fix named in the same words serve's
+refusals use - and exits 0 all pass, 1 one warns, 2 one fails. It
+writes nothing: no marker, no schema move, no lock. The checks are
+serve's own: the data directory's refusals, the database's build
+version and schema state, the store's pairing, a live server on the
+store, the listen addresses, the memory floor, and the data
+directory's free bytes and inodes. The token, TLS and ticket rules are
+the `serve` command's own flags check, run before any check prints.
+
+```sh
 ./scion-server --data /srv/scion serve --token-file /srv/scion-token
 ```
 
-The `umask 077` and the printf make the token file private (0600). A
-data directory the server does not find is refused, not created: every
+A data directory the server does not find is refused, not created: every
 subcommand except restore answers "<path> does not exist; create it or
 pass --data" (#578), so make the directory before the first command.
 The serve command keeps

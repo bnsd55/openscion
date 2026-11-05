@@ -5,13 +5,13 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use scion_proto::runtime::auth::{checked_read_error, read_secret_file, read_shared_file};
-use scion_proto::runtime::tls::ServerTls;
 
 use crate::error::Result;
 
 /// The inputs of a `preflight` run: the flags `serve` takes, as the
-/// shell hands them over. The Postgres URL stays unresolved, so the
-/// URL's own check can name the missing piece.
+/// shell hands them over. The token, TLS and ticket flags are not
+/// here: their rules are serve's own, and the binary runs them through
+/// `serve_flags` before any check prints.
 pub struct PreflightOptions {
     /// The data directory the checks read, and whose filesystem the
     /// disk check gauges.
@@ -22,22 +22,6 @@ pub struct PreflightOptions {
     /// The CA that verifies the database's certificate, when the URL
     /// names a host that is not local.
     pub postgres_ca: Option<PathBuf>,
-    /// The file holding the one principal's token, checked like a
-    /// secret.
-    pub token_file: Option<PathBuf>,
-    /// The access file: tokens and rules for many principals.
-    pub access: Option<PathBuf>,
-    /// The server's certificate chain (PEM).
-    pub tls_cert: Option<PathBuf>,
-    /// The server's private key (PEM).
-    pub tls_key: Option<PathBuf>,
-    /// The CA that verifies a client's certificate, when mTLS is on.
-    pub tls_client_ca: Option<PathBuf>,
-    /// The ticket signing key's seed file.
-    pub ticket_key: Option<PathBuf>,
-    /// The previous ticket key's public file, which a rotation keeps
-    /// alive.
-    pub ticket_key_old: Option<PathBuf>,
     /// The address the gRPC listener would bind.
     pub listen: SocketAddr,
     /// The address the metrics listener would bind, when given.
@@ -63,8 +47,10 @@ enum Answer {
 }
 
 /// Every check, in the order an operator fixes them: the directory,
-/// the database, the schema, the keys and files, the address, the
-/// host. Nothing is written: no marker, no schema move, no lock.
+/// the database, the schema, the store's pairing, the address, the
+/// host. The flags' rules are serve's own (`serve_flags`, in the
+/// binary); nothing here copies them. Nothing is written: no marker,
+/// no schema move, no lock.
 pub fn run(opts: &PreflightOptions) -> Report {
     let mut answers: Vec<(&'static str, Answer)> = Vec::new();
 
@@ -95,80 +81,10 @@ pub fn run(opts: &PreflightOptions) -> Report {
         Ok(client) => Some(client),
     };
 
-    // The Postgres build: 16 to 18, as docs/support.md supports.
+    let url = postgres_url(opts);
     if let Some(db) = db.as_mut() {
-        let version = match db
-            .query_one("SHOW server_version_num", &[])
-            .map(|row| row.get::<_, String>(0).parse().unwrap_or(0))
-        {
-            Ok(num) if (16..=18).contains(&(num / 10000)) => {
-                let (major, minor) = (num / 10000, num % 10000 / 100);
-                Answer::Ok(format!("PostgreSQL {major}.{minor} is supported"))
-            }
-            Ok(num) => Answer::Fail(format!(
-                "this build supports PostgreSQL 16 to 18; the database runs {}",
-                num / 10000
-            )),
-            Err(error) => Answer::Fail(format!("cannot read the server version: {error}")),
-        };
-        answers.push(("Postgres version", version));
-
-        // synchronous_commit, the database's own setting: the session
-        // carries no option for it (see preflight_client), so the SHOW
-        // answers what every other client would get.
-        let sync = match db.query_one("SHOW synchronous_commit", &[]) {
-            Ok(row) if row.get::<_, String>(0) == "on" => {
-                Answer::Ok("synchronous_commit is on".to_owned())
-            }
-            Ok(row) => Answer::Fail(format!(
-                "the database runs synchronous_commit={}; this backend \
-                 promises that a returned commit is durable, so it needs \
-                 synchronous_commit=on",
-                row.get::<_, String>(0)
-            )),
-            Err(error) => Answer::Fail(format!("cannot read synchronous_commit: {error}")),
-        };
-        answers.push(("synchronous_commit", sync));
-
-        // The schema's version, read-only: the ledger's presence, then
-        // its top version. Never the open's migrate path, which writes.
-        answers.push((
-            "schema version",
-            match crate::pg::read_schema_version_raw(db) {
-                Ok(version) if version == crate::pg::PG_SCHEMA_VERSION => Answer::Ok(format!(
-                    "the schema stands at version {version}, this build's"
-                )),
-                Ok(version) if version < crate::pg::PG_SCHEMA_VERSION => Answer::Fail(format!(
-                    "the schema stands at version {version}, this build needs {}; \
-                     run migrate (serve --migrate)",
-                    crate::pg::PG_SCHEMA_VERSION
-                )),
-                Ok(version) => Answer::Fail(format!(
-                    "the schema stands at version {version}, this build speaks {}; \
-                     run the build that made the database",
-                    crate::pg::PG_SCHEMA_VERSION
-                )),
-                Err(error) => Answer::Fail(format!("cannot read the schema version: {error}")),
-            },
-        ));
-
-        // The store's pairing: the marker's UUID beside the database's
-        // own row, plain selects only.
-        answers.push(("store pairing", store_pairing(&opts.data, db)));
-
-        // A live server on this store: the one-server lock's key, read
-        // from `pg_locks` - never taken.
-        answers.push(("one-server lock", live_server(db)));
+        database_checks(&url, opts, db, &mut answers);
     }
-
-    // The token and the access file: the rules of `serve`'s own load.
-    answers.push(("token and access", token_source(opts)));
-
-    // The TLS files, through the protocol's own loader.
-    answers.push(("TLS", tls(opts)));
-
-    // The ticket key files, through the keys' own loader.
-    answers.push(("ticket key", tickets(opts)));
 
     // The listen address: bound and dropped, the way `serve` binds it.
     answers.push(("listen address", listen_free(opts.listen)));
@@ -180,10 +96,98 @@ pub fn run(opts: &PreflightOptions) -> Report {
     // floor stays a warning, as it is in `serve`.
     answers.push(("memory floor", memory_floor()));
 
-    // The data directory's filesystem: free bytes and free inodes, the
-    // two walls of a blob store (one file, one inode, per blob).
+    // The data directory's filesystem: free bytes against the margin
+    // the store's own disk evidence names, and the inodes free.
     answers.push(("disk and inodes", disk_and_inodes(&opts.data)));
 
+    finish(answers)
+}
+
+/// The database's checks: the build's version, the schema's state
+/// through `check_schema`, the store's pairing, and a live server on
+/// the lock. A database that does not answer stops here; the later
+/// checks still print.
+fn database_checks(
+    url: &Result<String, crate::Error>,
+    opts: &PreflightOptions,
+    db: &mut postgres::Client,
+    answers: &mut Vec<(&'static str, Answer)>,
+) {
+    let data = &opts.data;
+    let version = match db
+        .query_one("SHOW server_version_num", &[])
+        .map(|row| row.get::<_, String>(0).parse().unwrap_or(0))
+    {
+        Ok(num) if (16..=18).contains(&(num / 10000)) => {
+            let (major, minor) = (num / 10000, num % 10000 / 100);
+            Answer::Ok(format!("PostgreSQL {major}.{minor} is supported"))
+        }
+        Ok(num) => Answer::Fail(format!(
+            "this build supports PostgreSQL 16 to 18; the database runs {}",
+            num / 10000
+        )),
+        Err(error) => Answer::Fail(format!("cannot read the server version: {error}")),
+    };
+    answers.push(("Postgres version", version));
+
+    // The schema, through `check_schema`'s own decision: a fresh
+    // database is fine (serve creates it), behind names the migrate
+    // fix, newer refuses - the open's own words.
+    let check = match url {
+        Ok(url) => crate::pg::check_schema(url, opts.postgres_ca.as_deref()),
+        Err(error) => Err(crate::Error::InvalidArgument(error.to_string())),
+    };
+    let check = match check {
+        Ok(check) => check,
+        Err(error) => {
+            answers.push(("schema version", Answer::Fail(error.to_string())));
+            answers.push((
+                "store pairing",
+                Answer::Fail("the schema's state does not read".to_owned()),
+            ));
+            answers.push(("one-server lock", live_server(db)));
+            return;
+        }
+    };
+    if check.db_version() == 0 {
+        answers.push((
+            "schema version",
+            Answer::Ok("a fresh database; serve creates the schema".to_owned()),
+        ));
+        answers.push((
+            "store pairing",
+            Answer::Ok("a first boot: the open mints the marker and the store together".to_owned()),
+        ));
+    } else {
+        answers.push((
+            "schema version",
+            if check.is_pending() {
+                Answer::Fail(format!(
+                    "the schema stands at version {}, this build ships {}; \
+                     run `scion-server migrate` first, or pass --migrate to serve",
+                    check.db_version(),
+                    check.build_version()
+                ))
+            } else {
+                Answer::Ok(format!(
+                    "the schema stands at version {}, this build's",
+                    check.db_version()
+                ))
+            },
+        ));
+        // The store's pairing: the open's own decision, on plain
+        // selects the read-only session allows.
+        answers.push(("store pairing", store_pairing(data, db)));
+    }
+
+    // A live server on this store: the one-server lock's key, read
+    // from `pg_locks` - asked, never taken. It stays a warning, as the
+    // approved design says; the open's own lock is the enforcement.
+    answers.push(("one-server lock", live_server(db)));
+}
+
+/// The exit code and the lines, from the answers in check order.
+fn finish(answers: Vec<(&'static str, Answer)>) -> Report {
     let mut code = 0;
     let mut lines = Vec::new();
     for (name, answer) in answers {
@@ -219,44 +223,6 @@ fn postgres_url(opts: &PreflightOptions) -> Result<String> {
         })
 }
 
-/// The rules of `serve`'s token load: exactly one of `--token-file`,
-/// `SCION_TOKEN` or `--access`, the same words serve's start answers.
-fn token_source(opts: &PreflightOptions) -> Answer {
-    let token = std::env::var("SCION_TOKEN").ok();
-    let given = [
-        token.is_some(),
-        opts.token_file.is_some(),
-        opts.access.is_some(),
-    ]
-    .into_iter()
-    .filter(|given| *given)
-    .count();
-    if given != 1 {
-        return Answer::Fail(if given == 0 {
-            "give --token-file, SCION_TOKEN or --access: serve has no token source".to_owned()
-        } else {
-            "give --token-file, SCION_TOKEN or --access, not two".to_owned()
-        });
-    }
-    if let Some(file) = &opts.token_file {
-        return match checked_text(file, true) {
-            Ok(_) => Answer::Ok("the token source loads".to_owned()),
-            Err(error) => Answer::Fail(error.to_string()),
-        };
-    }
-    if token.is_some() {
-        return Answer::Ok("the token source loads".to_owned());
-    }
-    let file = opts.access.as_ref().expect("exactly one source is given");
-    match checked_text(file, true) {
-        Ok(text) => match crate::Access::parse(&text) {
-            Ok(_) => Answer::Ok("the token source loads".to_owned()),
-            Err(why) => Answer::Fail(format!("bad access file {}: {why}", file.display())),
-        },
-        Err(error) => Answer::Fail(error.to_string()),
-    }
-}
-
 /// A file's trimmed text, read the way `serve` reads its secrets: the
 /// owner alone, no symlink, the directories above it checked.
 fn checked_text(file: &Path, secret: bool) -> Result<String> {
@@ -271,91 +237,48 @@ fn checked_text(file: &Path, secret: bool) -> Result<String> {
         .map_err(|_| crate::Error::InvalidArgument(format!("{} is not UTF-8", file.display())))
 }
 
-/// The TLS files: the protocol's own loader, as `serve` loads them.
-fn tls(opts: &PreflightOptions) -> Answer {
-    match (&opts.tls_cert, &opts.tls_key) {
-        (None, None) => Answer::Ok(
-            "no TLS is configured; the listen check refuses a \
-                        non-loopback address without it"
-                .to_owned(),
-        ),
-        (Some(cert), Some(key)) => {
-            match ServerTls::load(cert, key, opts.tls_client_ca.as_deref()) {
-                Ok(_) => Answer::Ok("the certificates load".to_owned()),
-                Err(error) => Answer::Fail(error.to_string()),
-            }
-        }
-        _ => Answer::Fail("--tls-cert and --tls-key come together".to_owned()),
-    }
-}
-
-/// The ticket keys, as `serve` loads them: a signing key, and the
-/// public key a rotation keeps alive.
-fn tickets(opts: &PreflightOptions) -> Answer {
-    let Some(seed) = &opts.ticket_key else {
-        return if opts.ticket_key_old.is_some() {
-            Answer::Fail("--ticket-key-old needs --ticket-key".to_owned())
-        } else {
-            Answer::Ok("no ticket key is configured".to_owned())
-        };
-    };
-    let seed = match checked_text(seed, true) {
-        Ok(text) => text,
-        Err(error) => return Answer::Fail(error.to_string()),
-    };
-    let mut old = Vec::new();
-    if let Some(file) = &opts.ticket_key_old {
-        match checked_text(file, false) {
-            Ok(text) => old.push(text),
-            Err(error) => return Answer::Fail(error.to_string()),
-        }
-    }
-    match crate::Keys::load(&seed, &old) {
-        Ok(_) => Answer::Ok("the ticket key loads".to_owned()),
-        Err(why) => Answer::Fail(why.clone()),
-    }
-}
-
-/// The marker's UUID beside the database's `store_uuid` row, plain
-/// selects: a mismatch is a store restored over a directory, the
-/// open's own refusal to name.
 fn store_pairing(data: &Path, db: &mut postgres::Client) -> Answer {
+    // Any query error is a fail: "cannot read" is not "no store".
     let marker = crate::backend::store_uuid_of(data);
-    let held: Option<Vec<u8>> = db
-        .query_opt("SELECT uuid FROM store_uuid WHERE one = 1", &[])
-        .ok()
-        .flatten()
-        .map(|row| row.get(0));
-    match (marker, held) {
-        (Some(marker), Some(held)) if marker == *held => {
+    let held: Option<[u8; 16]> =
+        match db.query_opt("SELECT uuid FROM store_uuid WHERE one = 1", &[]) {
+            Ok(row) => row.map(|row| {
+                let bytes: Vec<u8> = row.get(0);
+                bytes.try_into().expect("the store's uuid is 16 bytes")
+            }),
+            Err(error) => {
+                return Answer::Fail(format!("cannot read the database's store row: {error}"));
+            }
+        };
+    // The repos probe decides the no-marker case, as the open's own
+    // pairing does: a schema that holds repos was served.
+    let served = held.is_some()
+        && !db
+            .query("SELECT 1 FROM repos LIMIT 1", &[])
+            .map_err(|error| Answer::Fail(format!("cannot read the schema's repos: {error}")))
+            .unwrap_or_default()
+            .is_empty();
+    // The open's own decision, in the open's own words.
+    match crate::pg::pairing_decision(marker, held, served) {
+        crate::pg::Pairing::Agree => {
             Answer::Ok("the data directory and the database name one store".to_owned())
         }
-        (Some(marker), Some(held)) => Answer::Fail(format!(
-            "this data directory belongs to the store whose UUID is {}, \
-             but the database names the store {}: one was restored over \
-             the other; give the directory of the database's own store, \
-             or a directory the database has never served",
-            hex(&marker),
-            hex(&held)
-        )),
-        (Some(_), None) => {
-            Answer::Ok("the database has no store yet; the first open mints one".to_owned())
+        crate::pg::Pairing::AdoptCut => Answer::Warn(
+            "the database names a store the directory carries no marker of, and \
+             the schema holds no repos: the first open adopts it and writes \
+             the marker"
+                .to_owned(),
+        ),
+        crate::pg::Pairing::Fresh if marker.is_some() => Answer::Ok(
+            "the database holds no store yet; the first open takes the \
+             directory's marker as its store"
+                .to_owned(),
+        ),
+        crate::pg::Pairing::Fresh => {
+            Answer::Ok("a first boot: the open mints the marker and the store".to_owned())
         }
-        (None, Some(_)) => {
-            Answer::Ok("the directory carries no marker yet; the first open writes one".to_owned())
-        }
-        (None, None) => Answer::Ok("neither a marker nor a store: a first boot".to_owned()),
+        crate::pg::Pairing::Refuse(error) => Answer::Fail(error.to_string()),
     }
-}
-
-/// 16 bytes as 32 lowercase hex digits, for the pairing refusal.
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
 }
 
 /// A live server on this store, read from `pg_locks`: the advisory
@@ -381,6 +304,8 @@ fn live_server(db: &mut postgres::Client) -> Answer {
              WHERE locktype = 'advisory'
                AND classid = (($1::bigint >> 32) & 4294967295)::oid
                AND objid = ($1::bigint & 4294967295)::oid
+               AND database = (SELECT oid FROM pg_database
+                               WHERE datname = current_database())
                AND granted",
             &[&crate::pg::schema_lock_key(&schema)],
         )
@@ -426,24 +351,50 @@ fn memory_floor() -> Answer {
     }
 }
 
-/// The data directory's filesystem: free bytes and free inodes, the
-/// store's own gauges. No threshold: the docs size the budget from the
-/// blob count, so the numbers are the answer.
+/// # SHORTCUT: 12 MiB, the `disk_full` run's own margin, as a warn; a
+/// real disk budget needs a doc row naming the store's spend per blob
+/// and per land. The `disk_full` wet run leaves 12 MiB for the open,
+/// the repo and the first lands; a filesystem below it cannot boot a
+/// store.
+const DISK_MARGIN: u64 = 12 << 20;
+
+/// The data directory's filesystem: free bytes against the margin the
+/// store's own disk evidence names, and the inodes free. Inodes have no
+/// threshold: the budget is one file per blob, and the blob count is
+/// the operator's, so the number is the answer.
 fn disk_and_inodes(data: &Path) -> Answer {
-    match (
-        crate::store::free_bytes(data),
-        crate::store::free_inodes(data),
-    ) {
-        (Ok(bytes), Ok(inodes)) => Answer::Ok(format!(
-            "{} free and {inodes} inodes on {}",
+    let bytes = match crate::store::free_bytes(data) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Answer::Fail(format!(
+                "cannot read the filesystem of {}: {error}",
+                data.display()
+            ));
+        }
+    };
+    let inodes = match crate::store::free_inodes(data) {
+        Ok(inodes) => inodes,
+        Err(error) => {
+            return Answer::Fail(format!(
+                "cannot read the filesystem of {}: {error}",
+                data.display()
+            ));
+        }
+    };
+    if bytes < DISK_MARGIN {
+        return Answer::Warn(format!(
+            "{} free on {}, below the {} MiB the store's open and first \
+             lands spend: grow the filesystem before the first boot",
             human_bytes(bytes),
-            data.display()
-        )),
-        (Err(error), _) | (_, Err(error)) => Answer::Fail(format!(
-            "cannot read the filesystem of {}: {error}",
-            data.display()
-        )),
+            data.display(),
+            DISK_MARGIN / (1 << 20)
+        ));
     }
+    Answer::Ok(format!(
+        "{} free and {inodes} inodes on {}",
+        human_bytes(bytes),
+        data.display()
+    ))
 }
 
 /// Bytes as the unit an operator reads at a glance.
@@ -461,6 +412,11 @@ fn human_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// The memory override is process-global, so the tests that use it
+    /// take turns, as the statement log's lock does.
+    static MEMORY_LOCK: Mutex<()> = Mutex::new(());
 
     /// A temp directory the run owns outright: mode 0700, whatever the
     /// umask. The data-directory check refuses one group or others can
@@ -483,16 +439,6 @@ mod tests {
         file
     }
 
-    /// A token file the preflight reads: mode 0600.
-    fn token_file(dir: &Path) -> PathBuf {
-        let file = dir.join("token");
-        std::fs::write(&file, "t".repeat(32)).unwrap();
-        let mut mode = std::fs::metadata(&file).unwrap().permissions();
-        mode.set_mode(0o600);
-        std::fs::set_permissions(&file, mode).unwrap();
-        file
-    }
-
     /// A store ready for a first boot: the test database, a marker, a
     /// schema at this build's version, no server holding the lock.
     fn ready_store() -> (tempfile::TempDir, PathBuf) {
@@ -501,9 +447,6 @@ mod tests {
         let store = crate::Backend::open_test(dir.path()).unwrap();
         drop(store);
         let file = url_file(dir.path(), &url);
-        // The token file stands before the run: the run rewrites the
-        // same name, and the unchanged-directory snapshot stays true.
-        let _token = token_file(dir.path());
         (dir, file)
     }
 
@@ -514,13 +457,6 @@ mod tests {
             data: data.to_path_buf(),
             postgres_url_file: url_file.cloned(),
             postgres_ca: None,
-            token_file: Some(token_file(data)),
-            access: None,
-            tls_cert: None,
-            tls_key: None,
-            tls_client_ca: None,
-            ticket_key: None,
-            ticket_key_old: None,
             listen: "127.0.0.1:0".parse().unwrap(),
             metrics_listen: None,
         })
@@ -536,9 +472,12 @@ mod tests {
 
     /// The host's memory read points at a meminfo with room to spare:
     /// the floor's answer must not depend on the runner's own memory.
+    /// The override is process-global: the tests that touch it hold
+    /// [`MEMORY_LOCK`], and the drop resets it under the same lock.
     struct MemoryOverride(#[allow(dead_code)] tempfile::TempDir);
     impl MemoryOverride {
-        fn set() -> Self {
+        fn set(lock: &MutexGuard<'_, ()>) -> (Self, ()) {
+            let _ = lock;
             let dir = private_tempdir();
             std::fs::write(dir.path().join("meminfo"), "MemTotal:       67108864 kB\n").unwrap();
             crate::floor::test_set_paths(Some(crate::floor::Paths {
@@ -546,7 +485,20 @@ mod tests {
                 cgroup_root: dir.path().join("no-root"),
                 meminfo: dir.path().join("meminfo"),
             }));
-            Self(dir)
+            (Self(dir), ())
+        }
+
+        /// The override pointed at a small host: a floor warning.
+        fn set_small(lock: &MutexGuard<'_, ()>) -> (Self, ()) {
+            let _ = lock;
+            let dir = private_tempdir();
+            std::fs::write(dir.path().join("meminfo"), "MemTotal:         1048576 kB\n").unwrap();
+            crate::floor::test_set_paths(Some(crate::floor::Paths {
+                self_cgroup: dir.path().join("no-cgroup"),
+                cgroup_root: dir.path().join("no-root"),
+                meminfo: dir.path().join("meminfo"),
+            }));
+            (Self(dir), ())
         }
     }
     impl Drop for MemoryOverride {
@@ -555,87 +507,61 @@ mod tests {
         }
     }
 
-    /// A ready store passes everything, and the run writes nothing: the
-    /// data directory's files and the schema's catalog stand unchanged.
-    #[test]
-    fn a_ready_store_passes_preflight_and_writes_nothing() {
-        let _memory = MemoryOverride::set();
-        let (dir, url) = ready_store();
-        let before: Vec<_> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
-            .collect();
-        let mut raw = postgres::Client::connect(
-            std::fs::read_to_string(&url).unwrap().as_str(),
-            postgres::NoTls,
-        )
-        .unwrap();
+    /// The files of `dir`, every file's bytes, recursively, sorted:
+    /// the bytes a run must not change.
+    fn file_bytes(dir: &Path) -> Vec<(String, u64)> {
+        fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, u64)>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let name = format!("{prefix}{}", entry.file_name().to_string_lossy());
+                let kind = entry.file_type().unwrap();
+                if kind.is_dir() {
+                    walk(&entry.path(), &format!("{name}/"), out);
+                } else {
+                    out.push((name, entry.metadata().unwrap().len()));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(dir, "", &mut out);
+        out.sort();
+        out
+    }
+
+    /// Row counts of every table in the store's schema.
+    fn table_rows(url: &str) -> Vec<(String, i64)> {
+        let mut raw = postgres::Client::connect(url, postgres::NoTls).unwrap();
         let schema: String = raw
             .query_one("SELECT current_schema()::text", &[])
             .unwrap()
             .get(0);
-        let catalog_before = raw
-            .query_one(
-                "SELECT count(*) FROM pg_class
-                 WHERE relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $1)",
+        let mut out = Vec::new();
+        for row in raw
+            .query(
+                "SELECT c.relname FROM pg_class c
+                 WHERE c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $1)
+                   AND c.relkind = 'r'
+                 ORDER BY c.relname",
                 &[&schema],
             )
             .unwrap()
-            .get::<_, i64>(0);
-        drop(raw);
-        let report = run_cli(dir.path(), Some(&url));
-        assert_eq!(
-            report.code, 0,
-            "a ready store passes everything:\n{:#?}",
-            report.lines
-        );
-        for name in [
-            "ok data directory",
-            "ok Postgres version",
-            "ok synchronous_commit",
-            "ok schema version",
-            "ok store pairing",
-            "ok one-server lock",
-            "ok token and access",
-            "ok listen address",
-            "ok memory floor",
-            "ok disk and inodes",
-        ] {
-            assert!(
-                report.lines.iter().any(|l| l.starts_with(name)),
-                "no {name} in\n{:#?}",
-                report.lines
-            );
+        {
+            let name: String = row.get(0);
+            let count = raw
+                .query_one(&format!("SELECT count(*) FROM {name}"), &[])
+                .unwrap()
+                .get::<_, i64>(0);
+            out.push((name, count));
         }
-        let after: Vec<_> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
-            .collect();
-        assert_eq!(before, after, "the data directory stands unchanged");
-        let mut raw = postgres::Client::connect(
-            std::fs::read_to_string(&url).unwrap().as_str(),
-            postgres::NoTls,
-        )
-        .unwrap();
-        let catalog_after = raw
-            .query_one(
-                "SELECT count(*) FROM pg_class
-                 WHERE relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $1)",
-                &[&schema],
-            )
-            .unwrap()
-            .get::<_, i64>(0);
-        assert_eq!(
-            catalog_before, catalog_after,
-            "the catalog stands unchanged"
-        );
+        out
     }
 
     /// A directory that holds a sqlite store fails with the open's own
     /// refusal, and the exit code is 2.
     #[test]
     fn a_sqlite_directory_fails_preflight() {
-        let _memory = MemoryOverride::set();
+        let lock = MEMORY_LOCK.lock().unwrap();
+        let (_memory, ()) = MemoryOverride::set(&lock);
         let dir = private_tempdir();
         std::fs::write(dir.path().join("scion.db"), b"sqlite bytes\n").unwrap();
         let url = crate::Backend::test_postgres_url(dir.path()).unwrap();
@@ -649,11 +575,50 @@ mod tests {
         );
     }
 
+    /// A ready store passes everything, and the run writes nothing:
+    /// every table's rows and every file's bytes stand unchanged.
+    #[test]
+    fn a_ready_store_passes_preflight_and_writes_nothing() {
+        let lock = MEMORY_LOCK.lock().unwrap();
+        let (_memory, ()) = MemoryOverride::set(&lock);
+        let (dir, url) = ready_store();
+        let url_text = std::fs::read_to_string(&url).unwrap();
+        let tables_before = table_rows(&url_text);
+        let files_before = file_bytes(dir.path());
+        let report = run_cli(dir.path(), Some(&url));
+        assert_eq!(
+            report.code, 0,
+            "a ready store passes everything:\n{:#?}",
+            report.lines
+        );
+        for name in [
+            "ok data directory",
+            "ok Postgres version",
+            "ok schema version",
+            "ok store pairing",
+            "ok one-server lock",
+            "ok listen address",
+            "ok memory floor",
+            "ok disk and inodes",
+        ] {
+            assert!(
+                report.lines.iter().any(|l| l.starts_with(name)),
+                "no {name} in\n{:#?}",
+                report.lines
+            );
+        }
+        let tables_after = table_rows(&url_text);
+        assert_eq!(tables_before, tables_after, "the rows stand unchanged");
+        let files_after: Vec<_> = file_bytes(dir.path());
+        assert_eq!(files_before, files_after, "the files stand unchanged");
+    }
+
     /// A database that does not answer fails, and the later checks
     /// still print their lines.
     #[test]
     fn a_database_that_does_not_answer_fails_preflight() {
-        let _memory = MemoryOverride::set();
+        let lock = MEMORY_LOCK.lock().unwrap();
+        let (_memory, ()) = MemoryOverride::set(&lock);
         let dir = private_tempdir();
         let url = url_file(dir.path(), "postgres://127.0.0.1:1/scion");
         let report = run_cli(dir.path(), Some(&url));
@@ -664,7 +629,7 @@ mod tests {
             report.lines
         );
         assert!(
-            line(&report, "token and access").starts_with("ok"),
+            line(&report, "listen address").starts_with("ok"),
             "the later checks still run:\n{:#?}",
             report.lines
         );
@@ -673,14 +638,23 @@ mod tests {
     /// A schema behind this build fails with the fix named: migrate.
     #[test]
     fn a_schema_behind_the_build_fails_preflight() {
-        let _memory = MemoryOverride::set();
+        let lock = MEMORY_LOCK.lock().unwrap();
+        let (_memory, ()) = MemoryOverride::set(&lock);
         let (dir, url) = ready_store();
         let mut raw = postgres::Client::connect(
             std::fs::read_to_string(&url).unwrap().as_str(),
             postgres::NoTls,
         )
         .unwrap();
+        // Behind, not fresh: an empty ledger reads as a database serve
+        // would create, so the test stands the ledger at an old
+        // version instead.
         raw.execute("DELETE FROM schema_migrations", &[]).unwrap();
+        raw.execute(
+            "INSERT INTO schema_migrations (version, name) VALUES (3, 'an old step')",
+            &[],
+        )
+        .unwrap();
         drop(raw);
         let report = run_cli(dir.path(), Some(&url));
         assert_eq!(report.code, 2);
@@ -691,11 +665,142 @@ mod tests {
         );
     }
 
+    /// A schema newer than this build fails: the open's own refusal,
+    /// run the build that made the database.
+    #[test]
+    fn a_schema_newer_than_the_build_fails_preflight() {
+        let lock = MEMORY_LOCK.lock().unwrap();
+        let (_memory, ()) = MemoryOverride::set(&lock);
+        let (dir, url) = ready_store();
+        let mut raw = postgres::Client::connect(
+            std::fs::read_to_string(&url).unwrap().as_str(),
+            postgres::NoTls,
+        )
+        .unwrap();
+        raw.execute(
+            "INSERT INTO schema_migrations (version, name) VALUES (99, 'a future step')",
+            &[],
+        )
+        .unwrap();
+        drop(raw);
+        let report = run_cli(dir.path(), Some(&url));
+        assert_eq!(report.code, 2);
+        let schema = line(&report, "schema version");
+        assert!(
+            schema.starts_with("fail") && schema.contains("newer"),
+            "the newer schema fails:\n{schema}"
+        );
+    }
+
+    /// A data directory group or others can read fails: the open's own
+    /// rule, so a preflight pass cannot promise what the open refuses.
+    #[test]
+    fn a_shared_data_directory_fails_preflight() {
+        let lock = MEMORY_LOCK.lock().unwrap();
+        let (_memory, ()) = MemoryOverride::set(&lock);
+        let (dir, url) = ready_store();
+        let mut mode = std::fs::metadata(dir.path()).unwrap().permissions();
+        mode.set_mode(0o777);
+        std::fs::set_permissions(dir.path(), mode).unwrap();
+        let report = run_cli(dir.path(), Some(&url));
+        assert_eq!(report.code, 2);
+        assert!(
+            line(&report, "data directory").starts_with("fail"),
+            "the shared directory fails:\n{:#?}",
+            report.lines
+        );
+    }
+
+    /// A symlinked data directory fails: the target and its mode can
+    /// change behind the checks.
+    #[test]
+    fn a_symlinked_data_directory_fails_preflight() {
+        let lock = MEMORY_LOCK.lock().unwrap();
+        let (_memory, ()) = MemoryOverride::set(&lock);
+        let (dir, url) = ready_store();
+        let link = private_tempdir();
+        std::os::unix::fs::symlink(dir.path(), link.path().join("store")).unwrap();
+        let report = run_cli(&link.path().join("store"), Some(&url));
+        assert_eq!(report.code, 2);
+        assert!(
+            line(&report, "data directory").starts_with("fail"),
+            "the symlink fails:\n{:#?}",
+            report.lines
+        );
+    }
+
+    /// A damaged marker fails with the open's own refusal.
+    #[test]
+    fn a_damaged_marker_fails_preflight() {
+        let lock = MEMORY_LOCK.lock().unwrap();
+        let (_memory, ()) = MemoryOverride::set(&lock);
+        let (dir, url) = ready_store();
+        std::fs::write(dir.path().join("backend"), b"not a marker\n").unwrap();
+        let report = run_cli(dir.path(), Some(&url));
+        assert_eq!(report.code, 2);
+        assert!(
+            line(&report, "data directory").starts_with("fail"),
+            "the damaged marker fails:\n{:#?}",
+            report.lines
+        );
+    }
+
+    /// A directory whose marker names another store than the
+    /// database's row fails: one was restored over the other.
+    #[test]
+    fn a_pairing_mismatch_fails_preflight() {
+        let lock = MEMORY_LOCK.lock().unwrap();
+        let (_memory, ()) = MemoryOverride::set(&lock);
+        let (dir, url) = ready_store();
+        let mut raw = postgres::Client::connect(
+            std::fs::read_to_string(&url).unwrap().as_str(),
+            postgres::NoTls,
+        )
+        .unwrap();
+        raw.execute(
+            "UPDATE store_uuid SET uuid = $1 WHERE one = 1",
+            &[&[9u8; 16].to_vec()],
+        )
+        .unwrap();
+        drop(raw);
+        let report = run_cli(dir.path(), Some(&url));
+        assert_eq!(report.code, 2);
+        let pairing = line(&report, "store pairing");
+        assert!(
+            pairing.starts_with("fail") && pairing.contains("restored over"),
+            "the mismatch fails:\n{pairing}"
+        );
+    }
+
+    /// A database that cannot read its store row fails: "cannot read"
+    /// is not "no store".
+    #[test]
+    fn a_pairing_error_fails_preflight() {
+        let lock = MEMORY_LOCK.lock().unwrap();
+        let (_memory, ()) = MemoryOverride::set(&lock);
+        let (dir, url) = ready_store();
+        let mut raw = postgres::Client::connect(
+            std::fs::read_to_string(&url).unwrap().as_str(),
+            postgres::NoTls,
+        )
+        .unwrap();
+        raw.execute("DROP TABLE store_uuid", &[]).unwrap();
+        drop(raw);
+        let report = run_cli(dir.path(), Some(&url));
+        assert_eq!(report.code, 2);
+        let pairing = line(&report, "store pairing");
+        assert!(
+            pairing.starts_with("fail") && pairing.contains("cannot read"),
+            "the read error fails:\n{pairing}"
+        );
+    }
+
     /// A server on the store warns, and the exit code is 1: the memory
     /// floor is the only other warn, and the override keeps it ok.
     #[test]
     fn a_server_on_the_store_warns_preflight() {
-        let _memory = MemoryOverride::set();
+        let lock = MEMORY_LOCK.lock().unwrap();
+        let (_memory, ()) = MemoryOverride::set(&lock);
         let (dir, url) = ready_store();
         let mut holder = postgres::Client::connect(
             std::fs::read_to_string(&url).unwrap().as_str(),
@@ -731,31 +836,22 @@ mod tests {
             .unwrap();
     }
 
-    /// No token source anywhere: the token check fails, exit 2. The
-    /// options carry no token file and no access file, and the
-    /// environment names no token.
+    /// A host under the floor warns: the floor never refuses, as in
+    /// `serve`.
     #[test]
-    fn a_missing_token_source_fails_preflight() {
-        let _memory = MemoryOverride::set();
+    fn a_host_under_the_floor_warns_preflight() {
+        let lock = MEMORY_LOCK.lock().unwrap();
+        let (_memory, ()) = MemoryOverride::set_small(&lock);
         let (dir, url) = ready_store();
-        let report = super::run(&PreflightOptions {
-            data: dir.path().to_path_buf(),
-            postgres_url_file: Some(url),
-            postgres_ca: None,
-            token_file: None,
-            access: None,
-            tls_cert: None,
-            tls_key: None,
-            tls_client_ca: None,
-            ticket_key: None,
-            ticket_key_old: None,
-            listen: "127.0.0.1:0".parse().unwrap(),
-            metrics_listen: None,
-        });
-        assert_eq!(report.code, 2);
+        let report = run_cli(dir.path(), Some(&url));
+        assert_eq!(
+            report.code, 1,
+            "the floor warns, not fails:\n{:#?}",
+            report.lines
+        );
         assert!(
-            line(&report, "token and access").starts_with("fail"),
-            "the missing token fails:\n{:#?}",
+            line(&report, "memory floor").starts_with("warn"),
+            "the small meminfo warns:\n{:#?}",
             report.lines
         );
     }
@@ -763,7 +859,8 @@ mod tests {
     /// An occupied listen address fails with the fix named.
     #[test]
     fn an_occupied_listen_address_fails_preflight() {
-        let _memory = MemoryOverride::set();
+        let lock = MEMORY_LOCK.lock().unwrap();
+        let (_memory, ()) = MemoryOverride::set(&lock);
         let (dir, url) = ready_store();
         let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let taken = held.local_addr().unwrap();
@@ -771,13 +868,6 @@ mod tests {
             data: dir.path().to_path_buf(),
             postgres_url_file: Some(url.clone()),
             postgres_ca: None,
-            token_file: Some(token_file(dir.path())),
-            access: None,
-            tls_cert: None,
-            tls_key: None,
-            tls_client_ca: None,
-            ticket_key: None,
-            ticket_key_old: None,
             listen: taken,
             metrics_listen: None,
         });
@@ -793,7 +883,8 @@ mod tests {
     /// the data directory's filesystem.
     #[test]
     fn the_disk_check_names_the_numbers() {
-        let _memory = MemoryOverride::set();
+        let lock = MEMORY_LOCK.lock().unwrap();
+        let (_memory, ()) = MemoryOverride::set(&lock);
         let (dir, url) = ready_store();
         let report = run_cli(dir.path(), Some(&url));
         assert_eq!(report.code, 0);
@@ -801,6 +892,26 @@ mod tests {
         assert!(
             disk.contains("inodes on") && disk.contains("free"),
             "the numbers are the answer:\n{disk}"
+        );
+    }
+
+    /// A filesystem that does not answer fails: the numbers are the
+    /// answer, and an error is not a number.
+    #[test]
+    fn a_missing_filesystem_fails_the_disk_check() {
+        let lock = MEMORY_LOCK.lock().unwrap();
+        let (_memory, ()) = MemoryOverride::set(&lock);
+        let (dir, url) = ready_store();
+        // The directory goes away before the run: the directory check
+        // fails first, and the disk check still names its own error.
+        let path = dir.path().to_path_buf();
+        drop(dir);
+        let report = run_cli(&path, Some(&url));
+        assert_eq!(report.code, 2);
+        assert!(
+            line(&report, "disk and inodes").starts_with("fail"),
+            "the gone filesystem fails:\n{:#?}",
+            report.lines
         );
     }
 }

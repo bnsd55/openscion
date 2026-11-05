@@ -905,6 +905,61 @@ const LOCK_TIMEOUT_FOR_KEY: &str = "60s";
 /// of another store would name blobs of another disk. The comparison and
 /// the mint run before anything else is written, so a refusal leaves the
 /// schema untouched.
+/// What the marker and the database's store row decide together: the
+/// one decision an open and a preflight both need, made here so the two
+/// cannot drift.
+pub(crate) enum Pairing {
+    /// The marker and the row name one store.
+    Agree,
+    /// The database names a store the directory has no marker of, and
+    /// the schema holds no repos: a first open cut before its marker.
+    /// The open adopts the database's store and writes the marker.
+    AdoptCut,
+    /// Neither side names a store: the first open mints one.
+    Fresh,
+    /// A refusal, in the open's own words.
+    Refuse(Error),
+}
+
+/// The marker's pairing with the database's store row. `served`: the
+/// schema holds at least one repo row, so the database was served by a
+/// store whose directory carried the marker.
+pub(crate) fn pairing_decision(
+    marker: Option<[u8; 16]>,
+    held: Option<[u8; 16]>,
+    served: bool,
+) -> Pairing {
+    match (marker, held) {
+        (Some(marker_uuid), Some(held_uuid)) if marker_uuid == held_uuid => Pairing::Agree,
+        (Some(marker_uuid), Some(held_uuid)) => {
+            Pairing::Refuse(Error::FailedPrecondition(format!(
+                "this data directory belongs to the store whose \
+                 UUID is {}, but the database names the store {}: \
+                 one was restored over the other; give the \
+                 directory of the database's own store, or a \
+                 directory the database has never served",
+                hex16(&marker_uuid),
+                hex16(&held_uuid)
+            )))
+        }
+        (None, Some(held_uuid)) if served => Pairing::Refuse(Error::FailedPrecondition(format!(
+            "this database names the store {}, but the data \
+                 directory carries no marker of it: give the \
+                 directory the database was served with, or a \
+                 directory it has never served",
+            hex16(&held_uuid)
+        ))),
+        (None, Some(_)) => Pairing::AdoptCut,
+        (Some(marker_uuid), None) if served => Pairing::Refuse(Error::FailedPrecondition(format!(
+            "this data directory belongs to the store whose UUID \
+                 is {}, but this database holds no store: check \
+                 SCION_POSTGRES_URL and its search_path",
+            hex16(&marker_uuid)
+        ))),
+        (Some(_) | None, None) => Pairing::Fresh,
+    }
+}
+
 fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
     let first = writer.query("SELECT uuid FROM store_uuid WHERE one = 1", &[])?;
     if let Some(row) = first.first() {
@@ -914,8 +969,13 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
         // directory of another store would serve metadata whose blobs
         // are not on this disk.
         let uuid = uuid_of(row.get::<_, Vec<u8>>("uuid"))?;
-        match marker.uuid {
-            None => {
+        // The repos probe only decides the no-marker case: a schema
+        // that holds repos was served, one that holds none was not.
+        let served =
+            marker.uuid.is_none() && !writer.query("SELECT 1 FROM repos LIMIT 1", &[])?.is_empty();
+        match pairing_decision(marker.uuid, Some(uuid), served) {
+            Pairing::Agree => {}
+            Pairing::AdoptCut => {
                 // A first open cut between its store's UUID row and
                 // its marker: the row commits early in the open, the
                 // marker is written at its end, and a kill in that
@@ -923,20 +983,7 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
                 // schema with no repos row served nothing, so no
                 // blob of another disk can be named: the directory
                 // takes the database's store as its own, and this
-                // open writes the marker the cut fell before. A
-                // schema that holds repos was served by a store
-                // whose marker went missing - a fresh directory
-                // pointed at a served store - and refuses.
-                let served = writer.query("SELECT 1 FROM repos LIMIT 1", &[])?;
-                if !served.is_empty() {
-                    return Err(Error::FailedPrecondition(format!(
-                        "this database names the store {}, but the data \
-                         directory carries no marker of it: give the \
-                         directory the database was served with, or a \
-                         directory it has never served",
-                        hex16(&uuid)
-                    )));
-                }
+                // open writes the marker the cut fell before.
                 tracing::warn!(
                     "the data directory carries no marker of store {}; \
                      the schema holds no repos, so this open takes the \
@@ -944,18 +991,8 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
                     hex16(&uuid)
                 );
             }
-            Some(held) if held != uuid => {
-                return Err(Error::FailedPrecondition(format!(
-                    "this data directory belongs to the store whose \
-                     UUID is {}, but the database names the store {}: \
-                     one was restored over the other; give the \
-                     directory of the database's own store, or a \
-                     directory the database has never served",
-                    hex16(&held),
-                    hex16(&uuid)
-                )));
-            }
-            Some(_) => {}
+            Pairing::Fresh => unreachable!("the database names its store"),
+            Pairing::Refuse(error) => return Err(error),
         }
         Ok(uuid)
     } else {
@@ -970,16 +1007,12 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
         // served - and every caller would read "repo not found"
         // with no error at the start. An empty schema refuses while
         // the marker names a store, and mints when it names none.
-        let served = writer.query("SELECT 1 FROM repos LIMIT 1", &[])?;
-        if let (Some(held), []) = (marker.uuid, served.as_slice()) {
-            return Err(Error::FailedPrecondition(format!(
-                "this data directory belongs to the store whose UUID \
-                 is {}, but this database holds no store: check \
-                 SCION_POSTGRES_URL and its search_path",
-                hex16(&held)
-            )));
-        }
-        let fresh = marker.uuid.unwrap_or_else(uuid_new);
+        let served = writer.query("SELECT 1 FROM repos LIMIT 1", &[])?.is_empty();
+        let fresh = match pairing_decision(marker.uuid, None, served) {
+            Pairing::Agree | Pairing::AdoptCut => unreachable!("the database holds no store"),
+            Pairing::Fresh => marker.uuid.unwrap_or_else(uuid_new),
+            Pairing::Refuse(error) => return Err(error),
+        };
         writer.query(
             "INSERT INTO store_uuid (one, uuid) VALUES (1, $1) \
              ON CONFLICT (one) DO NOTHING",
@@ -3418,52 +3451,27 @@ fn pending_migration_message(db: u32, build: u32) -> String {
     )
 }
 
-/// The schema version the database stands at, read without writing:
-/// version 0 is a database with no schema yet. The check and the open's
-/// pending-migration refusal read it; the migration itself runs under
-/// the schema's lock, and its first step makes the ledger.
 /// One raw connection for preflight: the URL's own TLS and option
 /// rules, the pool's connect discipline, and no setup - no schema
 /// write, and no lock of any kind: the one-server lock and the
-/// schema's shared lock both stay untouched. The connection carries no
-/// `synchronous_commit` option, so its `SHOW` answers the database's
-/// own setting, not the session's.
+/// schema's shared lock both stay untouched. The session is read-only
+/// at the database itself (`default_transaction_read_only=on`), so a
+/// check cannot write even by accident.
 pub(crate) fn preflight_client(url: &str, ca: Option<&Path>) -> Result<Client> {
     connect_on(
         url,
         ca,
-        &format!("-cstatement_timeout=600000 -clock_timeout={LOCK_TIMEOUT_FOR_WRITERS}"),
+        &format!(
+            "-cdefault_transaction_read_only=on -cstatement_timeout=600000 \
+             -clock_timeout={LOCK_TIMEOUT_FOR_WRITERS}"
+        ),
     )
 }
 
-/// The schema version a raw client reads, for preflight: the ledger's
-/// presence, then its top version. The same two statements the open's
-/// migrate path reads (see [`schema_version`]) - change them together.
-///
-/// # Errors
-///
-/// A database that does not answer, or a version that is not a number.
-pub(crate) fn read_schema_version_raw(client: &mut Client) -> Result<u32> {
-    let ledger: Option<String> = client
-        .query_opt("SELECT to_regclass('schema_migrations')::text", &[])
-        .map_err(map_pg_error)?
-        .and_then(|row| row.get(0));
-    if ledger.is_none() {
-        return Ok(0);
-    }
-    let version: i64 = client
-        .query("SELECT max(version) FROM schema_migrations", &[])
-        .map_err(map_pg_error)?
-        .first()
-        .and_then(|row| row.get::<_, Option<i64>>(0))
-        .unwrap_or(0);
-    u32::try_from(version).map_err(|_| {
-        Error::FailedPrecondition(format!(
-            "database schema version {version} is not a version"
-        ))
-    })
-}
-
+/// The schema version the database stands at, read without writing:
+/// version 0 is a database with no schema yet. The check and the open's
+/// pending-migration refusal read it; the migration itself runs under
+/// the schema's lock, and its first step makes the ledger.
 fn schema_version(client: &mut PgClient) -> Result<u32> {
     let ledger: Option<String> = client
         .query_opt("SELECT to_regclass('schema_migrations')::text", &[])?

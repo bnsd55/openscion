@@ -298,13 +298,10 @@ impl Backend {
         // components only).
         scion_proto::runtime::auth::create_private_dir_all(data)
             .map_err(crate::error::Error::Io)?;
-        // The directory's own checks run before anything reads it: a
-        // symlink or a shared mode is refused by kind, before the marker
-        // read could follow a link.
-        crate::store::refuse_bad_dir(data)?;
-        refuse_damaged_marker(data)?;
+        // The directory's own checks run before anything reads it: the
+        // same three an exclusive open runs, so the two cannot drift.
+        check_dir(data)?;
         let marker = Marker::read(data);
-        refuse_sqlite_dir(data)?;
         let pg = open(url, ca, PG_READERS, data, marker)?;
         marker_agrees(data, pg.store_uuid())?;
         Ok(Self { pg })
