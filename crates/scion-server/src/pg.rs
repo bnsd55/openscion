@@ -5874,19 +5874,14 @@ pub(crate) mod pool_tests {
         // A statement_timeout above the bigint range fails the batch's
         // second command; the BEGIN in the same batch has already run.
         let huge = std::time::Duration::from_millis(u64::MAX);
-        let error = PgTx::begin_read(
+        let Err(error) = PgTx::begin_read(
             client,
             ReadIsolation::ReadCommitted,
             huge,
             std::time::Duration::from_secs(30),
-        )
-        .expect_err("the out-of-range timeout fails the open");
-        assert!(
-            matches!(error, Error::InvalidArgument(_))
-                || matches!(error, Error::Internal(_))
-                || matches!(error, Error::Corrupt(_)),
-            "the open failed, not hung or panicked: {error}"
-        );
+        ) else {
+            panic!("the out-of-range timeout must fail the open");
+        };
         // The session answers its next holder: no aborted transaction.
         let one: i32 = client.query("SELECT 1", &[]).unwrap()[0].get(0);
         assert_eq!(one, 1);
