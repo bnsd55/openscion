@@ -380,7 +380,7 @@ fn live_server(db: &mut postgres::Client) -> Answer {
              WHERE locktype = 'advisory' AND objid = $1 AND granted",
             &[&crate::pg::schema_lock_key(&schema)],
         )
-        .map_or(0, |row| row.map(|row| row.get::<_, i64>(0)).unwrap_or(0));
+        .map(|row| row.map_or(0, |row| row.get::<_, i64>(0)));
     match holders {
         Ok(0) => Answer::Ok("no server holds this store".to_owned()),
         Ok(n) => Answer::Warn(format!(
