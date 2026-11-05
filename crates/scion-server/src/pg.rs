@@ -2133,7 +2133,11 @@ impl<'a> PgTx<'a> {
                 req.request_key
             )));
         }
+        // The join wraps the column's own null in the row's presence: one
+        // flatten answers the column, which the early return above already
+        // proved present.
         let result = result_cs
+            .flatten()
             .map(|bytes| ChangesetId::try_from(bytes.as_slice()))
             .transpose()
             .map_err(|e| Error::Corrupt(format!("land {land_id} result: {e}")))?;
