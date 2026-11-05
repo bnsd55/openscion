@@ -3076,8 +3076,9 @@ mod tests {
             "#868: baseline {baseline:?}; after {MAX_BLOCKING} cancelled calls              of {LONG:?} with no check, the live call waited {waited:?}"
         );
         assert!(
-            waited < Duration::from_secs(5),
-            "the live call never got a permit: {waited:?}"
+            waited < Duration::from_millis(1),
+            "PROBE (deliberate, to surface the numbers): baseline {baseline:?}, \
+             live call waited {waited:?} after {MAX_BLOCKING} cancelled calls of {LONG:?}"
         );
     }
 
