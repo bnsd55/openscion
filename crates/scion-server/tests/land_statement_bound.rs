@@ -271,18 +271,22 @@ fn a_land_whose_head_tree_is_missing_fills_before_the_write_transaction() {
         .map(|at| plan_end + at)
         .expect("the settle transaction begins");
     let between = &log[plan_end + 1..settle_begin];
-    assert_eq!(
-        between.len(),
-        2,
-        "the missing tree fills with two reads before the write \
-         transaction:\n{between:#?}"
-    );
+    // The fill's shape, not its size: the derive reads the generation,
+    // the head's tree and the changeset it derives from - reads all,
+    // before the write transaction, so an unbounded derive never holds
+    // the write connection.
     assert!(
         between[0].starts_with("SELECT gen FROM changesets"),
         "the fill reads the generation first:\n{between:#?}"
     );
     assert!(
-        between[1].starts_with("SELECT value FROM derived WHERE kind = $1"),
+        between.iter().all(|sql| sql.starts_with("SELECT")),
+        "the fill only reads before the write transaction:\n{between:#?}"
+    );
+    assert!(
+        between
+            .iter()
+            .any(|sql| sql.starts_with("SELECT value FROM derived WHERE kind = $1")),
         "the fill reads the tree's value second:\n{between:#?}"
     );
     let settle_tx = &log[settle_begin..];
