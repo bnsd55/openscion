@@ -70,7 +70,7 @@ fn store_with_root(paths: &[String]) -> (tempfile::TempDir, Backend) {
                 &root,
                 &mut |_| Ok(0),
                 None,
-            , None)?;
+            )?;
             assert!(c.cas_ref(repo, "main", None, root)?);
             for path in paths {
                 c.add_repo_blob(repo, scion_core::BlobId::of(path.as_bytes()))?;
