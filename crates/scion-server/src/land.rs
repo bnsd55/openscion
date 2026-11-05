@@ -414,9 +414,8 @@ impl Lands {
     /// resumes it. Store errors otherwise.
     pub fn land(&self, store: &Backend, caller: &Caller, req: &LandRequest) -> Result<LandOutcome> {
         let started = Instant::now();
-        let (outcome, trace) = crate::land_profile::Trace::measure(|| {
-            self.land_committed(store, caller, req)
-        });
+        let (outcome, trace) =
+            crate::land_profile::Trace::measure(|| self.land_committed(store, caller, req));
         crate::land_profile::log(recorded_land_id(&outcome), started.elapsed(), &trace);
         // An index can hold up to the whole budget, and freeing it takes a
         // while, so it happens here, outside every lock.
@@ -921,6 +920,9 @@ fn plan(
 /// guard the land's own move has in its CAS. An import that moved the
 /// ref in the window aborts the verdict, and `finish` replans against
 /// the head the import made.
+// The phase guards' nesting makes the function long; the profile is a
+// branch-only instrument.
+#[allow(clippy::too_many_lines)]
 fn settle(
     lands: &Lands,
     store: &Backend,
@@ -931,7 +933,6 @@ fn settle(
     index: &mut Option<PathIndex>,
 ) -> Result<Finished> {
     let target = req.target_ref.as_str();
-    let deadline = &req.deadline;
     let (rebased, head, head_tree_stored) = match plan {
         Plan::Derive(head) => return Ok(Finished::Derive(head)),
         Plan::Reject { reason, detail } => {
@@ -973,33 +974,49 @@ fn settle(
     }
     // The blob lengths the tree build needs, read before the write
     // transaction, so the write connection does no file I/O.
-    let lens = tree::lens_of_puts(store, crate::meta::puts(&rebased).map(|(_, blob)| blob))?;
-    let landed = store.write_slot_holder(|c| {
-        let (id, _) = tree::store_changeset(c, repo, &rebased, &mut tree::lens_from(&lens))?;
-        if !c.cas_ref(repo, target, Some(head.version), id)? {
-            // The error rolls back the transaction, rebased changeset included.
-            return Err(Error::Aborted(format!(
-                "ref {target:?} moved during the land; retry with the same request key"
-            )));
-        }
-        let generation = c.generation(repo, id)?;
-        let mut outcome = c.set_land_state(
-            repo,
-            land_id,
-            LandState::Landed,
-            Some(id),
-            String::new(),
-            vec![],
-            LandRejectReason::Unspecified,
-        )?;
-        // The move's CAS pins the version the plan read, so
-        // `head.target` is the target this move replaced: the audit's
-        // old value, set here where the move happens, under the ref's
-        // lock, and not stored.
-        outcome.moved = true;
-        outcome.previous = Some(head.target);
-        Ok((outcome, generation))
-    });
+    let lens = {
+        let _guard = profile::Guard::enter(Phase::Lens);
+        tree::lens_of_puts(store, crate::meta::puts(&rebased).map(|(_, blob)| blob))?
+    };
+    let landed = {
+        let _guard = profile::Guard::enter(Phase::Settle);
+        store.write_slot_holder(|c| {
+            let (id, _) = {
+                let _guard = profile::Guard::enter(Phase::Build);
+                tree::store_changeset(c, repo, &rebased, &mut tree::lens_from(&lens))?
+            };
+            let changed = {
+                let _guard = profile::Guard::enter(Phase::Cas);
+                c.cas_ref(repo, target, Some(head.version), id)?
+            };
+            if !changed {
+                // The error rolls back the transaction, rebased changeset included.
+                return Err(Error::Aborted(format!(
+                    "ref {target:?} moved during the land; retry with the same request key"
+                )));
+            }
+            let generation = c.generation(repo, id)?;
+            let mut outcome = {
+                let _guard = profile::Guard::enter(Phase::SetState);
+                c.set_land_state(
+                    repo,
+                    land_id,
+                    LandState::Landed,
+                    Some(id),
+                    String::new(),
+                    vec![],
+                    LandRejectReason::Unspecified,
+                )?
+            };
+            // The move's CAS pins the version the plan read, so
+            // `head.target` is the target this move replaced: the audit's
+            // old value, set here where the move happens, under the ref's
+            // lock, and not stored.
+            outcome.moved = true;
+            outcome.previous = Some(head.target);
+            Ok((outcome, generation))
+        })
+    };
     match landed {
         Ok((outcome, generation)) => {
             if let (Some(index), Some(id)) = (index.as_mut(), outcome.result) {
@@ -2475,7 +2492,7 @@ mod tests {
                 if crash == Crash::RefMoved {
                     f.move_main(f.commit(f.main().target, &[put("c", "import")]));
                     let land_id = recorded.land_id;
-                    let err = settle(&f.lands, &f.store, repo, land_id, "main", plan, &mut index)
+                    let err = settle(&f.lands, &f.store, repo, land_id, &req, plan, &mut index)
                         .unwrap_err();
                     assert!(matches!(err, Error::Aborted(_)), "{crash:?}: {err}");
                     let kept = f.store.read(|c| c.has_changeset(repo, rebased));
