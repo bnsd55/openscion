@@ -2443,14 +2443,6 @@ mod tests {
         assert_eq!(code, Code::NotFound);
     }
 
-    /// Measures what slow readers hold, as wired, at 1, 4 and 16
-    /// connections. Each connection grants the largest windows, opens the
-    /// stream limit of reads, and reads one part per second: slow enough
-    /// to hold data at the server, fast enough to answer the keepalive
-    /// pings. The server samples its own RSS through each phase and the
-    /// failure names the per-phase peaks, so the growth per connection is
-    /// the uncounted remainder's slope.
-    #[tokio::test(flavor = "multi_thread")]
     /// Measures what slow readers hold in the server, as wired, at 1, 4
     /// and 16 connections. The clients run in child processes of this same
     /// binary, so the RSS this test samples is the server process's alone.
