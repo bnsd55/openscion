@@ -99,7 +99,12 @@ thread_local! {
     pub(crate) static CHANGESET_READS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
 }
-/// The advisory lock of one migration run of a database.
+/// The advisory lock of one migration run of a database. An older
+/// build takes it alone, exclusive; this build takes it shared beside
+/// its own schema's key.
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) const SCHEMA_LOCK: i64 = 0x5343_494F_4E53_4348;
+#[cfg(not(any(test, feature = "test-hooks")))]
 const SCHEMA_LOCK: i64 = 0x5343_494F_4E53_4348;
 
 /// Schema migrations in order. Migration `n`, from 1, moves the database
@@ -3008,11 +3013,21 @@ struct ClientConfig {
 /// only their own schema, so two schemas never take turns (#905). The
 /// database's bare key stays the fallback for a connection whose
 /// search path names no schema.
+///
+/// The derivation cannot overflow: XOR has no carry, so a debug build
+/// cannot panic on it. The fixed prefix byte `0x2D` names this key
+/// space; the schema's hash fills the rest. Against the one-server
+/// lock the guarantee is two-fold: a session that already holds
+/// `schema_lock_key` for its own schema re-enters any lock on the same
+/// key, so a running server never blocks its own store's migrations;
+/// and for the same schema the two derivations mix the hash
+/// differently, which the test below pins over a thousand names.
 pub(crate) fn migration_lock_key(schema: &str) -> i64 {
     let hash = blake3::hash(schema.as_bytes());
-    SCHEMA_LOCK.wrapping_add(i64::from_be_bytes(
-        hash.as_bytes()[..8].try_into().expect("8 of 32 bytes"),
-    ))
+    let mut key = [0u8; 8];
+    key[0] = 0x2D;
+    key[1..].copy_from_slice(&hash.as_bytes()[..7]);
+    SCHEMA_LOCK ^ i64::from_be_bytes(key)
 }
 
 /// The advisory-lock key of one test schema, so parallel tests of
@@ -3919,6 +3934,11 @@ fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
     // The lock is the schema's, not the database's: the migrations touch
     // only their own schema, so two schemas never take turns, and a
     // database with one schema behaves as it did (#905).
+    //
+    // The database's bare key is taken SHARED beside it: an older build
+    // takes that key alone, exclusive, so an older migrator and this
+    // one still take turns on the same schema, while two opens of this
+    // build - whose shared takes agree - never queue on each other.
     let schema: Option<String> = client
         .query_opt("SELECT current_schema()::text", &[])
         .map_err(|e| {
@@ -3936,6 +3956,15 @@ fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
             named_step(
                 "the schema migration lock",
                 "SELECT pg_advisory_lock($1)",
+                e,
+            )
+        })?;
+    client
+        .query_opt("SELECT pg_advisory_lock_shared($1)", &[P::i64(SCHEMA_LOCK)])
+        .map_err(|e| {
+            named_step(
+                "the migration's shared turn on the database",
+                "SELECT pg_advisory_lock_shared($1)",
                 e,
             )
         })?;
@@ -3965,6 +3994,7 @@ fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
     // its connection, and the unlock names a lock the new connection
     // never held, which answers false and costs nothing.
     let _ = client.query_opt("SELECT pg_advisory_unlock($1)", &[P::i64(lock)]);
+    let _ = client.query_opt("SELECT pg_advisory_unlock($1)", &[P::i64(SCHEMA_LOCK)]);
     outcome.and_then(|value| restored.map(|_| value))
 }
 

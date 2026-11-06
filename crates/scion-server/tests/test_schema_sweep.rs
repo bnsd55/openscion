@@ -558,3 +558,70 @@ fn an_open_waits_for_its_own_schemas_migration_lock_and_not_for_another_s() {
         other_open.err()
     );
 }
+
+/// An older build's migrator and this build still take turns: the older
+/// build takes the database's bare migration key alone, exclusive, and
+/// this build takes that key shared beside its own schema's key - so a
+/// hold of the bare key keeps this build's open waiting on its shared
+/// take, and the open answers after the hold lifts (#905).
+#[test]
+fn an_open_waits_while_an_older_builds_migration_holds_the_bare_key() {
+    let _lock = locked();
+    let held = Backend::test_bare_migration_lock();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let mut client = connect();
+        client
+            .execute("SELECT pg_advisory_lock($1)", &[&held])
+            .unwrap();
+        // The hold lasts until the open has returned, as an older
+        // build's migration window would.
+        let _ = released.recv();
+        client
+            .execute("SELECT pg_advisory_unlock($1)", &[&held])
+            .unwrap();
+    });
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let dir = private_tempdir();
+    let Err(err) = Backend::open_test(dir.path()) else {
+        panic!("the open succeeded while the older build held the bare key");
+    };
+    drop(release);
+    holder.join().unwrap();
+    assert!(
+        format!("{err:?}").contains("the migration's shared turn on the database")
+            && format!("{err:?}").contains("SELECT pg_advisory_lock_shared($1)"),
+        "the error names the shared take the older build kept waiting: {err:?}"
+    );
+    // With the older build's window closed, this build answers.
+    let after = private_tempdir();
+    let opened = Backend::open_test(after.path());
+    assert!(
+        opened.is_ok(),
+        "the open answers after the older build's migration: {:?}",
+        opened.err()
+    );
+}
+
+/// The two key spaces never meet for the same schema: the one-server
+/// lock a server holds for its whole life and the migration lock an
+/// open takes mix the schema's hash differently, and a debug build's
+/// overflow panic cannot happen on an XOR. Pinned over a thousand
+/// names (#905).
+#[test]
+fn the_migration_key_never_meets_the_one_server_key() {
+    for i in 0..1_000u64 {
+        let schema = format!("scion_test_sweep_{i}");
+        let migration = Backend::test_migration_lock_for(&schema);
+        let one_server = Backend::test_server_lock_for(&schema);
+        assert_ne!(
+            migration, one_server,
+            "the migration key met the one-server key for {schema}"
+        );
+        assert_ne!(
+            migration,
+            Backend::test_bare_migration_lock(),
+            "the migration key met the database's bare key for {schema}"
+        );
+    }
+}
