@@ -1,4 +1,6 @@
-# A ticket that is not the server's signature is PERMISSION_DENIED.
+# A ticket the server's keys did not sign is PERMISSION_DENIED. The file
+# sorts after get_objects_success on purpose: its daemon_warm line pins
+# the warm daemon serving the blob this file's store already holds.
 since: v0.7
 method: Objects/GetObjects
 fixture: landed
