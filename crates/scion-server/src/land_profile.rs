@@ -327,6 +327,7 @@ pub(crate) struct LaneSlot {
     pub held_ns: std::sync::atomic::AtomicU64,
     pub stmts: std::sync::atomic::AtomicU64,
     pub stmt_ns: std::sync::atomic::AtomicU64,
+    pub commit_ns: std::sync::atomic::AtomicU64,
 }
 
 pub(crate) static LANE: [LaneSlot; PHASES.len()] = {
@@ -337,6 +338,7 @@ pub(crate) static LANE: [LaneSlot; PHASES.len()] = {
         held_ns: std::sync::atomic::AtomicU64::new(0),
         stmts: std::sync::atomic::AtomicU64::new(0),
         stmt_ns: std::sync::atomic::AtomicU64::new(0),
+        commit_ns: std::sync::atomic::AtomicU64::new(0),
     };
     [SLOT; PHASES.len()]
 };
@@ -346,6 +348,11 @@ thread_local! {
     /// write transaction runs. A land's own transactions need no guard:
     /// the phase trace's stack already names them.
     static LANE_CUSTOMER: Cell<Option<Phase>> = const { Cell::new(None) };
+    /// The transaction's own customer, pinned when it enters the lane:
+    /// the stack top moves as the transaction's nested guards (the
+    /// settle's build, cas, set_state) come and go, but the whole
+    /// transaction is one customer's hold.
+    static LANE_TXN: Cell<Option<Phase>> = const { Cell::new(None) };
 }
 
 /// Names the lane customer the enclosing call site belongs to, for the
@@ -366,6 +373,24 @@ impl Drop for LaneCustomerGuard {
 /// The lane customer this thread's current write transaction belongs
 /// to: the land phase stack's top when a land's trace is live, else
 /// the guard-named customer, else Other.
+/// The lane customer for the running transaction: the one pinned at
+/// the lane's entry, else the stack top, else the guard-named one.
+fn lane_phase_txn() -> Phase {
+    LANE_TXN
+        .with(Cell::get)
+        .or_else(|| {
+            Trace::get().and_then(|trace| {
+                trace
+                    .stack
+                    .get(trace.depth.wrapping_sub(1))
+                    .copied()
+                    .flatten()
+            })
+        })
+        .or_else(|| LANE_CUSTOMER.with(Cell::get))
+        .unwrap_or(Phase::Other)
+}
+
 fn lane_phase() -> Phase {
     let phase = Trace::get().and_then(|trace| {
         trace
@@ -392,7 +417,9 @@ fn u64_ns(ns: u128) -> u64 {
 #[allow(clippy::cast_possible_truncation)] // ns is clamped to u64::MAX first
 pub(crate) fn lane_queued(ns: Duration) {
     let ns = u64_ns(ns.as_nanos());
-    let slot = &LANE[lane_phase().slot()];
+    let phase = lane_phase();
+    LANE_TXN.with(|c| c.set(Some(phase)));
+    let slot = &LANE[phase.slot()];
     slot.calls
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     slot.queued_ns
@@ -404,8 +431,18 @@ pub(crate) fn lane_queued(ns: Duration) {
 #[allow(clippy::cast_possible_truncation)] // ns is clamped to u64::MAX first
 pub(crate) fn lane_held(ns: Duration) {
     let ns = u64_ns(ns.as_nanos());
-    let slot = &LANE[lane_phase().slot()];
+    let slot = &LANE[lane_phase_txn().slot()];
     slot.held_ns
+        .fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
+    LANE_TXN.with(|c| c.set(None));
+}
+
+/// The transaction's COMMIT round trip took `ns`: the commit is its
+/// own gauge, so a hold splits into statement time and commit time.
+pub(crate) fn lane_commit(ns: Duration) {
+    let ns = u64_ns(ns.as_nanos());
+    let slot = &LANE[lane_phase_txn().slot()];
+    slot.commit_ns
         .fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -440,8 +477,8 @@ pub fn render_lane() -> Option<String> {
     for phase in PHASES {
         let slot = &LANE[phase.slot()];
         let name = phase.name();
-        let calls = slot.calls.load(std::sync::atomic::Ordering::Relaxed);
-        if calls == 0 {
+        let calls_n = slot.calls.load(std::sync::atomic::Ordering::Relaxed);
+        if calls_n == 0 {
             continue;
         }
         let queued = slot.queued_ns.load(std::sync::atomic::Ordering::Relaxed);
@@ -455,13 +492,17 @@ pub fn render_lane() -> Option<String> {
         let held_s = held as f64 / 1e9;
         #[allow(clippy::cast_precision_loss)]
         let round_s = stmt_ns as f64 / 1e9;
+        let commit_spent = slot.commit_ns.load(std::sync::atomic::Ordering::Relaxed);
+        #[allow(clippy::cast_precision_loss)]
+        let commit_s = commit_spent as f64 / 1e9;
         let _ = write!(
             out,
-            "scion_lane_calls{{phase=\"{name}\"}} {calls}\n\
+            "scion_lane_calls{{phase=\"{name}\"}} {calls_n}\n\
              scion_lane_queued_seconds{{phase=\"{name}\"}} {queued_s:.6}\n\
              scion_lane_held_seconds{{phase=\"{name}\"}} {held_s:.6}\n\
              scion_lane_stmts{{phase=\"{name}\"}} {stmts}\n\
-             scion_lane_stmt_seconds{{phase=\"{name}\"}} {round_s:.6}\n"
+             scion_lane_stmt_seconds{{phase=\"{name}\"}} {round_s:.6}\n\
+             scion_lane_commit_seconds{{phase=\"{name}\"}} {commit_s:.6}\n"
         );
     }
     let (cur, max) = &LANE_OPEN;

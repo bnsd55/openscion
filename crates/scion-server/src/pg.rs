@@ -2644,8 +2644,10 @@ impl<'a> PgTx<'a> {
     /// Commits the transaction. The client runs again afterwards.
     fn commit(&mut self) -> Result<()> {
         self.ended = true;
-        self.c.execute("COMMIT", &[])?;
-        Ok(())
+        let started = std::time::Instant::now();
+        let out = self.c.execute("COMMIT", &[]);
+        crate::land_profile::lane_commit(started.elapsed());
+        out.map(|_| ())
     }
 
     /// Rolls the transaction back. The client runs again afterwards.
