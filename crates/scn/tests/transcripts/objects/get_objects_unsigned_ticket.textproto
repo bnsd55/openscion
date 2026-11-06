@@ -5,7 +5,7 @@ since: v0.7
 method: Objects/GetObjects
 fixture: landed
 
-request.ticket: $missing
+request.ticket: $unsigned
 request.refs: kind=blob id=$blob path=src/main.rs
 
 # On a warm daemon this blob is already in the relay's disk store, and a

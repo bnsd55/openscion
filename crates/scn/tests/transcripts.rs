@@ -338,10 +338,20 @@ fn walk(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
 
 /// The corpus test: every file, against the server; the `Objects` cases
 /// also through the cache and the daemon. Files whose behaviour depends
-/// on the ticket (`bad_ticket`, `unknown_object`) and the per-file
-/// `tiers: refuse` files get a fresh cache and daemon, so a warm disk or
-/// a relay that does not check signatures cannot answer for them; the
-/// rest share one warm pair, cold only for the first file that touches it.
+/// on the ticket and the per-file `tiers: refuse` files get a fresh
+/// cache and daemon, so a warm disk or a relay that does not check
+/// signatures cannot answer for them; the rest share one warm pair,
+/// cold only for the first file that touches it.
+///
+/// The ticket files also pin the warm daemon's serve (`daemon_warm:
+/// serves`): a daemon checks no ticket by design, and the blob is in its
+/// disk store from the success file on. Note the refusal is enforced in
+/// depth: a cache that skipped only its signature check would still
+/// refuse, because its walk re-fetches the trees from upstream with the
+/// call's ticket, and the server refuses the unsigned one. A file that
+/// pins a refusal therefore catches a cache or daemon that serves
+/// without ANY proof, which is what the fresh pair and the warm runs are
+/// for.
 /// A tier serves GetObjects only: its refusal of the other calls is the
 /// contract (section 7.1).
 async fn assert_tier_refuses(url: &str, t: &Transcript, file: &Path) {
@@ -386,12 +396,10 @@ fn run_objects_across_tiers(tiers: &common::Tiers, t: &Transcript, f: &Fixture, 
         if url == &tiers.socket && daemon_warm_serves {
             // A daemon checks no ticket by design: it serves what its
             // store holds (docs/protocol-v1.md, section 7.1's daemon
-            // paragraph). Warm the daemon on purpose - the file's refs
-            // through this daemon with the file's valid ticket - so the
-            // pin tests a warm store wherever the file sorts; then pin
-            // the serve of the unsigned ticket by the stream, not by the
-            // call's headers: a daemon that answers OK and ends the
-            // stream with an error must not pass.
+            // paragraph). The setup warmed this daemon with the file's
+            // valid ticket; pin the serve of the unsigned ticket by the
+            // stream, not by the call's headers: a daemon that answers
+            // OK and ends the stream with an error must not pass.
             tiers.runtime.block_on(async {
                 let mut client = connect(url).await;
                 let want = t
@@ -401,24 +409,6 @@ fn run_objects_across_tiers(tiers: &common::Tiers, t: &Transcript, f: &Fixture, 
                     .map(|(_, v)| item(&resolve(v, f)))
                     .expect("the file names the object it reads");
                 let want = (want.0, hex(&want.1));
-
-                let mut stream = client
-                    .get_objects(
-                        request_with_ticket(t, f, f.ticket.clone())
-                            .expect("the file's request builds"),
-                    )
-                    .await
-                    .expect("the warm-up call answers")
-                    .into_inner();
-                let mut warmed = Vec::new();
-                read_part_stream(url, &mut stream, &mut warmed, std::time::Instant::now())
-                    .await
-                    .expect("the warm-up stream reads");
-                assert!(
-                    warmed.contains(&want),
-                    "{}, the warm-up did not deliver {want:?} (it sent {warmed:?})",
-                    file.display()
-                );
 
                 let mut stream = client
                     .get_objects(
@@ -498,6 +488,44 @@ fn the_corpus_answers_as_its_files_say() {
         let tier_refuses = tier_value("tiers") == Some("refuse");
         let tiers_fresh = tier_value("tiers") == Some("fresh");
         if t.method.starts_with("Objects/") {
+            if daemon_warm_serves {
+                // The file names a warm daemon: warm it as part of the
+                // file's setup - its refs through this daemon with its
+                // valid ticket - so the pin below tests a warm store
+                // wherever the file sorts.
+                tiers.runtime.block_on(async {
+                    let mut client = connect(&tiers.socket).await;
+                    let mut stream = client
+                        .get_objects(
+                            request_with_ticket(t, &f, f.ticket.clone())
+                                .expect("the file's request builds"),
+                        )
+                        .await
+                        .expect("the warm-up call answers")
+                        .into_inner();
+                    let mut warmed = Vec::new();
+                    read_part_stream(
+                        &tiers.socket,
+                        &mut stream,
+                        &mut warmed,
+                        std::time::Instant::now(),
+                    )
+                    .await
+                    .expect("the warm-up stream reads");
+                    let want = t
+                        .request
+                        .iter()
+                        .find(|(path, _)| path == "refs")
+                        .map(|(_, v)| item(&resolve(v, &f)))
+                        .expect("the file names the object it reads");
+                    let want = (want.0, hex(&want.1));
+                    assert!(
+                        warmed.contains(&want),
+                        "{}, the warm-up did not deliver {want:?} (it sent {warmed:?})",
+                        file.display()
+                    );
+                });
+            }
             run_objects_across_tiers(&tiers, &t, &f, &file);
             if tiers_fresh {
                 // The same file again on a cache and daemon no earlier
