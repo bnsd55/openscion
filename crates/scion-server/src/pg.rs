@@ -1583,11 +1583,6 @@ impl Pg {
         // the 60 s. OFFSET 0 keeps the planner from flattening the
         // subquery into one target list (tests/pg_guard_timeouts.rs
         // checks the plan's shape and times the wait).
-        if let Some(metrics) = self.inner.metrics.get() {
-            metrics.collector_key_wait(
-                u64::try_from(key_started.elapsed().as_micros()).unwrap_or(u64::MAX),
-            );
-        }
         match f(&mut tx) {
             Ok(value) => {
                 let unflushed = tx.cs_pending.as_deref().is_some_and(|p| !p.is_empty())
@@ -6659,6 +6654,22 @@ mod tests {
         assert!(
             text.contains("scion_pg_collector_key_wait_seconds_count 1\n"),
             "{text}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod lane_key_tests {
+    use super::{LANE_KEY_STATEMENT, LOCK_TIMEOUT_FOR_WRITERS};
+
+    /// The key statement spells the writers' clock from the constant,
+    /// not a literal beside it: a change to the constant reaches the
+    /// shipped statement, and this pin fails if it ever drifts (#917).
+    #[test]
+    fn the_lane_key_names_the_writers_clock_from_the_constant() {
+        assert!(
+            LANE_KEY_STATEMENT.contains(&format!("'{LOCK_TIMEOUT_FOR_WRITERS}'")),
+            "the lane key's restore spells the writers' clock: {LANE_KEY_STATEMENT}"
         );
     }
 }
