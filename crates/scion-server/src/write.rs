@@ -162,6 +162,7 @@ pub fn create_changeset(
     }
     // See `tree::store_changeset`. The write's flush covers these steps.
     tree::fill_root_tree(store, repo_id, parent)?;
+    let _customer = crate::land_profile::lane_customer(crate::land_profile::Phase::CreateCommit);
     store.write(|c| {
         let repo_id = check_parent(c, repo, parent)?;
         if c.has_changeset(repo_id, id)? {
@@ -226,6 +227,7 @@ pub fn put_blob(store: &Backend, repo: RepoId, upload: Upload) -> Result<BlobId>
     // or a PutBlob that answered ok would store nothing for the repo.
     // One statement either way, and the file the row names is on the
     // drive: `put_upload` kept it and touched it, or wrote it again.
+    let _customer = crate::land_profile::lane_customer(crate::land_profile::Phase::PutBlobRow);
     store.commit(|c| c.add_repo_blob(repo, id))?;
     store.flush()?;
     Ok(id)

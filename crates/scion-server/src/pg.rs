@@ -1510,7 +1510,13 @@ impl Pg {
         slot_holder: bool,
     ) -> Result<T> {
         self.check_fenced()?;
+        let queued_started = std::time::Instant::now();
         let (mut writer, _waiting) = self.lock_writer(slot_holder);
+        // Branch-only instrument for the write lane's breakdown: the
+        // queue is this transaction's wait for the connection; the hold
+        // is the rest, until the lane releases at this function's end.
+        crate::land_profile::lane_queued(queued_started.elapsed());
+        let held_started = std::time::Instant::now();
         // A write transaction runs at READ COMMITTED, the Postgres
         // default: every change of the caller checks the newest state of
         // the row it touches (the CAS predicates).
@@ -1577,7 +1583,15 @@ impl Pg {
                 u64::try_from(key_started.elapsed().as_micros()).unwrap_or(u64::MAX),
             );
         }
-        match f(&mut tx) {
+        let out = {
+            let held = {
+                let out = f(&mut tx);
+                crate::land_profile::lane_held(held_started.elapsed());
+                out
+            };
+            held
+        };
+        match out {
             Ok(value) => {
                 let unflushed = tx.cs_pending.as_deref().is_some_and(|p| !p.is_empty())
                     || tx.derived_pending.as_deref().is_some_and(|p| !p.is_empty());

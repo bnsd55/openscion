@@ -337,6 +337,8 @@ fn prune_rows(
         let mut seen = live.seen.get(&repo).cloned().unwrap_or_default();
         for chunk in dead.chunks(PRUNE_BATCH) {
             let started = std::time::Instant::now();
+            let _customer = crate::land_profile::lane_customer(crate::land_profile::Phase::GcSweep);
+            let _customer = crate::land_profile::lane_customer(crate::land_profile::Phase::GcSweep);
             store.write(|c| {
                 // The changesets this repo gained since the snapshot walk:
                 // their IDs, collected under the write lock the deletes

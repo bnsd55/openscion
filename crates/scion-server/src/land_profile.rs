@@ -54,11 +54,21 @@ pub(crate) enum Phase {
     Cas,
     /// Inside the settle commit: the land's row moves to landed.
     SetState,
-    /// Anything else (the flush, the eviction drop).
+    /// Anything else (the eviction drop).
     Other,
+    /// The changeset commit of a CreateChangeset call.
+    CreateCommit,
+    /// The row commit of a PutBlob call.
+    PutBlobRow,
+    /// A gc sweep's write transaction.
+    GcSweep,
+    /// The derive steps a land's old base fills.
+    DeriveSteps,
+    /// The blob files' fsync after a write; not on the connection.
+    FlushFile,
 }
 
-pub(crate) const PHASES: [Phase; 15] = [
+pub(crate) const PHASES: [Phase; 20] = [
     Phase::PreChecks,
     Phase::PreIntent,
     Phase::PreRest,
@@ -74,6 +84,11 @@ pub(crate) const PHASES: [Phase; 15] = [
     Phase::SetState,
     Phase::Post,
     Phase::Other,
+    Phase::CreateCommit,
+    Phase::PutBlobRow,
+    Phase::GcSweep,
+    Phase::DeriveSteps,
+    Phase::FlushFile,
 ];
 
 impl Phase {
@@ -99,6 +114,11 @@ impl Phase {
             Phase::Cas => "cas",
             Phase::SetState => "set_state",
             Phase::Other => "other",
+            Phase::CreateCommit => "create_commit",
+            Phase::PutBlobRow => "put_blob_row",
+            Phase::GcSweep => "gc_sweep",
+            Phase::DeriveSteps => "derive_steps",
+            Phase::FlushFile => "flush_file",
         }
     }
 }
@@ -294,11 +314,138 @@ impl Drop for Guard {
     }
 }
 
+/// One lane customer's counters, cumulative since the process started.
+/// The write lane holds at most one connection; every write transaction
+/// queues for it (queued), then holds it (held). The land's own
+/// transactions and the other customers' (the changeset commit, the
+/// blob row, a gc sweep, the derive steps) all ride these counters;
+/// the harness diffs them across the bench window like any gauge.
+#[derive(Default)]
+pub(crate) struct LaneSlot {
+    pub calls: std::sync::atomic::AtomicU64,
+    pub queued_ns: std::sync::atomic::AtomicU64,
+    pub held_ns: std::sync::atomic::AtomicU64,
+    pub stmts: std::sync::atomic::AtomicU64,
+    pub stmt_ns: std::sync::atomic::AtomicU64,
+}
+
+pub(crate) static LANE: [LaneSlot; PHASES.len()] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const SLOT: LaneSlot = LaneSlot {
+        calls: std::sync::atomic::AtomicU64::new(0),
+        queued_ns: std::sync::atomic::AtomicU64::new(0),
+        held_ns: std::sync::atomic::AtomicU64::new(0),
+        stmts: std::sync::atomic::AtomicU64::new(0),
+        stmt_ns: std::sync::atomic::AtomicU64::new(0),
+    };
+    [SLOT; PHASES.len()]
+};
+
+thread_local! {
+    /// The customer phase the non-land call sites name, while their
+    /// write transaction runs. A land's own transactions need no guard:
+    /// the phase trace's stack already names them.
+    static LANE_CUSTOMER: Cell<Option<Phase>> = const { Cell::new(None) };
+}
+
+/// Names the lane customer the enclosing call site belongs to, for the
+/// duration of the guard. Nesting is not expected; the inner wins.
+pub(crate) fn lane_customer(phase: Phase) -> LaneCustomerGuard {
+    LANE_CUSTOMER.with(|c| c.set(Some(phase)));
+    LaneCustomerGuard
+}
+
+pub(crate) struct LaneCustomerGuard;
+
+impl Drop for LaneCustomerGuard {
+    fn drop(&mut self) {
+        LANE_CUSTOMER.with(|c| c.set(None));
+    }
+}
+
+/// The lane customer this thread's current write transaction belongs
+/// to: the land phase stack's top when a land's trace is live, else
+/// the guard-named customer, else Other.
+fn lane_phase() -> Phase {
+    if let Some(trace) = Trace::get() {
+        if let Some(phase) = trace
+            .stack
+            .get(trace.depth.wrapping_sub(1))
+            .copied()
+            .flatten()
+        {
+            return phase;
+        }
+    }
+    LANE_CUSTOMER.with(|c| c.get()).unwrap_or(Phase::Other)
+}
+
+fn u64_max() -> u128 {
+    u64::MAX as u128
+}
+
+/// A write transaction queued for the write connection for `ns`, then
+/// holds it. The queue time lands before the hold; the hold's total
+/// comes from the lane guard's drop. Splitting here keeps a queued
+/// wait from reading as held work.
+pub(crate) fn lane_queued(ns: Duration) {
+    let ns = ns.as_nanos().min(u64_max());
+    let slot = &LANE[lane_phase().slot()];
+    slot.calls
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    slot.queued_ns
+        .fetch_add(ns as u64, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The write transaction's hold ended after `ns` more (the queue is
+/// already counted).
+pub(crate) fn lane_held(ns: Duration) {
+    let ns = ns.as_nanos().min(u64_max());
+    let slot = &LANE[lane_phase().slot()];
+    slot.held_ns
+        .fetch_add(ns as u64, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The /metrics lines of the lane counters, as Prometheus gauges. The
+/// harness diffs them across the bench window and divides by the lands.
+pub fn render_lane() -> Option<String> {
+    let mut out = String::new();
+    for phase in PHASES {
+        let slot = &LANE[phase.slot()];
+        let name = phase.name();
+        let calls = slot.calls.load(std::sync::atomic::Ordering::Relaxed);
+        if calls == 0 {
+            continue;
+        }
+        let queued = slot.queued_ns.load(std::sync::atomic::Ordering::Relaxed);
+        let held = slot.held_ns.load(std::sync::atomic::Ordering::Relaxed);
+        let stmts = slot.stmts.load(std::sync::atomic::Ordering::Relaxed);
+        let stmt_ns = slot.stmt_ns.load(std::sync::atomic::Ordering::Relaxed);
+        out.push_str(&format!(
+            "scion_lane_calls{{phase=\"{name}\"}} {calls}\n\
+             scion_lane_queued_seconds{{phase=\"{name}\"}} {:.6}\n\
+             scion_lane_held_seconds{{phase=\"{name}\"}} {:.6}\n\
+             scion_lane_stmts{{phase=\"{name}\"}} {stmts}\n\
+             scion_lane_stmt_seconds{{phase=\"{name}\"}} {:.6}\n",
+            queued as f64 / 1e9,
+            held as f64 / 1e9,
+            stmt_ns as f64 / 1e9,
+        ));
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// One statement's round trip done: the wall time from the client side.
 pub(crate) fn stmt_done(spent: Duration) {
     if let Some(trace) = Trace::get() {
         Trace::put(&trace.add_stmt(spent.as_nanos()));
     }
+    let ns = spent.as_nanos().min(u64_max()) as u64;
+    let slot = &LANE[lane_phase().slot()];
+    slot.stmts
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    slot.stmt_ns
+        .fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// One plan attempt: the land decided to plan again.
