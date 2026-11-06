@@ -284,7 +284,7 @@ for name in $names; do
       }
       END {
         printf "%-10s %9s %9s %9s %12s %9s %9s %8s %9s\n", "phase", "wall50", "wall99", "wallavg", "wait50", "wait99", "waitavg", "stmts", "attempts"
-        m = split("total pre_checks pre_intent pre_rest slot_wait record outcome plan fill_root lens settle build cas set_state other", order, " ")
+        m = split("total pre_checks pre_intent pre_rest slot_wait record outcome plan fill_root lens settle build cas set_state post other", order, " ")
         for (i = 1; i <= m; i++) {
           p = order[i]
           if (!n[p]) continue
