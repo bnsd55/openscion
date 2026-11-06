@@ -1325,6 +1325,28 @@ the process, scraped from there. The names:
   counts says a drive that cannot keep up with the imports.
 - `scion_data_free_bytes` — free bytes on the filesystem that holds the
   data directory, refreshed every 30 s; alert before it reaches zero.
+  Each sample waits at most 6 s for its stat: a sample whose filesystem
+  hangs (a lost network mount) is dropped with a warning per poll, the
+  free values keep their last good readings, and the poll keeps going —
+  one sample at a time, so a hung filesystem pins one thread, not one
+  per poll.
+- `scion_data_free_sample_age_seconds` — seconds since the free-space
+  poll's last good sample, set on every poll tick. It grows while the
+  statvfs is stuck and resets when a sample lands. An age above three
+  poll periods (90 s) says the sample is stuck; see
+  [A stuck free space sample](#a-stuck-free-space-sample).
+### A stuck free space sample
+
+Each free-space sample waits at most 6 s for its stat. A filesystem that
+hangs (a lost network mount, a suspended device) drops its sample with a
+warning per poll, the free values keep their last good readings, and the
+poll keeps going — one sample at a time, so a hung filesystem pins one
+thread, not one per poll. `scion_data_free_sample_age_seconds` counts the
+seconds since the last good sample; the `FreeSpaceSampleStuck` alert
+fires when it passes three poll periods (90 s). The disk and inode alerts
+then read stale numbers, so restore the filesystem first: the free values
+resume when a sample lands.
+
 - `scion_blob_count` — blobs the store's metadata names, refreshed every
   60 s by one bounded count query over the blob rows (never a directory
   walk, never per scrape). At 1,000,000 blobs the query itself costs
