@@ -650,12 +650,8 @@ fn ref_version(r: &str) -> Option<(u64, u64, u64)> {
 /// A `since:` value's version and the text it came from.
 type Since = ((u64, u64, u64), String);
 
-fn pick_n1_files(
-    files: &[PathBuf],
-    prev: (u64, u64, u64),
-) -> (Vec<(PathBuf, Transcript)>, usize, Since) {
+fn pick_n1_files(files: &[PathBuf], prev: (u64, u64, u64)) -> (Vec<(PathBuf, Transcript)>, Since) {
     let mut qualifying = Vec::new();
-    let mut scion_files = 0usize;
     let mut oldest: Option<Since> = None;
     for file in files {
         let text = fs::read_to_string(file).expect("the transcript opens");
@@ -665,27 +661,38 @@ fn pick_n1_files(
             Some((ov, os)) if ov <= v => (ov, os),
             _ => (v, t.since.clone()),
         });
-        // SHORTCUT: the Scion files stay out of both legs, counted only:
-        // their fixture names a changeset id this tree's store landed,
-        // and the N-1 side's changeset id differs, so the files'
-        // request.changeset_id would not resolve there. Issue #921 pairs
-        // the fixture through the ref; then the legs run them like the
-        // rest. The count comes before the since filter, so a file whose
-        // behaviour is newer than the side still counts as a Scion file.
-        if t.method.starts_with("Scion/") {
-            scion_files += 1;
-            continue;
-        }
         if v > prev {
             continue;
         }
         qualifying.push((file.clone(), t));
     }
-    (
-        qualifying,
-        scion_files,
-        oldest.expect("the corpus is not empty"),
-    )
+    (qualifying, oldest.expect("the corpus is not empty"))
+}
+
+/// The Ok-on-$cs control guards the Scion refusal files that name $cs:
+/// a wrong changeset id passes them with the refusal they expect anyway,
+/// because the same `NOT_FOUND` answers a missing path and a missing
+/// changeset alike. Both sides derive from the files' content, so a new
+/// refusal file joins the guard by itself. The control runs first, so a
+/// wrong id fails early with the clearest line the corpus has; the leg
+/// fails naming the file when the control does not qualify with it.
+fn guard_cs_refusals(qualifying: &mut [(PathBuf, Transcript)]) {
+    let names_cs = |t: &Transcript| t.request.iter().any(|(_, v)| v.contains("$cs"));
+    let expects =
+        |t: &Transcript, want: &str| t.expect.iter().any(|(k, v)| k == "status" && v == want);
+    let needs_control =
+        |t: &Transcript| t.method.starts_with("Scion/") && names_cs(t) && !expects(t, "ok");
+    let answers_ok_on_cs =
+        |t: &Transcript| t.method.starts_with("Scion/") && names_cs(t) && expects(t, "ok");
+    qualifying.sort_by_key(|(_, t)| !answers_ok_on_cs(t));
+    let has_control = qualifying.iter().any(|(_, t)| answers_ok_on_cs(t));
+    for (file, t) in qualifying.iter() {
+        assert!(
+            !needs_control(t) || has_control,
+            "{}, a $cs refusal file qualifies without an Ok-on-$cs control: the wrong-changeset pass is unguarded",
+            file.display()
+        );
+    }
 }
 
 /// The N-1 legs of the corpus (Refs #890): every file whose `since` is
@@ -733,7 +740,7 @@ fn the_n1_side_answers_as_its_files_say() {
     let mut files = Vec::new();
     walk(&corpus, &mut files).expect("the corpus holds only transcripts");
     files.sort();
-    let (qualifying, scion_files, (oldest_v, oldest_s)) = pick_n1_files(&files, prev);
+    let (mut qualifying, (oldest_v, oldest_s)) = pick_n1_files(&files, prev);
     let oldest_printed = if oldest_v.0 == u64::MAX {
         oldest_s.clone()
     } else {
@@ -743,6 +750,7 @@ fn the_n1_side_answers_as_its_files_say() {
         !qualifying.is_empty(),
         "the N-1 legs have nothing to prove: the corpus's oldest since is {oldest_printed}, the N-1 side is {prev:?} ({printed})"
     );
+    guard_cs_refusals(&mut qualifying);
 
     // Leg 1: the qualifying files against the N-1 server and its tiers.
     let (db_guard, pg) = n1_database();
@@ -758,6 +766,15 @@ fn the_n1_side_answers_as_its_files_say() {
             ticket,
             ..base.clone()
         };
+        if t.method.starts_with("Scion/") {
+            // A tier serves GetObjects only: the Scion service is the
+            // server's, so the file runs against the N-1 server alone.
+            runtime
+                .block_on(run_scion(t, &stack.server, &f))
+                .unwrap_or_else(|e| panic!("{} at {} (leg 1): {e}", file.display(), stack.server));
+            ran += 1;
+            continue;
+        }
         let index = ran;
         let fresh = || n1_fresh_pair(&prev_bin, &dir, index, &stack.server, &stack.pub_hex);
         run_one_object_file(
@@ -779,6 +796,12 @@ fn the_n1_side_answers_as_its_files_say() {
     let _entered2 = tiers.runtime.enter();
     let leg2 = start_n1_tiers(&tiers, &prev_bin, &dir);
     for (file, t) in &qualifying {
+        if t.method.starts_with("Scion/") {
+            // A tier serves GetObjects only: a Scion call never
+            // traverses the tiers, and this server's Scion answers are
+            // the corpus test's every PR. Leg 2 is Objects only.
+            continue;
+        }
         let (ticket, _) = mint(&tiers, base2.cs);
         let f = Fixture {
             unsigned: unsigned_of(&ticket),
@@ -801,9 +824,7 @@ fn the_n1_side_answers_as_its_files_say() {
         ran += 1;
     }
     drop(leg2);
-    eprintln!(
-        "the N-1 legs ran {ran} file-runs over the two legs; {scion_files} Scion files stayed out (issue #921: their fixture needs the N-1 changeset id)"
-    );
+    eprintln!("the N-1 legs ran {ran} file-runs over the two legs");
     // A green run leaves nothing: the children die with the guards, the
     // database drops with `db_guard`, and the work dir goes last.
     drop(stack);

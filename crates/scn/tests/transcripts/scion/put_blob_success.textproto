@@ -1,6 +1,6 @@
 # One blob stored. The blob_id is the ID of the bytes the messages
 # carried.
-since: unreleased
+since: v0.1
 method: Scion/PutBlob
 fixture: landed
 
