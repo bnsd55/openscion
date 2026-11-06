@@ -166,8 +166,18 @@ pub fn create_changeset(
     // land resumes from them instead of running to the end.
     tree::fill_root_tree_by(store, repo_id, parent, deadline)?;
     store.write(|c| {
-        let repo_id = check_parent(c, repo, parent)?;
-        if c.has_changeset(repo_id, id)? {
+        // The rules re-checked inside the transaction, one statement for
+        // the repo and both membership questions: the parent's, and the
+        // retry's (a stored changeset of the same id).
+        let Some((repo_id, membership)) = c.repo_and_membership(repo, &[parent, id])? else {
+            return Err(Error::NotFound(format!("repo {repo:?}")));
+        };
+        if !membership[0] {
+            return Err(Error::InvalidArgument(format!(
+                "parent {parent} is not in repo {repo:?}"
+            )));
+        }
+        if membership[1] {
             // A retry. Its tree was checked and recorded the first time.
             return Ok(id);
         }

@@ -634,6 +634,38 @@ pub(crate) fn put<K: Kind>(c: &mut dyn MetaTx, cs: ChangesetId, value: &K::Value
     c.put_derived(K::NAME, K::VERSION, cs, &K::encode(value))
 }
 
+/// A row a batched put will land: the kind's name, its version, the
+/// changeset, the encoded value.
+pub(crate) struct PutRow {
+    kind: &'static str,
+    version: u32,
+    cs: ChangesetId,
+    value: Vec<u8>,
+}
+
+/// Lands the rows of [`put_row`] and [`on_write_into`] in one statement.
+/// The rows are of changesets the caller's transaction just stored, so a
+/// conflicting stored row is corrupt state and refuses, like the single
+/// put does.
+///
+/// # Errors
+///
+/// [`Error::Corrupt`] if a stored row disagrees, and backend errors.
+pub(crate) fn put_all(c: &mut dyn MetaTx, rows: Vec<PutRow>) -> Result<()> {
+    let rows = rows
+        .into_iter()
+        .map(
+            |PutRow {
+                 kind,
+                 version,
+                 cs,
+                 value,
+             }| { (kind.to_owned(), version, cs, value) },
+        )
+        .collect::<Vec<_>>();
+    c.put_derived_all(&rows)
+}
+
 /// For a kind that is stored when a changeset is written: derives and stores
 /// the value of `K` for `id`, which the caller's transaction just stored, if
 /// each parent that `K` reads has a value. Otherwise it stores nothing, and
@@ -644,18 +676,29 @@ pub(crate) fn put<K: Kind>(c: &mut dyn MetaTx, cs: ChangesetId, value: &K::Value
 /// # Errors
 ///
 /// Errors of [`Kind::derive`].
-pub(crate) fn on_write<K: Kind>(
+/// The batched shape of [`put`]: the row waits in `rows` for
+/// [`put_all`], which lands it with the batch in one statement.
+pub(crate) fn put_row<K: Kind>(rows: &mut Vec<PutRow>, cs: ChangesetId, value: &K::Value) {
+    rows.push(PutRow {
+        kind: K::NAME,
+        version: K::VERSION,
+        cs,
+        value: K::encode(value),
+    });
+}
+
+/// The batched shape of [`on_write`]: the put lands in `rows` for
+/// [`put_all`] instead of its own statement. The stored check and the
+/// parents' reads keep their shape; both answer from the transaction's
+/// memory on the fold's path. The old-version sweep stays with the
+/// caller, which runs it once for the whole batch.
+pub(crate) fn on_write_into<K: Kind>(
+    rows: &mut Vec<PutRow>,
     c: &mut dyn MetaTx,
     id: ChangesetId,
     changeset: &Changeset,
     lens: crate::tree::BlobLens<'_>,
 ) -> Result<()> {
-    // While the importer's batching is on, the caller is writing the
-    // transaction's own changesets: their ids are new, so the stored
-    // check cannot find anything, and the values the transaction
-    // inserted answer the parents' reads. The flush lands the rows.
-    // A changeset this transaction inserted itself is the same case
-    // without the batching: its row cannot hold a value yet.
     let stored = if c.changeset_batching() || c.inserted_this_tx(id) {
         None
     } else {
@@ -665,8 +708,41 @@ pub(crate) fn on_write<K: Kind>(
         && let Some(parents) = parent_values::<K>(c, changeset)?
     {
         let value = K::derive(c, id, changeset, parents, lens)?;
-        put::<K>(c, id, &value)?;
+        put_row::<K>(rows, id, &value);
     }
+    Ok(())
+}
+
+/// For a kind that is stored when a changeset is written: derives and stores
+/// the value of `K` for `id`, which the caller's transaction just stored, if
+/// each parent that `K` reads has a value. Otherwise it stores nothing, and
+/// [`fill`] derives the value when it is first needed. So a write never
+/// derives a long history. Like each step of [`fill`], it also removes a few
+/// rows of older versions of `K`.
+///
+/// # Errors
+///
+/// Errors of [`Kind::derive`].
+#[cfg(test)]
+pub(crate) fn on_write<K: Kind>(
+    c: &mut dyn MetaTx,
+    id: ChangesetId,
+    changeset: &Changeset,
+    lens: crate::tree::BlobLens<'_>,
+) -> Result<()> {
+    let mut rows = Vec::new();
+    let stored = if c.changeset_batching() || c.inserted_this_tx(id) {
+        None
+    } else {
+        load::<K>(c, id)?
+    };
+    if stored.is_none()
+        && let Some(parents) = parent_values::<K>(c, changeset)?
+    {
+        let value = K::derive(c, id, changeset, parents, lens)?;
+        put_row::<K>(&mut rows, id, &value);
+    }
+    put_all(c, rows)?;
     remove_old::<K>(c)?;
     Ok(())
 }

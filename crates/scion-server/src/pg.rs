@@ -4682,6 +4682,28 @@ impl MetaTx for PgTx<'_> {
     }
 
     /// Whether `repo` may see changeset `id`.
+    fn repo_and_membership(
+        &mut self,
+        name: &str,
+        ids: &[ChangesetId],
+    ) -> Result<Option<(RepoId, Vec<bool>)>> {
+        let ids: Vec<Vec<u8>> = ids.iter().map(|id| id_bytes(id.as_bytes())).collect();
+        let rows = self.c.query(
+            "SELECT r.repo_id, (m.cs IS NOT NULL) FROM repos r
+             CROSS JOIN LATERAL unnest($2::bytea[]) WITH ORDINALITY AS u(cs, ord)
+             LEFT JOIN repo_changesets m ON m.repo_id = r.repo_id AND m.cs = u.cs
+             WHERE r.name = $1
+             ORDER BY u.ord",
+            &[P::text(name), P::bytea_array(ids)],
+        )?;
+        let Some(first) = rows.first() else {
+            return Ok(None);
+        };
+        let repo = RepoId(first.get::<_, i64>(0));
+        let membership = rows.iter().map(|row| row.get::<_, bool>(1)).collect();
+        Ok(Some((repo, membership)))
+    }
+
     fn has_changeset(&mut self, repo: RepoId, id: ChangesetId) -> Result<bool> {
         Ok(self
             .c
@@ -5350,6 +5372,68 @@ impl MetaTx for PgTx<'_> {
                 (kind.to_owned(), version64, id_bytes(cs.as_bytes())),
                 value.to_vec(),
             );
+        }
+        Ok(())
+    }
+
+    /// Records derived values, one statement for the whole batch, and
+    /// follows the writes into the transaction's memory. The callers
+    /// write rows of changesets this transaction just stored, so any
+    /// conflict is corrupt state and refuses.
+    fn put_derived_all(&mut self, rows: &[(String, u32, ChangesetId, Vec<u8>)]) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        // The importer's batching owns batched writes already: the
+        // flush writes the pending rows one statement per 1,000.
+        if self.cs_batching
+            && let Some(pending) = self.derived_pending.as_deref_mut()
+        {
+            for (kind, version, cs, value) in rows {
+                pending.push((kind.clone(), i64::from(*version), *cs, value.clone()));
+            }
+            return Ok(());
+        }
+        let kinds: Vec<String> = rows.iter().map(|(kind, _, _, _)| kind.clone()).collect();
+        let versions: Vec<i64> = rows.iter().map(|(_, v, _, _)| i64::from(*v)).collect();
+        let css: Vec<Vec<u8>> = rows
+            .iter()
+            .map(|(_, _, cs, _)| id_bytes(cs.as_bytes()))
+            .collect();
+        let values: Vec<Vec<u8>> = rows.iter().map(|(_, _, _, value)| value.clone()).collect();
+        let inserted = self.c.execute(
+            "INSERT INTO derived (kind, version, cs, value)
+             SELECT * FROM unnest($1::text[], $2::int8[], $3::bytea[], $4::bytea[])
+             ON CONFLICT (kind, version, cs) DO NOTHING",
+            &[
+                P::text_array(kinds),
+                P::i64_array(versions),
+                P::bytea_array(css),
+                P::bytea_array(values),
+            ],
+        )?;
+        // A short count is a stored row for one of the batch's keys:
+        // legal when it agrees (a fill may have stored the same value
+        // for the head before this transaction began), corrupt when it
+        // differs - the same rule the single put applies, checked row
+        // by row on this rare path.
+        if inserted != rows.len() as u64 {
+            for (kind, version, cs, value) in rows {
+                if self.get_derived(kind, *version, *cs)?.as_deref() != Some(value) {
+                    return Err(Error::Corrupt(format!(
+                        "derived {kind} v{version} for {cs} differs from the stored value"
+                    )));
+                }
+            }
+        }
+        // The transaction's memory follows its writes.
+        if let Some(preload) = self.derived_preload.as_deref_mut() {
+            for (kind, version, cs, value) in rows {
+                preload.insert(
+                    (kind.clone(), i64::from(*version), id_bytes(cs.as_bytes())),
+                    value.clone(),
+                );
+            }
         }
         Ok(())
     }

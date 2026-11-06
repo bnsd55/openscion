@@ -434,10 +434,16 @@ fn store_changeset_impl(
     puts.sort();
     puts.dedup();
     c.add_repo_blobs(repo, &puts)?;
-    derived::put::<RootTree>(c, id, &tree)?;
+    // The three derived rows land in one statement: the rows are of
+    // this transaction's own changeset, so the batch's conflict guard
+    // keeps the single put's meaning, and the reads above answered from
+    // the preload before any row lands.
+    let mut rows = Vec::new();
+    derived::put_row::<RootTree>(&mut rows, id, &tree);
     derived::remove_old::<RootTree>(c)?;
-    derived::on_write::<CommitGraph>(c, id, cs, lens)?;
-    derived::on_write::<PathHistory>(c, id, cs, lens)?;
+    derived::on_write_into::<CommitGraph>(&mut rows, c, id, cs, lens)?;
+    derived::on_write_into::<PathHistory>(&mut rows, c, id, cs, lens)?;
+    derived::put_all(c, rows)?;
     Ok((id, tree))
 }
 
