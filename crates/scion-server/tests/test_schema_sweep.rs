@@ -596,9 +596,11 @@ fn an_open_waits_while_an_older_builds_migration_holds_the_bare_key() {
     });
     // The hold is seen in pg_locks, not assumed from a sleep: the open
     // starts only once the older build's turn is real. The holder may
-    // still be connecting, so the poll waits for the row.
+    // still be connecting, so the poll waits for the row; a poll that
+    // gives up names whatever holds the key instead.
     let mut holding = Vec::new();
-    for _ in 0..250 {
+    let poll = std::time::Instant::now();
+    while poll.elapsed() < std::time::Duration::from_secs(10) {
         holding = connect()
             .query(
                 &format!(
@@ -613,6 +615,29 @@ fn an_open_waits_while_an_older_builds_migration_holds_the_bare_key() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    if holding.is_empty() {
+        let holders = connect()
+            .query(
+                &format!(
+                    "SELECT l.pid, l.mode, l.granted, a.application_name, a.query
+                     FROM pg_locks l LEFT JOIN pg_stat_activity a ON a.pid = l.pid
+                     WHERE l.locktype = 'advisory'
+                       AND l.classid = {held_hi} AND l.objid = {held_lo}"
+                ),
+                &[],
+            )
+            .unwrap();
+        for row in &holders {
+            eprintln!(
+                "DEBUG the bare key: pid {} mode {} granted {} app {} query {}",
+                row.get::<_, i32>(0),
+                row.get::<_, String>(1),
+                row.get::<_, bool>(2),
+                row.get::<_, Option<String>>(3).unwrap_or_default(),
+                row.get::<_, String>(4),
+            );
+        }
     }
     assert_eq!(holding.len(), 1, "the older build's turn is real");
     let dir = private_tempdir();
