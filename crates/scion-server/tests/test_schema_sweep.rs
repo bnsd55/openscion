@@ -625,3 +625,54 @@ fn the_migration_key_never_meets_the_one_server_key() {
         );
     }
 }
+
+/// The shared take goes back with the open: a writer that ran its
+/// migrations keeps no advisory lock on the database's bare migration
+/// key, or an older build's exclusive take would wait for as long as
+/// any new server runs (#905).
+#[test]
+fn an_open_keeps_no_lock_on_the_bare_migration_key() {
+    let _lock = locked();
+    let dir = private_tempdir();
+    let store = Backend::open_test(dir.path()).unwrap();
+    // The writer's session is the one holding the store's one-server
+    // key for its whole life.
+    let server_key = Backend::test_server_lock(dir.path()).unwrap();
+    let bare = Backend::test_bare_migration_lock();
+    // Postgres splits a one-argument advisory key into the two ints
+    // pg_locks shows: the high half in classid, the low in objid.
+    let (server_hi, server_lo) = (server_key >> 32, server_key & 0xFFFF_FFFF);
+    let (bare_hi, bare_lo) = (bare >> 32, bare & 0xFFFF_FFFF);
+    let rows = connect()
+        .query(
+            &format!(
+                "SELECT l.pid FROM pg_locks l
+                 WHERE l.locktype = 'advisory' AND l.classid = {server_hi}
+                   AND l.objid = {server_lo} AND l.granted"
+            ),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the writer's session is on the one-server key"
+    );
+    let pid: i32 = rows[0].get(0);
+    let leaked = connect()
+        .query(
+            &format!(
+                "SELECT l.mode FROM pg_locks l
+                 WHERE l.locktype = 'advisory' AND l.classid = 0
+                   AND l.classid = {bare_hi} AND l.objid = {bare_lo}
+                   AND l.pid = {pid} AND l.granted"
+            ),
+            &[],
+        )
+        .unwrap();
+    assert!(
+        leaked.is_empty(),
+        "the writer keeps no lock on the bare migration key, holds: {leaked:?}"
+    );
+    drop(store);
+}

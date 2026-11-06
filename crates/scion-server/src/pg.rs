@@ -102,10 +102,7 @@ thread_local! {
 /// The advisory lock of one migration run of a database. An older
 /// build takes it alone, exclusive; this build takes it shared beside
 /// its own schema's key.
-#[cfg(any(test, feature = "test-hooks"))]
 pub(crate) const SCHEMA_LOCK: i64 = 0x5343_494F_4E53_4348;
-#[cfg(not(any(test, feature = "test-hooks")))]
-const SCHEMA_LOCK: i64 = 0x5343_494F_4E53_4348;
 
 /// Schema migrations in order. Migration `n`, from 1, moves the database
 /// from version `n - 1` to version `n`. A released migration never changes.
@@ -3939,6 +3936,10 @@ fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
     // takes that key alone, exclusive, so an older migrator and this
     // one still take turns on the same schema, while two opens of this
     // build - whose shared takes agree - never queue on each other.
+    // When the search path names no schema, both takes land on the
+    // bare key itself - exclusive, then shared, which one session may
+    // hold together - and the two unlocks below match them one for
+    // one.
     let schema: Option<String> = client
         .query_opt("SELECT current_schema()::text", &[])
         .map_err(|e| {
@@ -3994,7 +3995,10 @@ fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
     // its connection, and the unlock names a lock the new connection
     // never held, which answers false and costs nothing.
     let _ = client.query_opt("SELECT pg_advisory_unlock($1)", &[P::i64(lock)]);
-    let _ = client.query_opt("SELECT pg_advisory_unlock($1)", &[P::i64(SCHEMA_LOCK)]);
+    let _ = client.query_opt(
+        "SELECT pg_advisory_unlock_shared($1)",
+        &[P::i64(SCHEMA_LOCK)],
+    );
     outcome.and_then(|value| restored.map(|_| value))
 }
 
