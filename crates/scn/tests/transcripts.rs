@@ -352,7 +352,7 @@ fn walk(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
 /// pins a refusal therefore catches a cache or daemon that serves
 /// without ANY proof, which is what the fresh pair and the warm runs are
 /// for.
-/// A tier serves GetObjects only: its refusal of the other calls is the
+/// A tier serves `GetObjects` only: its refusal of the other calls is the
 /// contract (section 7.1).
 async fn assert_tier_refuses(url: &str, t: &Transcript, file: &Path) {
     let mut client = connect(url).await;
@@ -376,6 +376,42 @@ async fn assert_tier_refuses(url: &str, t: &Transcript, file: &Path) {
         file.display(),
         t.method
     );
+}
+
+/// The warm-up a `daemon_warm: serves` file runs as its setup: the
+/// file's refs through the daemon with its valid ticket, and the blob
+/// checked as arrived, so the pin below tests a warm store wherever the
+/// file sorts.
+fn warm_daemon_for(tiers: &common::Tiers, t: &Transcript, f: &Fixture, file: &Path) {
+    tiers.runtime.block_on(async {
+        let mut client = connect(&tiers.socket).await;
+        let mut stream = client
+            .get_objects(request_with_ticket(t, f, &f.ticket).expect("the file's request builds"))
+            .await
+            .expect("the warm-up call answers")
+            .into_inner();
+        let mut warmed = Vec::new();
+        read_part_stream(
+            &tiers.socket,
+            &mut stream,
+            &mut warmed,
+            std::time::Instant::now(),
+        )
+        .await
+        .expect("the warm-up stream reads");
+        let want = t
+            .request
+            .iter()
+            .find(|(path, _)| path == "refs")
+            .map(|(_, v)| item(&resolve(v, f)))
+            .expect("the file names the object it reads");
+        let want = (want.0, hex(&want.1));
+        assert!(
+            warmed.contains(&want),
+            "{}, the warm-up did not deliver {want:?} (it sent {warmed:?})",
+            file.display()
+        );
+    });
 }
 
 /// The per-tier run for one file on one pair: the tier refusal, the warm
@@ -412,8 +448,7 @@ fn run_objects_across_tiers(tiers: &common::Tiers, t: &Transcript, f: &Fixture, 
 
                 let mut stream = client
                     .get_objects(
-                        request_with_ticket(t, f, f.unsigned.clone())
-                            .expect("the file's request builds"),
+                        request_with_ticket(t, f, &f.unsigned).expect("the file's request builds"),
                     )
                     .await
                     .expect("the pinned call answers")
@@ -492,42 +527,7 @@ fn the_corpus_answers_as_its_files_say() {
                 .iter()
                 .any(|(k, v)| k == "daemon_warm" && v == "serves")
             {
-                // The file names a warm daemon: warm it as part of the
-                // file's setup - its refs through this daemon with its
-                // valid ticket - so the pin below tests a warm store
-                // wherever the file sorts.
-                tiers.runtime.block_on(async {
-                    let mut client = connect(&tiers.socket).await;
-                    let mut stream = client
-                        .get_objects(
-                            request_with_ticket(&t, &f, f.ticket.clone())
-                                .expect("the file's request builds"),
-                        )
-                        .await
-                        .expect("the warm-up call answers")
-                        .into_inner();
-                    let mut warmed = Vec::new();
-                    read_part_stream(
-                        &tiers.socket,
-                        &mut stream,
-                        &mut warmed,
-                        std::time::Instant::now(),
-                    )
-                    .await
-                    .expect("the warm-up stream reads");
-                    let want = t
-                        .request
-                        .iter()
-                        .find(|(path, _)| path == "refs")
-                        .map(|(_, v)| item(&resolve(v, &f)))
-                        .expect("the file names the object it reads");
-                    let want = (want.0, hex(&want.1));
-                    assert!(
-                        warmed.contains(&want),
-                        "{}, the warm-up did not deliver {want:?} (it sent {warmed:?})",
-                        file.display()
-                    );
-                });
+                warm_daemon_for(&tiers, &t, &f, &file);
             }
             run_objects_across_tiers(&tiers, &t, &f, &file);
             if tiers_fresh {
@@ -1319,7 +1319,7 @@ fn get_objects_request(t: &Transcript, f: &Fixture) -> Result<GetObjectsRequest,
         .find(|(path, _)| path == "ticket")
         .map(|(_, v)| resolve(v, f))
         .ok_or_else(|| "the file names no ticket".to_owned())?;
-    request_with_ticket(t, f, unhex(&value))
+    request_with_ticket(t, f, &unhex(&value))
 }
 
 /// The file's `GetObjects` request with `ticket` in place of the file's
@@ -1327,12 +1327,12 @@ fn get_objects_request(t: &Transcript, f: &Fixture) -> Result<GetObjectsRequest,
 fn request_with_ticket(
     t: &Transcript,
     f: &Fixture,
-    ticket: Vec<u8>,
+    ticket: &[u8],
 ) -> Result<GetObjectsRequest, String> {
     let mut req = GetObjectsRequest::default();
     for (path, value) in &t.request {
         match path.as_str() {
-            "ticket" => req.ticket = ticket.clone(),
+            "ticket" => req.ticket = ticket.to_owned(),
             "refs" => req.refs.push(object_ref(&resolve(value, f))?),
             "accept" => {
                 req.accept.push(match resolve(value, f).as_str() {
