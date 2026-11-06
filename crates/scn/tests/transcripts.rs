@@ -587,6 +587,17 @@ fn the_corpus_answers_as_its_files_say() {
     }
 }
 
+/// The release version a ref carries: `v0.7` and `v0.7.1` parse; a
+/// commit hash or a branch name carries none.
+fn ref_version(r: &str) -> Option<(u64, u64, u64)> {
+    let rest = r.strip_prefix('v')?;
+    let mut parts = rest.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    Some((major, minor, patch))
+}
+
 /// The files the N-1 legs run: every file whose `since` is at or under
 /// the N-1 version. A Scion file's fixture names the changeset this
 /// tree's store landed, and the N-1 side's changeset id is not plumbed
@@ -644,19 +655,18 @@ fn the_n1_side_answers_as_its_files_say() {
     let dir = work.path();
 
     // The N-1 version decides which files qualify: a file's `since`
-    // must be at or under it. The binary says it itself, so no env
-    // wiring can lose it.
-    let out = Command::new(prev_bin.join("scion-server"))
-        .arg("--version")
-        .output()
-        .expect("the N-1 scion-server runs");
-    let printed = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    let prev = version_of(
-        printed
-            .rsplit(' ')
-            .next()
-            .expect("the version line has a number"),
-    );
+    // must be at or under it. `PREV_REF` names the ref the
+    // version-matrix job tested; a `v`-prefixed release ref carries
+    // the version itself, a stand-in commit carries none and so every
+    // file qualifies against it.
+    let ref_name = std::env::var("PREV_REF").unwrap_or_else(|_| "unset".to_owned());
+    let (prev, printed) = match ref_version(&ref_name) {
+        Some(v) => (v, format!("N-1 {ref_name}")),
+        None => (
+            (u64::MAX, u64::MAX, u64::MAX),
+            format!("{ref_name}, a stand-in with no release version, so every file qualifies"),
+        ),
+    };
     let corpus = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join(CORPUS);
