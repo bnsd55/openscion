@@ -1077,7 +1077,10 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
         // served - and every caller would read "repo not found"
         // with no error at the start. An empty schema refuses while
         // the marker names a store, and mints when it names none.
-        let has_repos = !writer.query("SELECT 1 FROM repos LIMIT 1", &[])?.is_empty();
+        let repos = writer
+            .query("SELECT 1 FROM repos LIMIT 1", &[])
+            .map_err(|e| named_step("the repos probe", "SELECT 1 FROM repos LIMIT 1", e))?;
+        let has_repos = !repos.is_empty();
         let fresh = match pairing_decision(marker.uuid, None, has_repos) {
             Pairing::Agree | Pairing::AdoptCut => unreachable!("the database holds no store"),
             Pairing::Fresh => marker.uuid.unwrap_or_else(uuid_new),
@@ -2623,9 +2626,10 @@ struct Setup {
     /// import).
     exclusive: bool,
     outcome: SetupOutcome,
-    /// The statement whose execution failed, so the error names what
-    /// waited: a flake says which lock it lost (#905).
-    failed_sql: Option<String>,
+    /// The statement whose execution failed, with the database's error:
+    /// the error names what waited, and the source keeps the SQLSTATE
+    /// (#905).
+    failed: Option<(String, postgres::Error)>,
 }
 
 impl Setup {
@@ -2636,7 +2640,7 @@ impl Setup {
             schema: schema.map(str::to_owned),
             exclusive,
             outcome: SetupOutcome::Unreachable,
-            failed_sql: None,
+            failed: None,
         };
         setup.outcome = setup.apply(client);
         setup
@@ -2663,8 +2667,8 @@ impl Setup {
                 "SET search_path TO {schema}; SET application_name TO '{schema}';
                  SELECT pg_advisory_lock_shared(hashtext('{schema}'))"
             );
-            if client.batch_execute(&sql).is_err() {
-                self.failed_sql = Some(sql);
+            if let Err(e) = client.batch_execute(&sql) {
+                self.failed = Some((sql, e));
                 return SetupOutcome::Unreachable;
             }
         }
@@ -2673,9 +2677,12 @@ impl Setup {
             // spelled: a plain URL and one that rides
             // `--search_path=public` land in the same schema and must
             // fence each other, and schemas ride separately.
-            let Ok(row) = client.query_one("SELECT current_schema()::text", &[]) else {
-                self.failed_sql = Some("SELECT current_schema()::text".to_owned());
-                return SetupOutcome::Unreachable;
+            let row = match client.query_one("SELECT current_schema()::text", &[]) {
+                Ok(row) => row,
+                Err(e) => {
+                    self.failed = Some(("SELECT current_schema()::text".to_owned(), e));
+                    return SetupOutcome::Unreachable;
+                }
             };
             // A search_path whose members all miss answers NULL: the
             // connection would create nothing, and no lock names it.
@@ -2852,20 +2859,24 @@ fn run_statement(client: &mut Client, job: &Job) -> Result<Reply> {
 
 /// The reply of a failed setup: a takeover names the loss; an
 /// unreachable database answers what a client retries against.
-fn setup_error(setup: &Setup, ever_held: bool) -> Error {
+fn setup_error(setup: &mut Setup, ever_held: bool) -> Error {
     if matches!(setup.outcome, SetupOutcome::NoSchema) {
         return Error::FailedPrecondition(
             "the URL's search_path names no existing schema; create it first".into(),
         );
     }
     if matches!(setup.outcome, SetupOutcome::Unreachable) {
-        let waited = setup
-            .failed_sql
-            .as_deref()
-            .unwrap_or("the failing statement is unnamed");
-        return Error::Storage(Storage::busy(std::io::Error::other(format!(
-            "the database was unreachable at setup, waiting on:\n{waited}"
-        ))));
+        return match setup.failed.take() {
+            Some((sql, source)) => {
+                Error::Storage(Storage::busy(std::io::Error::other(SetupFailure {
+                    sql,
+                    source,
+                })))
+            }
+            None => Error::Storage(Storage::busy(std::io::Error::other(
+                "the database was unreachable at setup, and the failing statement is unnamed",
+            ))),
+        };
     }
     Error::FailedPrecondition(lost_message(ever_held).into())
 }
@@ -3185,7 +3196,9 @@ fn connect_exclusive(
     // server starts against a taken database sees it now, and not in the
     // errors of the first call a client makes.
     let client = spawn_client(url, ca, options, schema, true, Some(fence))?;
-    client.query_opt("SELECT 1", &[])?;
+    client
+        .query_opt("SELECT 1", &[])
+        .map_err(|e| named_step("the one-server lock's probe", "SELECT 1", e))?;
     Ok(client)
 }
 
@@ -3462,6 +3475,31 @@ pub(crate) fn map_pg_error(e: postgres::Error) -> Error {
     pg_error_of(code.as_deref(), e)
 }
 
+/// The setup's failure: the statement rides the message, and the
+/// database's own error - the SQLSTATE with it - stays the source
+/// (#905).
+#[derive(Debug)]
+struct SetupFailure {
+    sql: String,
+    source: postgres::Error,
+}
+
+impl std::fmt::Display for SetupFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the database was unreachable at setup, waiting on:\n{}",
+            self.sql
+        )
+    }
+}
+
+impl std::error::Error for SetupFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 /// An open step's failure: the step's name and statement ride the
 /// error's display, and the source stays the mapped engine error, whose
 /// own source is the database's error - the whole chain survives
@@ -3555,7 +3593,7 @@ fn pg_error_of_source(
         // deadline.
         Some("57014") => {
             tracing::warn!("the database gave the statement up: {source}");
-            Error::DeadlineExceeded(format!("the database kept the caller waiting: {source}"))
+            Error::DeadlineExceeded("the database kept the caller waiting".to_owned())
         }
         // A violation the code handles (a duplicate key, a check, a
         // foreign key) is one answer among many: it logs quietly.
@@ -3853,10 +3891,18 @@ fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
     // writer with no answer is the silent path the base budget exists
     // to prevent. The migration's own error comes first, and the
     // restore's failure answers when the migrations left none.
-    let restored = client.execute(
-        &format!("SET statement_timeout = '{}'", base_statement_timeout()),
-        &[],
-    );
+    let restored = client
+        .execute(
+            &format!("SET statement_timeout = '{}'", base_statement_timeout()),
+            &[],
+        )
+        .map_err(|e| {
+            named_step(
+                "the base budget's return",
+                "SET statement_timeout = <the open's budget>",
+                e,
+            )
+        });
     // The lock lives on the client's session: it goes back whatever the
     // migrations did. A client that died mid-migration lost the lock with
     // its connection, and the unlock names a lock the new connection
@@ -3875,7 +3921,13 @@ fn migrate_under_lock(client: &mut PgClient, allow: bool) -> Result<Option<(u32,
     // alone — and a role that may read the ledger but not create in the
     // schema still reaches the refusal instead of dying on the ledger's
     // DDL first.
-    let version = schema_version(client)?;
+    let version = schema_version(client).map_err(|e| {
+        named_step(
+            "the migration's version read",
+            "the schema_migrations ledger",
+            e,
+        )
+    })?;
     if version > PG_SCHEMA_VERSION {
         return Err(Error::FailedPrecondition(format!(
             "database schema version {version} is newer than this build \
@@ -3897,15 +3949,31 @@ fn migrate_under_lock(client: &mut PgClient, allow: bool) -> Result<Option<(u32,
     // The runner will write: a migration is the operator's ask, not a
     // lane's call, so its statements are not bounded by the open's
     // per-statement budget. `migrate` puts the base budget back.
-    client.execute("SET statement_timeout = 0", &[])?;
+    client
+        .execute("SET statement_timeout = 0", &[])
+        .map_err(|e| {
+            named_step(
+                "the migration window's budget lift",
+                "SET statement_timeout = 0",
+                e,
+            )
+        })?;
     // The ledger of the versions, made first, in its own transaction: a
     // migration that fails leaves the ledger and every version before it.
-    client.batch(
-        "CREATE TABLE IF NOT EXISTS schema_migrations (
+    client
+        .batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
              version BIGINT PRIMARY KEY,
              name    TEXT NOT NULL
          )",
-    )?;
+        )
+        .map_err(|e| {
+            named_step(
+                "the migration ledger's create",
+                "CREATE TABLE IF NOT EXISTS schema_migrations",
+                e,
+            )
+        })?;
     if version != 0 {
         tracing::info!(
             from_version = version,
@@ -3941,6 +4009,10 @@ fn migrate_under_lock(client: &mut PgClient, allow: bool) -> Result<Option<(u32,
         let mut derived = DerivedPending::default();
         let mut preload = std::collections::HashMap::new();
         let mut history = HistoryPending::default();
+        let step_name = PG_MIGRATION_NAMES
+            .get(usize::try_from(n).expect("a schema version fits in usize") - 1)
+            .copied()
+            .unwrap_or("unnamed");
         let mut tx = PgTx::begin(
             client,
             &mut pending,
@@ -3948,13 +4020,22 @@ fn migrate_under_lock(client: &mut PgClient, allow: bool) -> Result<Option<(u32,
             &mut preload,
             &mut history,
             None,
-        )?;
+        )
+        .map_err(|e| named_step("the migration's begin", "BEGIN", e))?;
         tx.c.batch(&format!(
             "{sql}\nINSERT INTO schema_migrations (version, name) \
              VALUES ({}, 'postgres schema')",
             i64::from(n)
-        ))?;
-        tx.commit()?;
+        ))
+        .map_err(|e| {
+            named_step(
+                "the migration itself",
+                &format!("migration {n} ({step_name})"),
+                e,
+            )
+        })?;
+        tx.commit()
+            .map_err(|e| named_step("the migration's commit", "COMMIT", e))?;
         if version != 0 {
             tracing::info!(
                 from_version = n - 1,
@@ -6337,9 +6418,9 @@ mod tests {
     fn a_search_path_that_names_no_schema_refuses_with_the_fix() {
         let url = crate::backend::test_hooks::test_url().unwrap();
         let mut client = Client::connect(&url, NoTls).unwrap();
-        let setup = super::Setup::new(Some("scion_test_missing"), true, &mut client);
+        let mut setup = super::Setup::new(Some("scion_test_missing"), true, &mut client);
         assert!(!setup.ok(), "a missing schema cannot hold the setup");
-        let error = super::setup_error(&setup, false);
+        let error = super::setup_error(&mut setup, false);
         assert!(
             error
                 .to_string()

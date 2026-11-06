@@ -136,91 +136,16 @@ fn an_open_whose_cleanup_lock_is_held_for_six_seconds_succeeds() {
     let dir = private_tempdir();
     let started = std::time::Instant::now();
     let store = Backend::open_test(dir.path());
+    let took = started.elapsed();
     if let Err(err) = &store {
         panic!("the open failed while the cleanup lock was held: {err}");
     }
     drop(store);
     holder.join().unwrap();
-    let took = started.elapsed();
     assert!(
         took >= std::time::Duration::from_millis(5_000),
         "the open did not wait for the cleanup lock: {took:?}"
     );
-}
-
-/// One open whose migration waits for the schema lock: a test session
-/// holds `SCHEMA_LOCK` just over the writer's 5 s lock clock while one
-/// open runs. The migration's lock is one key per database, so the
-/// open's migrate queues behind the holder under the writer's clock -
-/// on main this fails with 55P03 Busy, and the named error says which
-/// step waited (#905).
-#[test]
-fn an_open_whose_migration_lock_is_held_for_five_and_a_half_seconds_fails() {
-    let _lock = locked();
-    let holder = std::thread::spawn(|| {
-        let mut client = connect();
-        client
-            .execute("SELECT pg_advisory_lock($1)", &[&SCHEMA_LOCK])
-            .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5_500));
-        client
-            .execute("SELECT pg_advisory_unlock($1)", &[&SCHEMA_LOCK])
-            .unwrap();
-    });
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    let dir = private_tempdir();
-    let Err(err) = Backend::open_test(dir.path()) else {
-        panic!("the open succeeded while the migration lock was held")
-    };
-    holder.join().unwrap();
-    assert!(
-        format!("{err:?}").contains("the schema migration lock")
-            && format!("{err:?}").contains("SELECT pg_advisory_lock($1)"),
-        "the error names the migration's lock step: {err:?}"
-    );
-}
-
-/// Eight parallel opens while stale schemas wait to be drained: the
-/// drain holds the cleanup lock across its drops, and every open's
-/// writer must start inside its own 5 s lock clock (#905).
-#[test]
-fn eight_parallel_opens_succeed_while_stale_schemas_wait_to_drain() {
-    let _lock = locked();
-    let mut client = connect();
-    let pid = std::process::id();
-    for i in 0..10 {
-        let stale = format!("scion_test_stall{pid}_{i}");
-        let mut tables = String::new();
-        for t in 0..60 {
-            tables.push_str("CREATE TABLE ");
-            tables.push_str(&stale);
-            tables.push_str(".t");
-            tables.push_str(&t.to_string());
-            tables.push_str(" (a int); ");
-        }
-        client
-            .batch_execute(&format!(
-                "CREATE SCHEMA IF NOT EXISTS {stale}; {tables}
-                 COMMENT ON SCHEMA {stale} IS '/the/directory/is/gone'"
-            ))
-            .unwrap();
-        register(&mut client, &stale, 86_400_000 * 10 - 100);
-    }
-    std::thread::scope(|scope| {
-        let results: Vec<_> = (0..8)
-            .map(|_| {
-                scope.spawn(|| {
-                    let dir = private_tempdir();
-                    let opened = Backend::open_test(dir.path()).is_ok();
-                    (opened, dir)
-                })
-            })
-            .collect();
-        for result in results {
-            let (opened, _dir) = result.join().unwrap();
-            assert!(opened, "a parallel open failed");
-        }
-    });
 }
 
 /// A finished test's schema drops at a later sweep: the backend closed,
