@@ -1583,14 +1583,8 @@ impl Pg {
                 u64::try_from(key_started.elapsed().as_micros()).unwrap_or(u64::MAX),
             );
         }
-        let out = {
-            let held = {
-                let out = f(&mut tx);
-                crate::land_profile::lane_held(held_started.elapsed());
-                out
-            };
-            held
-        };
+        let out = f(&mut tx);
+        crate::land_profile::lane_held(held_started.elapsed());
         match out {
             Ok(value) => {
                 let unflushed = tx.cs_pending.as_deref().is_some_and(|p| !p.is_empty())

@@ -998,6 +998,14 @@ fn self_extra_render() -> Option<String> {
 }
 
 /// Serve the /metrics endpoint of one `Metrics` until `shutdown` ends.
+///
+/// # Errors
+///
+/// What the listener and the connections return.
+///
+/// # Panics
+///
+/// Never in practice: the response builder's parts are constant.
 pub async fn serve(
     listener: TcpListener,
     metrics: std::sync::Arc<Metrics>,
