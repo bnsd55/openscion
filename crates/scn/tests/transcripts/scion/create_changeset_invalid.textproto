@@ -1,5 +1,5 @@
 # A changeset that does not decode is malformed.
-since: v0.7
+since: unreleased
 method: Scion/CreateChangeset
 fixture: landed
 

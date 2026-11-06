@@ -64,12 +64,17 @@ private key"). One file per run, in this shape.
    the same. For the first release nothing is bumped; a later release
    bumps all five in one commit.
 
+4. Every transcript under `crates/scn/tests/transcripts/` that says
+   `since: unreleased` is set to the release's tag (RELEASING.md
+   "The release PR" 4).
+
    Done when: the PR carries the merged changelog, the dated section,
-   and the version step.
+   the version step, and no `since: unreleased` that this release
+   names.
 
    Notes: ___
 
-### R5 - Notes from the tagged commit, and the smoke (RELEASING.md "The release PR" 4-7)
+### R5 - Notes from the tagged commit, and the smoke (RELEASING.md "The release PR" 5-8)
 
 1. The GitHub release notes come from the version's `CHANGELOG.md`
    section read at the tagged commit, never a local working tree:
@@ -92,7 +97,7 @@ private key"). One file per run, in this shape.
 
    Notes: ___
 
-### R6 - The umask-002 run (RELEASING.md "The release PR" 6)
+### R6 - The umask-002 run (RELEASING.md "The release PR" 7)
 
 1. Once #302's CI job exists, it runs on the release commit and its
    green result is part of the release. Until it exists, this step

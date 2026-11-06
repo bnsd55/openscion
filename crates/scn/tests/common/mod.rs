@@ -243,6 +243,21 @@ impl Tiers {
         (self.daemon.upstream_calls(), self.cache.upstream_calls())
     }
 
+    /// The public halves of this set's ticket keys, hex, for a tier
+    /// started outside this process to verify the tickets it forwards.
+    pub(crate) fn ticket_public_keys(&self) -> Vec<String> {
+        self.verify_keys
+            .iter()
+            .map(|k| {
+                k.as_bytes().iter().fold(String::new(), |mut hex, b| {
+                    use std::fmt::Write as _;
+                    let _ = write!(hex, "{b:02x}");
+                    hex
+                })
+            })
+            .collect()
+    }
+
     /// Where the server, and the daemon, keep blob `id`.
     pub(crate) fn blob_paths(&self, id: BlobId) -> [PathBuf; 2] {
         let [server, node] = &self.dirs;

@@ -1,6 +1,6 @@
 # The Scion service answers the ref calls too: an unknown ref is
 # NOT_FOUND there as well.
-since: v0.7
+since: unreleased
 method: Scion/ResolveRef
 fixture: landed
 

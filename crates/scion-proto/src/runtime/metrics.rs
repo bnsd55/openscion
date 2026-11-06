@@ -159,6 +159,13 @@ pub struct Metrics {
     /// ran); it shares the free-bytes poll's failure policy.
     data_free_inodes: AtomicU64,
     data_free_inodes_set: std::sync::atomic::AtomicBool,
+    /// Seconds since the free-space poll's last good sample, set on
+    /// every poll tick (`data_free_sample_age_set` says whether any
+    /// sample landed). A stuck statvfs stops the samples but not the
+    /// poll, so this gauge is what makes the stuck sample visible and
+    /// alertable; the free values keep their last good readings.
+    data_free_sample_age: AtomicU64,
+    data_free_sample_age_set: std::sync::atomic::AtomicBool,
     /// Blobs the metadata names, as the latest refresh saw them
     /// (`blob_count_set` says whether any refresh ran).
     blob_count: AtomicU64,
@@ -353,6 +360,15 @@ impl Metrics {
         self.data_free_inodes_set.store(true, Ordering::Relaxed);
     }
 
+    /// Sets the free-space sample's age, from the latest poll tick. The
+    /// first good sample arms it; every tick after that refreshes it,
+    /// so a poll whose statvfs hangs grows the age while the free
+    /// values hold.
+    pub fn data_free_sample_age(&self, seconds: u64) {
+        self.data_free_sample_age.store(seconds, Ordering::Relaxed);
+        self.data_free_sample_age_set.store(true, Ordering::Relaxed);
+    }
+
     /// Sets the blob count the metadata names, from the latest refresh.
     pub fn set_blob_count(&self, blobs: u64) {
         self.blob_count.store(blobs, Ordering::Relaxed);
@@ -521,6 +537,15 @@ impl Metrics {
                  # TYPE scion_data_free_inodes gauge\n\
                  scion_data_free_inodes {}",
                 self.data_free_inodes.load(Ordering::Relaxed)
+            );
+        }
+        if self.data_free_sample_age_set.load(Ordering::Relaxed) {
+            let _ = writeln!(
+                text,
+                "# HELP scion_data_free_sample_age_seconds Seconds since the free-space poll's last good sample; a growing age says the poll's statvfs is stuck.\n\
+                 # TYPE scion_data_free_sample_age_seconds gauge\n\
+                 scion_data_free_sample_age_seconds {}",
+                self.data_free_sample_age.load(Ordering::Relaxed)
             );
         }
         if self.blob_count_set.load(Ordering::Relaxed) {

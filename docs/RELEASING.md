@@ -54,7 +54,13 @@ A release is cut through one PR from a branch named
    the first release nothing is bumped: the five already say 0.1.0,
    and the step is the check that they are equal. A later release
    bumps all five in one commit.
-4. **Notes regenerated from the tagged commit.** The release body is
+4. **Bump the corpus's `since: unreleased` headers.** Every
+   transcript under `crates/scn/tests/transcripts/` that says
+   `since: unreleased` names a behaviour that exists in this release:
+   set each one to the release's tag. The N-1 transcript legs refuse
+   an `unreleased` file on every N-1 side, so a release that forgets
+   this step leaves those behaviours unproven by the version matrix.
+5. **Notes regenerated from the tagged commit.** The release body is
    the notes file (`docs/release-notes/<version>.md`) read at the
    tagged commit — never from a local working tree or an edited copy —
    followed by one line pointing at the full change list: the
@@ -71,7 +77,7 @@ A release is cut through one PR from a branch named
    git show v0.1.0:CHANGELOG.md | awk \
      '/^## \[v0.1.0\]/{f=1} f && /^## \[/{if(++n==2) exit} f'
    ```
-5. **A clean-checkout build and quick-start smoke.** From a fresh
+6. **A clean-checkout build and quick-start smoke.** From a fresh
    clone of the tagged commit, build the workspace and run the
    README's `Try it` flow end to end (it needs the Postgres container
    the flow starts, so Docker runs on the machine doing this). The tagged commit is also the
@@ -81,10 +87,10 @@ A release is cut through one PR from a branch named
    --locked`); a release that ships binaries says that instead. Either
    way the notes point the operator at keeping the previous release's
    binaries beside the new ones, because a rollback needs them.
-6. **The umask-002 run.** #302 is closed by choice: the group-writable
+7. **The umask-002 run.** #302 is closed by choice: the group-writable
    rule stays fail-closed and the refusal names the chmod, so the
    release's umask-002 run proves the refusal, not an exception.
-7. **Benchmark numbers with their provenance.** A number that a
+8. **Benchmark numbers with their provenance.** A number that a
    release note states records the commit it measured, the OS, the
    filesystem, the dataset, the command, and the variance across runs.
    A release note never names the maintainer's machine.

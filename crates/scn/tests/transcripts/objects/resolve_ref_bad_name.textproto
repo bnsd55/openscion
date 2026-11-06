@@ -1,6 +1,6 @@
 # An empty ref name is malformed; a well-formed name the repo has no row
 # for is NOT_FOUND instead (the pinned unknown-ref file).
-since: v0.7
+since: v0.1
 method: Objects/ResolveRef
 fixture: landed
 tiers: refuse
