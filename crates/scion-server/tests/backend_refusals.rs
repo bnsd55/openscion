@@ -312,6 +312,80 @@ fn a_statement_sent_before_the_fatal_is_read_answers_the_transaction_was_lost() 
         .expect("a new transaction runs after the dead one was ended");
 }
 
+/// A statement whose own reply is the FATAL: its backend is terminated
+/// while the statement waits, so the database answers that very
+/// statement with the connection-fatal and the socket dies with it.
+/// The client's closed flag still reads open - the error is a database
+/// error - and main's early return handed the raw FATAL to the caller;
+/// the lost-transaction reply belongs there (#922).
+#[test]
+fn a_statement_whose_own_reply_is_the_fatal_answers_the_transaction_was_lost() {
+    let dir = scion_server::test_support::private_tempdir();
+    let store = Backend::open_test(dir.path()).unwrap();
+    store
+        .write(|c| c.create_repo("before").map(|_| ()))
+        .unwrap();
+    let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+    let schema = Backend::test_schema(dir.path());
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
+    let killer = std::thread::spawn(move || {
+        let mut c = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+        // The killer's own transaction holds a lock the writer's insert
+        // must wait for, so the writer's statement is pending on the
+        // server when the terminate lands.
+        c.batch_execute(&format!("BEGIN; LOCK TABLE {schema}.repos IN SHARE MODE;"))
+            .unwrap();
+        locked_tx.send(()).unwrap();
+        // The wait is confirmed in pg_locks: the writer's insert is
+        // blocked on the repos relation.
+        let waiting = "SELECT l.pid FROM pg_locks l
+             JOIN pg_class c ON c.oid = l.relation
+             JOIN pg_stat_activity a ON a.pid = l.pid
+             WHERE NOT l.granted AND c.relname = 'repos'
+               AND a.application_name = $1";
+        let pid = (0..500)
+            .find_map(|_| {
+                let row = c.query_opt(waiting, &[&schema]).unwrap()?;
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                Some(row.get::<_, i32>(0))
+            })
+            .expect("the writer's insert waits on the locked repos table");
+        // The terminate answers the writer's pending statement with the
+        // FATAL, and the killer's lock goes away so the reconnect's own
+        // statements run.
+        c.execute("SELECT pg_terminate_backend($1)", &[&pid])
+            .unwrap();
+        c.batch_execute("ROLLBACK").unwrap();
+    });
+    locked_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the killer locked the repos table");
+    let error = store
+        .commit(|c| -> Result<(), scion_server::Error> {
+            let first = c.create_repo("again");
+            assert!(
+                matches!(&first, Err(scion_server::Error::Unavailable(message))
+                    if message.contains("lost with the connection")),
+                "a statement whose own reply is the FATAL answers that the \
+                 transaction was lost: {first:?}"
+            );
+            Err(scion_server::Error::NotFound("ends the transaction".into()))
+        })
+        .expect_err("the transaction was lost");
+    killer.join().unwrap();
+    assert!(
+        matches!(error, scion_server::Error::NotFound(_)),
+        "{error:?}"
+    );
+    // The store recovers without a restart.
+    store
+        .commit(|c| c.create_repo("after").map(|_| ()))
+        .expect("a new transaction runs after the dead one was ended");
+    store
+        .read(|c| c.repo_id("after").map(|_| ()))
+        .expect("the repo the new transaction made is there");
+}
+
 /// A reconnect ends the transaction of the dead session, and nothing of
 /// the old transaction runs on the new session: every statement of the
 /// dead transaction fails until its caller ends it, a new BEGIN opens a
