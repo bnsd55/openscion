@@ -1053,7 +1053,6 @@ mod tests {
     use crate::meta::testing;
     use crate::pg::damage;
     use crate::store::{DERIVE_WALKS_CAP, FSYNC_LEAVES_DRIVE_CACHE};
-    use crate::tree::RootTree;
     use crate::tree::{self, RootTree};
 
     thread_local! {
