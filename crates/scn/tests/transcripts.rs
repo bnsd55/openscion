@@ -79,13 +79,20 @@ fn parse(at: &Path, text: &str) -> Transcript {
             panic!("{}:{} has no `:`: {line}", at.display(), n + 1);
         };
         let (key, value) = (key.trim(), value.trim());
+        // `if let` guards are Rust 1.88+; the project's minimum is 1.88,
+        // so the prefixes come out of the match (train 69's MSRV red).
+        if let Some(rest) = key.strip_prefix("request.") {
+            request.push((rest.to_owned(), value.to_owned()));
+            continue;
+        }
+        if let Some(rest) = key.strip_prefix("reply.") {
+            expect.push((format!("reply.{rest}"), value.to_owned()));
+            continue;
+        }
         match key {
             "since" => since = Some(value.to_owned()),
             "method" => method = Some(value.to_owned()),
             "fixture" => fixture = Some(value.to_owned()),
-            k if let Some(rest) = k.strip_prefix("request.") => {
-                request.push((rest.to_owned(), value.to_owned()));
-            }
             "status" | "end" | "resume_status" => {
                 expect.push((key.to_owned(), value.to_owned()));
             }
@@ -97,9 +104,6 @@ fn parse(at: &Path, text: &str) -> Transcript {
                 at.display(),
                 n + 1
             ),
-            k if let Some(rest) = k.strip_prefix("reply.") => {
-                expect.push((format!("reply.{rest}"), value.to_owned()));
-            }
             "objects" | "entries" => expect.push((key.to_owned(), value.to_owned())),
             other => panic!("{}:{} names unknown key {other}", at.display(), n + 1),
         }
