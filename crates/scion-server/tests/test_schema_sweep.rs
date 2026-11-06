@@ -540,7 +540,9 @@ fn a_write_that_loses_the_lane_key_answers_busy_and_leaves_no_transaction_open()
         held = connect()
             .query(
                 "SELECT 1 FROM pg_locks WHERE locktype = 'advisory'
-                 AND classid = 0 AND objid = hashtext($1::text || ':gc')
+                 AND classid = ((hashtext($1::text || ':gc')::bigint >> 32)
+                                & 4294967295)
+                 AND objid = (hashtext($1::text || ':gc') & 4294967295)
                  AND granted",
                 &[&format!("{schema}:gc")],
             )
