@@ -328,7 +328,6 @@ fn walk(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
 /// `tiers: refuse` files get a fresh cache and daemon, so a warm disk or
 /// a relay that does not check signatures cannot answer for them; the
 /// rest share one warm pair, cold only for the first file that touches it.
-#[test]
 /// The per-tier run for one file on one pair: the tier refusal, the warm
 /// daemon's serve pin, then the file's own expectations.
 fn run_objects_across_tiers(tiers: &common::Tiers, t: &Transcript, f: &Fixture, file: &Path) {
@@ -390,6 +389,7 @@ fn run_objects_across_tiers(tiers: &common::Tiers, t: &Transcript, f: &Fixture, 
     }
 }
 
+#[test]
 fn the_corpus_answers_as_its_files_say() {
     let corpus = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -432,7 +432,6 @@ fn the_corpus_answers_as_its_files_say() {
         };
         let tier_refuses = tier_value("tiers") == Some("refuse");
         let tiers_fresh = tier_value("tiers") == Some("fresh");
-        let daemon_warm_serves = tier_value("daemon_warm") == Some("serves");
         if t.method.starts_with("Objects/") {
             run_objects_across_tiers(&tiers, &t, &f, &file);
             if tiers_fresh {
