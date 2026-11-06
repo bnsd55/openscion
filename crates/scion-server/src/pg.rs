@@ -959,7 +959,7 @@ const LOCK_TIMEOUT_FOR_KEY: &str = "60s";
 /// statement, in force before the key's wait begins (`lock_timeout` is
 /// read when the wait starts), and the key's statement - the OFFSET 0
 /// data dependency and the 5 s restore - is byte-identical to the
-/// two-statement shape (tests/pg_guard_timeouts.rs pins the plan and
+/// two-statement shape (`tests/pg_guard_timeouts.rs` pins the plan and
 /// the timing). A wait the batch loses arrives as one error from
 /// `open_transaction`, whose ROLLBACK leaves no transaction behind.
 const LANE_KEY_STATEMENT: &str = "SELECT set_config('lock_timeout', '5s', true) \

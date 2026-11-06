@@ -12,7 +12,7 @@
 use std::path::Path;
 
 use scion_server::test_support::private_tempdir;
-use scion_server::{Backend, Error, StorageClass};
+use scion_server::{Backend, Error};
 
 /// The database's URL, and a client that reaches it. Every test here
 /// needs no store of its own, only the registry and the catalog.
@@ -733,6 +733,54 @@ fn an_open_keeps_no_lock_on_the_bare_migration_key() {
     drop(store);
 }
 
+/// The lane key's holder row, polled until it appears; a poll that
+/// gives up prints every granted advisory row beside the split the
+/// confirm computed, so a red names the two numbers.
+fn lane_key_holder(schema: &str) -> Vec<postgres::Row> {
+    let confirm = "SELECT 1 FROM pg_locks WHERE locktype = 'advisory'
+                 AND classid = ((hashtext($1::text || ':gc')::bigint >> 32)
+                                & 4294967295)
+                 AND objid = (hashtext($1::text || ':gc') & 4294967295)
+                 AND granted";
+    let mut held = Vec::new();
+    for _ in 0..250 {
+        held = connect().query(confirm, &[&schema]).unwrap();
+        if !held.is_empty() {
+            return held;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let seen = connect()
+        .query(
+            "SELECT classid, objid, objsubid, mode FROM pg_locks
+             WHERE locktype = 'advisory' AND granted",
+            &[],
+        )
+        .unwrap();
+    for row in &seen {
+        eprintln!(
+            "DEBUG the lane key's holder: classid {} objid {} objsubid {} mode {}",
+            row.get::<_, u32>(0),
+            row.get::<_, u32>(1),
+            row.get::<_, u32>(2),
+            row.get::<_, String>(3),
+        );
+    }
+    let want = connect()
+        .query(
+            "SELECT ((hashtext($1::text || ':gc')::bigint >> 32) & 4294967295),
+                    (hashtext($1::text || ':gc') & 4294967295)",
+            &[&schema],
+        )
+        .unwrap();
+    eprintln!(
+        "DEBUG the confirm wants: classid {} objid {}",
+        want[0].get::<_, u32>(0),
+        want[0].get::<_, u32>(1)
+    );
+    held
+}
+
 /// A write that loses the lane key answers the same busy as before the
 /// key rode the open batch, and the transaction the batch opened is
 /// rolled back: the writer's session holds no transaction when the
@@ -760,30 +808,13 @@ fn a_write_that_loses_the_lane_key_answers_busy_and_leaves_no_transaction_open()
             .batch_execute("ROLLBACK")
             .expect("the holder's transaction ends");
     });
-    // The hold is seen in pg_locks before the write runs. hashtext is a
-    // signed 32-bit value; promoted to the advisory's bigint key, a
-    // negative hash lands in the lock table as classid 4294967295, so
-    // the confirm splits the key with the shift-and-mask the table
-    // shows.
-    let mut held = Vec::new();
-    for _ in 0..250 {
-        held = connect()
-            .query(
-                "SELECT 1 FROM pg_locks WHERE locktype = 'advisory'
-                 AND classid = ((hashtext($1::text || ':gc')::bigint >> 32)
-                                & 4294967295)
-                 AND objid = (hashtext($1::text || ':gc') & 4294967295)
-                 AND granted",
-                &[&format!("{schema}:gc")],
-            )
-            .unwrap();
-        if !held.is_empty() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    assert_eq!(held.len(), 1, "the rival writer holds the lane key");
+    // The hold is seen in pg_locks before the write runs: hashtext is a
+    // signed 32-bit value, and its bigint promotion splits into the
+    // lock table's two ints, so the confirm computes the split it
+    // expects and a poll that gives up prints the row beside it.
+    let held = lane_key_holder(&schema);
     use scion_server::test_support::meta::Meta as _;
+    assert_eq!(held.len(), 1, "the rival writer holds the lane key");
     let error = store
         .write(|_c| Ok(()))
         .expect_err("the write loses the lane key");
