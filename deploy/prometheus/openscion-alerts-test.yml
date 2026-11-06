@@ -242,6 +242,57 @@ tests:
         alertname: DiskFull
         exp_alerts: []
 
+  # A11 InodesLow: under 100,000 fires after its 15m for; just above
+  # 100,000 does not.
+  - interval: 1m
+    input_series:
+      - series: "scion_data_free_inodes"
+        values: "90000+0x20"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: InodesLow
+        exp_alerts:
+          - exp_labels:
+              severity: high
+            exp_annotations:
+              response: >-
+                The filesystem that holds the data directory is under 10% of
+                the inode headroom one blob per inode needs
+                (docs/operations.md#the-inode-budget). Stop creating repos
+                and give the store more inodes before new blobs fail.
+  - interval: 1m
+    input_series:
+      - series: "scion_data_free_inodes"
+        values: "110000+0x20"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: InodesLow
+        exp_alerts: []
+
+  # A12 InodesCritical: under 10,000 fires; just above does not.
+  - interval: 1m
+    input_series:
+      - series: "scion_data_free_inodes"
+        values: "9000+0x20"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: InodesCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              response: >-
+                New blobs fail soon (docs/operations.md#the-inode-budget).
+                Stop writes and move stores or grow the filesystem now.
+  - interval: 1m
+    input_series:
+      - series: "scion_data_free_inodes"
+        values: "11000+0x20"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: InodesCritical
+        exp_alerts: []
+
   # A10 BlobSyncSlow: a mean fsync of exactly 2 s must not fire; 5 s
   # must.
   - interval: 1m

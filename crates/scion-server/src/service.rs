@@ -130,11 +130,32 @@ fn spawn_free_space_poll(
         let mut stop = stop;
         loop {
             let data = data.clone();
-            let free = tokio::task::spawn_blocking(move || crate::store::free_bytes(&data));
+            let free = tokio::task::spawn_blocking(move || {
+                (
+                    crate::store::free_bytes(&data),
+                    crate::store::free_inodes(&data),
+                )
+            });
             match free.await {
-                Ok(Ok(bytes)) => metrics.data_free_bytes(bytes),
-                Ok(Err(e)) => {
-                    tracing::warn!(error = %e, "cannot stat the data directory's free space");
+                Ok((bytes, inodes)) => {
+                    // The bytes value stands on its own: an inode failure
+                    // must not drop it (the same one-failure-per-gauge
+                    // policy both gauges share).
+                    match bytes {
+                        Ok(bytes) => metrics.data_free_bytes(bytes),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "cannot stat the data directory's free space");
+                        }
+                    }
+                    match inodes {
+                        // A filesystem without an inode table exports no
+                        // gauge, so the inode alerts stay quiet there.
+                        Ok(Some(inodes)) => metrics.data_free_inodes(inodes),
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::warn!(error = %e, "cannot stat the data directory's free inodes");
+                        }
+                    }
                 }
                 Err(e) => tracing::warn!(error = %e, "the free-space poll failed"),
             }

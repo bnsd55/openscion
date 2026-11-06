@@ -440,11 +440,19 @@ fn disk_and_inodes(data: &Path) -> Answer {
             data.display()
         ));
     }
-    Answer::Ok(format!(
-        "{} free and {inodes} inodes on {}",
-        human_bytes(bytes),
-        data.display()
-    ))
+    // A filesystem without an inode table (btrfs) names no inode count.
+    match inodes {
+        Some(inodes) => Answer::Ok(format!(
+            "{} free and {inodes} inodes on {}",
+            human_bytes(bytes),
+            data.display()
+        )),
+        None => Answer::Ok(format!(
+            "{} free on {} (the filesystem has no inode table)",
+            human_bytes(bytes),
+            data.display()
+        )),
+    }
 }
 
 /// Bytes as the unit an operator reads at a glance.
