@@ -1832,12 +1832,13 @@ impl Scion for ScionService {
         &self,
         request: Request<scion_proto::v1::LandRequest>,
     ) -> Result<Response<LandResponse>, Status> {
-        // The profile's Pre phase opens at the handler's first line: the
+        // The profile's Pre phases open at the handler's first line: the
         // checks and the audit intent are the land's own work, and the
         // phase sum can be read against the client's latency only when
         // they are in it. The wall rides the worker's closure: the trace
         // is thread-local and the land runs on a blocking thread.
         let handler_started = std::time::Instant::now();
+        let checks_started = handler_started;
         // The job checks it in its walks: a request timeout, or a client
         // that cancels, drops this call but not a job that is running. The
         // guard ends the deadline when this call ends or is dropped.
@@ -1854,6 +1855,8 @@ impl Scion for ScionService {
         // is refused with `invalid_argument`, and the audit owes no
         // intent for a call that named nothing to land.
         let changeset = parse_id(&req.changeset_id, "changeset_id")?;
+        let pre_checks = checks_started.elapsed();
+        let intent_started = std::time::Instant::now();
         let principal = caller.0.clone();
         // The answer the intent will owe: armed before the intent is
         // recorded, so a call cut while the intent's append is in
@@ -1887,6 +1890,7 @@ impl Scion for ScionService {
         // The intent was not made durable, so no result line is owed:
         // the drop must answer nothing.
         .inspect_err(|_| answer.store(LAND_VOID, Ordering::Release))?;
+        let pre_intent = intent_started.elapsed();
         let req = land::LandRequest {
             changeset,
             repo: req.repo,
@@ -1900,6 +1904,7 @@ impl Scion for ScionService {
         // does not depend on this handler living: the job needs its own
         // copies of what the lines name.
         let pre = handler_started.elapsed();
+        crate::land_profile::seed_pre_parts(pre_checks, pre_intent);
         let (job_request_id, job_principal) = (request_id.clone(), principal.clone());
         let (job_repo, job_ref) = (repo.clone(), target_ref.clone());
         let audit = self.audit.clone();

@@ -20,9 +20,14 @@ use std::time::Duration;
 /// statements issued outside a land.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Phase {
-    /// The handler's own work before the land's phases: the caller and
-    /// quota checks, the id parses, and the audit intent's append.
-    Pre,
+    /// The handler's checks: the caller and quota checks, the id
+    /// parses, the reader rules.
+    PreChecks,
+    /// The handler's audit intent append, before the land records.
+    PreIntent,
+    /// The rest of the handler's pre-land wall: the worker's dispatch
+    /// and the permit wait.
+    PreRest,
     /// The `record_land` commit, before the ref's slot.
     Record,
     /// Waiting for the ref's slot lock. No statements: the wait is
@@ -50,8 +55,10 @@ pub(crate) enum Phase {
     Other,
 }
 
-pub(crate) const PHASES: [Phase; 12] = [
-    Phase::Pre,
+pub(crate) const PHASES: [Phase; 14] = [
+    Phase::PreChecks,
+    Phase::PreIntent,
+    Phase::PreRest,
     Phase::Record,
     Phase::SlotWait,
     Phase::Outcome,
@@ -73,7 +80,9 @@ impl Phase {
     /// The field name the log line and the harness use.
     pub(crate) fn name(self) -> &'static str {
         match self {
-            Phase::Pre => "pre",
+            Phase::PreChecks => "pre_checks",
+            Phase::PreIntent => "pre_intent",
+            Phase::PreRest => "pre_rest",
             Phase::Record => "record",
             Phase::SlotWait => "slot_wait",
             Phase::Outcome => "outcome",
@@ -113,13 +122,21 @@ pub(crate) struct Trace {
 thread_local! {
     static CURRENT: Cell<Option<Trace>> = const { Cell::new(None) };
     static PRE: Cell<Option<std::time::Duration>> = const { Cell::new(None) };
+    static PRE_PARTS: Cell<Option<(std::time::Duration, std::time::Duration)>> =
+        const { Cell::new(None) };
 }
 
 /// Hands the handler's pre-land wall to the land's trace: the handler
 /// measures it on its own task (the trace cannot cross threads), and
-/// the next `measure` on this thread takes it into the Pre phase.
+/// the next `measure` on this thread takes it into the Pre phases.
 pub(crate) fn seed_pre(pre: std::time::Duration) {
     PRE.with(|c| c.set(Some(pre)));
+}
+
+/// Splits the pre-land wall into its parts: the checks and the audit
+/// intent's append; the rest is the dispatch and the permit wait.
+pub(crate) fn seed_pre_parts(checks: std::time::Duration, intent: std::time::Duration) {
+    PRE_PARTS.with(|c| c.set(Some((checks, intent))));
 }
 
 impl Trace {
@@ -143,8 +160,19 @@ impl Trace {
         let mut trace = Trace::default();
         PRE.with(|c| {
             if let Some(pre) = c.get() {
-                trace.slots[Phase::Pre.slot()].ns = pre.as_nanos();
+                let mut total = pre.as_nanos();
                 c.set(None);
+                PRE_PARTS.with(|p| {
+                    if let Some((checks, intent)) = p.get() {
+                        let checks_ns = checks.as_nanos().min(total);
+                        let intent_ns = intent.as_nanos().min(total - checks_ns);
+                        trace.slots[Phase::PreChecks.slot()].ns = checks_ns;
+                        trace.slots[Phase::PreIntent.slot()].ns = intent_ns;
+                        total -= checks_ns + intent_ns;
+                        p.set(None);
+                    }
+                });
+                trace.slots[Phase::PreRest.slot()].ns = total;
             }
         });
         Self::put(&trace);
