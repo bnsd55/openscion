@@ -8,7 +8,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{Client, Error, Marker, P, Path, Pg, PgClient, Result, connect_with, map_pg_error};
-use crate::error::Storage;
 
 /// The name prefix of every schema the test helpers make. The sweep
 /// drops nothing outside it, and the test schema helper spells it: a
@@ -265,20 +264,6 @@ pub(crate) fn register_test_schema(
 /// any connection narrows its search path to it. Runs the stale-schema
 /// sweep once per process, at the first open.
 #[cfg(any(test, feature = "test-hooks"))]
-/// The setup statement's text rides its error: a flake names the
-/// statement that waited, not only the failure's class (#905).
-fn named(sql: &str, e: postgres::Error) -> Error {
-    match map_pg_error(e) {
-        Error::Storage(_) => Error::Storage(Storage::busy(std::io::Error::other(format!(
-            "the setup statement waited or failed:\n{sql}"
-        )))),
-        Error::DeadlineExceeded(_) => {
-            Error::DeadlineExceeded(format!("the setup statement waited past its clock:\n{sql}"))
-        }
-        other => other,
-    }
-}
-
 fn prepare_test_schema(url: &str, schema: &str, dir: &Path) -> Result<()> {
     let preparer = connect(url, None)?;
     preparer.raw(Box::new({
@@ -288,7 +273,9 @@ fn prepare_test_schema(url: &str, schema: &str, dir: &Path) -> Result<()> {
                 "SET application_name TO '{name}';
                  SELECT pg_advisory_lock_shared(hashtext('{name}'))"
             );
-            client.batch_execute(&sql).map_err(|e| named(&sql, e))
+            client
+                .batch_execute(&sql)
+                .map_err(|e| named_step("the test schema's name lock", &sql, e))
         }
     }))?;
     // The run's own sweep runs once; every preparation then drains a
@@ -301,9 +288,16 @@ fn prepare_test_schema(url: &str, schema: &str, dir: &Path) -> Result<()> {
         let dir = dir.to_path_buf();
         move |client| {
             let sql = format!("CREATE SCHEMA IF NOT EXISTS {name};");
-            client.batch_execute(&sql).map_err(|e| named(&sql, e))?;
-            register_test_schema(client, &name, &dir)
-                .map_err(|e| named(&format!("the registration of {name}"), e))
+            client
+                .batch_execute(&sql)
+                .map_err(|e| named_step("the test schema's create", &sql, e))?;
+            register_test_schema(client, &name, &dir).map_err(|e| {
+                named_step(
+                    "the test schema's registration",
+                    "SELECT pg_advisory_xact_lock(CLEAN_LOCK); ...",
+                    e,
+                )
+            })
         }
     }))?;
     Ok(())
@@ -318,6 +312,14 @@ fn prepare_test_schema(url: &str, schema: &str, dir: &Path) -> Result<()> {
 /// # Errors
 ///
 /// What the database returns for the maker's connect.
+/// The step of the open that failed, with its statement, wrapped in the
+/// class the SQLSTATE maps to - the test helper's re-export of the
+/// metadata side's helper (#905).
+#[cfg(any(test, feature = "test-hooks"))]
+fn named_step(step: &'static str, sql: &str, e: postgres::Error) -> Error {
+    crate::pg::named_step(step, sql, e)
+}
+
 #[cfg(any(test, feature = "test-hooks"))]
 pub(crate) fn sweep_stale_test_schemas(url: &str) -> Result<(usize, usize)> {
     let preparer = connect(url, None)?;

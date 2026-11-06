@@ -108,11 +108,11 @@ fn wait_unnamed(client: &mut postgres::Client, schema: &str) {
 const CLEAN_LOCK: i64 = 0x5343_494F_4E53_5445;
 
 /// One open whose registration waits for the cleanup lock: a test
-/// session holds CLEAN_LOCK for six seconds while an open runs, longer
-/// than the writer's 5 s lock clock. The registration runs on the
-/// preparer's session, which carries no lock clock, so the open must
-/// succeed - slow, not failed. A 55P03 here names the statement that
-/// waited (#905).
+/// session holds CLEAN_LOCK just over the writer's 5 s lock clock while
+/// an open runs. The test guards the preparer's absence of a lock
+/// clock: the registration runs on the preparer's session, which
+/// carries none, so the open must succeed - slow, not failed. A 55P03
+/// here would name the statement that waited (#905).
 #[test]
 fn an_open_whose_cleanup_lock_is_held_for_six_seconds_succeeds() {
     let _lock = locked();
@@ -121,7 +121,7 @@ fn an_open_whose_cleanup_lock_is_held_for_six_seconds_succeeds() {
         client
             .execute("SELECT pg_advisory_lock($1)", &[&CLEAN_LOCK])
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_secs(6));
+        std::thread::sleep(std::time::Duration::from_millis(5_500));
         client
             .execute("SELECT pg_advisory_unlock($1)", &[&CLEAN_LOCK])
             .unwrap();
@@ -137,7 +137,7 @@ fn an_open_whose_cleanup_lock_is_held_for_six_seconds_succeeds() {
     holder.join().unwrap();
     let took = started.elapsed();
     assert!(
-        took >= std::time::Duration::from_secs(5),
+        took >= std::time::Duration::from_millis(5_000),
         "the open did not wait for the cleanup lock: {took:?}"
     );
 }
