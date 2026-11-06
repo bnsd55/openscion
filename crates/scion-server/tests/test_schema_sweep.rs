@@ -595,17 +595,25 @@ fn an_open_waits_while_an_older_builds_migration_holds_the_bare_key() {
             .unwrap();
     });
     // The hold is seen in pg_locks, not assumed from a sleep: the open
-    // starts only once the older build's turn is real.
-    let holding = connect()
-        .query(
-            &format!(
-                "SELECT 1 FROM pg_locks WHERE locktype = 'advisory'
-                 AND classid = {held_hi} AND objid = {held_lo}
-                 AND mode = 'ExclusiveLock' AND granted"
-            ),
-            &[],
-        )
-        .unwrap();
+    // starts only once the older build's turn is real. The holder may
+    // still be connecting, so the poll waits for the row.
+    let mut holding = Vec::new();
+    for _ in 0..250 {
+        holding = connect()
+            .query(
+                &format!(
+                    "SELECT 1 FROM pg_locks WHERE locktype = 'advisory'
+                     AND classid = {held_hi} AND objid = {held_lo}
+                     AND mode = 'ExclusiveLock' AND granted"
+                ),
+                &[],
+            )
+            .unwrap();
+        if !holding.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     assert_eq!(holding.len(), 1, "the older build's turn is real");
     let dir = private_tempdir();
     let started = std::time::Instant::now();
