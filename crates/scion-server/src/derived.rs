@@ -575,10 +575,6 @@ pub(crate) fn backfill<K: Kind>(
     repo: &str,
     cs: ChangesetId,
 ) -> Result<DeriveReport> {
-    use crate::graph::CommitGraph;
-    use crate::history::PathHistory;
-    use crate::meta::Meta as _;
-    use crate::tree::RootTree;
     let repo = store.read(|c| c.repo_id(repo))?;
     let (_value, written) = fill_until::<K>(store, repo, cs, None)?;
     // Every step removes at most a step's worth, and a short step means
@@ -1052,9 +1048,12 @@ mod tests {
     use scion_core::{BlobId, FileState, IdentityTime, RepoPath};
 
     use super::*;
+    use crate::graph::CommitGraph;
+    use crate::history::PathHistory;
     use crate::meta::testing;
     use crate::pg::damage;
     use crate::store::{DERIVE_WALKS_CAP, FSYNC_LEAVES_DRIVE_CACHE};
+    use crate::tree::RootTree;
     use crate::tree::{self, RootTree};
 
     thread_local! {
