@@ -43,6 +43,10 @@
 #      version's cache writes opens as the other version's daemon seed,
 #      and a checkout through that daemon reads the repo whole.
 #
+#   7. the transcript corpus's N-1 legs (issue #890): every file whose
+#      `since:` is at or under N-1 replays against the N-1 server and
+#      its tiers, and the N-1 tiers in front of the N server - the
+#      harness is this tree's runner, PREV_BIN names the N-1 binaries.
 # Left out on purpose, per docs/compatibility.md:
 #   - tier <-> tier (a chain of caches): the policy's chain rule follows
 #     from every hop, and each hop is pair 2 here.
@@ -770,4 +774,14 @@ pair_5 prev "$PREV_BIN" "$BIN"
 pair_6 cur "$BIN" "$PREV_BIN"
 pair_6 prev "$PREV_BIN" "$BIN"
 
-summary "version matrix passed: N-1 $ref against N $(git -C "$ROOT" rev-parse --short HEAD), all six pairs (scn, tier, daemon, store, ticket window, snapshot window)"
+# Leg 7 (issue #890): the corpus's N-1 legs. The harness is this tree's
+# runner (cargo test builds it from HEAD), PREV_BIN names the N-1
+# binaries the pairs built, and the same Postgres database server backs
+# the N-1 server's schema. A qualifying file that answers differently
+# on the N-1 side fails here, not in an operator's upgrade.
+note "corpus N-1 legs"
+PREV_BIN="$PREV_BIN" SCION_TEST_POSTGRES_URL="$SCION_TEST_POSTGRES_URL" \
+  cargo test -p open-scion --test transcripts the_n1_side -- --nocapture ||
+  die "leg 7 (corpus N-1 legs): the runner failed"
+
+summary "version matrix passed: N-1 $ref against N $(git -C "$ROOT" rev-parse --short HEAD), all six pairs (scn, tier, daemon, store, ticket window, snapshot window) and the corpus's N-1 legs"

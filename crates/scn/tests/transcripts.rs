@@ -53,10 +53,8 @@ const CORPUS: &str = "transcripts";
 struct Transcript {
     /// The file's own path: the Land  is per file.
     path: String,
-    /// The release the behaviour exists since; the N-1 run skips files
-    /// newer than the server it runs.
-    /// SHORTCUT: unread until the N-1 matrix slice; that slice reads it.
-    #[allow(dead_code)]
+    /// The release the behaviour exists since; the N-1 run runs the
+    /// files at or under the N-1 version and skips the newer ones.
     since: String,
     /// `Service/Method`, as the proto names them.
     method: String,
@@ -390,9 +388,15 @@ async fn assert_tier_refuses(url: &str, t: &Transcript, file: &Path) {
 /// file's refs through the daemon with its valid ticket, and the blob
 /// checked as arrived, so the pin below tests a warm store wherever the
 /// file sorts.
-fn warm_daemon_for(tiers: &common::Tiers, t: &Transcript, f: &Fixture, file: &Path) {
-    tiers.runtime.block_on(async {
-        let mut client = connect(&tiers.socket).await;
+fn warm_daemon_for(
+    runtime: &tokio::runtime::Runtime,
+    socket: &str,
+    t: &Transcript,
+    f: &Fixture,
+    file: &Path,
+) {
+    runtime.block_on(async {
+        let mut client = connect(socket).await;
         let mut stream = client
             .get_objects(
                 request_with_ticket(t, f, f.ticket.clone()).expect("the file's request builds"),
@@ -401,14 +405,9 @@ fn warm_daemon_for(tiers: &common::Tiers, t: &Transcript, f: &Fixture, file: &Pa
             .expect("the warm-up call answers")
             .into_inner();
         let mut warmed = Vec::new();
-        read_part_stream(
-            &tiers.socket,
-            &mut stream,
-            &mut warmed,
-            std::time::Instant::now(),
-        )
-        .await
-        .expect("the warm-up stream reads");
+        read_part_stream(socket, &mut stream, &mut warmed, std::time::Instant::now())
+            .await
+            .expect("the warm-up stream reads");
         let want = t
             .request
             .iter()
@@ -426,27 +425,33 @@ fn warm_daemon_for(tiers: &common::Tiers, t: &Transcript, f: &Fixture, file: &Pa
 
 /// The per-tier run for one file on one pair: the tier refusal, the warm
 /// daemon's serve pin, then the file's own expectations.
-fn run_objects_across_tiers(tiers: &common::Tiers, t: &Transcript, f: &Fixture, file: &Path) {
+fn run_objects_across_tiers(
+    runtime: &tokio::runtime::Runtime,
+    urls: [&str; 3],
+    t: &Transcript,
+    f: &Fixture,
+    file: &Path,
+) {
     let tier_refuses = t.expect.iter().any(|(k, v)| k == "tiers" && v == "refuse");
     let daemon_warm_serves = t
         .expect
         .iter()
         .any(|(k, v)| k == "daemon_warm" && v == "serves");
-    for url in [&tiers.server, &tiers.cache_url, &tiers.socket] {
-        if tier_refuses && url != &tiers.server {
+    for url in urls {
+        if tier_refuses && url != urls[0] {
             // A tier serves GetObjects only: its refusal of the
             // other calls is the contract (section 7.1).
-            tiers.runtime.block_on(assert_tier_refuses(url, t, file));
+            runtime.block_on(assert_tier_refuses(url, t, file));
             continue;
         }
-        if url == &tiers.socket && daemon_warm_serves {
+        if url == urls[2] && daemon_warm_serves {
             // A daemon checks no ticket by design: it serves what its
             // store holds (docs/protocol-v1.md, section 7.1's daemon
             // paragraph). The setup warmed this daemon with the file's
             // valid ticket; pin the serve of the unsigned ticket by the
             // stream, not by the call's headers: a daemon that answers
             // OK and ends the stream with an error must not pass.
-            tiers.runtime.block_on(async {
+            runtime.block_on(async {
                 let mut client = connect(url).await;
                 let want = t
                     .request
@@ -482,8 +487,7 @@ fn run_objects_across_tiers(tiers: &common::Tiers, t: &Transcript, f: &Fixture, 
             });
             continue;
         }
-        tiers
-            .runtime
+        runtime
             .block_on(run_objects(t, url, f))
             .unwrap_or_else(|e| panic!("{} at {}: {e}", file.display(), url));
     }
@@ -538,9 +542,15 @@ fn the_corpus_answers_as_its_files_say() {
                 .iter()
                 .any(|(k, v)| k == "daemon_warm" && v == "serves")
             {
-                warm_daemon_for(&tiers, &t, &f, &file);
+                warm_daemon_for(&tiers.runtime, &tiers.socket, &t, &f, &file);
             }
-            run_objects_across_tiers(&tiers, &t, &f, &file);
+            run_objects_across_tiers(
+                &tiers.runtime,
+                [&tiers.server, &tiers.cache_url, &tiers.socket],
+                &t,
+                &f,
+                &file,
+            );
             if tiers_fresh {
                 // The same file again on a cache and daemon no earlier
                 // file touched: the same server and keys, so the file's
@@ -577,7 +587,514 @@ fn the_corpus_answers_as_its_files_say() {
     }
 }
 
+/// The files the N-1 legs run: every file whose `since` is at or under
+/// the N-1 version. A Scion file's fixture names the changeset this
+/// tree's store landed, and the N-1 side's changeset id is not plumbed
+/// into the harness yet (the next slice pairs it through the ref), so
+/// such a file stays out of the legs and the count reports it. Returns
+/// the qualifying files, the Scion count, and the corpus's oldest
+/// `since`.
+fn pick_n1_files(
+    files: &[PathBuf],
+    prev: (u64, u64, u64),
+) -> (Vec<(PathBuf, Transcript)>, usize, String) {
+    let mut qualifying = Vec::new();
+    let mut scion_files = 0usize;
+    let mut oldest = None;
+    for file in files {
+        let text = fs::read_to_string(file).expect("the transcript opens");
+        let t = parse(file, &text);
+        oldest = Some(match oldest {
+            Some(o) if o <= t.since => o,
+            _ => t.since.clone(),
+        });
+        if version_of(&t.since) > prev {
+            continue;
+        }
+        if t.method.starts_with("Scion/") {
+            scion_files += 1;
+            continue;
+        }
+        qualifying.push((file.clone(), t));
+    }
+    (
+        qualifying,
+        scion_files,
+        oldest.expect("the corpus is not empty"),
+    )
+}
+
+/// The N-1 legs of the corpus (Refs #890): every file whose `since` is
+/// at or under the N-1 version replays against the N-1 server and its
+/// tiers, and the N-1 tiers in front of this server - the real upgrade
+/// order. This tree's runner is the harness; the N-1 side contributes
+/// its binaries. A difference on the N-1 side is either a wrong `since`
+/// in the file or a break of N-1 compatibility; the failure names the
+/// file, the side and both answers. Skipped green when `PREV_BIN` is
+/// unset: the legs belong to the version-matrix job, which builds N-1
+/// and points `PREV_BIN` at it.
+#[test]
+fn the_n1_side_answers_as_its_files_say() {
+    let Ok(prev_bin) = std::env::var("PREV_BIN") else {
+        eprintln!("PREV_BIN unset: the N-1 legs run in the version-matrix job");
+        return;
+    };
+    let prev_bin = PathBuf::from(prev_bin);
+    let work = common::private_tempdir();
+    let dir = work.path();
+
+    // The N-1 version decides which files qualify: a file's `since`
+    // must be at or under it. The binary says it itself, so no env
+    // wiring can lose it.
+    let out = Command::new(prev_bin.join("scion-server"))
+        .arg("--version")
+        .output()
+        .expect("the N-1 scion-server runs");
+    let printed = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    let prev = version_of(
+        printed
+            .rsplit(' ')
+            .next()
+            .expect("the version line has a number"),
+    );
+    let corpus = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join(CORPUS);
+    let mut files = Vec::new();
+    walk(&corpus, &mut files).expect("the corpus holds only transcripts");
+    files.sort();
+    let (qualifying, scion_files, oldest) = pick_n1_files(&files, prev);
+    if qualifying.is_empty() {
+        eprintln!(
+            "the N-1 legs ran nothing: the corpus's oldest since is {oldest:?}, the N-1 side is {prev:?} ({printed})",
+        );
+        return;
+    }
+
+    // Leg 1: the qualifying files against the N-1 server and its tiers.
+    let stack = start_n1_stack(&prev_bin, dir);
+    let runtime = tokio::runtime::Runtime::new().expect("the runtime starts");
+    let _entered = runtime.enter();
+    let fixture = n1_fixture(&runtime, &stack.server);
+    let mut ran = 0usize;
+    for (file, t) in &qualifying {
+        run_objects_across_tiers(
+            &runtime,
+            [&stack.server, &stack.cache, &stack.socket],
+            t,
+            &fixture,
+            file,
+        );
+        ran += 1;
+    }
+
+    // Leg 2: the N-1 tiers in front of this server - the upgrade order.
+    // The corpus's landed store and tickets are the fixture; the N-1
+    // cache verifies the tickets of this server's keys, the N-1 daemon
+    // forwards to it.
+    let (tiers, base) = landed();
+    let _entered2 = tiers.runtime.enter();
+    let leg2 = start_n1_tiers(&tiers, &prev_bin, dir);
+    for (file, t) in &qualifying {
+        let f = Fixture {
+            ticket: mint(&tiers, base.cs).0,
+            ..base.clone()
+        };
+        run_objects_across_tiers(
+            &tiers.runtime,
+            [&tiers.server, &leg2.cache, &leg2.socket],
+            t,
+            &f,
+            file,
+        );
+        ran += 1;
+    }
+    drop(leg2);
+    eprintln!(
+        "the N-1 legs ran {ran} file-runs over the two legs; {scion_files} Scion files stayed out (their fixture needs the N-1 changeset id, the next slice)"
+    );
+}
+
+/// Leg 2's tiers: the N-1 cache in front of this server, the N-1 daemon
+/// in front of that cache. The cache verifies this server's ticket keys,
+/// which `tiers` holds; the children die with the return value.
+fn start_n1_tiers(tiers: &common::Tiers, prev_bin: &Path, dir: &Path) -> N1Leg2 {
+    let keys: Vec<String> = tiers
+        .ticket_public_keys()
+        .into_iter()
+        .map(|k| format!("--ticket-public-key={k}"))
+        .collect();
+    let cache_log = dir.join("tiers-cache.log");
+    let cache = spawn_logged(
+        prev_bin.join("scion-cache"),
+        std::iter::empty()
+            .chain(["--listen", "127.0.0.1:0", "--upstream", &tiers.server])
+            .chain(keys.iter().map(String::as_str)),
+        &[],
+        &cache_log,
+    );
+    let cport = serving_port(&cache_log);
+    let relay_dir = dir.join("tiers");
+    fs::create_dir_all(&relay_dir).expect("the leg-2 tiers dir is made");
+    make_private(&relay_dir);
+    let relay_sock = dir.join("tier.sock");
+    let daemon = spawn_logged(
+        prev_bin.join("scion-daemon"),
+        [
+            "--data",
+            &relay_dir.display().to_string(),
+            "--socket",
+            &relay_sock.display().to_string(),
+            "--upstream",
+            &format!("http://127.0.0.1:{cport}"),
+        ],
+        &[],
+        &dir.join("tiers.log"),
+    );
+    wait_serving(&dir.join("tiers.log"));
+    N1Leg2 {
+        cache: format!("http://127.0.0.1:{cport}"),
+        socket: format!("unix://{}", relay_sock.display()),
+        _children: vec![cache, daemon],
+    }
+}
+
+/// The version a `since:` or a binary names, as (major, minor, patch);
+/// a missing part is zero, so `v0.7` is `(0, 7, 0)`.
+fn version_of(v: &str) -> (u64, u64, u64) {
+    let one = |p: Option<&str>| p.and_then(|p| p.parse().ok()).unwrap_or(0);
+    let mut parts = v.trim().trim_start_matches('v').split('.');
+    (one(parts.next()), one(parts.next()), one(parts.next()))
+}
+
+/// Leg 2's tiers: the cache url, the daemon's socket url, and the
+/// children that keep them alive.
+struct N1Leg2 {
+    cache: String,
+    socket: String,
+    _children: Vec<Child>,
+}
+
+/// A child killed when the test ends, so a red run leaves no server.
+struct Child(std::process::Child);
+
+impl Drop for Child {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Starts BIN with ARGS, its log at PATH. The caller reads readiness
+/// with `serving_port` or `wait_serving`.
+fn spawn_logged<I, S>(bin: PathBuf, args: I, env: &[(&str, &str)], log: &Path) -> Child
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    use std::process::Stdio;
+    let file = fs::File::create(log).expect("the log opens");
+    let err = file.try_clone().expect("the log clones");
+    let mut cmd = Command::new(bin);
+    cmd.args(args);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let c = cmd
+        .stdout(Stdio::from(file))
+        .stderr(Stdio::from(err))
+        .spawn()
+        .expect("the binary starts");
+    Child(c)
+}
+
+/// Reads the `serving listen=127.0.0.1:PORT` line of LOG, waiting up to
+/// 30 s, so a slow start is not a race.
+fn serving_port(log: &Path) -> u16 {
+    for _ in 0..300 {
+        if let Ok(text) = fs::read_to_string(log) {
+            for line in text.lines().rev() {
+                let Some(rest) = line.split_once("serving listen=127.0.0.1:") else {
+                    continue;
+                };
+                if let Some(port) = rest
+                    .1
+                    .split([' ', ':', ','])
+                    .next()
+                    .and_then(|p| p.parse().ok())
+                {
+                    return port;
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("{}, no serving listen line in 30 s", log.display());
+}
+
+/// Waits for LOG's first ` serving` line, up to 30 s: a daemon serves a
+/// socket, not a port, and its serving line is the readiness.
+fn wait_serving(log: &Path) {
+    for _ in 0..300 {
+        if let Ok(text) = fs::read_to_string(log)
+            && text.contains(" serving")
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("{}, no serving line in 30 s", log.display());
+}
+
+/// CHMOD 0700 on DIR: the daemon refuses a data directory open to
+/// others.
+fn make_private(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).expect("the mode sets");
+}
+
+/// Runs one git command, failing the test on a non-zero exit.
+fn git(args: &[&str]) {
+    let out = Command::new("git").args(args).output().expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {:?}: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Runs BIN with ARGS to completion, failing the test on a non-zero
+/// exit, with ENV set for the call.
+fn run_to_end(bin: &Path, args: &[&str], env: &[(&str, &str)]) {
+    let mut cmd = Command::new(bin);
+    cmd.args(args);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("the binary runs");
+    assert!(
+        out.status.success(),
+        "{} {:?}: {}",
+        bin.display(),
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The N-1 stack: the repo imported into its own database, the ticket
+/// keys made, the server serving, the cache in front of it, the daemon
+/// in front of the cache. Returns the three urls; the children live in
+/// the stack and die with it.
+struct N1Stack {
+    server: String,
+    cache: String,
+    socket: String,
+    _children: Vec<Child>,
+}
+
+/// The N-1 server's repository: one file of the fixture's bytes, one
+/// commit. The ids are content-addressed, so the fixture's names
+/// resolve on the N-1 side too. Returns the tree's path.
+fn n1_repo(dir: &Path) -> PathBuf {
+    let src = dir.join("src");
+    fs::create_dir_all(&src).expect("the src tree is made");
+    git(&["init", "-q", "-b", "main", &src.display().to_string()]);
+    git(&[
+        "-C",
+        &src.display().to_string(),
+        "config",
+        "user.name",
+        "n1",
+    ]);
+    git(&[
+        "-C",
+        &src.display().to_string(),
+        "config",
+        "user.email",
+        "n1@localhost",
+    ]);
+    fs::create_dir_all(src.join("src")).expect("the file's dir is made");
+    fs::write(src.join("src/main.rs"), b"pub fn main() {}\n").expect("the file writes");
+    git(&["-C", &src.display().to_string(), "add", "-A"]);
+    git(&["-C", &src.display().to_string(), "commit", "-qam", "first"]);
+    src
+}
+
+/// The N-1 server's database: one of this run's own, as version-matrix's
+/// `pg_db_for` makes one - the two builds share the database server,
+/// never its rows. Returns the address.
+fn n1_database() -> String {
+    let base = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL names the test database");
+    let base = base.split('?').next().expect("the base url").to_owned();
+    let db = format!("scion_n1_{}", std::process::id());
+    let admin = format!(
+        "{}/postgres",
+        base.rsplit_once('/').expect("the url has a path").0
+    );
+    run_to_end(
+        Path::new("psql"),
+        &[
+            &admin,
+            "-X",
+            "-q",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-c",
+            &format!("DROP DATABASE IF EXISTS \"{db}\""),
+            "-c",
+            &format!("CREATE DATABASE \"{db}\""),
+        ],
+        &[],
+    );
+    format!("{base}/{db}")
+}
+
+fn start_n1_stack(prev_bin: &Path, dir: &Path) -> N1Stack {
+    let pg = n1_database();
+    let src = n1_repo(dir);
+
+    let server_dir = dir.join("server");
+    fs::create_dir_all(&server_dir).expect("the data dir is made");
+    make_private(&server_dir);
+    let scion = prev_bin.join("scion-server");
+    run_to_end(
+        &scion,
+        &[
+            "--data",
+            &server_dir.display().to_string(),
+            "import",
+            &src.display().to_string(),
+        ],
+        &[("SCION_POSTGRES_URL", &pg)],
+    );
+    let key = dir.join("ticket.key");
+    let pub_hex = String::from_utf8_lossy(
+        &Command::new(&scion)
+            .args([
+                "--data",
+                &server_dir.display().to_string(),
+                "ticket-key",
+                "--out",
+                &key.display().to_string(),
+            ])
+            .env("SCION_POSTGRES_URL", &pg)
+            .output()
+            .expect("the ticket key prints")
+            .stdout,
+    )
+    .trim()
+    .to_owned();
+
+    let server_log = dir.join("server.log");
+    let server = spawn_logged(
+        scion.clone(),
+        [
+            "--data",
+            &server_dir.display().to_string(),
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--ticket-key",
+            &key.display().to_string(),
+        ],
+        &[("SCION_POSTGRES_URL", &pg)],
+        &server_log,
+    );
+    let sport = serving_port(&server_log);
+    let server_url = format!("http://127.0.0.1:{sport}");
+
+    let cache_log = dir.join("cache.log");
+    let cache = spawn_logged(
+        prev_bin.join("scion-cache"),
+        [
+            "--listen",
+            "127.0.0.1:0",
+            "--upstream",
+            &server_url,
+            "--ticket-public-key",
+            &pub_hex,
+        ],
+        &[],
+        &cache_log,
+    );
+    let cport = serving_port(&cache_log);
+    let cache_url = format!("http://127.0.0.1:{cport}");
+
+    let relay_dir = dir.join("daemon");
+    fs::create_dir_all(&relay_dir).expect("the daemon dir is made");
+    make_private(&relay_dir);
+    let relay_sock = dir.join("daemon.sock");
+    let relay_log = dir.join("daemon.log");
+    let daemon = spawn_logged(
+        prev_bin.join("scion-daemon"),
+        [
+            "--data",
+            &relay_dir.display().to_string(),
+            "--socket",
+            &relay_sock.display().to_string(),
+            "--upstream",
+            &cache_url,
+        ],
+        &[],
+        &relay_log,
+    );
+    wait_serving(&relay_log);
+    let socket_url = format!("unix://{}", relay_sock.display());
+
+    N1Stack {
+        server: server_url,
+        cache: cache_url,
+        socket: socket_url,
+        _children: vec![server, cache, daemon],
+    }
+}
+
+/// The N-1 side's fixture: the ref's changeset, then the root tree and
+/// the ticket it names, resolved from the N-1 server like the client
+/// does. The blob's bytes are the corpus's, so its names resolve.
+fn n1_fixture(runtime: &tokio::runtime::Runtime, server: &str) -> Fixture {
+    runtime.block_on(async {
+        let mut client = connect(server).await;
+        let ref_reply = client
+            .resolve_ref(scion_proto::v1::ResolveRefRequest {
+                repo: common::REPO.into(),
+                name: "main".into(),
+            })
+            .await
+            .expect("the ref resolves")
+            .into_inner();
+        let cs = scion_core::ChangesetId::from_bytes(
+            ref_reply
+                .changeset_id
+                .try_into()
+                .expect("the cs is 32 bytes"),
+        );
+        let tree_reply = client
+            .get_root_tree(scion_proto::v1::GetRootTreeRequest {
+                repo: common::REPO.into(),
+                changeset_id: cs.as_bytes().to_vec(),
+            })
+            .await
+            .expect("the root tree answers")
+            .into_inner();
+        let tree = tree_reply.tree_id.try_into().expect("the tree is 32 bytes");
+        let content = b"pub fn main() {}\n".to_vec();
+        Fixture {
+            blob: BlobId::of(&content),
+            content,
+            tree,
+            cs,
+            missing: missing_id(0xab),
+            unsigned: unsigned_of(&tree_reply.ticket),
+            ticket: tree_reply.ticket,
+        }
+    })
+}
+
 use std::path::PathBuf;
+use std::process::Command;
 
 type ScionClientOf = ScionClient<InterceptedService<Channel, Bearer>>;
 
