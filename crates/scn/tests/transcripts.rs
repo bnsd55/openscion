@@ -1332,7 +1332,7 @@ fn request_with_ticket(
     let mut req = GetObjectsRequest::default();
     for (path, value) in &t.request {
         match path.as_str() {
-            "ticket" => req.ticket = ticket.to_owned(),
+            "ticket" => req.ticket.clone_from(ticket),
             "refs" => req.refs.push(object_ref(&resolve(value, f))?),
             "accept" => {
                 req.accept.push(match resolve(value, f).as_str() {
