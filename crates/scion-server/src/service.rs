@@ -169,9 +169,11 @@ fn spawn_free_space_poll(
         // its blocking thread, and the poll waits it out instead of
         // parking a new thread per tick.
         let mut in_flight: Option<tokio::task::JoinHandle<FreeSample>> = None;
-        // When the last good sample landed. The first good sample arms
-        // the age gauge; every tick refreshes it, so a stuck sample
-        // grows the age while the free values hold.
+        // When the last good sample landed. Before it, the age counts
+        // from the poll's own start, so the gauge arms on the first
+        // tick and a statvfs that never lands a first sample still
+        // grows the age — the never-landed case the alert exists for.
+        let armed_at = std::time::Instant::now();
         let mut last_good: Option<std::time::Instant> = None;
         loop {
             if in_flight.is_none() {
@@ -218,10 +220,9 @@ fn spawn_free_space_poll(
                     );
                 }
             }
-            if let Some(at) = last_good {
-                let age = at.elapsed().as_secs();
-                metrics.data_free_sample_age(age);
-            }
+            let at = last_good.unwrap_or(armed_at);
+            let age = at.elapsed().as_secs();
+            metrics.data_free_sample_age(age);
             tokio::select! {
                 () = tokio::time::sleep(free_space_poll_period()) => {}
                 _ = stop.changed() => break,
@@ -2511,6 +2512,72 @@ mod tests {
             spins += 1;
             assert!(spins < 100, "the poll never took another sample");
         }
+    }
+
+    /// The age gauge exists before any sample lands: a statvfs that
+    /// hangs from the poll's first tick grows the age from the poll's
+    /// start while the free gauges stay absent, so the stuck alert can
+    /// fire in the never-landed case. Before the boot-arming, the gauge
+    /// armed only with the first good sample and this read had no
+    /// series — the red proof on main.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_age_gauge_counts_from_boot_while_no_sample_lands() {
+        const PERIOD: u64 = 50;
+        let dir = crate::test_support::private_tempdir();
+        let metrics = Arc::new(Metrics::default());
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(());
+        FREE_SPACE_POLL_OVERRIDE.store(PERIOD, Ordering::Relaxed);
+        FREE_SPACE_STAT_BOUND_OVERRIDE.store(2 * PERIOD, Ordering::Relaxed);
+        // The statvfs hangs before the poll's first sample: the park is
+        // armed before the poll starts.
+        let park = crate::store::ParkFreeStat::now(dir.path().to_path_buf());
+        spawn_free_space_poll(
+            std::path::PathBuf::from(dir.path()),
+            Arc::clone(&metrics),
+            stop_rx,
+        );
+        let mut spins = 0;
+        let mut first: Option<u64> = None;
+        loop {
+            tokio::time::sleep(Duration::from_millis(PERIOD)).await;
+            let text = metrics.render();
+            let line = text
+                .lines()
+                .find(|l| l.starts_with("scion_data_free_sample_age_seconds "));
+            let Some(line) = line else {
+                spins += 1;
+                assert!(
+                    spins < 100,
+                    "the age gauge never armed before a sample landed"
+                );
+                continue;
+            };
+            let age: u64 = line
+                .rsplit(' ')
+                .next()
+                .unwrap()
+                .parse()
+                .expect("the age gauge renders a number");
+            let Some(before) = first else {
+                assert!(
+                    !text.contains("scion_data_free_bytes "),
+                    "no sample landed, so the free gauge must be absent: {text}"
+                );
+                first = Some(age);
+                continue;
+            };
+            if age > before {
+                break;
+            }
+            // The gauge counts whole seconds: a tick at the same second
+            // reads equal, so the wait runs a few real seconds.
+            spins += 1;
+            assert!(
+                spins < 300,
+                "the age froze while nothing landed: {before} -> {age}"
+            );
+        }
+        drop(park);
     }
 
     /// Receives one step's go signal, or panics naming the step: a
