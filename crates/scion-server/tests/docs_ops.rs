@@ -413,20 +413,7 @@ fn every_alert_response_anchor_resolves() {
     );
 }
 
-/// Every heading of the guide, as GitHub slugs it: lowercased, spaces
-/// and dots to dashes, other punctuation dropped.
-/// An alert anchor that names a heading with a hyphen in it resolves:
-/// GitHub keeps the hyphen, so the check's slug rule must too.
-#[test]
-fn an_alert_anchor_resolves_a_hyphenated_heading() {
-    let doc = "### A stuck free-space sample\n\nEach free-space sample.\n";
-    let slugs = headings(doc);
-    assert!(
-        slugs.iter().any(|h| h == "a-stuck-free-space-sample"),
-        "the hyphenated heading's GitHub slug is missing from {slugs:?}"
-    );
-}
-
+/// Every heading of the guide, as GitHub slugs it (docs_common::github_slug).
 fn headings(doc: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in doc.lines() {
@@ -437,6 +424,18 @@ fn headings(doc: &str) -> Vec<String> {
         out.push(docs_common::github_slug(heading));
     }
     out
+}
+
+/// An alert anchor that names a heading with a hyphen in it resolves:
+/// GitHub keeps the hyphen, so the check's slug rule must too.
+#[test]
+fn an_alert_anchor_resolves_a_hyphenated_heading() {
+    let doc = "### A stuck free-space sample\n\nEach free-space sample.\n";
+    let slugs = headings(doc);
+    assert!(
+        slugs.iter().any(|h| h == "a-stuck-free-space-sample"),
+        "the hyphenated heading's GitHub slug is missing from {slugs:?}"
+    );
 }
 
 /// The command-line extractor: continuations join, other tools pass,

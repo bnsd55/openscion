@@ -1,9 +1,12 @@
 //! Common to the suites that read the docs: the rules the docs'
 //! checks share, so a link that renders on GitHub also resolves here.
 
-/// GitHub's slug of one heading's text: punctuation drops, formatting
+/// GitHub's slug of one heading's text: punctuation and formatting
 /// marks drop, each run of whitespace maps to one hyphen, and a hyphen
-/// or an underscore in the heading stays. GitHub's own rule.
+/// in the heading stays. GitHub's own rule, with one marked limit: an
+/// underscore is dropped here where GitHub keeps one inside a word
+/// (`SCION_TOKEN` -> `scion_token`); no heading in the repo has one,
+/// and the rule grows it when one lands.
 pub(crate) fn github_slug(text: &str) -> String {
     let mut out = String::new();
     let mut last_space = false;
@@ -33,8 +36,9 @@ mod tests {
     #[test]
     fn a_slug_follows_the_github_rules() {
         assert_eq!(super::github_slug("6. What to watch"), "6-what-to-watch");
-        // Punctuation and formatting drop; digits, letters, `-` and `_` stay.
-        // Each space maps to one hyphen, and a kept hyphen stays.
+        // Punctuation and formatting drop; digits, letters and `-` stay.
+        // Each space maps to one hyphen, and a kept hyphen stays. An
+        // underscore is the rule's marked limit (the module's doc).
         assert_eq!(
             super::github_slug("The `Meta` trait (v1)"),
             "the-meta-trait-v1"
