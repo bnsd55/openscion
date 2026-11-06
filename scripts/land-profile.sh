@@ -319,7 +319,7 @@ for name in $names; do
       function val(file, gauge,   line, kv, v) {
         v = 0
         while ((getline line < file) > 0)
-          if (line ~ ("^" gauge "{")) { split(line, kv, " "); v += kv[2]; }
+          if (line ~ ("^" gauge)) { split(line, kv, " "); v += kv[2]; }
         close(file)
         return v
       }
