@@ -213,6 +213,7 @@ cell() {
   curl -fsS "http://127.0.0.1:$SERVER_METRICS_PORT/metrics" \
     > "$WORK/metrics-$name-after.txt" || die "no metrics after the bench"
   window_end=$(date +%s)
+  echo "$((window_end - window_start))" > "$WORK/window-$name.txt"
   psql "$SCION_PG_URL" -X -A -t -c "SELECT wal_sync, wal_sync_time FROM pg_stat_wal" \
     > "$WORK/wal-$name-after.txt" || die "no wal after the bench"
   psql "$SCION_PG_URL" -X -A -t \
@@ -364,7 +365,7 @@ for name in $names; do
   {
     echo ""
     echo "## the write lane in $name (per land)"
-    awk -v before="$before" -v after="$after" -v secs="$((window_end - window_start))" '
+    awk -v before="$before" -v after="$after" -v secs="$(cat "$WORK/window-$name.txt" 2> /dev/null || echo 0)" '
       function val(file, gauge,   line, kv, v) {
         v = 0
         while ((getline line < file) > 0)
