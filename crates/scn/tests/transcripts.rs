@@ -771,11 +771,7 @@ fn the_n1_side_answers_as_its_files_say() {
         };
         let index = ran;
         let fresh = || {
-            let keys: Vec<String> = tiers
-                .ticket_public_keys()
-                .into_iter()
-                .map(|k| format!("--ticket-public-key={k}"))
-                .collect();
+            let keys: Vec<String> = tiers.ticket_public_keys();
             n1_fresh_pair_keys(&prev_bin, &dir, index, &tiers.server, &keys)
         };
         run_one_object_file(
@@ -1102,11 +1098,15 @@ fn n1_database() -> (N1Db, String) {
     let base = std::env::var("SCION_TEST_POSTGRES_URL")
         .expect("SCION_TEST_POSTGRES_URL names the test database");
     let base = base.split('?').next().expect("the base url").to_owned();
+    // The base names a database in its path; the N-1 database replaces
+    // that last segment, as the script's pg_db_for does.
+    let stem = base
+        .rsplit_once('/')
+        .expect("the url has a path")
+        .0
+        .to_owned();
     let db = format!("scion_n1_{}", std::process::id());
-    let admin = format!(
-        "{}/postgres",
-        base.rsplit_once('/').expect("the url has a path").0
-    );
+    let admin = format!("{stem}/postgres");
     run_to_end(
         Path::new("psql"),
         &[
@@ -1127,7 +1127,7 @@ fn n1_database() -> (N1Db, String) {
             admin,
             db: db.clone(),
         },
-        format!("{base}/{db}"),
+        format!("{stem}/{db}"),
     )
 }
 
