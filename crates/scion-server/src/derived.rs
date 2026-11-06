@@ -575,7 +575,10 @@ pub(crate) fn backfill<K: Kind>(
     repo: &str,
     cs: ChangesetId,
 ) -> Result<DeriveReport> {
+    use crate::graph::CommitGraph;
+    use crate::history::PathHistory;
     use crate::meta::Meta as _;
+    use crate::tree::RootTree;
     let repo = store.read(|c| c.repo_id(repo))?;
     let (_value, written) = fill_until::<K>(store, repo, cs, None)?;
     // Every step removes at most a step's worth, and a short step means
@@ -1616,10 +1619,22 @@ mod tests {
             matches!(membership, Error::NotFound(_)),
             "no changeset row in `other`"
         );
-        let derived_row = store
-            .read(|c| Ok(c.get_derived(ChangedPathsV1::NAME, 1, child_id)?.is_some()))
+        let derived_rows = store
+            .read(|c| {
+                Ok([
+                    c.get_derived(RootTree::NAME, RootTree::VERSION, child_id)?
+                        .is_some(),
+                    c.get_derived(CommitGraph::NAME, CommitGraph::VERSION, child_id)?
+                        .is_some(),
+                    c.get_derived(PathHistory::NAME, PathHistory::VERSION, child_id)?
+                        .is_some(),
+                ])
+            })
             .unwrap();
-        assert!(!derived_row, "no derived row for the refused child");
+        assert!(
+            derived_rows.iter().all(|stored| !stored),
+            "no derived row for the refused child: {derived_rows:?}"
+        );
     }
 
     #[test]
