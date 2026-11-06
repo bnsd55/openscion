@@ -386,7 +386,9 @@ fn warm_daemon_for(tiers: &common::Tiers, t: &Transcript, f: &Fixture, file: &Pa
     tiers.runtime.block_on(async {
         let mut client = connect(&tiers.socket).await;
         let mut stream = client
-            .get_objects(request_with_ticket(t, f, &f.ticket).expect("the file's request builds"))
+            .get_objects(
+                request_with_ticket(t, f, f.ticket.clone()).expect("the file's request builds"),
+            )
             .await
             .expect("the warm-up call answers")
             .into_inner();
