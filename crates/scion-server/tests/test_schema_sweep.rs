@@ -505,3 +505,56 @@ fn the_drain_reaches_past_the_schemas_it_keeps() {
         );
     }
 }
+
+/// One open whose migration waits for its schema's migration lock: a
+/// session holds the schema's own migration key until the open has
+/// returned, so the writer's 5 s clock - not a fixed sleep - is the
+/// race. The open of the held schema fails with the named error, the
+/// migration's lock step and its statement; an open of another schema
+/// during the same hold succeeds: the migrations touch only their own
+/// schema, so two schemas never take turns (#905).
+#[test]
+fn an_open_waits_for_its_own_schemas_migration_lock_and_not_for_another_s() {
+    let _lock = locked();
+    let dir = private_tempdir();
+    let held = Backend::test_migration_lock(dir.path()).unwrap();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let mut client = connect();
+        client
+            .execute("SELECT pg_advisory_lock($1)", &[&held])
+            .unwrap();
+        // The hold lasts until the open has returned: the writer's
+        // clock is the race, not a sleep.
+        let _ = released.recv();
+        client
+            .execute("SELECT pg_advisory_unlock($1)", &[&held])
+            .unwrap();
+    });
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let started = std::time::Instant::now();
+    let Err(err) = Backend::open_test(dir.path()) else {
+        panic!("the open succeeded while its schema's migration lock was held");
+    };
+    let took = started.elapsed();
+    // Another schema's open is not the holder's business: its migrate
+    // takes its own schema's key, inside the hold.
+    let other = private_tempdir();
+    let other_open = Backend::open_test(other.path());
+    drop(release);
+    holder.join().unwrap();
+    assert!(
+        format!("{err:?}").contains("the schema migration lock")
+            && format!("{err:?}").contains("SELECT pg_advisory_lock($1)"),
+        "the error names the migration's lock step: {err:?}"
+    );
+    assert!(
+        took >= std::time::Duration::from_millis(5_000),
+        "the open did not wait out its schema's clock: {took:?}"
+    );
+    assert!(
+        other_open.is_ok(),
+        "another schema's open succeeds during the hold: {:?}",
+        other_open.err()
+    );
+}

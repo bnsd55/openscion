@@ -47,6 +47,14 @@ impl Backend {
     pub fn test_server_lock(data: &Path) -> Result<i64> {
         Ok(crate::pg::schema_lock_key(&test_schema(data)))
     }
+    /// The advisory-lock key of the test schema's migrations, for the
+    /// test that takes it from its own connection, as a wedged
+    /// migration would.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn test_migration_lock(data: &Path) -> Result<i64> {
+        Ok(crate::pg::migration_lock_key(&test_schema(data)))
+    }
     /// A test backend of `data`, as a process that does not land: it
     /// takes no one-server lock, like an import beside a server.
     ///
