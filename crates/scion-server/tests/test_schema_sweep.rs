@@ -787,6 +787,7 @@ fn lane_key_holder(schema: &str) -> Vec<postgres::Row> {
 /// error lands (#782).
 #[test]
 fn a_write_that_loses_the_lane_key_answers_busy_and_leaves_no_transaction_open() {
+    use scion_server::test_support::meta::Meta as _;
     let _lock = locked();
     let dir = private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
@@ -799,8 +800,7 @@ fn a_write_that_loses_the_lane_key_answers_busy_and_leaves_no_transaction_open()
         let mut client = connect();
         client
             .batch_execute(&format!(
-                "BEGIN; SELECT pg_advisory_xact_lock(hashtext('{}' || ':gc'));",
-                escaped
+                "BEGIN; SELECT pg_advisory_xact_lock(hashtext('{escaped}' || ':gc'));"
             ))
             .unwrap();
         let _ = released.recv();
@@ -813,7 +813,6 @@ fn a_write_that_loses_the_lane_key_answers_busy_and_leaves_no_transaction_open()
     // lock table's two ints, so the confirm computes the split it
     // expects and a poll that gives up prints the row beside it.
     let held = lane_key_holder(&schema);
-    use scion_server::test_support::meta::Meta as _;
     assert_eq!(held.len(), 1, "the rival writer holds the lane key");
     let error = store
         .write(|_c| Ok(()))
