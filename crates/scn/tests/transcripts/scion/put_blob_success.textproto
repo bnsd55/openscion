@@ -1,0 +1,11 @@
+# One blob stored. The blob_id is the ID of the bytes the messages
+# carried.
+since: v0.7
+method: Scion/PutBlob
+fixture: landed
+
+request.repo: r
+request.data: $blob_bytes
+
+status: ok
+reply.blob_id: $blob

@@ -1,0 +1,9 @@
+# A kind that is not TREE or BLOB is malformed.
+since: v0.7
+method: Objects/GetObjects
+fixture: landed
+
+request.ticket: $ticket
+request.refs: kind=7 id=$blob path=src/main.rs
+
+status: invalid_argument

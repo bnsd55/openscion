@@ -1,0 +1,9 @@
+# A changeset that does not decode is malformed.
+since: v0.7
+method: Scion/CreateChangeset
+fixture: landed
+
+request.repo: r
+request.changeset: aabb
+
+status: invalid_argument

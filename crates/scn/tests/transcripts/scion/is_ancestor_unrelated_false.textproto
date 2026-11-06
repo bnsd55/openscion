@@ -1,0 +1,10 @@
+# A changeset the repo does not have is NOT_FOUND, on either side.
+since: v0.7
+method: Scion/IsAncestor
+fixture: landed
+
+request.repo: r
+request.ancestor_id: id=$missing
+request.descendant_id: id=$cs
+
+status: not_found

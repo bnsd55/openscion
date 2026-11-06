@@ -1,0 +1,12 @@
+# The ref resolves to the changeset the fixture landed.
+since: v0.7
+method: Objects/ResolveRef
+fixture: landed
+
+request.repo: r
+request.name: main
+
+tiers: refuse
+
+status: ok
+reply.changeset_id: $cs

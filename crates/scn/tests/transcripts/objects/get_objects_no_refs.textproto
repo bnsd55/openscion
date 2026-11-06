@@ -1,0 +1,8 @@
+# No ref at all is malformed.
+since: v0.7
+method: Objects/GetObjects
+fixture: landed
+
+request.ticket: $ticket
+
+status: invalid_argument

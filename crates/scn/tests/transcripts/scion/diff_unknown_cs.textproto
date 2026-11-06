@@ -1,0 +1,10 @@
+# A changeset either side does not have is NOT_FOUND.
+since: v0.7
+method: Scion/Diff
+fixture: landed
+
+request.repo: r
+request.old_changeset_id: id=$cs
+request.new_changeset_id: id=$missing
+
+status: not_found

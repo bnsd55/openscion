@@ -1,0 +1,9 @@
+# A changeset the repo does not have is NOT_FOUND.
+since: v0.7
+method: Scion/GetChangeset
+fixture: landed
+
+request.repo: r
+request.changeset_id: $missing
+
+status: not_found
