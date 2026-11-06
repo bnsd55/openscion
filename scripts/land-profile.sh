@@ -315,7 +315,7 @@ for name in $names; do
   {
     echo ""
     echo "## the write lane in $name (per land)"
-    awk -v before="$before" -v after="$after" '
+    awk -v before="$before" -v after="$after" -v secs="$(jq -r '[.seconds] | add' "$WORK"/bench-"$name"-rep*.json)" '
       function val(file, gauge,   line, kv, v) {
         v = 0
         while ((getline line < file) > 0)
@@ -336,7 +336,7 @@ for name in $names; do
           total_held += held[p]
         }
       }
-      { lands = $1; seconds = $2 }
+      { lands = $1 - $2 }
       END {
         if (lands <= 0) { print "no lands"; exit }
         printf "%-14s %8s %10s %10s %10s %8s\n", "customer", "calls", "queuedms", "heldms", "stmt_ms", "stmts"
@@ -345,8 +345,10 @@ for name in $names; do
           if (calls[p] == 0) continue
           printf "%-14s %8.1f %10.2f %10.2f %10.2f %8.1f\n", p, calls[p] / lands, queued[p] * 1000 / lands, held[p] * 1000 / lands, stmtns[p] * 1000 / lands, stmts[p] / lands
         }
-        printf "lane holds total %.1f ms/land; the window is %.1f s for %d lands, so 1/rate is %.1f ms\n", total_held * 1000 / lands, seconds, lands, seconds * 1000 / lands
-      }' <(printf '%s %s\n' "$(jq -r '.landed' "$WORK/bench-$name-rep$PROFILE_REPS.json")" "$(jq -r '.seconds' "$WORK/bench-$name-rep$PROFILE_REPS.json")")
+        printf "lane holds total %.1f ms/land; the window is %.1f s for %d lands, so 1/rate is %.1f ms; holds/rate %.1f%%\n", total_held * 1000 / lands, secs, lands, secs * 1000 / lands, 100 * total_held * 1000 / lands / (secs * 1000 / lands)
+      }' <(printf '%s %s\n' \
+        "$(awk '$1 == "scion_lands_total" { s += $2 } END { print s + 0 }' "$after")" \
+        "$(awk '$1 == "scion_lands_total" { s += $2 } END { print s + 0 }' "$before")")
   } >> "$sum"
 done
 

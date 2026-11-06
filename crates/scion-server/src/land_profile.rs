@@ -409,6 +409,28 @@ pub(crate) fn lane_held(ns: Duration) {
         .fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// The open held spans, for the one-writer invariant: `current` is the
+/// count of open spans right now, `max` the highest it reached. The
+/// lane is one connection, so both must stay at 1.
+pub(crate) static LANE_OPEN: (std::sync::atomic::AtomicU64, std::sync::atomic::AtomicU64) = (
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+);
+
+/// One held span opened: the count goes up, and the max follows it.
+pub(crate) fn lane_open() {
+    let (cur, max) = &LANE_OPEN;
+    let now = cur.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    max.fetch_max(now, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// One held span closed.
+pub(crate) fn lane_close() {
+    LANE_OPEN
+        .0
+        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// The /metrics lines of the lane counters, as Prometheus gauges. The
 /// harness diffs them across the bench window and divides by the lands.
 #[must_use]
@@ -442,6 +464,14 @@ pub fn render_lane() -> Option<String> {
              scion_lane_stmt_seconds{{phase=\"{name}\"}} {round_s:.6}\n"
         );
     }
+    let (cur, max) = &LANE_OPEN;
+    let _ = write!(
+        out,
+        "scion_lane_open_holds {}\n\
+         scion_lane_max_open_holds {}\n",
+        cur.load(std::sync::atomic::Ordering::Relaxed),
+        max.load(std::sync::atomic::Ordering::Relaxed)
+    );
     (!out.is_empty()).then_some(out)
 }
 

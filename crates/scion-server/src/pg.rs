@@ -1552,6 +1552,9 @@ impl Pg {
         // is the rest, until the lane releases at this function's end.
         crate::land_profile::lane_queued(queued_started.elapsed());
         let held_started = std::time::Instant::now();
+        // The writer lock is held to this function's end: the open-span
+        // count tracks it, and its max proves the one-writer invariant.
+        crate::land_profile::lane_open();
         // A write transaction runs at READ COMMITTED, the Postgres
         // default: every change of the caller checks the newest state of
         // the row it touches (the CAS predicates).
@@ -1614,12 +1617,8 @@ impl Pg {
         // the 60 s. OFFSET 0 keeps the planner from flattening the
         // subquery into one target list (tests/pg_guard_timeouts.rs
         // checks the plan's shape and times the wait).
-        let out = {
-            let out = f(&mut tx);
-            crate::land_profile::lane_held(held_started.elapsed());
-            out
-        };
-        match out {
+        let out = f(&mut tx);
+        let result = match out {
             Ok(value) => {
                 let unflushed = tx.cs_pending.as_deref().is_some_and(|p| !p.is_empty())
                     || tx.derived_pending.as_deref().is_some_and(|p| !p.is_empty());
@@ -1675,7 +1674,12 @@ impl Pg {
                 let _ = tx.rollback();
                 Err(error)
             }
-        }
+        };
+        // The lane's whole hold ends here, at the writer lock's own
+        // release: the body's statements and the commit's round trips.
+        crate::land_profile::lane_held(held_started.elapsed());
+        crate::land_profile::lane_close();
+        result
     }
 
     /// [`Pg::commit`]: on this backend, durable on return.
