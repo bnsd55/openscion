@@ -385,16 +385,62 @@ fn run_objects_across_tiers(tiers: &common::Tiers, t: &Transcript, f: &Fixture, 
         }
         if url == &tiers.socket && daemon_warm_serves {
             // A daemon checks no ticket by design: it serves what its
-            // store holds, and this file's blob is already there from an
-            // earlier file (docs/protocol-v1.md, section 7.1's daemon
-            // paragraph). Pin the serve, so a daemon that starts
-            // refusing breaks the file.
+            // store holds (docs/protocol-v1.md, section 7.1's daemon
+            // paragraph). Warm the daemon on purpose - the file's refs
+            // through this daemon with the file's valid ticket - so the
+            // pin tests a warm store wherever the file sorts; then pin
+            // the serve of the unsigned ticket by the stream, not by the
+            // call's headers: a daemon that answers OK and ends the
+            // stream with an error must not pass.
             tiers.runtime.block_on(async {
                 let mut client = connect(url).await;
-                let served = client.get_objects(req_of(t, f)).await.is_ok();
+                let want = t
+                    .request
+                    .iter()
+                    .find(|(path, _)| path == "refs")
+                    .map(|(_, v)| item(&resolve(v, f)))
+                    .expect("the file names the object it reads");
+                let want = (want.0, hex(&want.1));
+
+                let mut stream = client
+                    .get_objects(
+                        request_with_ticket(t, f, f.ticket.clone())
+                            .expect("the file's request builds"),
+                    )
+                    .await
+                    .expect("the warm-up call answers")
+                    .into_inner();
+                let mut warmed = Vec::new();
+                read_part_stream(url, &mut stream, &mut warmed, std::time::Instant::now())
+                    .await
+                    .expect("the warm-up stream reads");
                 assert!(
-                    served,
-                    "{}, a warm daemon serves what its store holds",
+                    warmed.contains(&want),
+                    "{}, the warm-up did not deliver {want:?} (it sent {warmed:?})",
+                    file.display()
+                );
+
+                let mut stream = client
+                    .get_objects(
+                        request_with_ticket(t, f, f.unsigned.clone())
+                            .expect("the file's request builds"),
+                    )
+                    .await
+                    .expect("the pinned call answers")
+                    .into_inner();
+                let mut served = Vec::new();
+                let ended =
+                    read_part_stream(url, &mut stream, &mut served, std::time::Instant::now())
+                        .await
+                        .expect("the pinned stream reads");
+                assert!(
+                    served.contains(&want),
+                    "{}, a warm daemon serves what its store holds (it sent {served:?})",
+                    file.display()
+                );
+                assert!(
+                    ended.is_none(),
+                    "{}, a warm daemon ends the unsigned serve clean (it ended {ended:?})",
                     file.display()
                 );
             });
@@ -1234,17 +1280,28 @@ fn unknown_field(what: &str, name: &str) -> String {
     format!("{what} knows no request field {name}")
 }
 
-/// The file's first `GetObjects` request, for the warm-daemon pin.
-fn req_of(t: &Transcript, f: &Fixture) -> GetObjectsRequest {
-    get_objects_request(t, f).expect("the file's request builds")
-}
-
 /// Builds the file's first `GetObjects` request.
 fn get_objects_request(t: &Transcript, f: &Fixture) -> Result<GetObjectsRequest, String> {
+    let value = t
+        .request
+        .iter()
+        .find(|(path, _)| path == "ticket")
+        .map(|(_, v)| resolve(v, f))
+        .ok_or_else(|| "the file names no ticket".to_owned())?;
+    request_with_ticket(t, f, unhex(&value))
+}
+
+/// The file's `GetObjects` request with `ticket` in place of the file's
+/// own ticket value, so a pin can send the ticket it names.
+fn request_with_ticket(
+    t: &Transcript,
+    f: &Fixture,
+    ticket: Vec<u8>,
+) -> Result<GetObjectsRequest, String> {
     let mut req = GetObjectsRequest::default();
     for (path, value) in &t.request {
         match path.as_str() {
-            "ticket" => req.ticket = unhex(&resolve(value, f)),
+            "ticket" => req.ticket = ticket.clone(),
             "refs" => req.refs.push(object_ref(&resolve(value, f))?),
             "accept" => {
                 req.accept.push(match resolve(value, f).as_str() {
