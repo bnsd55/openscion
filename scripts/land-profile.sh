@@ -163,6 +163,9 @@ cell() {
   reset_cell "$name"
   curl -fsS "http://127.0.0.1:$SERVER_METRICS_PORT/metrics" \
     > "$WORK/metrics-$name-before.txt" || die "no metrics before the bench"
+  psql "$SCION_PG_URL" -X -A -t -c "SELECT wal_sync, wal_sync_time" \
+    > "$WORK/wal-$name-before.txt" || die "no wal before the bench"
+  window_start=$(date +%s)
   psql "$SCION_PG_URL" -X -q -c "SELECT pg_stat_statements_reset()" > /dev/null \
     || die "the statements reset failed"
   if [ "$readers" -gt 0 ]; then
@@ -209,14 +212,13 @@ cell() {
   wait "$cpu_pid" 2> /dev/null || true
   curl -fsS "http://127.0.0.1:$SERVER_METRICS_PORT/metrics" \
     > "$WORK/metrics-$name-after.txt" || die "no metrics after the bench"
+  window_end=$(date +%s)
+  psql "$SCION_PG_URL" -X -A -t -c "SELECT wal_sync, wal_sync_time" \
+    > "$WORK/wal-$name-after.txt" || die "no wal after the bench"
   psql "$SCION_PG_URL" -X -A -t \
     -c "SELECT calls, round(total_exec_time::numeric, 3), left(query, 160)
         FROM pg_stat_statements ORDER BY total_exec_time DESC" \
     > "$WORK/pg-statements-$name.csv" || die "the statements dump failed"
-  psql "$SCION_PG_URL" -X -A -t \
-    -c "SELECT wal_sync, round(wal_sync_time::numeric, 3)
-        FROM pg_stat_wal" \
-    > "$WORK/wal-$name.txt" || die "the wal dump failed"
   stop_server
   mv -f "$WORK/server.log" "$WORK/server-$name.log"
 }
@@ -284,8 +286,8 @@ done
   if [ -s "$WORK/cpu-$name.log" ]; then
     awk '{ b += $2; w += $3; l += $5; if ($5 > m) m = $5; n++ } END { printf "runner: mean busy %.0f%%, iowait %.0f%%, loadavg mean %.1f, max %.1f\n", b / n, w / n, l / n, m }' "$WORK/cpu-$name.log"
   fi
-  if [ -s "$WORK/wal-$name.txt" ]; then
-    echo "wal syncs in the window: $(cat "$WORK/wal-$name.txt")"
+  if [ -s "$WORK/wal-$name-after.txt" ]; then
+    awk 'NR == FNR { s = $1; t = $2; next } { printf "wal in the window: %d syncs, %.1f s total, %.3f ms mean\n", $1 - s, ($2 - t) / 1000, ($2 - t) / ($1 - s) }' "$WORK/wal-$name-before.txt" "$WORK/wal-$name-after.txt"
   fi
 } >> "$sum"
 
@@ -362,7 +364,7 @@ for name in $names; do
   {
     echo ""
     echo "## the write lane in $name (per land)"
-    awk -v before="$before" -v after="$after" -v secs="$(jq -r '[.seconds] | add' "$WORK"/bench-"$name"-rep*.json)" '
+    awk -v before="$before" -v after="$after" -v secs="$((window_end - window_start))" '
       function val(file, gauge,   line, kv, v) {
         v = 0
         while ((getline line < file) > 0)
