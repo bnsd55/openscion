@@ -1,0 +1,44 @@
+PANIC: the retry of land 0: Status { code: Cancelled, message: "Timeout expired", source: Some(tonic::transport::Error(Transport, TimeoutExpired(()))) }
+PANIC: the twin retry of land 0: Status { code: Cancelled, message: "Timeout expired", source: Some(tonic::transport::Error(Transport, TimeoutExpired(()))) }
+16-by-key-while-parked.txt passed its budget of 240s at step 6 (seed 1793908935931); the run is wedged, aborting the process
+PANIC: the twin retry of land 0: Status { code: Cancelled, message: "Timeout expired", source: Some(tonic::transport::Error(Transport, TimeoutExpired(()))) }PANIC: the retry of land 0: Status { code: Cancelled, message: "Timeout expired", source: Some(tonic::transport::Error(Transport, TimeoutExpired(()))) }
+
+16-by-key-while-parked.txt passed its budget of 240s at step 6 (seed 1793909677902); the run is wedged, aborting the process
+snapshot: begin
+activity: pid=181292 state=idle wait=Client/ClientRead xact=None q=SELECT 1
+activity: pid=181293 state=idle wait=Client/ClientRead xact=None q=SHOW synchronous_commit
+activity: pid=181294 state=idle wait=Client/ClientRead xact=None q=SHOW synchronous_commit
+activity: pid=181295 state=idle wait=Client/ClientRead xact=None q=SHOW synchronous_commit
+activity: pid=181296 state=idle wait=Client/ClientRead xact=None q=SHOW synchronous_commit
+activity: pid=181297 state=idle wait=Client/ClientRead xact=None q=SHOW synchronous_commit
+activity: pid=181298 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=181299 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=181300 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+PANIC: error retrieving column 1: error deserializing column 1
+PANIC: the retry of land 0: Status { code: InvalidArgument, message: "request key \"c0-o1-0\" was already used for a different land", metadata: MetadataMap { headers: {"content-type": "application/grpc", "date": "Thu, 05 Nov 2026 20:44:36 GMT"} }, source: None }
+10-gc-during-pending.txt passed its budget of 240s at step 3 (seed 1793911426027); the run is wedged, aborting the process
+snapshot: begin
+activity: pid=182732 state=idle wait=Client/ClientRead xact=None q=SELECT 1
+activity: pid=182733 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=182734 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=182735 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=182736 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=182737 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=182738 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=182739 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=182740 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+PANIC: error retrieving column 1: error deserializing column 1
+PANIC: the retry of land 0: Status { code: InvalidArgument, message: "request key \"c0-o1-0\" was already used for a different land", metadata: MetadataMap { headers: {"content-type": "application/grpc", "date": "Thu, 05 Nov 2026 21:06:50 GMT"} }, source: None }
+10-gc-during-pending.txt passed its budget of 240s at step 3 (seed 1793912771542); the run is wedged, aborting the process
+snapshot: begin
+activity: pid=182984 state=idle wait=Client/ClientRead xact=None q=SELECT 1
+activity: pid=182985 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=182986 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=182987 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=182988 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=182989 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=182990 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=182991 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+activity: pid=182992 state=idle wait=Client/ClientRead xact=None q=ROLLBACK
+lock: pid=182984 type=advisory class=3920262750 obj=1757374271 granted=true holder_state=idle holder_q=SELECT 1
+PANIC: error retrieving column 1: error deserializing column 1

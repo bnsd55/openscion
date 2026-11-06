@@ -1,0 +1,8 @@
+   Compiling open-scion-server v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.09s
+     Running tests/land_model_proptest.rs (target/debug/deps/land_model_proptest-3bf7487f2f8e0126)
+
+running 1 test
+test the_seed_corpus_holds ... 0.00s seed 1793893327505 op 1: CutFresh { caller: 0, target: 0, shared: false, cut_ms: 20 }
+0.10s seed 1793893327505 op 2: KillAtPending
+10.42s seed 1793893327505 op 3: Check

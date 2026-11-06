@@ -405,6 +405,15 @@ impl Lands {
     /// resumes it. Store errors otherwise.
     pub fn land(&self, store: &Backend, caller: &Caller, req: &LandRequest) -> Result<LandOutcome> {
         let outcome = self.land_committed(store, caller, req);
+        // The gate of the settled point holds nothing: the settle's
+        // transaction committed inside `land_committed`, and the flush and
+        // the reply come after. It fires only for a land that decided
+        // LANDED — the class whose lost reply the by-key rule must
+        // answer.
+        #[cfg(any(test, feature = "test-hooks"))]
+        if outcome.as_ref().is_ok_and(|o| o.state == LandState::Landed) {
+            crate::land_gates::hit(crate::land_gates::Gate::Settled, &req.request_key);
+        }
         // An index can hold up to the whole budget, and freeing it takes a
         // while, so it happens here, outside every lock.
         let evicted = mem::take(&mut *self.evicted.lock().unwrap_or_else(PoisonError::into_inner));
@@ -451,6 +460,10 @@ impl Lands {
         if recorded.state != LandState::Pending {
             return Ok(recorded);
         }
+        // The gate holds nothing: the record transaction is closed, and
+        // the ref's slot lock is taken below.
+        #[cfg(any(test, feature = "test-hooks"))]
+        crate::land_gates::hit(crate::land_gates::Gate::RecordCommitted, &req.request_key);
 
         // SHORTCUT: an in-process lock serializes lands per ref, so this works
         // with one server process. Upgrade: a single lander per ref that
@@ -493,7 +506,8 @@ impl Lands {
                     "the path history of {head} is missing after it was derived"
                 )));
             }
-            derive_history(store, repo, head, &req.deadline).map_err(stays_pending)?;
+            derive_history(store, repo, head, &req.deadline, &req.request_key)
+                .map_err(stays_pending)?;
         }
     }
 
@@ -742,14 +756,23 @@ fn stays_pending(e: Error) -> Error {
 /// steps, and the derivation stops between steps at `deadline`. A database
 /// from before path history needs this once: each later changeset gets its
 /// own when it is written.
+#[cfg_attr(not(any(test, feature = "test-hooks")), allow(unused_variables))]
 fn derive_history(
     store: &Backend,
     repo: RepoId,
     head: ChangesetId,
     deadline: &Deadline,
+    // The gate's key, unused in a release build, where the gate compiles
+    // out.
+    key: &str,
 ) -> Result<()> {
     tracing::info!(%head, "deriving the history of the head for a land on an old base");
     derived::fill_by::<CommitGraph>(store, repo, head, deadline)?;
+    // The gate between the walk's two kinds: the first fill's steps are
+    // committed, the second's are not, and the gate holds nothing — the
+    // walk's index was dropped by the caller before it started.
+    #[cfg(any(test, feature = "test-hooks"))]
+    crate::land_gates::hit(crate::land_gates::Gate::FinishStep, key);
     derived::fill_by::<PathHistory>(store, repo, head, deadline)?;
     Ok(())
 }
@@ -789,6 +812,10 @@ fn finish(
             }
             plan(lands, c, repo, req, head, head_tree, index).map(Planned::Do)
         })?;
+        // The gate holds the ref's slot lock: the plan is read, the settle
+        // has not opened its write transaction.
+        #[cfg(any(test, feature = "test-hooks"))]
+        crate::land_gates::hit(crate::land_gates::Gate::Planned, &req.request_key);
         #[cfg(test)]
         let step = lands
             .before_settle
@@ -806,7 +833,16 @@ fn finish(
             Planned::Settled(row) => return Ok(Finished::Outcome(row)),
             Planned::Do(plan) => plan,
         };
-        match settle(lands, store, repo, land_id, req, plan, index) {
+        match settle(
+            lands,
+            store,
+            repo,
+            land_id,
+            req,
+            &req.request_key,
+            plan,
+            index,
+        ) {
             Err(Error::Aborted(detail)) if attempt < MAX_ATTEMPTS => {
                 tracing::info!(land_id, attempt, %detail, "planning the land again");
                 if let Some(metrics) = &lands.metrics {
@@ -895,12 +931,16 @@ fn plan(
 /// guard the land's own move has in its CAS. An import that moved the
 /// ref in the window aborts the verdict, and `finish` replans against
 /// the head the import made.
+#[cfg_attr(not(any(test, feature = "test-hooks")), allow(unused_variables))]
+#[allow(clippy::too_many_arguments)] // the settle's own knobs, and the gate's key
 fn settle(
     lands: &Lands,
     store: &Backend,
     repo: RepoId,
     land_id: i64,
     req: &LandRequest,
+    // The request key, for the gate the tests park the settle at.
+    key: &str,
     plan: Plan,
     index: &mut Option<PathIndex>,
 ) -> Result<Finished> {
@@ -947,6 +987,12 @@ fn settle(
     // The blob lengths the tree build needs, read before the write
     // transaction, so the write connection does no file I/O.
     let lens = tree::lens_of_puts(store, crate::meta::puts(&rebased).map(|(_, blob)| blob))?;
+    // The gate holds the ref's slot lock, and no transaction is open: the
+    // settle's write transaction opens below. A ref move during the park
+    // (an import takes no land lock) leaves the plan's version stale, and
+    // the CAS answers false.
+    #[cfg(any(test, feature = "test-hooks"))]
+    crate::land_gates::hit(crate::land_gates::Gate::BeforeCas, key);
     let landed = store.write_slot_holder(|c| {
         let (id, _) =
             tree::store_changeset_within(c, repo, &rebased, &mut tree::lens_from(&lens), deadline)?;
@@ -2495,8 +2541,17 @@ mod tests {
                 if crash == Crash::RefMoved {
                     f.move_main(f.commit(f.main().target, &[put("c", "import")]));
                     let land_id = recorded.land_id;
-                    let err = settle(&f.lands, &f.store, repo, land_id, &req, plan, &mut index)
-                        .unwrap_err();
+                    let err = settle(
+                        &f.lands,
+                        &f.store,
+                        repo,
+                        land_id,
+                        &req,
+                        "the unit test's key",
+                        plan,
+                        &mut index,
+                    )
+                    .unwrap_err();
                     assert!(matches!(err, Error::Aborted(_)), "{crash:?}: {err}");
                     let kept = f.store.read(|c| c.has_changeset(repo, rebased));
                     assert!(!kept.unwrap(), "the transaction rolled back");

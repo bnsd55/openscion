@@ -1,0 +1,31 @@
+   Compiling open-scion-server v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.66s
+     Running tests/land_model_proptest.rs (target/debug/deps/land_model_proptest-3bf7487f2f8e0126)
+
+running 3 tests
+test the_model_holds_across_a_random_script ... ok
+test a_restart_waits_for_the_killed_servers_store_lock ... ok
+PANIC: import to main failed: 2026-11-05T12:41:21.912086Z  INFO scion_server::import: git import planned reachable=1 new=1 to_verify=1
+2026-11-05T12:41:21.935208Z  INFO scion_server::import: importing git commits done=1 total=1 commits_per_sec=31
+Error: ref "main" has diverged from git: it points at 11a1f885f12bb4a0be04ed133491ce299dad96258ad83040ead3f6f49a38bfe0, which is not an ancestor of the imported tip 2e59a4fb7334d2a3f0bed191999a87df69a858aa23554b74717658c5c6ede54d; import into another ref
+
+test the_seed_corpus_holds ... FAILED
+
+failures:
+
+---- the_seed_corpus_holds stdout ----
+
+thread 'the_seed_corpus_holds' (456001233) panicked at crates/scion-server/tests/land_model_proptest.rs:793:5:
+import to main failed: 2026-11-05T12:41:21.912086Z  INFO scion_server::import: git import planned reachable=1 new=1 to_verify=1
+2026-11-05T12:41:21.935208Z  INFO scion_server::import: importing git commits done=1 total=1 commits_per_sec=31
+Error: ref "main" has diverged from git: it points at 11a1f885f12bb4a0be04ed133491ce299dad96258ad83040ead3f6f49a38bfe0, which is not an ancestor of the imported tip 2e59a4fb7334d2a3f0bed191999a87df69a858aa23554b74717658c5c6ede54d; import into another ref
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    the_seed_corpus_holds
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.89s
+
+error: test failed, to rerun pass `-p open-scion-server --test land_model_proptest`

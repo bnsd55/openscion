@@ -1,0 +1,10 @@
+   Compiling open-scion-server v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.46s
+     Running tests/land_model_proptest.rs (target/debug/deps/land_model_proptest-3bf7487f2f8e0126)
+
+running 1 test
+test the_seed_corpus_holds ... the random case passed its budget of 5s at op 0 (seed 1793902815871): "CutFresh { caller: 0, target: 0, shared: false, cut_ms: 20 }"; aborting so the cap cannot hide it
+error: test failed, to rerun pass `-p open-scion-server --test land_model_proptest`
+
+Caused by:
+  process didn't exit successfully: `/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/target/debug/deps/land_model_proptest-3bf7487f2f8e0126 the_seed_corpus_holds --test-threads=1 --nocapture` (signal: 6, SIGABRT: process abort signal)

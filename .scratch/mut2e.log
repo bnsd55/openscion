@@ -1,0 +1,531 @@
+   Compiling open-scion-server v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-server)
+error: prefix `land` is unknown
+    --> crates/scion-server/src/pg.rs:2357:68
+     |
+2357 |                 "request key {:?} was already used for a different land",
+     |                                                                    ^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2357 |                 "request key {:?} was already used for a different land ",
+     |                                                                        +
+
+error: prefix `paths` is unknown
+    --> crates/scion-server/src/pg.rs:2373:80
+     |
+2373 |                 .ok_or_else(|| Error::Corrupt(format!("land {land_id} conflict paths")))?,
+     |                                                                                ^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2373 |                 .ok_or_else(|| Error::Corrupt(format!("land {land_id} conflict paths ")))?,
+     |                                                                                     +
+
+error: prefix `exist` is unknown
+    --> crates/scion-server/src/pg.rs:2394:49
+     |
+2394 |         let detail = format!("ref {:?} does not exist", req.target_ref);
+     |                                                 ^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2394 |         let detail = format!("ref {:?} does not exist ", req.target_ref);
+     |                                                      +
+
+error: character literal may only contain one codepoint
+    --> crates/scion-server/src/pg.rs:2412:41
+     |
+2412 |                          CASE WHEN $6 = 'pending' THEN NULL ELSE now_epoch() END,
+     |                                         ^^^^^^^^^
+     |
+help: if you meant to write a string literal, use double quotes
+     |
+2412 -                          CASE WHEN $6 = 'pending' THEN NULL ELSE now_epoch() END,
+2412 +                          CASE WHEN $6 = "pending" THEN NULL ELSE now_epoch() END,
+     |
+
+error: prefix `land_id` is unknown
+    --> crates/scion-server/src/pg.rs:2415:32
+     |
+2415 |                      RETURNING land_id",
+     |                                ^^^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2415 |                      RETURNING land_id ",
+     |                                       +
+
+error: character literal may only contain one codepoint
+    --> crates/scion-server/src/pg.rs:2541:75
+     |
+2541 |                     "SET search_path TO {schema}; SET application_name TO '{schema}';
+     |                                                                           ^^^^^^^^^^
+     |
+help: if you meant to write a string literal, use double quotes
+     |
+2541 -                     "SET search_path TO {schema}; SET application_name TO '{schema}';
+2541 +                     "SET search_path TO {schema}; SET application_name TO "{schema}";
+     |
+
+error: character literal may only contain one codepoint
+    --> crates/scion-server/src/pg.rs:2542:62
+     |
+2542 |                      SELECT pg_advisory_lock_shared(hashtext('{schema}'))"
+     |                                                              ^^^^^^^^^^
+     |
+help: if you meant to write a string literal, use double quotes
+     |
+2542 -                      SELECT pg_advisory_lock_shared(hashtext('{schema}'))"
+2542 +                      SELECT pg_advisory_lock_shared(hashtext("{schema}"))"
+     |
+
+error: prefix `text` is unknown
+    --> crates/scion-server/src/pg.rs:2554:70
+     |
+2554 |             let Ok(row) = client.query_one("SELECT current_schema()::text", &[]) else {
+     |                                                                      ^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2554 |             let Ok(row) = client.query_one("SELECT current_schema()::text ", &[]) else {
+     |                                                                          +
+
+error: prefix `randomness` is unknown
+    --> crates/scion-server/src/pg.rs:2576:48
+     |
+2576 |     getrandom::fill(&mut bytes).expect("system randomness");
+     |                                                ^^^^^^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2576 |     getrandom::fill(&mut bytes).expect("system randomness ");
+     |                                                          +
+
+error: unknown start of token: \
+    --> crates/scion-server/src/pg.rs:2586:65
+     |
+2586 |             "the store_uuid row holds {len} bytes, not 16: this \
+     |                                                                 ^
+
+error: prefix `backend` is unknown
+    --> crates/scion-server/src/pg.rs:2587:35
+     |
+2587 |              database is not this backend's store"
+     |                                   ^^^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2587 |              database is not this backend 's store"
+     |                                          +
+
+error: prefix `store` is unknown
+    --> crates/scion-server/src/pg.rs:2587:45
+     |
+2587 |              database is not this backend's store"
+     |                                             ^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2587 |              database is not this backend's store "
+     |                                                  +
+
+error: prefix `hooks` is unknown
+    --> crates/scion-server/src/pg.rs:2652:33
+     |
+2652 | #[cfg(any(test, feature = "test-hooks"))]
+     |                                 ^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2652 | #[cfg(any(test, feature = "test-hooks "))]
+     |                                      +
+
+error: prefix `hooks` is unknown
+    --> crates/scion-server/src/pg.rs:2657:33
+     |
+2657 | #[cfg(any(test, feature = "test-hooks"))]
+     |                                 ^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2657 | #[cfg(any(test, feature = "test-hooks "))]
+     |                                      +
+
+error: prefix `hooks` is unknown
+    --> crates/scion-server/src/pg.rs:2661:33
+     |
+2661 | #[cfg(any(test, feature = "test-hooks"))]
+     |                                 ^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2661 | #[cfg(any(test, feature = "test-hooks "))]
+     |                                      +
+
+error: prefix `hooks` is unknown
+    --> crates/scion-server/src/pg.rs:2670:33
+     |
+2670 | #[cfg(any(test, feature = "test-hooks"))]
+     |                                 ^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2670 | #[cfg(any(test, feature = "test-hooks "))]
+     |                                      +
+
+error: prefix `hooks` is unknown
+    --> crates/scion-server/src/pg.rs:2676:33
+     |
+2676 | #[cfg(any(test, feature = "test-hooks"))]
+     |                                 ^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2676 | #[cfg(any(test, feature = "test-hooks "))]
+     |                                      +
+
+error: prefix `hooks` is unknown
+    --> crates/scion-server/src/pg.rs:2687:33
+     |
+2687 | #[cfg(any(test, feature = "test-hooks"))]
+     |                                 ^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2687 | #[cfg(any(test, feature = "test-hooks "))]
+     |                                      +
+
+error: prefix `hooks` is unknown
+    --> crates/scion-server/src/pg.rs:2693:33
+     |
+2693 | #[cfg(any(test, feature = "test-hooks"))]
+     |                                 ^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2693 | #[cfg(any(test, feature = "test-hooks "))]
+     |                                      +
+
+error: prefix `hooks` is unknown
+    --> crates/scion-server/src/pg.rs:2700:33
+     |
+2700 | #[cfg(any(test, feature = "test-hooks"))]
+     |                                 ^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2700 | #[cfg(any(test, feature = "test-hooks "))]
+     |                                      +
+
+error: prefix `hooks` is unknown
+    --> crates/scion-server/src/pg.rs:2712:37
+     |
+2712 |     #[cfg(any(test, feature = "test-hooks"))]
+     |                                     ^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2712 |     #[cfg(any(test, feature = "test-hooks "))]
+     |                                          +
+
+error: prefix `branch` is unknown
+    --> crates/scion-server/src/pg.rs:2725:61
+     |
+2725 |         Kind::Raw => unreachable!("a raw job ran in its own branch"),
+     |                                                             ^^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2725 |         Kind::Raw => unreachable!("a raw job ran in its own branch "),
+     |                                                                   +
+
+error: prefix `URL` is unknown
+    --> crates/scion-server/src/pg.rs:2735:18
+     |
+2735 |             "the URL's search_path names no existing schema; create it first".into(),
+     |                  ^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2735 |             "the URL 's search_path names no existing schema; create it first".into(),
+     |                     +
+
+error: prefix `first` is unknown
+    --> crates/scion-server/src/pg.rs:2735:72
+     |
+2735 |             "the URL's search_path names no existing schema; create it first".into(),
+     |                                                                        ^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2735 |             "the URL's search_path names no existing schema; create it first ".into(),
+     |                                                                             +
+
+error: prefix `setup` is unknown
+    --> crates/scion-server/src/pg.rs:2740:46
+     |
+2740 |             "the database was unreachable at setup",
+     |                                              ^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2740 |             "the database was unreachable at setup ",
+     |                                                   +
+
+error: unknown start of token: \
+    --> crates/scion-server/src/pg.rs:2747:70
+     |
+2747 | const TX_LOST: &str = "the transaction was lost with the connection; \
+     |                                                                      ^
+
+error: prefix `again` is unknown
+    --> crates/scion-server/src/pg.rs:2748:30
+     |
+2748 |      roll it back and run it again";
+     |                              ^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2748 |      roll it back and run it again ";
+     |                                   +
+
+error: unknown start of token: \
+    --> crates/scion-server/src/pg.rs:2755:59
+     |
+2755 |         "this server process lost the database to another \
+     |                                                           ^
+
+error: prefix `on` is unknown
+    --> crates/scion-server/src/pg.rs:2756:54
+     |
+2756 |          server process; it serves nothing from here on"
+     |                                                      ^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2756 |          server process; it serves nothing from here on "
+     |                                                        +
+
+error: prefix `store` is unknown
+    --> crates/scion-server/src/pg.rs:2765:68
+     |
+2765 | pub(crate) const HOLDER_MESSAGE: &str = "another server holds this store";
+     |                                                                    ^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2765 | pub(crate) const HOLDER_MESSAGE: &str = "another server holds this store ";
+     |                                                                         +
+
+error: prefix `bytes` is unknown
+    --> crates/scion-server/src/pg.rs:2843:57
+     |
+2843 |         hash.as_bytes()[..8].try_into().expect("8 of 32 bytes"),
+     |                                                         ^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2843 |         hash.as_bytes()[..8].try_into().expect("8 of 32 bytes "),
+     |                                                              +
+
+error: prefix `text` is unknown
+    --> crates/scion-server/src/pg.rs:2918:46
+     |
+2918 |         .query_opt("SELECT current_schema()::text", &[])?
+     |                                              ^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2918 |         .query_opt("SELECT current_schema()::text ", &[])?
+     |                                                  +
+
+error: prefix `URL` is unknown
+    --> crates/scion-server/src/pg.rs:2922:18
+     |
+2922 |             "the URL's search_path names no existing schema; create it first".into(),
+     |                  ^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2922 |             "the URL 's search_path names no existing schema; create it first".into(),
+     |                     +
+
+error: prefix `first` is unknown
+    --> crates/scion-server/src/pg.rs:2922:72
+     |
+2922 |             "the URL's search_path names no existing schema; create it first".into(),
+     |                                                                        ^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2922 |             "the URL's search_path names no existing schema; create it first ".into(),
+     |                                                                             +
+
+error: character literal may only contain one codepoint
+    --> crates/scion-server/src/pg.rs:2936:40
+     |
+2936 |             "SELECT to_regclass(format('%I.restore_staging', $1::text))::text",
+     |                                        ^^^^^^^^^^^^^^^^^^^^
+     |
+help: if you meant to write a string literal, use double quotes
+     |
+2936 -             "SELECT to_regclass(format('%I.restore_staging', $1::text))::text",
+2936 +             "SELECT to_regclass(format("%I.restore_staging", $1::text))::text",
+     |
+
+error: prefix `text` is unknown
+    --> crates/scion-server/src/pg.rs:2936:74
+     |
+2936 |             "SELECT to_regclass(format('%I.restore_staging', $1::text))::text",
+     |                                                                          ^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2936 |             "SELECT to_regclass(format('%I.restore_staging', $1::text))::text ",
+     |                                                                              +
+
+error: character literal may only contain one codepoint
+    --> crates/scion-server/src/pg.rs:2942:40
+     |
+2942 |             "SELECT to_regclass(format('%I.store_uuid', $1::text))::text",
+     |                                        ^^^^^^^^^^^^^^^
+     |
+help: if you meant to write a string literal, use double quotes
+     |
+2942 -             "SELECT to_regclass(format('%I.store_uuid', $1::text))::text",
+2942 +             "SELECT to_regclass(format("%I.store_uuid", $1::text))::text",
+     |
+
+error: prefix `text` is unknown
+    --> crates/scion-server/src/pg.rs:2942:69
+     |
+2942 |             "SELECT to_regclass(format('%I.store_uuid', $1::text))::text",
+     |                                                                     ^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2942 |             "SELECT to_regclass(format('%I.store_uuid', $1::text))::text ",
+     |                                                                         +
+
+error: prefix `restore` is unknown
+    --> crates/scion-server/src/pg.rs:2948:50
+     |
+2948 |             "this database names a store, and no restore's staging mark: \
+     |                                                  ^^^^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2948 |             "this database names a store, and no restore 's staging mark: \
+     |                                                         +
+
+error: unknown start of token: \
+    --> crates/scion-server/src/pg.rs:2948:74
+     |
+2948 |             "this database names a store, and no restore's staging mark: \
+     |                                                                          ^
+
+error: prefix `make` is unknown
+    --> crates/scion-server/src/pg.rs:2949:59
+     |
+2949 |              a restore refuses to drop a store it did not make"
+     |                                                           ^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2949 |              a restore refuses to drop a store it did not make "
+     |                                                               +
+
+error: unknown start of token: \
+    --> crates/scion-server/src/pg.rs:2959:55
+     |
+2959 |             "SELECT count(*) FROM pg_catalog.pg_class \
+     |                                                       ^
+
+error: unknown start of token: \
+    --> crates/scion-server/src/pg.rs:2960:69
+     |
+2960 |                  WHERE relnamespace = (SELECT oid FROM pg_namespace \
+     |                                                                     ^
+
+error: unknown start of token: \
+    --> crates/scion-server/src/pg.rs:2967:90
+     |
+2967 |                 "this schema holds {foreign} table(s) that no store and no restore made: \
+     |                                                                                          ^
+
+error: prefix `make` is unknown
+    --> crates/scion-server/src/pg.rs:2968:60
+     |
+2968 |                  a restore refuses to drop what it did not make"
+     |                                                            ^^^^ unknown prefix
+     |
+     = note: prefixed identifiers and literals are reserved since Rust 2021
+help: consider inserting whitespace here
+     |
+2968 |                  a restore refuses to drop what it did not make "
+     |                                                                +
+
+error: character literal may only contain one codepoint
+    --> crates/scion-server/src/pg.rs:2977:29
+     |
+2977 |         "SET lock_timeout = '{RESET_LOCK_TIMEOUT}'; SET statement_timeout = '{RESET_STATEMENT_TIMEOUT}'"
+     |                             ^^^^^^^^^^^^^^^^^^^^^^
+     |
+help: if you meant to write a string literal, use double quotes
+     |
+2977 -         "SET lock_timeout = '{RESET_LOCK_TIMEOUT}'; SET statement_timeout = '{RESET_STATEMENT_TIMEOUT}'"
+2977 +         "SET lock_timeout = "{RESET_LOCK_TIMEOUT}"; SET statement_timeout = '{RESET_STATEMENT_TIMEOUT}'"
+     |
+
+error: character literal may only contain one codepoint
+    --> crates/scion-server/src/pg.rs:2977:77
+     |
+2977 |         "SET lock_timeout = '{RESET_LOCK_TIMEOUT}'; SET statement_timeout = '{RESET_STATEMENT_TIMEOUT}'"
+     |                                                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+help: if you meant to write a string literal, use double quotes
+     |
+2977 -         "SET lock_timeout = '{RESET_LOCK_TIMEOUT}'; SET statement_timeout = '{RESET_STATEMENT_TIMEOUT}'"
+2977 +         "SET lock_timeout = '{RESET_LOCK_TIMEOUT}'; SET statement_timeout = "{RESET_STATEMENT_TIMEOUT}""
+     |
+
+error[E0762]: unterminated character literal
+    --> crates/scion-server/src/pg.rs:2982:35
+     |
+2982 |     let quoted = schema.replace('"', "\"\"");
+     |                                   ^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0762`.
+error: could not compile `open-scion-server` (lib) due to 48 previous errors

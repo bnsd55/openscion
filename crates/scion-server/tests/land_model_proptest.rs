@@ -37,8 +37,9 @@
 
 mod common;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -54,8 +55,19 @@ use tonic::Status;
 /// Callers that land. Each land names a caller; the fixture's one token
 /// makes them one caller at the server, so the keys carry the identity.
 const CALLERS: usize = 4;
+/// One script's wall-clock bound, in seconds. The corpus measured under
+/// two minutes on Postgres and a random case under five; a wedged
+/// script must die inside a bound that names its script and its step,
+/// not at the CI job's cap, where the log holds no name at all.
+const SCRIPT_BUDGET_SECS: u64 = 240;
 /// A ref that does not exist, for the lands that must be rejected.
 const MISSING: usize = REFS.len();
+/// The ref the run's imports move: it does not exist until the first
+/// `import` op creates it, so every import of the run fast-forwards it,
+/// and the corpus parks its CAS lands here - the import under a parked
+/// land is the mover no land lock can stop.
+const IMPORTED: usize = REFS.len() + 1;
+const IMPORTED_REF_NAME: &str = "imported";
 
 /// One operation of the script. Ops that name an earlier land do so by
 /// its position in the script's ledger; the runner takes the index
@@ -107,6 +119,64 @@ enum Op {
     BurstCut { k: usize, target: usize },
     /// Retry what never answered, then check the model.
     Check,
+    /// A new land whose call is sent and never awaited: the reply is
+    /// lost, and the land parks at the named gate point on its way —
+    /// the arm file the runner writes first is what makes it park.
+    SendNoWait {
+        caller: usize,
+        target: usize,
+        stale: bool,
+        point: GatePoint,
+    },
+    /// Wait until the named land stands at the named gate point, or has
+    /// decided without reaching it (a rejected land never parks).
+    AwaitGate { land: usize, point: GatePoint },
+    /// Release the land parked at the named gate point.
+    Resume { land: usize, point: GatePoint },
+    /// Import a git repo into the model's repo, pointing the named ref
+    /// at a fresh tip: the one ref mover that takes no land lock, so a
+    /// land parked before its compare-and-swap loses the CAS to it.
+    Import,
+}
+
+/// The gate points the runner can name, spelled as the server's marker
+/// files spell them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GatePoint {
+    /// After the record transaction committed.
+    Record,
+    /// After the plan's read, before the settle.
+    Planned,
+    /// Before the settle's compare-and-swap.
+    Cas,
+    /// After the settle committed, before the reply.
+    Settled,
+    /// Between the derive steps of the finish's walk.
+    Step,
+}
+
+impl GatePoint {
+    /// The point's name in the gate files.
+    fn name(self) -> &'static str {
+        match self {
+            GatePoint::Record => "record-committed",
+            GatePoint::Planned => "planned",
+            GatePoint::Cas => "before-cas",
+            GatePoint::Settled => "settled",
+            GatePoint::Step => "finish-step",
+        }
+    }
+
+    fn from_word(word: &str) -> GatePoint {
+        match word {
+            "record" => GatePoint::Record,
+            "planned" => GatePoint::Planned,
+            "cas" => GatePoint::Cas,
+            "settled" => GatePoint::Settled,
+            "step" => GatePoint::Step,
+            other => panic!("a gate point the runner does not know: {other}"),
+        }
+    }
 }
 
 fn op_strategy() -> impl Strategy<Value = Op> {
@@ -250,6 +320,21 @@ fn parse_script(text: &str) -> Vec<Op> {
                     target: num(target),
                 },
                 ["check"] => Op::Check,
+                ["landnow", caller, target, stale, point] => Op::SendNoWait {
+                    caller: num(caller),
+                    target: num(target),
+                    stale: *stale == "stale" || *stale == "1",
+                    point: GatePoint::from_word(point),
+                },
+                ["awaitgate", land, point] => Op::AwaitGate {
+                    land: num(land),
+                    point: GatePoint::from_word(point),
+                },
+                ["resume", land, point] => Op::Resume {
+                    land: num(land),
+                    point: GatePoint::from_word(point),
+                },
+                ["import"] => Op::Import,
                 other => panic!("a corpus line the runner does not know: {other:?}"),
             }
         })
@@ -529,9 +614,77 @@ async fn note_head(state: &mut Run, target: &str, idxs: &[usize]) {
 fn target_name(target: usize) -> &'static str {
     if target == MISSING {
         "no-such-ref"
+    } else if target == IMPORTED {
+        IMPORTED_REF_NAME
     } else {
         REFS[target % REFS.len()]
     }
+}
+
+/// Sends a new land whose reply is never read, with the named gate point
+/// armed: the server parks the land there on its way, and the script's
+/// later `awaitgate` and `resume` drive the ordering. The changeset and
+/// its row exist as any land's do; the reply is dropped.
+async fn send_land_nowait(
+    state: &mut Run,
+    caller: usize,
+    target: usize,
+    base: ChangesetId,
+    point: GatePoint,
+) -> usize {
+    let op = state.ops;
+    let key = format!("c{caller}-o{op}-{j}", j = state.lands.len());
+    // The arm goes down before the call: the server reaches the gate only
+    // inside the land this call starts.
+    if let Some(dir) = &state.gates {
+        std::fs::create_dir_all(dir.join("arm")).unwrap();
+        std::fs::write(dir.join("arm").join(format!("{}-{key}", point.name())), b"").unwrap();
+    }
+    let changes = build_changes(
+        &mut state.scion,
+        op,
+        state.lands.len(),
+        false,
+        None,
+        &mut state.put,
+    )
+    .await;
+    let original = Changeset::new(vec![base], author(), None, key.as_bytes().to_vec(), changes)
+        .expect("changeset fits the format");
+    let (bytes, id) = original.encode_with_id();
+    let reply = ceiling(
+        &format!("CreateChangeset {key}"),
+        state.scion.create_changeset(CreateChangesetRequest {
+            repo: REPO.into(),
+            changeset: bytes,
+        }),
+    )
+    .await
+    .into_inner();
+    assert_eq!(changeset_id(&reply.changeset_id), id);
+    let rec = Rec {
+        caller,
+        key,
+        original,
+        id,
+        base,
+        target: target_name(target).to_owned(),
+        decided_head: None,
+        m2_phase: None,
+        replies: Vec::new(),
+    };
+    state.lands.push(rec);
+    let idx = state.lands.len() - 1;
+    // The call runs on its own: its reply is lost, like a Cut's.
+    let request = state.lands[idx].request();
+    let mut conn = state.scion.clone();
+    tokio::spawn(async move {
+        // The reply goes nowhere: the ledger holds no reply for this
+        // land, and the retry phase (or the script's own retry op)
+        // finishes it.
+        let _ = conn.land(request).await;
+    });
+    idx
 }
 
 /// The runner's mutable state.
@@ -558,6 +711,13 @@ struct Run {
     /// The bytes of every blob this script put, by ID: the read-back
     /// check compares a landed tree's files to what the client sent.
     put: HashMap<BlobId, Vec<u8>>,
+    /// The gate dir the server was spawned with, when the run's spawn
+    /// carried `SCION_TEST_GATE_DIR`.
+    gates: Option<PathBuf>,
+    /// The tips the script's imports pointed refs at, per ref: the model
+    /// holds them as foreign steps of the chain (K2), changesets no land
+    /// sent.
+    imported: HashMap<String, Vec<ChangesetId>>,
     ops: usize,
 }
 
@@ -583,11 +743,102 @@ struct RunSummary {
 
 /// Runs the whole script against one real server, then checks.
 #[allow(clippy::too_many_lines)] // one arm per op: the dispatch is the table
-async fn run_script(script: &[Op]) -> RunSummary {
+/// Adds one git commit in the run's repo and imports it to the run's
+/// own `imported` ref. The repo lives beside the run's temp dir and
+/// every import of a run shares it, so each import's tip sits on the
+/// previous one and the server's fast-forward rule holds: the first
+/// import creates the ref, and a later one moves it only from an
+/// ancestor of the tip - the last import, or a land on top of it.
+/// The lands the corpus parks at the CAS stand on this ref, so the
+/// import under them is the mover no land lock can stop.
+async fn run_import(state: &mut Run, root: &Path, data: &Path) {
+    use std::fmt::Write as _;
+    let name = IMPORTED_REF_NAME;
+    let git_dir = root.join("git");
+    if git_dir.join(".git").exists() {
+        let mut note = std::fs::read_to_string(git_dir.join("import-note.txt")).unwrap();
+        writeln!(note, "import {}", state.ops).unwrap();
+        std::fs::write(git_dir.join("import-note.txt"), &note).unwrap();
+        common::git(&git_dir, &["add", "."]);
+        common::git(&git_dir, &["commit", "-m", "the model's import"]);
+    } else {
+        std::fs::create_dir_all(&git_dir).unwrap();
+        common::git(&git_dir, &["init", "--initial-branch=main"]);
+        std::fs::write(git_dir.join("import-note.txt"), "import 0\n").unwrap();
+        common::git(&git_dir, &["add", "."]);
+        common::git(&git_dir, &["commit", "-m", "the model's import seed"]);
+    }
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"));
+    cmd.arg("--data")
+        .arg(data)
+        .env("SCION_POSTGRES_URL", common::postgres_url(data))
+        .args(["import", "--repo", REPO, "--ref", name])
+        .arg(&git_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "import to {name} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The import's tip is the ref's head now: a foreign changeset no
+    // land sent, which the chain check holds as the model's own import.
+    let tip = resolve_ref(&mut state.objects, name).await.unwrap();
+    state.imported.entry(name.to_owned()).or_default().push(tip);
+    state.heads.entry(name).or_default().push(tip);
+}
+
+/// Runs one script on its own runtime, and bounds the shutdown: the
+/// script's fired-and-forgotten races run as tasks on it, and a server
+/// that never answers one would hold the runtime's drop past every
+/// ceiling. A straggler dies with the runtime instead of the run.
+fn run_on_rt(script: &[Op], script_name: &str) -> RunSummary {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
+    let summary = rt.block_on(run_script(script, script_name));
+    rt.shutdown_timeout(Duration::from_secs(10));
+    summary
+}
+
+#[allow(clippy::too_many_lines)] // one arm per op: the dispatch is the table
+async fn run_script(script: &[Op], script_name: &str) -> RunSummary {
+    // The script's one bound, held by a plain OS thread outside the
+    // runtime it guards: it starts before anything the run does (a run
+    // that wedges in its own setup - a server start, a store open, a
+    // connect - has no step yet), it names the script and the step it
+    // died on, and it exits the process whatever the runtime's threads
+    // hold. The step check between ops is the fast guard; this one sees
+    // an op that blocks inside one call, where a land RPC runs to its
+    // 600 s client deadline and the gc subprocess has no ceiling.
+    let started = std::time::Instant::now();
+    let budget = Duration::from_secs(SCRIPT_BUDGET_SECS);
+    let ordinal = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
     let dir = scion_server::test_support::private_tempdir();
     let (data, log) = (dir.path().join("data"), dir.path().join("server.log"));
     create_repo(&data);
-    let mut server = Server::start(&data, &log);
+    let db_url = postgres_url(&data);
+    let watchdog = Watchdog {
+        script_name: script_name.to_owned(),
+        db_url,
+        seed: seed(),
+        started,
+        budget,
+        ordinal: Arc::clone(&ordinal),
+        stop: Arc::clone(&stop),
+    };
+    // The guard starts before the server does: it covers the server
+    // start and the connect, where a wedge has no step yet.
+    std::thread::spawn(move || watchdog.run());
+    // The gate dir of this run: the server pauses only at points a corpus
+    // line or a strategy op armed, and the dir dies with the run's temp
+    // dir.
+    let gates = dir.path().join("gates");
+    let mut server = Server::start_with_env(&data, &log, &[("SCION_TEST_GATE_DIR", &gates)]);
     let (scion, objects) = connect(&server.url).await.unwrap();
     let mut state = Run {
         scion,
@@ -600,35 +851,10 @@ async fn run_script(script: &[Op]) -> RunSummary {
         gc_during_pending: false,
         put: HashMap::new(),
         m2_ref: None,
+        gates: Some(gates),
+        imported: HashMap::new(),
         ops: 0,
     };
-
-    // A wall-clock budget far under the CI job cap, enforced by a
-    // watchdog thread. The between-ops check cannot fire on an op that
-    // blocks inside one call - a land RPC runs to its 600 s client
-    // deadline, and the gc subprocess has no ceiling at all - so the
-    // watchdog, which sees real time whatever the executor does, kills
-    // the process with the seed and the current op. libtest captures
-    // print! and eprint!, but a raw write to the stderr file handle,
-    // and the abort that follows, reach the CI log.
-    let budget = Duration::from_secs(
-        std::env::var("SCION_LANDMODEL_BUDGET_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(240),
-    );
-    let started = std::time::Instant::now();
-    let ordinal = Arc::new(AtomicUsize::new(0));
-    let stop = Arc::new(AtomicBool::new(false));
-    let watchdog = Watchdog {
-        script: script.to_vec(),
-        seed: seed(),
-        started,
-        budget,
-        ordinal: Arc::clone(&ordinal),
-        stop: Arc::clone(&stop),
-    };
-    std::thread::spawn(move || watchdog.run());
 
     for op in script {
         state.ops += 1;
@@ -893,6 +1119,84 @@ async fn run_script(script: &[Op]) -> RunSummary {
                 }
                 assert!(status.success(), "gc failed: {err}");
             }
+            Op::SendNoWait {
+                caller,
+                target,
+                stale,
+                point,
+            } => {
+                let name = target_name(*target);
+                let head = match resolve_ref(&mut state.objects, name).await {
+                    Ok(head) => Some(head),
+                    Err(_) if *target == MISSING => None,
+                    Err(status) => panic!("ResolveRef {name}: {status:?}"),
+                };
+                let base = match head {
+                    Some(head) => {
+                        state.heads.entry(name).or_default().push(head);
+                        // A stale land bases on the oldest head the run
+                        // saw, so the finish must derive (the walk the
+                        // finish-step gate stands in).
+                        if *stale { state.heads[name][0] } else { head }
+                    }
+                    None => resolve_ref(&mut state.objects, REFS[0]).await.unwrap(),
+                };
+                send_land_nowait(&mut state, *caller, *target, base, *point).await;
+            }
+            Op::AwaitGate { land, point } => {
+                if state.lands.is_empty() {
+                    continue;
+                }
+                let idx = land % state.lands.len();
+                let key = state.lands[idx].key.clone();
+                let Some(dir) = &state.gates else {
+                    continue;
+                };
+                let pause = dir.join("pause").join(format!("{}-{key}", point.name()));
+                let arm = dir.join("arm").join(format!("{}-{key}", point.name()));
+                let mut reader = common::LandsReader::open(&data);
+                let give_up = std::time::Instant::now() + Duration::from_secs(60);
+                loop {
+                    if pause.exists() {
+                        break;
+                    }
+                    // The land may have decided without ever reaching the
+                    // point (a rejected land never parks): the arm stays
+                    // for nothing, and the wait ends instead of blowing
+                    // its ceiling on a random script.
+                    if reader
+                        .state_of_key(&key)
+                        .is_some_and(|row| row != "pending")
+                    {
+                        let _ = std::fs::remove_file(&arm);
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < give_up,
+                        "the land {key} never parked at {} though the arm stood",
+                        point.name()
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+            Op::Resume { land, point } => {
+                if state.lands.is_empty() {
+                    continue;
+                }
+                let idx = land % state.lands.len();
+                let key = state.lands[idx].key.clone();
+                if let Some(dir) = &state.gates {
+                    std::fs::create_dir_all(dir.join("resume")).unwrap();
+                    std::fs::write(
+                        dir.join("resume").join(format!("{}-{key}", point.name())),
+                        b"",
+                    )
+                    .unwrap();
+                }
+            }
+            Op::Import => {
+                run_import(&mut state, dir.path(), &data).await;
+            }
             Op::Burst { k, target } => {
                 let name = target_name(*target);
                 let base = match resolve_ref(&mut state.objects, name).await {
@@ -1044,7 +1348,8 @@ async fn run_script(script: &[Op]) -> RunSummary {
 /// blocks inside one call: a land RPC runs to its 600 s deadline, and a
 /// `gc` subprocess has no ceiling at all.
 struct Watchdog {
-    script: Vec<Op>,
+    script_name: String,
+    db_url: String,
     seed: u64,
     started: std::time::Instant,
     budget: Duration,
@@ -1057,21 +1362,15 @@ impl Watchdog {
         while !self.stop.load(Ordering::Relaxed) {
             if self.started.elapsed() >= self.budget {
                 let at = self.ordinal.load(Ordering::Relaxed);
-                let op = self.script.get(at.saturating_sub(1));
-                let mut err = std::io::stderr().lock();
-                let _ = writeln!(
-                    err,
-                    "the random case passed its budget of {budget:?} at op {at} \
-                     (seed {s}): {op:?}; aborting so the cap cannot hide it",
-                    at = at,
-                    budget = self.budget,
-                    s = self.seed,
-                    op = op.map_or_else(String::new, |op| format!("{op:?}")),
-                );
-                let _ = err.flush();
+                guard_log(&format!(
+                    "{} passed its budget of {:?} at step {} (seed {}); \
+                     the run is wedged, aborting the process",
+                    self.script_name, self.budget, at, self.seed,
+                ));
+                snapshot_db(&self.db_url);
                 std::process::abort();
             }
-            std::thread::sleep(Duration::from_secs(5));
+            std::thread::sleep(Duration::from_secs(1));
         }
     }
 }
@@ -1136,13 +1435,45 @@ async fn check(state: &mut Run) {
     finish_lands(&mut state.scion, &mut state.lands).await;
     check_keys(&state.lands);
     for target in REFS {
+        let foreign: HashSet<ChangesetId> = state
+            .imported
+            .get(target)
+            .map(|tips| tips.iter().copied().collect())
+            .unwrap_or_default();
         let (mut scion, mut objects) = (state.scion.clone(), state.objects.clone());
-        check_chain(&mut scion, &mut objects, target, &state.lands).await;
+        check_chain(&mut scion, &mut objects, target, &state.lands, &foreign).await;
         check_conflict(&mut scion, &mut objects, target, &state.lands).await;
         check_durability(
             &mut scion,
             &mut objects,
             target,
+            &state.lands,
+            &state.acked_before_kill,
+        )
+        .await;
+    }
+    // The imported ref holds the run's imports and whatever lands the
+    // corpus parked on it; the same checks apply once anything is there.
+    if state.imported.contains_key(IMPORTED_REF_NAME) {
+        let foreign: HashSet<ChangesetId> = state
+            .imported
+            .get(IMPORTED_REF_NAME)
+            .map(|tips| tips.iter().copied().collect())
+            .unwrap_or_default();
+        let (mut scion, mut objects) = (state.scion.clone(), state.objects.clone());
+        check_chain(
+            &mut scion,
+            &mut objects,
+            IMPORTED_REF_NAME,
+            &state.lands,
+            &foreign,
+        )
+        .await;
+        check_conflict(&mut scion, &mut objects, IMPORTED_REF_NAME, &state.lands).await;
+        check_durability(
+            &mut scion,
+            &mut objects,
+            IMPORTED_REF_NAME,
             &state.lands,
             &state.acked_before_kill,
         )
@@ -1165,10 +1496,11 @@ async fn finish_lands(scion: &mut Scion, lands: &mut Ledger) {
         let request = lands[idx].request();
         let mut retry_conn = scion.clone();
         calls.spawn(async move {
-            let reply = retry_conn
-                .land(request)
-                .await
-                .unwrap_or_else(|s| panic!("the retry of land {idx}: {s:?}"));
+            let reply = ceiling(
+                &format!("the retry of land {idx}"),
+                retry_conn.land(request),
+            )
+            .await;
             (idx, reply.into_inner())
         });
         // The twin of a cut call: in flight at the same time.
@@ -1176,10 +1508,11 @@ async fn finish_lands(scion: &mut Scion, lands: &mut Ledger) {
             let request = lands[idx].request();
             let mut twin_conn = scion.clone();
             calls.spawn(async move {
-                let reply = twin_conn
-                    .land(request)
-                    .await
-                    .unwrap_or_else(|s| panic!("the twin retry of land {idx}: {s:?}"));
+                let reply = ceiling(
+                    &format!("the twin retry of land {idx}"),
+                    twin_conn.land(request),
+                )
+                .await;
                 (idx, reply.into_inner())
             });
         }
@@ -1198,12 +1531,93 @@ async fn finish_lands(scion: &mut Scion, lands: &mut Ledger) {
 /// cannot capture - before the harness holds the test's output, so a
 /// panic is in the CI log even when the job is cancelled before the
 /// summary runs.
+/// Appends one guard line to the file `SCION_TEST_GUARD_LOG` names, when
+/// it is set: the guards' words must survive a wedged thread holding
+/// the stderr lock, so the guards also speak to a file no one else
+/// writes.
+/// Writes what the test database holds when a run wedges: every
+/// connection's state, wait and query, and every lock with its holder.
+/// A retry that waits on a row or advisory lock names its holder here;
+/// a database with no waiting statement puts the wait in the server's
+/// memory, and the land path's own logs take over.
+fn snapshot_db(url: &str) {
+    guard_log("snapshot: begin");
+    let Ok(mut client) = postgres::Client::connect(url, postgres::NoTls) else {
+        guard_log("snapshot: the database refused a connection");
+        return;
+    };
+    let Ok(rows) = client.query(
+        "SELECT pid, state, wait_event_type, wait_event, xact_start, \
+         left(query, 160) AS query FROM pg_stat_activity \
+         WHERE datname = current_database() AND pid <> pg_backend_pid() \
+         ORDER BY pid",
+        &[],
+    ) else {
+        guard_log("snapshot: the activity query failed");
+        return;
+    };
+    for row in &rows {
+        guard_log(&format!(
+            "activity: pid={} state={} wait={}/{} xact={:?} q={}",
+            row.get::<_, i32>(0),
+            row.get::<_, String>(1),
+            row.get::<_, Option<String>>(2).unwrap_or_default(),
+            row.get::<_, Option<String>>(3).unwrap_or_default(),
+            row.get::<_, Option<std::time::SystemTime>>(4),
+            row.get::<_, String>(5).trim(),
+        ));
+    }
+    let Ok(rows) = client.query(
+        "SELECT l.locktype::text, l.classid::text, l.objid::text, l.granted, \
+         l.pid, a.state, left(a.query, 120) AS query FROM pg_locks l \
+         LEFT JOIN pg_stat_activity a ON a.pid = l.pid \
+         WHERE a.datname = current_database() OR a.pid IS NULL \
+         ORDER BY l.pid, l.granted",
+        &[],
+    ) else {
+        guard_log("snapshot: the locks query failed");
+        return;
+    };
+    for row in &rows {
+        guard_log(&format!(
+            "lock: pid={} type={} class={} obj={} granted={} holder_state={} holder_q={}",
+            row.get::<_, Option<i32>>(4).unwrap_or(-1),
+            row.get::<_, String>(0),
+            row.get::<_, String>(1),
+            row.get::<_, Option<String>>(2).unwrap_or_default(),
+            row.get::<_, bool>(3),
+            row.get::<_, Option<String>>(5).unwrap_or_default(),
+            row.get::<_, Option<String>>(6).unwrap_or_default().trim(),
+        ));
+    }
+    guard_log("snapshot: end");
+}
+
+fn guard_log(line: &str) {
+    if let Some(path) = std::env::var_os("SCION_TEST_GUARD_LOG") {
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+}
+
 fn install_panic_hook() {
     static HOOK: OnceLock<()> = OnceLock::new();
     HOOK.get_or_init(|| {
         let default = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             use std::io::Write as _;
+            guard_log(&format!(
+                "PANIC: {}",
+                info.payload()
+                    .downcast_ref::<String>()
+                    .map_or("panic", String::as_str)
+            ));
             let _ = writeln!(
                 std::io::stderr().lock(),
                 "PANIC: {}",
@@ -1323,13 +1737,26 @@ impl Chain {
 /// K2: each ref's chain is constructible by the model's rebase rule, and
 /// each landed result is the change its land sent, rebased onto its
 /// parent; every land that replied LANLED is on it, exactly once.
-async fn check_chain(scion: &mut Scion, objects: &mut Objects, target: &str, lands: &Ledger) {
+async fn check_chain(
+    scion: &mut Scion,
+    objects: &mut Objects,
+    target: &str,
+    lands: &Ledger,
+    foreign: &HashSet<ChangesetId>,
+) {
     let chain = Chain::walk(scion, objects, target, lands).await;
+    // The changesets the script's imports pointed refs at: on the chain
+    // as steps, but no land's result.
+    let mut foreign_steps = 0usize;
     for (i, (id, changeset, land)) in chain.steps.iter().enumerate() {
         if i == 0 {
             if !(land.is_none()) {
                 fail_check("{target}: the root {id} is a land's result");
             }
+            continue;
+        }
+        if foreign.contains(id) {
+            foreign_steps += 1;
             continue;
         }
         let rec_idx = land.unwrap_or_else(|| {
@@ -1355,7 +1782,8 @@ async fn check_chain(scion: &mut Scion, objects: &mut Objects, target: &str, lan
         );
     }
     // Every land that replied LANDED for this ref is on it, exactly once:
-    // the chain holds one step per land, and no step twice.
+    // the chain holds one step per land, and no step twice. The script's
+    // imports hold the steps between them.
     let landed = lands
         .iter()
         .filter(|rec| {
@@ -1366,16 +1794,19 @@ async fn check_chain(scion: &mut Scion, objects: &mut Objects, target: &str, lan
         })
         .count();
     check_assert!(
-        chain.steps.len() - 1 == landed,
-        "{target}: {landed} lands replied LANDED, the chain holds {}",
+        chain.steps.len() - 1 == landed + foreign_steps,
+        "{target}: {landed} lands replied LANDED and {foreign_steps} steps are imports, \
+         the chain holds {}",
         chain.steps.len() - 1
     );
     // R4: the chain is constructible. Walking root-first, each step's
     // land has its base on the chain before it, and no path of the land
     // changed on the chain between its base and the head it landed on.
+    // An import step is no land: the walk skips it, as R2 above did.
     for i in 1..chain.steps.len() {
         let (id, _, land) = &chain.steps[i];
-        let rec = &lands[land.expect("mapped above")];
+        let Some(land) = land else { continue };
+        let rec = &lands[*land];
         let base_at = if rec.base == chain.steps[0].0 {
             0
         } else {
@@ -1664,6 +2095,7 @@ fn a_restart_waits_for_the_killed_servers_store_lock() {
 /// The checked-in seed corpus: each file is one script, run first, so a
 /// regression here reads like a sentence.
 #[test]
+#[allow(clippy::too_many_lines)] // the corpus's guards and its kinds
 fn the_seed_corpus_holds() {
     install_panic_hook();
     // Postgres pays per-op commits and a full server restart per script:
@@ -1672,7 +2104,9 @@ fn the_seed_corpus_holds() {
     // conflict, a missing ref - is these six files, under one minute.
     // The nightly land-model workflow runs the whole corpus there
     // (SCION_LANDMODEL_CASES set).
-    let short_on_postgres = ["02", "03", "05", "06", "08", "10"];
+    let short_on_postgres = [
+        "02", "03", "05", "06", "08", "10", "12", "13", "14", "15", "16",
+    ];
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/land_model_corpus");
     let mut names = Vec::new();
     for entry in std::fs::read_dir(&dir).unwrap() {
@@ -1694,15 +2128,59 @@ fn the_seed_corpus_holds() {
     let (mut landed, mut conflict, mut rejected) = (0, 0, 0);
     let (mut retried_after_kill, mut gc_beside) = (false, false);
     let (mut executable_lands, mut gc_during_pending) = (0, false);
+    // One guard over the whole corpus: each script's guard covers its
+    // own run, and the harness's own work between scripts - a runtime
+    // shutdown, a summary - must never sit unguarded. The bound is the
+    // sum of the script budgets plus a margin for that harness work.
+    let corpus_started = std::time::Instant::now();
+    let corpus_budget = Duration::from_secs(SCRIPT_BUDGET_SECS * (names.len() as u64) + 120);
+    let corpus_stop = Arc::new(AtomicBool::new(false));
+    let corpus_guard_stop = Arc::clone(&corpus_stop);
+    let corpus_guard = std::thread::spawn(move || {
+        while !corpus_guard_stop.load(Ordering::Relaxed) {
+            if corpus_started.elapsed() >= corpus_budget {
+                guard_log(&format!(
+                    "the corpus passed its budget of {corpus_budget:?}; the \
+                     run is wedged between scripts, aborting the process",
+                ));
+                eprintln!(
+                    "the corpus passed its budget of {corpus_budget:?}; the \
+                     run is wedged between scripts, aborting the process",
+                );
+                std::process::abort();
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    });
+    // The gate-ordered scripts run twice: the gates make the order exact,
+    // so a rerun must land the same outcome shape, and a failing one must
+    // fail the same way every time.
+    let ordered = ["12", "13", "14", "15", "16"];
     for path in names {
         let text = std::fs::read_to_string(&path).unwrap();
         let script = parse_script(&text);
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(4)
-            .enable_all()
-            .build()
-            .unwrap();
-        let summary = rt.block_on(run_script(&script));
+        let summary = run_on_rt(&script, &path.file_name().unwrap().to_string_lossy());
+        // The gate-ordered scripts run twice: the gates make the order
+        // exact, so a rerun lands the same outcome shape — and a failing
+        // one fails the same way every time.
+        if ordered
+            .iter()
+            .any(|p| path.file_name().unwrap().to_string_lossy().starts_with(p))
+        {
+            let again = run_on_rt(&script, &path.file_name().unwrap().to_string_lossy());
+            assert_eq!(
+                (summary.landed, summary.conflict, summary.rejected),
+                (again.landed, again.conflict, again.rejected),
+                "{}: the ordered script's rerun landed another outcome",
+                path.display()
+            );
+            assert_eq!(
+                summary.retried_after_kill,
+                again.retried_after_kill,
+                "{}: the rerun's retry-after-kill differs",
+                path.display()
+            );
+        }
         landed += summary.landed;
         conflict += summary.conflict;
         rejected += summary.rejected;
@@ -1711,6 +2189,8 @@ fn the_seed_corpus_holds() {
         executable_lands += summary.executable_lands;
         gc_during_pending |= summary.gc_during_pending;
     }
+    corpus_stop.store(true, Ordering::Relaxed);
+    let _ = corpus_guard.join();
     // The corpus must keep making every kind of outcome: a parser or a
     // strategy change cannot empty it without this sounding.
     if landed == 0 {
@@ -1776,12 +2256,7 @@ fn the_model_holds_across_a_random_script() {
         // its script in the log even if shrinking then eats the cap.
         println!("seed: {}", seed());
         println!("script: {script:?}");
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(4)
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(run_script(&script));
+        run_on_rt(&script, "the random case");
         Ok(())
     });
     if let Err(failure) = verdict {

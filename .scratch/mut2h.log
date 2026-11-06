@@ -1,0 +1,14 @@
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.38s
+     Running tests/land_model_proptest.rs (target/debug/deps/land_model_proptest-3bf7487f2f8e0126)
+
+running 1 test
+test the_seed_corpus_holds ... 0.00s seed 1793893959664 op 1: CutFresh { caller: 0, target: 0, shared: false, cut_ms: 20 }
+0.09s seed 1793893959664 op 2: KillAtPending
+seed 1793893959664: kill-pending saw no pending row; the land finished between two polls, and the kill is a plain kill
+10.43s seed 1793893959664 op 3: Check
+error: test failed, to rerun pass `-p open-scion-server --test land_model_proptest`
+
+Caused by:
+  process didn't exit successfully: `/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/target/debug/deps/land_model_proptest-3bf7487f2f8e0126 the_seed_corpus_holds --test-threads=1 --nocapture` (signal: 15, SIGTERM: termination signal)

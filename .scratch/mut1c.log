@@ -1,0 +1,12 @@
+   Compiling open-scion-server v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.53s
+     Running tests/land_model_proptest.rs (target/debug/deps/land_model_proptest-3bf7487f2f8e0126)
+
+running 1 test
+test the_seed_corpus_holds ... 0.00s seed 1793888475908 op 1: CutFresh { caller: 0, target: 0, shared: false, cut_ms: 20 }
+0.10s seed 1793888475908 op 2: KillAtPending
+0.44s seed 1793888475908 op 3: Check
+error: test failed, to rerun pass `-p open-scion-server --test land_model_proptest`
+
+Caused by:
+  process didn't exit successfully: `/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/target/debug/deps/land_model_proptest-3bf7487f2f8e0126 the_seed_corpus_holds --test-threads=1` (signal: 15, SIGTERM: termination signal)

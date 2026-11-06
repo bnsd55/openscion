@@ -1,0 +1,29 @@
+   Compiling open-scion-server v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.70s
+     Running tests/land_model_proptest.rs (target/debug/deps/land_model_proptest-3bf7487f2f8e0126)
+
+running 1 test
+test the_seed_corpus_holds ... 6.70s seed 1793905728366 op 1: CutFresh { caller: 0, target: 0, shared: false, cut_ms: 20 }
+6.80s seed 1793905728366 op 2: KillAtPending
+17.14s seed 1793905728366 op 3: Check
+5.30s seed 1793905728366 op 1: Land { caller: 1, target: 0, stale: false, shared: false }
+5.43s seed 1793905728366 op 2: Twin { caller: 2, land: 0 }
+5.44s seed 1793905728366 op 3: Check
+4.83s seed 1793905728366 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+4.96s seed 1793905728366 op 2: Land { caller: 1, target: 1, stale: false, shared: false }
+5.06s seed 1793905728366 op 3: Gc
+6.99s seed 1793905728366 op 4: Land { caller: 2, target: 0, stale: false, shared: true }
+7.12s seed 1793905728366 op 5: Check
+4.83s seed 1793905728366 op 1: Land { caller: 0, target: 2, stale: false, shared: false }
+4.93s seed 1793905728366 op 2: Check
+4.80s seed 1793905728366 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+4.92s seed 1793905728366 op 2: Land { caller: 1, target: 0, stale: false, shared: true }
+5.05s seed 1793905728366 op 3: Land { caller: 2, target: 0, stale: true, shared: true }
+5.18s seed 1793905728366 op 4: Check
+4.88s seed 1793905728366 op 1: BurstCut { k: 5, target: 0 }
+5.58s seed 1793905728366 op 2: Gc
+7.49s seed 1793905728366 op 3: Check
+error: test failed, to rerun pass `-p open-scion-server --test land_model_proptest`
+
+Caused by:
+  process didn't exit successfully: `/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/target/debug/deps/land_model_proptest-3bf7487f2f8e0126 the_seed_corpus_holds --test-threads=1` (signal: 15, SIGTERM: termination signal)

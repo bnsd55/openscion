@@ -1,0 +1,105 @@
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+lockf: /private/tmp/claude-1820636291/-Users-ben-shaharizad-git-scion/40305b24-01e6-4715-bad7-f4b5b8c1a2cb/scratchpad/slots/slot1: already locked
+build-slot: waiting (free 7 GiB, 1 slots busy or disk low)
+    Checking open-scion-server v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.36s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.25s
+   Compiling open-scion-proto v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-proto)
+   Compiling open-scion-server v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-server)
+   Compiling open-scion-tier v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-tier)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.20s
+     Running tests/land_model_proptest.rs (target/debug/deps/land_model_proptest-3bf7487f2f8e0126)
+
+running 3 tests
+test the_model_holds_across_a_random_script ... ok
+test a_restart_waits_for_the_killed_servers_store_lock ... ok
+4.94s seed 1793908492652 op 1: CutFresh { caller: 0, target: 0, shared: false, cut_ms: 20 }
+5.05s seed 1793908492652 op 2: KillAtPending
+15.37s seed 1793908492652 op 3: Check
+4.90s seed 1793908492652 op 1: Land { caller: 1, target: 0, stale: false, shared: false }
+5.02s seed 1793908492652 op 2: Twin { caller: 2, land: 0 }
+5.03s seed 1793908492652 op 3: Check
+4.86s seed 1793908492652 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+4.98s seed 1793908492652 op 2: Land { caller: 1, target: 1, stale: false, shared: false }
+5.10s seed 1793908492652 op 3: Gc
+6.97s seed 1793908492652 op 4: Land { caller: 2, target: 0, stale: false, shared: true }
+7.10s seed 1793908492652 op 5: Check
+4.84s seed 1793908492652 op 1: Land { caller: 0, target: 2, stale: false, shared: false }
+4.93s seed 1793908492652 op 2: Check
+4.91s seed 1793908492652 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.02s seed 1793908492652 op 2: Land { caller: 1, target: 0, stale: false, shared: true }
+5.14s seed 1793908492652 op 3: Land { caller: 2, target: 0, stale: true, shared: true }
+5.26s seed 1793908492652 op 4: Check
+4.87s seed 1793908492652 op 1: BurstCut { k: 5, target: 0 }
+5.59s seed 1793908492652 op 2: Gc
+7.52s seed 1793908492652 op 3: Check
+4.78s seed 1793908492652 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+4.91s seed 1793908492652 op 2: Import
+5.30s seed 1793908492652 op 3: SendNoWait { caller: 1, target: 3, stale: false, point: Cas }
+5.34s seed 1793908492652 op 4: AwaitGate { land: 1, point: Cas }
+5.37s seed 1793908492652 op 5: Import
+5.76s seed 1793908492652 op 6: Resume { land: 1, point: Cas }
+5.76s seed 1793908492652 op 7: Retry { caller: 1, land: 1 }
+5.81s seed 1793908492652 op 8: Check
+test the_seed_corpus_holds has been running for over 60 seconds
+4.91s seed 1793908492652 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.03s seed 1793908492652 op 2: Import
+5.41s seed 1793908492652 op 3: SendNoWait { caller: 1, target: 3, stale: false, point: Cas }
+5.45s seed 1793908492652 op 4: AwaitGate { land: 1, point: Cas }
+5.48s seed 1793908492652 op 5: Import
+5.86s seed 1793908492652 op 6: Resume { land: 1, point: Cas }
+5.86s seed 1793908492652 op 7: Retry { caller: 1, land: 1 }
+5.91s seed 1793908492652 op 8: Check
+4.94s seed 1793908492652 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.06s seed 1793908492652 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Settled }
+5.13s seed 1793908492652 op 3: AwaitGate { land: 1, point: Settled }
+5.17s seed 1793908492652 op 4: Resume { land: 1, point: Settled }
+5.17s seed 1793908492652 op 5: Retry { caller: 1, land: 1 }
+5.19s seed 1793908492652 op 6: Check
+4.88s seed 1793908492652 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.01s seed 1793908492652 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Settled }
+5.07s seed 1793908492652 op 3: AwaitGate { land: 1, point: Settled }
+5.11s seed 1793908492652 op 4: Resume { land: 1, point: Settled }
+5.11s seed 1793908492652 op 5: Retry { caller: 1, land: 1 }
+5.13s seed 1793908492652 op 6: Check
+4.79s seed 1793908492652 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+4.91s seed 1793908492652 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Planned }
+4.98s seed 1793908492652 op 3: AwaitGate { land: 1, point: Planned }
+5.00s seed 1793908492652 op 4: Kill
+5.31s seed 1793908492652 op 5: Retry { caller: 1, land: 1 }
+5.35s seed 1793908492652 op 6: Check
+4.98s seed 1793908492652 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.09s seed 1793908492652 op 2: SendNoWait { caller: 1, target: 0, stale: false, point: Planned }
+5.16s seed 1793908492652 op 3: AwaitGate { land: 1, point: Planned }
+5.19s seed 1793908492652 op 4: Kill
+5.49s seed 1793908492652 op 5: Retry { caller: 1, land: 1 }
+5.53s seed 1793908492652 op 6: Check
+4.88s seed 1793908492652 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+5.01s seed 1793908492652 op 2: SendNoWait { caller: 1, target: 0, stale: true, point: Step }
+5.08s seed 1793908492652 op 3: AwaitGate { land: 1, point: Step }
+5.15s seed 1793908492652 op 4: Kill
+5.45s seed 1793908492652 op 5: Retry { caller: 1, land: 1 }
+5.46s seed 1793908492652 op 6: Check
+4.81s seed 1793908492652 op 1: Land { caller: 0, target: 0, stale: false, shared: false }
+4.94s seed 1793908492652 op 2: SendNoWait { caller: 1, target: 0, stale: true, point: Step }
+5.01s seed 1793908492652 op 3: AwaitGate { land: 1, point: Step }
+5.08s seed 1793908492652 op 4: Kill
+5.38s seed 1793908492652 op 5: Retry { caller: 1, land: 1 }
+5.40s seed 1793908492652 op 6: Check
+5.08s seed 1793908492652 op 1: SendNoWait { caller: 1, target: 0, stale: false, point: Record }
+5.15s seed 1793908492652 op 2: AwaitGate { land: 1, point: Record }
+5.18s seed 1793908492652 op 3: Land { caller: 1, target: 0, stale: false, shared: false }
+5.29s seed 1793908492652 op 4: Resume { land: 1, point: Record }
+5.29s seed 1793908492652 op 5: Retry { caller: 1, land: 1 }
+5.31s seed 1793908492652 op 6: Check
+error: test failed, to rerun pass `-p open-scion-server --test land_model_proptest`
+
+Caused by:
+  process didn't exit successfully: `/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/target/debug/deps/land_model_proptest-3bf7487f2f8e0126 --test-threads=2` (signal: 6, SIGABRT: process abort signal)

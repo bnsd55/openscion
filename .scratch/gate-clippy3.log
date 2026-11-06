@@ -1,0 +1,44 @@
+    Checking open-scion-server v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-server)
+error: unnecessary boolean `not` operation
+   --> crates/scion-server/tests/land_model_proptest.rs:753:5
+    |
+753 | /     if !git_dir.join(".git").exists() {
+754 | |         std::fs::create_dir_all(&git_dir).unwrap();
+755 | |         common::git(&git_dir, &["init", "--initial-branch=main"]);
+756 | |         std::fs::write(git_dir.join("import-note.txt"), "import 0\n").unwrap();
+...   |
+764 | |         common::git(&git_dir, &["commit", "-m", "the model's import"]);
+765 | |     }
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#if_not_else
+    = note: `-D clippy::if-not-else` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::if_not_else)]`
+help: try
+    |
+753 ~     if git_dir.join(".git").exists() {
+754 +         let mut note = std::fs::read_to_string(git_dir.join("import-note.txt")).unwrap();
+755 +         writeln!(note, "import {}", state.ops).unwrap();
+756 +         std::fs::write(git_dir.join("import-note.txt"), &note).unwrap();
+757 +         common::git(&git_dir, &["add", "."]);
+758 +         common::git(&git_dir, &["commit", "-m", "the model's import"]);
+759 +     } else {
+760 +         std::fs::create_dir_all(&git_dir).unwrap();
+761 +         common::git(&git_dir, &["init", "--initial-branch=main"]);
+762 +         std::fs::write(git_dir.join("import-note.txt"), "import 0\n").unwrap();
+763 +         common::git(&git_dir, &["add", "."]);
+764 +         common::git(&git_dir, &["commit", "-m", "the model's import seed"]);
+765 +     }
+    |
+
+error: this function has too many lines (462/100)
+   --> crates/scion-server/tests/land_model_proptest.rs:787:1
+    |
+787 | async fn run_script(script: &[Op]) -> RunSummary {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#too_many_lines
+    = note: `-D clippy::too-many-lines` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::too_many_lines)]`
+
+error: could not compile `open-scion-server` (test "land_model_proptest") due to 2 previous errors

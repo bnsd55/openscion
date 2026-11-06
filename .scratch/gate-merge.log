@@ -1,0 +1,30 @@
+build-slot: waiting (free 6 GiB, 1 slots busy or disk low)
+    Checking open-scion-proto v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-proto)
+    Checking open-scion-server v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-server)
+    Checking open-scion-tier v0.1.0 (/Users/ben.shaharizad/git/scion/.claude/worktrees/land-gates/crates/scion-tier)
+error: this function has too many lines (103/100)
+    --> crates/scion-server/tests/land_model_proptest.rs:2015:1
+     |
+2015 | fn the_seed_corpus_holds() {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#too_many_lines
+     = note: `-D clippy::too-many-lines` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::too_many_lines)]`
+
+error: variables can be used directly in the `format!` string
+    --> crates/scion-server/tests/land_model_proptest.rs:2058:17
+     |
+2058 | /                 eprintln!(
+2059 | |                     "the corpus passed its budget of {budget:?}; the run is \
+2060 | |                      wedged between scripts, aborting the process",
+2061 | |                     budget = corpus_budget,
+2062 | |                 );
+     | |_________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#uninlined_format_args
+     = note: `-D clippy::uninlined-format-args` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::uninlined_format_args)]`
+
+error: could not compile `open-scion-server` (test "land_model_proptest") due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
