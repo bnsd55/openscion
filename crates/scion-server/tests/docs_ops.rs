@@ -10,6 +10,9 @@
 use std::path::Path;
 use std::process::Command;
 
+#[path = "docs_common/mod.rs"]
+mod docs_common;
+
 /// The scion-server subcommands the guide's commands may use.
 const SUBCOMMANDS: [&str; 14] = [
     "serve",
@@ -412,6 +415,18 @@ fn every_alert_response_anchor_resolves() {
 
 /// Every heading of the guide, as GitHub slugs it: lowercased, spaces
 /// and dots to dashes, other punctuation dropped.
+/// An alert anchor that names a heading with a hyphen in it resolves:
+/// GitHub keeps the hyphen, so the check's slug rule must too.
+#[test]
+fn an_alert_anchor_resolves_a_hyphenated_heading() {
+    let doc = "### A stuck free-space sample\n\nEach free-space sample.\n";
+    let slugs = headings(doc);
+    assert!(
+        slugs.iter().any(|h| h == "a-stuck-free-space-sample"),
+        "the hyphenated heading's GitHub slug is missing from {slugs:?}"
+    );
+}
+
 fn headings(doc: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in doc.lines() {
@@ -419,18 +434,7 @@ fn headings(doc: &str) -> Vec<String> {
             continue;
         };
         let heading = heading.trim_start_matches('#').trim();
-        let mut slug = String::new();
-        for c in heading.chars() {
-            if c.is_ascii_alphanumeric() {
-                slug.extend(c.to_lowercase());
-            } else if c == ' ' || c == '.' {
-                slug.push('-');
-            }
-        }
-        while slug.ends_with('-') {
-            slug.pop();
-        }
-        out.push(slug);
+        out.push(docs_common::github_slug(heading));
     }
     out
 }

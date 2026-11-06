@@ -9,6 +9,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[path = "docs_common/mod.rs"]
+mod docs_common;
+
+use docs_common::github_slug as slug;
+
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
 /// The two repo-absolute link shapes the README uses: a file at main
@@ -76,31 +81,6 @@ fn slugs(markdown: &str) -> Vec<String> {
             format!("{slug}{suffix}")
         })
         .collect()
-}
-
-/// GitHub's slug of one heading's text.
-fn slug(text: &str) -> String {
-    let mut out = String::new();
-    let mut last_space = false;
-    for c in text.chars() {
-        if c.is_whitespace() {
-            if !last_space {
-                out.push('-');
-            }
-            last_space = true;
-            continue;
-        }
-        last_space = false;
-        if c == '`' || c == '*' || c == '_' {
-            // Formatting is dropped, but a bare `_` or `*` word mark is
-            // punctuation on GitHub too.
-            continue;
-        }
-        if c.is_alphanumeric() || c == '-' || c == '_' {
-            out.extend(c.to_lowercase());
-        }
-    }
-    out
 }
 
 /// One inline link's target, or a reference definition's target.
