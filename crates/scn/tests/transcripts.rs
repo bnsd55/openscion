@@ -729,6 +729,27 @@ fn the_n1_side_answers_as_its_files_say() {
     // file for the wrong reason - the same NOT_FOUND answers a missing
     // path and a missing changeset alike.
     qualifying.sort_by_key(|(file, _)| !file.ends_with("is_ancestor_self_true.textproto"));
+    // The control guards only when it qualifies: a probe may hand one of
+    // the five $cs refusal files a since the control does not have, and
+    // those five would run unguarded - the wrong id passes them with the
+    // refusal they expect anyway. Fail the leg naming both.
+    const CS_REFUSALS: [&str; 5] = [
+        "diff_unknown_cs.textproto",
+        "is_ancestor_unrelated_false.textproto",
+        "merge_base_unknown_cs.textproto",
+        "list_dir_unknown_path.textproto",
+        "read_file_unknown_path.textproto",
+    ];
+    let control = "is_ancestor_self_true.textproto";
+    let has_control = qualifying.iter().any(|(file, _)| file.ends_with(control));
+    for (file, _) in &qualifying {
+        if CS_REFUSALS.iter().any(|name| file.ends_with(name)) && !has_control {
+            panic!(
+                "{}, a $cs refusal file qualifies without the Ok-on-$cs control ({control}): the wrong-changeset pass is unguarded",
+                file.display()
+            );
+        }
+    }
 
     // Leg 1: the qualifying files against the N-1 server and its tiers.
     let (db_guard, pg) = n1_database();
