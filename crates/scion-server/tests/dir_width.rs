@@ -141,6 +141,7 @@ fn one_changed_name_in_a_wide_directory() {
             &request,
             std::time::Duration::ZERO,
         )
+        .0
         .expect("the land lands");
     let land_ms = started.elapsed().as_secs_f64() * 1000.0;
     let root = outcome
@@ -223,6 +224,7 @@ fn a_change_to_a_supported_width_directory_stays_on_the_measured_line() {
             &request,
             std::time::Duration::ZERO,
         )
+        .0
         .expect("the land lands");
     let land_ms = started.elapsed().as_secs_f64() * 1000.0;
     let root = outcome

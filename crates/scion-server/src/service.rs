@@ -1948,7 +1948,13 @@ impl Scion for ScionService {
                     // is born here.
                     crate::land_profile::seed_pre(pre);
                     crate::land_profile::seed_pre_parts(pre_checks, pre_intent);
-                    lands.land(&store, &caller, &req, pre).map_err(Status::from)
+                    let (outcome, trace) = lands.land(&store, &caller, &req, pre);
+                    crate::land_profile::log(
+                        land::recorded_land_id(&outcome),
+                        handler_started.elapsed(),
+                        &trace,
+                    );
+                    outcome.map_err(Status::from)
                 })();
                 // The job that changed the state writes the state change's
                 // own lines, after the commit and outside the write

@@ -118,12 +118,15 @@ fn land_once(
         request_key: cs.to_string(),
         deadline: later(),
     };
-    match lands.land(
-        store,
-        &Caller("t".into()),
-        &request,
-        std::time::Duration::ZERO,
-    ) {
+    match lands
+        .land(
+            store,
+            &Caller("t".into()),
+            &request,
+            std::time::Duration::ZERO,
+        )
+        .0
+    {
         Ok(outcome) => outcome,
         Err(Error::Aborted(detail)) => panic!("the land aborted once: {detail}"),
         Err(error) => panic!("the land failed: {error}"),
