@@ -56,9 +56,9 @@ pub(crate) enum Phase {
     SetState,
     /// Anything else (the eviction drop).
     Other,
-    /// The changeset commit of a CreateChangeset call.
+    /// The changeset commit of a `CreateChangeset` call.
     CreateCommit,
-    /// The row commit of a PutBlob call.
+    /// The row commit of a `PutBlob` call.
     PutBlobRow,
     /// A gc sweep's write transaction.
     GcSweep,
@@ -367,48 +367,53 @@ impl Drop for LaneCustomerGuard {
 /// to: the land phase stack's top when a land's trace is live, else
 /// the guard-named customer, else Other.
 fn lane_phase() -> Phase {
-    if let Some(trace) = Trace::get() {
-        if let Some(phase) = trace
+    let phase = Trace::get().and_then(|trace| {
+        trace
             .stack
             .get(trace.depth.wrapping_sub(1))
             .copied()
             .flatten()
-        {
-            return phase;
-        }
+    });
+    if let Some(phase) = phase {
+        return phase;
     }
-    LANE_CUSTOMER.with(|c| c.get()).unwrap_or(Phase::Other)
+    LANE_CUSTOMER.with(Cell::get).unwrap_or(Phase::Other)
 }
 
-fn u64_max() -> u128 {
-    u64::MAX as u128
+/// The nanoseconds as u128, clamped into a u64 for the counters.
+fn u64_ns(ns: u128) -> u64 {
+    u64::try_from(ns).unwrap_or(u64::MAX)
 }
 
 /// A write transaction queued for the write connection for `ns`, then
 /// holds it. The queue time lands before the hold; the hold's total
 /// comes from the lane guard's drop. Splitting here keeps a queued
 /// wait from reading as held work.
+#[allow(clippy::cast_possible_truncation)] // ns is clamped to u64::MAX first
 pub(crate) fn lane_queued(ns: Duration) {
-    let ns = ns.as_nanos().min(u64_max());
+    let ns = u64_ns(ns.as_nanos());
     let slot = &LANE[lane_phase().slot()];
     slot.calls
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     slot.queued_ns
-        .fetch_add(ns as u64, std::sync::atomic::Ordering::Relaxed);
+        .fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The write transaction's hold ended after `ns` more (the queue is
 /// already counted).
+#[allow(clippy::cast_possible_truncation)] // ns is clamped to u64::MAX first
 pub(crate) fn lane_held(ns: Duration) {
-    let ns = ns.as_nanos().min(u64_max());
+    let ns = u64_ns(ns.as_nanos());
     let slot = &LANE[lane_phase().slot()];
     slot.held_ns
-        .fetch_add(ns as u64, std::sync::atomic::Ordering::Relaxed);
+        .fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The /metrics lines of the lane counters, as Prometheus gauges. The
 /// harness diffs them across the bench window and divides by the lands.
+#[must_use]
 pub fn render_lane() -> Option<String> {
+    use std::fmt::Write as _;
     let mut out = String::new();
     for phase in PHASES {
         let slot = &LANE[phase.slot()];
@@ -421,16 +426,21 @@ pub fn render_lane() -> Option<String> {
         let held = slot.held_ns.load(std::sync::atomic::Ordering::Relaxed);
         let stmts = slot.stmts.load(std::sync::atomic::Ordering::Relaxed);
         let stmt_ns = slot.stmt_ns.load(std::sync::atomic::Ordering::Relaxed);
-        out.push_str(&format!(
+        // ns into seconds; a u64's last bits do not matter at this scale.
+        #[allow(clippy::cast_precision_loss)]
+        let queued_s = queued as f64 / 1e9;
+        #[allow(clippy::cast_precision_loss)]
+        let held_s = held as f64 / 1e9;
+        #[allow(clippy::cast_precision_loss)]
+        let round_s = stmt_ns as f64 / 1e9;
+        let _ = write!(
+            out,
             "scion_lane_calls{{phase=\"{name}\"}} {calls}\n\
-             scion_lane_queued_seconds{{phase=\"{name}\"}} {:.6}\n\
-             scion_lane_held_seconds{{phase=\"{name}\"}} {:.6}\n\
+             scion_lane_queued_seconds{{phase=\"{name}\"}} {queued_s:.6}\n\
+             scion_lane_held_seconds{{phase=\"{name}\"}} {held_s:.6}\n\
              scion_lane_stmts{{phase=\"{name}\"}} {stmts}\n\
-             scion_lane_stmt_seconds{{phase=\"{name}\"}} {:.6}\n",
-            queued as f64 / 1e9,
-            held as f64 / 1e9,
-            stmt_ns as f64 / 1e9,
-        ));
+             scion_lane_stmt_seconds{{phase=\"{name}\"}} {round_s:.6}\n"
+        );
     }
     (!out.is_empty()).then_some(out)
 }
@@ -440,7 +450,7 @@ pub(crate) fn stmt_done(spent: Duration) {
     if let Some(trace) = Trace::get() {
         Trace::put(&trace.add_stmt(spent.as_nanos()));
     }
-    let ns = spent.as_nanos().min(u64_max()) as u64;
+    let ns = u64_ns(spent.as_nanos());
     let slot = &LANE[lane_phase().slot()];
     slot.stmts
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
