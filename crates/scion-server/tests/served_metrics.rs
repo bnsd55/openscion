@@ -152,6 +152,10 @@ async fn a_served_server_renders_the_operating_metrics() {
     let text = metrics.render();
     assert!(text.contains("scion_data_free_bytes "), "{text}");
     assert!(text.contains("scion_data_free_inodes "), "{text}");
+    assert!(
+        text.contains("scion_data_free_sample_age_seconds "),
+        "{text}"
+    );
     // On Postgres, the changeset's write transaction waited for the
     // collector's key, and the wait is in the histogram.
     // On Postgres, a write transaction waits for the collector's key,
