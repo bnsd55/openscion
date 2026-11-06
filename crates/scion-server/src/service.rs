@@ -2451,19 +2451,19 @@ mod tests {
     use super::*;
 
     /// The free-space tests' shared slot: both tests drive the one
-    /// process-global park (TEST_FREE_STAT_PARKED holds a single
+    /// process-global park (`TEST_FREE_STAT_PARKED` holds a single
     /// directory) and the one pair of poll overrides, so a second
     /// test's park steals the first's — its statvfs answers, its
     /// samples land, and its age freezes at 0, which is the red the
     /// CI's one-process run caught. Each test holds the slot for its
-    /// whole body; tests in separate processes share nothing.
-    static FREE_SPACE_POLL_SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// whole body; tests in separate processes share nothing. The
+    /// tokio mutex, not a std one: the async tests hold the guard
+    /// across awaits, which a std guard forbids.
+    static FREE_SPACE_POLL_SLOT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// Takes the free-space tests' slot for the caller's whole body.
-    fn free_space_poll_slot() -> std::sync::MutexGuard<'static, ()> {
-        FREE_SPACE_POLL_SLOT
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    async fn free_space_poll_slot() -> tokio::sync::MutexGuard<'static, ()> {
+        FREE_SPACE_POLL_SLOT.lock().await
     }
 
     /// A statvfs that never answers does not stop the poll: the stuck
@@ -2472,8 +2472,8 @@ mod tests {
     /// answers. The park is the statvfs's test hook.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_stuck_free_space_sample_does_not_stop_the_poll() {
-        let _slot = free_space_poll_slot();
         const PERIOD: u64 = 50;
+        let _slot = free_space_poll_slot().await;
         let dir = crate::test_support::private_tempdir();
         let metrics = Arc::new(Metrics::default());
         let (_stop_tx, stop_rx) = tokio::sync::watch::channel(());
@@ -2539,8 +2539,8 @@ mod tests {
     /// series — the red proof on main.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_age_gauge_counts_from_boot_while_no_sample_lands() {
-        let _slot = free_space_poll_slot();
         const PERIOD: u64 = 50;
+        let _slot = free_space_poll_slot().await;
         let dir = crate::test_support::private_tempdir();
         let metrics = Arc::new(Metrics::default());
         let (_stop_tx, stop_rx) = tokio::sync::watch::channel(());
