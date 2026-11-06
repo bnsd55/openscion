@@ -264,12 +264,12 @@ fn a_lost_server_lock_fences_the_backend() {
     drop(taker);
 }
 
-/// The statement goes out before the client reads the FATAL: the kill
-/// is delivered while the worker sits between jobs, so the next
-/// statement sends on the dead socket and reads the FATAL as its own
-/// answer - the order that once handed the raw FATAL to the caller
-/// (#922). The reconnect path must answer that the transaction was
-/// lost.
+/// A statement sent on a connection already gone: the kill is
+/// delivered while the worker sits between jobs, so the next statement
+/// meets the dead socket and its error carries the socket's io error.
+/// The socket-error path of the connection-gone gate answers that the
+/// transaction was lost; the test passed before #922's fix and guards
+/// that path against a regression.
 #[test]
 fn a_statement_sent_before_the_fatal_is_read_answers_the_transaction_was_lost() {
     let dir = scion_server::test_support::private_tempdir();
