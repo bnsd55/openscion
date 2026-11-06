@@ -307,12 +307,21 @@ fn a_record_costs_five_statements() {
         count, 6,
         "a record cost {count} statements, not 6:\n{log:#?}"
     );
+    // The fold: the ref answers inside the lookup, never its own
+    // statement.
     assert_eq!(
         log.iter()
-            .filter(|sql| sql.contains("SELECT") && !sql.contains("INSERT"))
+            .filter(|sql| sql.starts_with("SELECT target, version FROM refs"))
             .count(),
-        2,
-        "the record ran more than the key and the lookup SELECTs:\n{log:#?}"
+        0,
+        "the record read the ref in its own statement:\n{log:#?}"
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|sql| sql.starts_with("SELECT r.repo_id"))
+            .count(),
+        1,
+        "the record's lookup ran more than once:\n{log:#?}"
     );
     // With a pending limit the quota's answer rides the same statement:
     // one statement more than the land's own shape would be if the
