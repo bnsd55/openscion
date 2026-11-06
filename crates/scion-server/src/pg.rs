@@ -48,7 +48,9 @@ use crate::land::{
     EXPIRE_PER_LAND, LAND_RETENTION_SECS, LandOutcome, LandRejectReason, LandRequest, LandState,
     decode_paths, encode_paths,
 };
-use crate::meta::{FsckDerivedRow, Meta, MetaTx, RefState, RepoChangeset, RepoId, StaleLand};
+use crate::meta::{
+    FsckDerivedRow, Meta, MetaTx, RefState, RepoChangeset, RepoId, StaleLand, StartRead,
+};
 use crate::store::Blobs;
 use crate::tree::RootTree;
 
@@ -1983,6 +1985,35 @@ fn delete_prefixes(calls: &[(String, i64)], belows: &[i64]) -> (Vec<String>, Vec
 }
 
 impl<'a> PgTx<'a> {
+    /// The derived rows the transaction already holds: the batching's
+    /// pending buffer first, then the preload's. One read filled the
+    /// preload at the start of a write path, and every put of this
+    /// transaction keeps it true. A row it deleted is of an older
+    /// version, which no read of this kind asks for, so no stale answer
+    /// can hide there.
+    ///
+    /// A held answer skips the repo-membership join on purpose: the only
+    /// rows a transaction holds are the parents and the changeset it
+    /// stores into `repo`, and the changesets insert refuses a parent
+    /// `repo` cannot see before any row is written.
+    fn held_derived(&mut self, kind: &str, version: u32, cs: ChangesetId) -> Option<Vec<u8>> {
+        let version = i64::from(version);
+        let key = id_bytes(cs.as_bytes());
+        if self.cs_batching
+            && let Some(pending) = self.derived_pending.as_deref()
+        {
+            for (k, v, c, value) in pending.iter().rev() {
+                if *k == kind && *v == version && id_bytes(c.as_bytes()) == key {
+                    return Some(value.clone());
+                }
+            }
+        }
+        self.derived_preload
+            .as_deref()
+            .and_then(|preload| preload.get(&(kind.to_owned(), version, key.clone())))
+            .cloned()
+    }
+
     /// The pending-lands quota counts new pending rows. A retry of an
     /// existing key resumes its land and adds no row, so a client can
     /// always finish what it started. The count and the insert need no
@@ -4679,6 +4710,51 @@ impl MetaTx for PgTx<'_> {
         Ok(())
     }
 
+    /// One statement for the walk's start: the generation rides the
+    /// repo-membership join (the guard), the value is a left join on the
+    /// same row. A hold in the transaction's memory answers with
+    /// [`StartRead::Stored`] and no statement - the only rows the
+    /// transaction holds are the parents and the changeset it stores
+    /// into `repo`, and the changesets insert refuses a parent `repo`
+    /// cannot see before any row is written.
+    fn generation_and_stored(
+        &mut self,
+        repo: RepoId,
+        kind: &str,
+        version: u32,
+        cs: ChangesetId,
+    ) -> Result<StartRead> {
+        if let Some(bytes) = self.held_derived(kind, version, cs) {
+            return Ok(StartRead::Stored(bytes));
+        }
+        let version = i64::from(version);
+        let key = id_bytes(cs.as_bytes());
+        let row = self
+            .c
+            .query_opt(
+                "SELECT gen, value FROM changesets
+                 JOIN repo_changesets ON cs = id
+                 LEFT JOIN derived
+                   ON derived.cs = changesets.id AND kind = $2 AND version = $3
+                 WHERE repo_id = $1 AND changesets.id = $4",
+                &[
+                    P::i64(repo.0),
+                    P::text(kind),
+                    P::i64(version),
+                    P::bytes(&key),
+                ],
+            )?
+            .ok_or_else(|| Error::NotFound(format!("changeset {cs}")))?;
+        let generation: i64 = row.get(0);
+        // The read caches, like `generation` does: the write that follows
+        // the walk asks the same changeset's generation, and the cache
+        // answers it.
+        self.gen_cache.insert((repo.0, key), generation);
+        Ok(row
+            .get::<_, Option<Vec<u8>>>(1)
+            .map_or(StartRead::Generation(generation), StartRead::Stored))
+    }
+
     /// The stored bytes of a derived value, if computed. While the
     /// importer's batching is on, the values this transaction inserted
     /// answer first (newest insert wins), then the chains the importer
@@ -4691,29 +4767,11 @@ impl MetaTx for PgTx<'_> {
         version: u32,
         cs: ChangesetId,
     ) -> Result<Option<Vec<u8>>> {
+        if let Some(bytes) = self.held_derived(kind, version, cs) {
+            return Ok(Some(bytes));
+        }
         let version = i64::from(version);
         let key = id_bytes(cs.as_bytes());
-        if self.cs_batching
-            && let Some(pending) = self.derived_pending.as_deref()
-        {
-            for (k, v, c, value) in pending.iter().rev() {
-                if *k == kind && *v == version && id_bytes(c.as_bytes()) == key {
-                    return Ok(Some(value.clone()));
-                }
-            }
-        }
-        // The transaction's own memory of the derived rows it preloaded
-        // or wrote: one statement filled it at the start of a write path,
-        // and every put of this transaction keeps it true. A row it
-        // deleted is of an older version, which no read of this kind
-        // asks for, so no stale answer can hide there.
-        if let Some(value) = self
-            .derived_preload
-            .as_deref()
-            .and_then(|preload| preload.get(&(kind.to_owned(), version, key.clone())))
-        {
-            return Ok(Some(value.clone()));
-        }
         Ok(self
             .c
             .query_opt(
@@ -5007,6 +5065,7 @@ impl MetaTx for PgTx<'_> {
     /// memory, so the answers stay the transaction's own.
     fn preload_derived(
         &mut self,
+        repo: RepoId,
         kinds: &[(&'static str, u32)],
         css: &[ChangesetId],
     ) -> Result<()> {
@@ -5022,8 +5081,16 @@ impl MetaTx for PgTx<'_> {
             .map(|(_, version)| i64::from(*version))
             .collect();
         let keys: Vec<Vec<u8>> = css.iter().map(|cs| id_bytes(cs.as_bytes())).collect();
+        // The generation rides the rows under the repo-membership join -
+        // the same guard every generation read keeps - and the read
+        // caches it: the changesets insert of the write that follows asks
+        // the first parent's generation, and the cache answers it.
         let rows = self.c.query(
-            "SELECT kind, version, cs, value FROM derived
+            "SELECT kind, version, cs, value,
+                    (SELECT gen FROM changesets
+                     JOIN repo_changesets ON cs = id
+                     WHERE repo_id = $4 AND id = d.cs) AS gen
+             FROM derived AS d
              WHERE cs = ANY($3)
                AND (kind, version) IN (SELECT kind, version
                                        FROM unnest($1::text[], $2::int8[]) AS t(kind, version))",
@@ -5031,10 +5098,15 @@ impl MetaTx for PgTx<'_> {
                 P::text_array(kind_names),
                 P::i64_array(versions),
                 P::bytea_array(keys),
+                P::i64(repo.0),
             ],
         )?;
         for row in rows {
             preload.insert((row.get(0), row.get(1), row.get(2)), row.get(3));
+            if let Some(read_gen) = row.try_get::<_, Option<i64>>(4).map_err(map_pg_error)? {
+                let cs: Vec<u8> = row.get(2);
+                self.gen_cache.insert((repo.0, cs), read_gen);
+            }
         }
         Ok(())
     }
