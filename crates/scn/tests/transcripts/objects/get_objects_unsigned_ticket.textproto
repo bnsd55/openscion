@@ -1,6 +1,7 @@
-# A ticket the server's keys did not sign is PERMISSION_DENIED. The file
-# sorts after get_objects_success on purpose: its daemon_warm line pins
-# the warm daemon serving the blob this file's store already holds.
+# A ticket the server's keys did not sign is PERMISSION_DENIED. The
+# daemon_warm line makes the runner warm the daemon with the valid
+# ticket first, so the pin below tests a warm store and the file can
+# sort anywhere.
 since: v0.7
 method: Objects/GetObjects
 fixture: landed

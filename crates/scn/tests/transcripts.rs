@@ -15,6 +15,14 @@
 //! match; unlisted fields never block, so a new optional field does not
 //! break the corpus. The runner parses these lines itself, so an unknown
 //! key fails the file instead of passing in silence.
+//!
+//! Tier keys, for the `Objects` files: `tiers: refuse` asserts a tier's
+//! UNIMPLEMENTED refusal of the non-GetObjects calls (section 7.1);
+//! `tiers: fresh` adds a second run of the file on a cache and daemon no
+//! earlier file touched, over the same store; `daemon_warm: serves` warms
+//! the daemon with the file's valid ticket as its setup, then pins the
+//! warm daemon serving the file's unsigned ticket from its store - a
+//! daemon checks no ticket by design (docs/protocol-v1.md section 7.1).
 #![cfg(unix)]
 
 use std::fs;
