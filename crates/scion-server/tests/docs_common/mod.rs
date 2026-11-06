@@ -4,7 +4,7 @@
 /// GitHub's slug of one heading's text: punctuation drops, formatting
 /// marks drop, each run of whitespace maps to one hyphen, and a hyphen
 /// or an underscore in the heading stays. GitHub's own rule.
-pub fn github_slug(text: &str) -> String {
+pub(crate) fn github_slug(text: &str) -> String {
     let mut out = String::new();
     let mut last_space = false;
     for c in text.chars() {
