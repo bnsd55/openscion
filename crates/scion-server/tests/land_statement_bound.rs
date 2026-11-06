@@ -156,7 +156,7 @@ static LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[test]
 fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound() {
     const BOUND: u64 = 36;
-    const EXACT: u64 = 26;
+    const EXACT: u64 = 24;
     let _log = LOG_LOCK.lock().unwrap();
     // Today's count, with slack for one more plan attempt: each fold of
     // the round-trip card lowers this number, and a change that raises
@@ -175,7 +175,10 @@ fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound()
     // the stored value in one statement - the repo-membership join stays
     // the guard - and the land's settle, whose head tree the preload
     // already holds, starts its walk with no statement at all:
-    // the land costs 26.
+    // the land costs 26. The next fold rides each writer transaction's
+    // lane key into its open batch - BEGIN, the 60 s guard, and the
+    // key's wait are one round trip, the guards keeping their order -
+    // and the land costs 24.
     //
     // This run has no rival writer, so the land settles in one attempt;
     // the log's one verdict UPDATE proves it. On that run the count is
