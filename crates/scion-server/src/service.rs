@@ -3092,6 +3092,28 @@ mod tests {
     /// a client's cancel leaves them - a job with no deadline check in
     /// its current phase (one long statement, a large tree store) holds
     /// its permit to the phase's end. A live call then times its wait
+    /// A job that answers an error returns its permit when its closure
+    /// ends: the land's deadline stop rides this, so a cancelled land
+    /// that gave up at its fill's deadline holds nothing back.
+    #[tokio::test]
+    async fn an_errored_job_returns_its_permit() {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let worker = Worker::new(store);
+        let status = worker
+            .run(|_| -> Result<(), crate::Error> {
+                Err(crate::Error::DeadlineExceeded("the test's job".into()))
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::DeadlineExceeded, "{status}");
+        assert_eq!(
+            worker.permits.available_permits(),
+            MAX_BLOCKING,
+            "the errored job held its permit"
+        );
+    }
+
     /// for a permit. The numbers land in the CI log; the mail to the
     /// lead carries them.
     #[tokio::test(flavor = "multi_thread")]
