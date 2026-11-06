@@ -105,12 +105,13 @@ stop_server() {
 cpu_sample() {
   prev=""
   while :; do
-    cur=$(awk '/^cpu /{print $2+$3+$4+$6+$7+$8, $5}' /proc/stat)
+    cur=$(awk '/^cpu /{print $2+$3+$4+$7+$8, $5, $6}' /proc/stat)
     if [ -n "$prev" ]; then
       busy=$(( $(echo "$cur" | cut -d' ' -f1) - $(echo "$prev" | cut -d' ' -f1) ))
       idle=$(( $(echo "$cur" | cut -d' ' -f2) - $(echo "$prev" | cut -d' ' -f2) ))
-      total=$((busy + idle))
-      [ "$total" -gt 0 ] && echo "busy_pct $((100 * busy / total)) load $(cut -d' ' -f1 /proc/loadavg)" >> "$WORK/cpu-$CELL.log"
+      wait=$(( $(echo "$cur" | cut -d' ' -f3) - $(echo "$prev" | cut -d' ' -f3) ))
+      total=$((busy + idle + wait))
+      [ "$total" -gt 0 ] && echo "busy_pct $((100 * busy / total)) iowait_pct $((100 * wait / total)) load $(cut -d' ' -f1 /proc/loadavg)" >> "$WORK/cpu-$CELL.log"
     fi
     prev="$cur"
     sleep 5
@@ -243,6 +244,14 @@ done
   echo "one land, taken apart (runner: ${CAPACITY_MACHINE:-unspecified})"
   echo "branch: $(git rev-parse --short HEAD); the main it carries: $(git log --format=%P -1 HEAD | awk '{print $2}' | cut -c1-7)"
   echo "runner cpus: $(nproc) vCPU"
+  psql "$SCION_PG_URL" -X -A -t -c \
+    "SELECT name || '=' || setting FROM pg_settings
+     WHERE name IN ('fsync', 'synchronous_commit', 'wal_sync_method',
+                    'full_page_writes', 'track_wal_io_timing')
+     ORDER BY name" | paste -sd' ' - | sed 's/^/postgres: /' || true
+  if docker ps --format '{{.Names}}' 2> /dev/null | grep -q profile-pg; then
+    echo "postgres data dir: $(docker exec profile-pg df -T /var/lib/postgresql/data 2> /dev/null | tail -1 | awk '{print $2, $5}')"
+  fi
   names=""
   for w in $PROFILE_CELLS; do
     names="$names land-w$w-r0 land-w$w-r$PROFILE_READERS"
@@ -273,7 +282,7 @@ done
   tries=$(wc -l < "$WORK/read-times-$name.csv" 2> /dev/null | tr -d ' ')
   echo "completed $tries checkouts, p50 ${p50:--} ms, p99 ${p99:--} ms"
   if [ -s "$WORK/cpu-$name.log" ]; then
-    awk '{ b += $2; l += $4; if ($4 > m) m = $4; n++ } END { printf "runner: mean busy %.0f%%, loadavg mean %.1f, max %.1f\n", b / n, l / n, m }' "$WORK/cpu-$name.log"
+    awk '{ b += $2; w += $3; l += $5; if ($5 > m) m = $5; n++ } END { printf "runner: mean busy %.0f%%, iowait %.0f%%, loadavg mean %.1f, max %.1f\n", b / n, w / n, l / n, m }' "$WORK/cpu-$name.log"
   fi
   if [ -s "$WORK/wal-$name.txt" ]; then
     echo "wal syncs in the window: $(cat "$WORK/wal-$name.txt")"
