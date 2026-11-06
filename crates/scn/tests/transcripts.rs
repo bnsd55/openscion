@@ -963,6 +963,17 @@ async fn run_get_root_tree(
 /// for what a reply did not send, and checks each object against its ID
 /// and the part rules. The answer is the ordered items plus how the
 /// whole answer ended; the file pins both.
+/// An object in progress: the first part's declared fields and the data
+/// the parts have carried so far.
+struct InProgress {
+    kind: i32,
+    declared_id: Vec<u8>,
+    encoding: i32,
+    size: u64,
+    encoded_size: u64,
+    data: Vec<u8>,
+}
+
 /// Reads one `GetObjects` answer's part stream into `objects`: the first
 /// part names its object, later parts extend it. Returns how the answer
 /// ended: `None` for a clean OK end, `Some(end)` for an error end.
@@ -972,29 +983,56 @@ async fn read_part_stream(
     objects: &mut Vec<(i32, String)>,
     sent_at: std::time::Instant,
 ) -> Result<Option<End>, String> {
-    let mut current: Option<(i32, Vec<u8>)> = None;
+    let mut current: Option<InProgress> = None;
     let mut parts = 0usize;
     loop {
-        match stream.message().await {
+        // F1: a tier that sends one part and holds the stream open must
+        // not hang the runner: every read is bounded.
+        let message = tokio::time::timeout(std::time::Duration::from_secs(30), stream.message())
+            .await
+            .map_err(|_| {
+                format!(
+                    "the tier sent nothing for 30s ({}s after the call went out)",
+                    sent_at.elapsed().as_secs()
+                )
+            })?;
+        match message {
             Ok(Some(part)) => {
                 parts += 1;
                 if part.id.is_empty() {
-                    // A later part of the object in progress.
-                    let Some((_, data)) = current.as_mut() else {
+                    // A later part: none of fields 1, 2, 4, 5 and 6 may be
+                    // set (section 3's part rules).
+                    let Some(object) = current.as_mut() else {
                         return Err("a part names no object and none is in progress".to_owned());
                     };
-                    data.extend_from_slice(&part.data);
+                    if part.kind != 0
+                        || part.encoding != 0
+                        || part.encoded_size != 0
+                        || part.size != 0
+                    {
+                        return Err(
+                            "a later part set kind, encoding, encoded_size or size".to_owned()
+                        );
+                    }
+                    object.data.extend_from_slice(&part.data);
                     continue;
                 }
                 // A first part: the object before it must have ended.
-                if let Some((kind, data)) = current.take() {
-                    objects.push(checked(kind, &data)?);
+                if let Some(object) = current.take() {
+                    objects.push(checked(&object)?);
                 }
-                current = Some((part.kind, part.data.to_vec()));
+                current = Some(InProgress {
+                    kind: part.kind,
+                    declared_id: part.id,
+                    encoding: part.encoding,
+                    size: part.size,
+                    encoded_size: part.encoded_size,
+                    data: part.data.to_vec(),
+                });
             }
             Ok(None) => {
-                if let Some((kind, data)) = current.take() {
-                    objects.push(checked(kind, &data)?);
+                if let Some(object) = current.take() {
+                    objects.push(checked(&object)?);
                 }
                 eprintln!(
                     "CALL {} GetObjects took={:.3}s end=Ok parts={}",
@@ -1007,8 +1045,8 @@ async fn read_part_stream(
             Err(status) => {
                 // The object in progress ends here: check it if it came
                 // whole, then the stream's code.
-                if let Some((kind, data)) = current.take()
-                    && let Ok(got) = checked(kind, &data)
+                if let Some(object) = current.take()
+                    && let Ok(got) = checked(&object)
                 {
                     objects.push(got);
                 }
@@ -1087,7 +1125,7 @@ async fn run_get_objects(
     let mut objects: Vec<(i32, String)> = Vec::new();
     let mut end = None;
     let mut rounds = 0usize;
-    while !remaining.is_empty() {
+    loop {
         rounds += 1;
         assert!(
             rounds <= 1000,
@@ -1128,6 +1166,9 @@ async fn run_get_objects(
         // named: ask again for the rest.
         let sent = objects.len() - before;
         remaining.drain(0..sent.min(remaining.len()));
+        if remaining.is_empty() {
+            break;
+        }
     }
 
     // The items the file pins, in order.
@@ -1162,15 +1203,45 @@ async fn run_get_objects(
 
 /// Whether `data` is the object `kind` and `id` name, as the
 /// conformance test checks: an ID must verify against its bytes.
-fn checked(kind: i32, data: &[u8]) -> Result<(i32, String), String> {
+fn checked(object: &InProgress) -> Result<(i32, String), String> {
+    let kind = object.kind;
     let id: Vec<u8> = match ObjectKind::try_from(kind) {
-        Ok(ObjectKind::Tree) => Tree::decode_with_id(data)
+        Ok(ObjectKind::Tree) => Tree::decode_with_id(&object.data)
             .map_err(|e| format!("the tree bytes do not decode: {e}"))?
             .1
             .as_bytes()
             .to_vec(),
-        Ok(ObjectKind::Blob) => scion_core::BlobId::of(data).as_bytes().to_vec(),
+        Ok(ObjectKind::Blob) => scion_core::BlobId::of(&object.data).as_bytes().to_vec(),
         _ => return Err(format!("the kind {kind} is no object kind")),
     };
+    // The part rules: the declared id must be the bytes' own, the parts
+    // must add up to the first part's encoded_size, and raw answers
+    // carry encoded_size == size == the data.
+    if id != object.declared_id {
+        return Err(format!(
+            "the first part declared id {}, the bytes hash to {}",
+            hex(&object.declared_id),
+            hex(&id)
+        ));
+    }
+    let carried = object.data.len() as u64;
+    if carried != object.encoded_size {
+        return Err(format!(
+            "the parts carry {carried} bytes, the first part said encoded_size {}",
+            object.encoded_size
+        ));
+    }
+    if object.encoding == Encoding::Raw as i32 && object.encoded_size != object.size {
+        return Err(format!(
+            "raw encoded_size {} does not equal size {}",
+            object.encoded_size, object.size
+        ));
+    }
+    if carried != object.size {
+        return Err(format!(
+            "the object is {carried} bytes, the first part said size {}",
+            object.size
+        ));
+    }
     Ok((kind, hex(&id)))
 }
