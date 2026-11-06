@@ -1372,7 +1372,14 @@ async fn run_get_objects(
         let sent_at = std::time::Instant::now();
         eprintln!("CALL {} GetObjects refs={} sent", url, call.refs.len());
         let mut stream = match client.get_objects(call).await {
-            Ok(stream) => stream.into_inner(),
+            Ok(stream) => {
+                // The call's headers are OK: the file's `status:` pin
+                // must be Ok, or the pin would never be compared on a
+                // served reply and a file that pins a failure would pass
+                // on one.
+                check_status(t, Code::Ok)?;
+                stream.into_inner()
+            }
             Err(status) => {
                 // The call itself failed: the file pins the code as the
                 // status, or as `resume_status` when this is a resumed
