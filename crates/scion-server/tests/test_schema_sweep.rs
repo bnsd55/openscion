@@ -525,7 +525,7 @@ fn a_write_that_loses_the_lane_key_answers_busy_and_leaves_no_transaction_open()
         let mut client = connect();
         client
             .batch_execute(&format!(
-                "BEGIN; SELECT pg_advisory_xact_lock(hashtext('{} || ':gc'));",
+                "BEGIN; SELECT pg_advisory_xact_lock(hashtext('{}' || ':gc'));",
                 escaped
             ))
             .unwrap();
