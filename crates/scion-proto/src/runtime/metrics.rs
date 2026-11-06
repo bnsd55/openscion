@@ -506,17 +506,21 @@ impl Metrics {
         self.render_blob_sync(&mut text);
         self.render_collector_key_wait(&mut text);
         if self.data_free_set.load(Ordering::Relaxed) {
-            let inodes = self.data_free_inodes.load(Ordering::Relaxed);
             let _ = writeln!(
                 text,
                 "# HELP scion_data_free_bytes Free bytes of the filesystem that holds the data directory.\n\
                  # TYPE scion_data_free_bytes gauge\n\
-                 scion_data_free_bytes {}\n\
-                 # HELP scion_data_free_inodes Free inodes of the filesystem that holds the data directory; one blob costs one inode (docs/operations.md, The inode budget).\n\
+                 scion_data_free_bytes {}",
+                self.data_free_bytes.load(Ordering::Relaxed)
+            );
+        }
+        if self.data_free_inodes_set.load(Ordering::Relaxed) {
+            let _ = writeln!(
+                text,
+                "# HELP scion_data_free_inodes Free inodes of the filesystem that holds the data directory; one blob costs one inode (docs/operations.md, The inode budget).\n\
                  # TYPE scion_data_free_inodes gauge\n\
                  scion_data_free_inodes {}",
-                self.data_free_bytes.load(Ordering::Relaxed),
-                inodes
+                self.data_free_inodes.load(Ordering::Relaxed)
             );
         }
         if self.blob_count_set.load(Ordering::Relaxed) {

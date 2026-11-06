@@ -1664,7 +1664,9 @@ What to do at each level:
 
 Nothing in the store needs repair because inodes ran out: a write that
 failed out-of-inodes left no torn file, and when inodes are back,
-writes resume with no restart.
+writes resume with no restart. A filesystem without a fixed inode table
+(btrfs) exports no inode gauge at all, so the inode alerts stay quiet
+there by design.
 
 Proof: crates/scion-server/tests/served_metrics.rs::a_served_server_renders_the_operating_metrics (behaviour, no command: the poll is the free-space poll's own code path, and the served render names both gauges; each alert's firing is proven by the promtool cases deploy/prometheus/openscion-alerts-test.yml runs, which fire past the threshold and stay quiet just above 100,000).
 

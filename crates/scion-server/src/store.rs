@@ -1036,14 +1036,23 @@ static TEST_FREE_BYTES: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(No
 
 /// The inodes free for this user on the filesystem that holds `dir`:
 /// the other wall of a blob store, one file per blob. `f_favail`, not
-/// `f_ffree`: the inodes a non-root process can really get.
+/// `f_ffree`: the inodes a non-root process can really get. `None` when
+/// the filesystem has no fixed inode table (f_files == 0; btrfs reports
+/// 0 and grows inodes on demand), so an operator does not get a false
+/// InodesCritical on a healthy store.
 ///
 /// # Errors
 ///
 /// The `statvfs` of `dir` failed (a directory that is gone).
-pub fn free_inodes(dir: &Path) -> std::io::Result<u64> {
+pub fn free_inodes(dir: &Path) -> std::io::Result<Option<u64>> {
     let stats = rustix::fs::statvfs(dir)?;
-    Ok(stats.f_favail)
+    Ok(inode_headroom(stats.f_files, stats.f_favail))
+}
+
+/// The free-inode count a filesystem with an inode table reports; `None`
+/// when it has none. Pure, so the table test can pin both arms.
+fn inode_headroom(files: u64, avail: u64) -> Option<u64> {
+    if files == 0 { None } else { Some(avail) }
 }
 
 /// Blobs written but not yet durable. Call [`BlobBatch::sync`] before
@@ -1808,8 +1817,18 @@ mod tests {
     #[test]
     fn free_inodes_of_a_tempdir_is_positive() {
         let dir = crate::test_support::private_tempdir();
-        let free = free_inodes(dir.path()).unwrap();
+        let free = free_inodes(dir.path())
+            .unwrap()
+            .expect("a tempdir has an inode table");
         assert!(free > 0, "{free}");
+    }
+
+    #[test]
+    fn a_filesystem_without_an_inode_table_reports_none() {
+        // (0, 0) is btrfs: no table, no gauge, no false InodesCritical.
+        assert_eq!(inode_headroom(0, 0), None);
+        // (1000, 10) is ext4-like: 10 free inodes of 1000.
+        assert_eq!(inode_headroom(1000, 10), Some(10));
     }
 
     #[test]
