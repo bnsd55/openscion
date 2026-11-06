@@ -6725,9 +6725,9 @@ mod tests {
 mod lane_key_tests {
     use super::{LANE_KEY_STATEMENT, LOCK_TIMEOUT_FOR_WRITERS};
 
-    /// The key statement spells the writers' clock from the constant,
-    /// not a literal beside it: a change to the constant reaches the
-    /// shipped statement, and this pin fails if it ever drifts (#917).
+    /// The key statement spells the writers' clock as a literal (the
+    /// simple query protocol takes no parameters). This pin fails if
+    /// the literal and `LOCK_TIMEOUT_FOR_WRITERS` ever drift (#917).
     #[test]
     fn the_lane_key_names_the_writers_clock_from_the_constant() {
         assert!(
