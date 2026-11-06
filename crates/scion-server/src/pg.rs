@@ -325,7 +325,10 @@ impl Readers {
         let idle = (0..size)
             .map(|_| {
                 let client = connect_with(url, ca, options, schema)?;
-                let on: String = client.query("SHOW synchronous_commit", &[])?[0].get(0);
+                let on: String = client.query("SHOW synchronous_commit", &[]).map_err(|e| {
+                    named_step("a reader's durability check", "SHOW synchronous_commit", e)
+                })?[0]
+                    .get(0);
                 if on != "on" {
                     return Err(Error::FailedPrecondition(format!(
                         "the database runs synchronous_commit={on}; this \
@@ -1010,7 +1013,15 @@ pub(crate) fn pairing_decision(
 /// the mint run before anything else is written, so a refusal leaves the
 /// schema untouched.
 fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
-    let first = writer.query("SELECT uuid FROM store_uuid WHERE one = 1", &[])?;
+    let first = writer
+        .query("SELECT uuid FROM store_uuid WHERE one = 1", &[])
+        .map_err(|e| {
+            named_step(
+                "the store identity read",
+                "SELECT uuid FROM store_uuid WHERE one = 1",
+                e,
+            )
+        })?;
     if let Some(row) = first.first() {
         // The database already names its store, and the comparison runs
         // before anything is written: no marker, or the marker of
@@ -1023,8 +1034,17 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
         // arm reads the flag while the marker is there, so the probe
         // runs then not at all - the reopen costs exactly main's
         // statements.
-        let has_repos =
-            marker.uuid.is_none() && !writer.query("SELECT 1 FROM repos LIMIT 1", &[])?.is_empty();
+        let has_repos = marker.uuid.is_none()
+            && !writer
+                .query("SELECT 1 FROM repos LIMIT 1", &[])
+                .map_err(|e| {
+                    named_step(
+                        "the store identity's repos probe",
+                        "SELECT 1 FROM repos LIMIT 1",
+                        e,
+                    )
+                })?
+                .is_empty();
         match pairing_decision(marker.uuid, Some(uuid), has_repos) {
             Pairing::Agree => {}
             Pairing::AdoptCut => {
@@ -1059,21 +1079,40 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
         // served - and every caller would read "repo not found"
         // with no error at the start. An empty schema refuses while
         // the marker names a store, and mints when it names none.
-        let has_repos = !writer.query("SELECT 1 FROM repos LIMIT 1", &[])?.is_empty();
+        let repos = writer
+            .query("SELECT 1 FROM repos LIMIT 1", &[])
+            .map_err(|e| named_step("the repos probe", "SELECT 1 FROM repos LIMIT 1", e))?;
+        let has_repos = !repos.is_empty();
         let fresh = match pairing_decision(marker.uuid, None, has_repos) {
             Pairing::Agree | Pairing::AdoptCut => unreachable!("the database holds no store"),
             Pairing::Fresh => marker.uuid.unwrap_or_else(uuid_new),
             Pairing::Refuse(error) => return Err(error),
         };
-        writer.query(
-            "INSERT INTO store_uuid (one, uuid) VALUES (1, $1) \
+        writer
+            .query(
+                "INSERT INTO store_uuid (one, uuid) VALUES (1, $1) \
              ON CONFLICT (one) DO NOTHING",
-            &[P::bytes(&fresh)],
-        )?;
+                &[P::bytes(&fresh)],
+            )
+            .map_err(|e| {
+                named_step(
+                    "the store identity write",
+                    "INSERT INTO store_uuid (one, uuid) VALUES (1, $1) ON CONFLICT (one) DO NOTHING",
+                    e,
+                )
+            })?;
         // A concurrent first open may have minted its own: read the
         // row again, and whatever it holds is the identity.
         Ok(uuid_of(
-            writer.query("SELECT uuid FROM store_uuid WHERE one = 1", &[])?[0]
+            writer
+                .query("SELECT uuid FROM store_uuid WHERE one = 1", &[])
+                .map_err(|e| {
+                    named_step(
+                        "the store identity read",
+                        "SELECT uuid FROM store_uuid WHERE one = 1",
+                        e,
+                    )
+                })?[0]
                 .get::<_, Vec<u8>>("uuid"),
         )?)
     }
@@ -1177,7 +1216,10 @@ impl Pg {
         let migrated = migrate(&mut writer, allow_migrate)?;
         // The durability of a commit is a promise of this backend: check
         // that the server kept its side of it.
-        let on: String = writer.query("SHOW synchronous_commit", &[])?[0].get(0);
+        let on: String = writer
+            .query("SHOW synchronous_commit", &[])
+            .map_err(|e| named_step("the durability check", "SHOW synchronous_commit", e))?[0]
+            .get(0);
         if on != "on" {
             return Err(Error::FailedPrecondition(format!(
                 "the database runs synchronous_commit={on}; this backend \
@@ -2615,6 +2657,10 @@ struct Setup {
     /// import).
     exclusive: bool,
     outcome: SetupOutcome,
+    /// The statement whose execution failed, with the database's error:
+    /// the error names what waited, and the source keeps the SQLSTATE
+    /// (#905).
+    failed: Option<(String, postgres::Error)>,
 }
 
 impl Setup {
@@ -2625,6 +2671,7 @@ impl Setup {
             schema: schema.map(str::to_owned),
             exclusive,
             outcome: SetupOutcome::Unreachable,
+            failed: None,
         };
         setup.outcome = setup.apply(client);
         setup
@@ -2647,13 +2694,12 @@ impl Setup {
             // cleanup's real check: a live connection holds it, so its
             // schema never yields the cleanup's exclusive try, whatever
             // a snapshot saw.
-            if client
-                .batch_execute(&format!(
-                    "SET search_path TO {schema}; SET application_name TO '{schema}';
-                     SELECT pg_advisory_lock_shared(hashtext('{schema}'))"
-                ))
-                .is_err()
-            {
+            let sql = format!(
+                "SET search_path TO {schema}; SET application_name TO '{schema}';
+                 SELECT pg_advisory_lock_shared(hashtext('{schema}'))"
+            );
+            if let Err(e) = client.batch_execute(&sql) {
+                self.failed = Some((sql, e));
                 return SetupOutcome::Unreachable;
             }
         }
@@ -2662,8 +2708,12 @@ impl Setup {
             // spelled: a plain URL and one that rides
             // `--search_path=public` land in the same schema and must
             // fence each other, and schemas ride separately.
-            let Ok(row) = client.query_one("SELECT current_schema()::text", &[]) else {
-                return SetupOutcome::Unreachable;
+            let row = match client.query_one("SELECT current_schema()::text", &[]) {
+                Ok(row) => row,
+                Err(e) => {
+                    self.failed = Some(("SELECT current_schema()::text".to_owned(), e));
+                    return SetupOutcome::Unreachable;
+                }
             };
             // A search_path whose members all miss answers NULL: the
             // connection would create nothing, and no lock names it.
@@ -2840,16 +2890,24 @@ fn run_statement(client: &mut Client, job: &Job) -> Result<Reply> {
 
 /// The reply of a failed setup: a takeover names the loss; an
 /// unreachable database answers what a client retries against.
-fn setup_error(setup: &Setup, ever_held: bool) -> Error {
+fn setup_error(setup: &mut Setup, ever_held: bool) -> Error {
     if matches!(setup.outcome, SetupOutcome::NoSchema) {
         return Error::FailedPrecondition(
             "the URL's search_path names no existing schema; create it first".into(),
         );
     }
     if matches!(setup.outcome, SetupOutcome::Unreachable) {
-        return Error::Storage(Storage::busy(std::io::Error::other(
-            "the database was unreachable at setup",
-        )));
+        return match setup.failed.take() {
+            Some((sql, source)) => {
+                Error::Storage(Storage::busy(std::io::Error::other(SetupFailure {
+                    sql,
+                    source,
+                })))
+            }
+            None => Error::Storage(Storage::busy(std::io::Error::other(
+                "the database was unreachable at setup, and the failing statement is unnamed",
+            ))),
+        };
     }
     Error::FailedPrecondition(lost_message(ever_held).into())
 }
@@ -3169,7 +3227,9 @@ fn connect_exclusive(
     // server starts against a taken database sees it now, and not in the
     // errors of the first call a client makes.
     let client = spawn_client(url, ca, options, schema, true, Some(fence))?;
-    client.query_opt("SELECT 1", &[])?;
+    client
+        .query_opt("SELECT 1", &[])
+        .map_err(|e| named_step("the one-server lock's probe", "SELECT 1", e))?;
     Ok(client)
 }
 
@@ -3446,13 +3506,108 @@ pub(crate) fn map_pg_error(e: postgres::Error) -> Error {
     pg_error_of(code.as_deref(), e)
 }
 
+/// The setup's failure: the statement rides the message, and the
+/// database's own error - the SQLSTATE with it - stays the source
+/// (#905).
+#[derive(Debug)]
+struct SetupFailure {
+    sql: String,
+    source: postgres::Error,
+}
+
+impl std::fmt::Display for SetupFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the database was unreachable at setup, waiting on:\n{}",
+            self.sql
+        )
+    }
+}
+
+impl std::error::Error for SetupFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// An open step's failure: the step's name and statement ride the
+/// error's display, and the source stays the mapped engine error, whose
+/// own source is the database's error - the whole chain survives
+/// (#905).
+#[derive(Debug)]
+struct NamedStep {
+    step: &'static str,
+    sql: String,
+    source: Error,
+}
+
+impl std::fmt::Display for NamedStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the open step `{}` waited or failed:\n{}",
+            self.step, self.sql
+        )
+    }
+}
+
+impl std::error::Error for NamedStep {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// The step of the open that failed, with its statement, in the class
+/// the mapped error already carries (#905).
+pub(crate) fn named_step(step: &'static str, sql: &str, err: Error) -> Error {
+    use crate::error::StorageClass;
+    let class = match &err {
+        Error::Storage(storage) => Some(storage.class()),
+        _ => None,
+    };
+    let named = NamedStep {
+        step,
+        sql: sql.to_owned(),
+        source: err,
+    };
+    match class {
+        Some(StorageClass::Busy) => Error::Storage(Storage::busy(std::io::Error::other(named))),
+        Some(StorageClass::DiskFull) => {
+            Error::Storage(Storage::disk_full(std::io::Error::other(named)))
+        }
+        Some(StorageClass::Internal) => {
+            Error::Storage(Storage::internal(std::io::Error::other(named)))
+        }
+        // The classes a step's own message carries: the clock's answer
+        // names the step, and the rest stand - a NotFound or a
+        // precondition is the step's own words already.
+        None => match named.source {
+            Error::DeadlineExceeded(why) => Error::DeadlineExceeded(format!(
+                "{why}; the open step `{}` waited or failed:\n{}",
+                named.step, named.sql
+            )),
+            other => other,
+        },
+    }
+}
+
 /// The mapping on one SQLSTATE, split from [`map_pg_error`] so a unit
 /// test can hand it a code: the `postgres` crate's error type cannot be
 /// built with a chosen one.
 fn pg_error_of(code: Option<&str>, e: postgres::Error) -> Error {
+    let closed = e.is_closed();
+    pg_error_of_source(code, closed, Box::new(e))
+}
+
+fn pg_error_of_source(
+    code: Option<&str>,
+    closed: bool,
+    source: Box<dyn std::error::Error + Send + Sync>,
+) -> Error {
     // A connection the database dropped is as retryable as a busy one.
-    if e.is_closed() {
-        return Error::Storage(Storage::busy(e));
+    if closed {
+        return Error::Storage(Storage::busy(source));
     }
     match code {
         // Deadlock, serialization failure, an administrative shutdown, a
@@ -3461,21 +3616,21 @@ fn pg_error_of(code: Option<&str>, e: postgres::Error) -> Error {
             if matches!(code, "40P01" | "40001" | "57P01" | "57P03" | "55P03")
                 || code.starts_with("08") =>
         {
-            tracing::warn!("the database is busy: {e}");
-            Error::Storage(Storage::busy(e))
+            tracing::warn!("the database is busy: {source}");
+            Error::Storage(Storage::busy(source))
         }
         // The lock or the statement waited past its clock: the caller
         // has been at it too long, and the client retries past its own
         // deadline.
         Some("57014") => {
-            tracing::warn!("the database gave the statement up: {e}");
+            tracing::warn!("the database gave the statement up: {source}");
             Error::DeadlineExceeded("the database kept the caller waiting".to_owned())
         }
         // A violation the code handles (a duplicate key, a check, a
         // foreign key) is one answer among many: it logs quietly.
         Some(code) if code.starts_with("23") => {
-            tracing::debug!("the database refused a statement: {e}");
-            Error::Storage(Storage::internal(e))
+            tracing::debug!("the database refused a statement: {source}");
+            Error::Storage(Storage::internal(source))
         }
         // Out of space: the same shortage, wherever the metadata lives.
         // 53100 is the database's one disk-full code - errcode_for_file_access
@@ -3489,23 +3644,23 @@ fn pg_error_of(code: Option<&str>, e: postgres::Error) -> Error {
         // succeed - and 58030 is an io_error - a failing device is the
         // EIO row's internal, not a space shortage.
         Some("53100") => {
-            tracing::error!("the server is out of disk space: {e}");
-            Error::Storage(Storage::disk_full(e))
+            tracing::error!("the server is out of disk space: {source}");
+            Error::Storage(Storage::disk_full(source))
         }
         // A statement the database never saw: the connection could not
         // be made or was cut on the way. No SQLSTATE names it, and a
         // client retries it as it retries a busy one.
         None => {
-            tracing::warn!("the database is unreachable: {e}");
-            Error::Storage(Storage::busy(e))
+            tracing::warn!("the database is unreachable: {source}");
+            Error::Storage(Storage::busy(source))
         }
         // The rest keep the engine's error as the source, and it reaches
         // the log in full: a bug of this backend, such as a bad parameter,
         // must not look busy, or the importer retries it and the log says
         // nothing but "busy".
         _ => {
-            tracing::warn!("the database refused a statement: {e}");
-            Error::Storage(Storage::internal(e))
+            tracing::warn!("the database refused a statement: {source}");
+            Error::Storage(Storage::internal(source))
         }
     }
 }
@@ -3749,7 +3904,15 @@ fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
     // turns while the migrations are quick, and the version the loser
     // reads is the one the winner left. A lock past its 5 s clock leaves
     // the taker busy: an open that hits one waits and tries again.
-    client.query_opt("SELECT pg_advisory_lock($1)", &[P::i64(SCHEMA_LOCK)])?;
+    client
+        .query_opt("SELECT pg_advisory_lock($1)", &[P::i64(SCHEMA_LOCK)])
+        .map_err(|e| {
+            named_step(
+                "the schema migration lock",
+                "SELECT pg_advisory_lock($1)",
+                e,
+            )
+        })?;
     let outcome = migrate_under_lock(client, allow);
     // The base statement budget goes back whatever the migrations did:
     // only the migration window ran without it, and this client — for
@@ -3759,16 +3922,75 @@ fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
     // writer with no answer is the silent path the base budget exists
     // to prevent. The migration's own error comes first, and the
     // restore's failure answers when the migrations left none.
-    let restored = client.execute(
-        &format!("SET statement_timeout = '{}'", base_statement_timeout()),
-        &[],
-    );
+    let restored = client
+        .execute(
+            &format!("SET statement_timeout = '{}'", base_statement_timeout()),
+            &[],
+        )
+        .map_err(|e| {
+            named_step(
+                "the base budget's return",
+                "SET statement_timeout = <the open's budget>",
+                e,
+            )
+        });
     // The lock lives on the client's session: it goes back whatever the
     // migrations did. A client that died mid-migration lost the lock with
     // its connection, and the unlock names a lock the new connection
     // never held, which answers false and costs nothing.
     let _ = client.query_opt("SELECT pg_advisory_unlock($1)", &[P::i64(SCHEMA_LOCK)]);
     outcome.and_then(|value| restored.map(|_| value))
+}
+
+/// One migration, in its own transaction with its version bump: a
+/// migration that fails rolls its own statements back, and the
+/// versions before it stand. The steps name themselves, with the
+/// migration's ledger name in the statement the failure names (#905).
+/// `from_version` is the version the database stood at before the
+/// open: a fresh database's story is a creation, not a migration, so
+/// the step log only answers a database that had one.
+fn run_one_migration(client: &mut PgClient, from_version: u32, n: u32, sql: &str) -> Result<()> {
+    let step = std::time::Instant::now();
+    let mut pending = Vec::new();
+    let mut derived = DerivedPending::default();
+    let mut preload = std::collections::HashMap::new();
+    let mut history = HistoryPending::default();
+    let step_name = PG_MIGRATION_NAMES
+        .get(usize::try_from(n).expect("a schema version fits in usize") - 1)
+        .copied()
+        .unwrap_or("unnamed");
+    let mut tx = PgTx::begin(
+        client,
+        &mut pending,
+        &mut derived,
+        &mut preload,
+        &mut history,
+        None,
+    )
+    .map_err(|e| named_step("the migration's begin", "BEGIN", e))?;
+    tx.c.batch(&format!(
+        "{sql}\nINSERT INTO schema_migrations (version, name) \
+             VALUES ({}, 'postgres schema')",
+        i64::from(n)
+    ))
+    .map_err(|e| {
+        named_step(
+            "the migration itself",
+            &format!("migration {n} ({step_name})"),
+            e,
+        )
+    })?;
+    tx.commit()
+        .map_err(|e| named_step("the migration's commit", "COMMIT", e))?;
+    if from_version != 0 {
+        tracing::info!(
+            from_version = n - 1,
+            to_version = n,
+            elapsed_ms = u64::try_from(step.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "the metadata schema migrated one step"
+        );
+    }
+    Ok(())
 }
 
 /// The migrations themselves, under the session's schema lock. `allow`
@@ -3781,7 +4003,13 @@ fn migrate_under_lock(client: &mut PgClient, allow: bool) -> Result<Option<(u32,
     // alone — and a role that may read the ledger but not create in the
     // schema still reaches the refusal instead of dying on the ledger's
     // DDL first.
-    let version = schema_version(client)?;
+    let version = schema_version(client).map_err(|e| {
+        named_step(
+            "the migration's version read",
+            "the schema_migrations ledger",
+            e,
+        )
+    })?;
     if version > PG_SCHEMA_VERSION {
         return Err(Error::FailedPrecondition(format!(
             "database schema version {version} is newer than this build \
@@ -3803,15 +4031,31 @@ fn migrate_under_lock(client: &mut PgClient, allow: bool) -> Result<Option<(u32,
     // The runner will write: a migration is the operator's ask, not a
     // lane's call, so its statements are not bounded by the open's
     // per-statement budget. `migrate` puts the base budget back.
-    client.execute("SET statement_timeout = 0", &[])?;
+    client
+        .execute("SET statement_timeout = 0", &[])
+        .map_err(|e| {
+            named_step(
+                "the migration window's budget lift",
+                "SET statement_timeout = 0",
+                e,
+            )
+        })?;
     // The ledger of the versions, made first, in its own transaction: a
     // migration that fails leaves the ledger and every version before it.
-    client.batch(
-        "CREATE TABLE IF NOT EXISTS schema_migrations (
+    client
+        .batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
              version BIGINT PRIMARY KEY,
              name    TEXT NOT NULL
          )",
-    )?;
+        )
+        .map_err(|e| {
+            named_step(
+                "the migration ledger's create",
+                "CREATE TABLE IF NOT EXISTS schema_migrations",
+                e,
+            )
+        })?;
     if version != 0 {
         tracing::info!(
             from_version = version,
@@ -3842,33 +4086,7 @@ fn migrate_under_lock(client: &mut PgClient, allow: bool) -> Result<Option<(u32,
         // One transaction per migration, with its version bump: a
         // migration that fails rolls its own statements back, and the
         // versions before it stand.
-        let step = std::time::Instant::now();
-        let mut pending = Vec::new();
-        let mut derived = DerivedPending::default();
-        let mut preload = std::collections::HashMap::new();
-        let mut history = HistoryPending::default();
-        let mut tx = PgTx::begin(
-            client,
-            &mut pending,
-            &mut derived,
-            &mut preload,
-            &mut history,
-            None,
-        )?;
-        tx.c.batch(&format!(
-            "{sql}\nINSERT INTO schema_migrations (version, name) \
-             VALUES ({}, 'postgres schema')",
-            i64::from(n)
-        ))?;
-        tx.commit()?;
-        if version != 0 {
-            tracing::info!(
-                from_version = n - 1,
-                to_version = n,
-                elapsed_ms = u64::try_from(step.elapsed().as_millis()).unwrap_or(u64::MAX),
-                "the metadata schema migrated one step"
-            );
-        }
+        run_one_migration(client, version, n, sql)?;
     }
     if version == 0 {
         tracing::info!(
@@ -6284,9 +6502,9 @@ mod tests {
     fn a_search_path_that_names_no_schema_refuses_with_the_fix() {
         let url = crate::backend::test_hooks::test_url().unwrap();
         let mut client = Client::connect(&url, NoTls).unwrap();
-        let setup = super::Setup::new(Some("scion_test_missing"), true, &mut client);
+        let mut setup = super::Setup::new(Some("scion_test_missing"), true, &mut client);
         assert!(!setup.ok(), "a missing schema cannot hold the setup");
-        let error = super::setup_error(&setup, false);
+        let error = super::setup_error(&mut setup, false);
         assert!(
             error
                 .to_string()

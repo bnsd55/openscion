@@ -102,6 +102,47 @@ fn wait_unnamed(client: &mut postgres::Client, schema: &str) {
     );
 }
 
+/// The key `register_test_schema` and the drain serialize on: the same
+/// constant of the test schema preparation names `CLEAN_LOCK`, spelled
+/// here so the
+/// test holds exactly that lock.
+const CLEAN_LOCK: i64 = 0x5343_494F_4E53_5445;
+
+/// One open whose registration waits for the cleanup lock: a test
+/// session holds `CLEAN_LOCK` just over the writer's 5 s lock clock while
+/// an open runs. The test guards the preparer's absence of a lock
+/// clock: the registration runs on the preparer's session, which
+/// carries none, so the open must succeed - slow, not failed. A 55P03
+/// here would name the statement that waited (#905).
+#[test]
+fn an_open_whose_cleanup_lock_is_held_over_the_writer_s_clock_succeeds() {
+    let _lock = locked();
+    let holder = std::thread::spawn(|| {
+        let mut client = connect();
+        client
+            .execute("SELECT pg_advisory_lock($1)", &[&CLEAN_LOCK])
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5_500));
+        client
+            .execute("SELECT pg_advisory_unlock($1)", &[&CLEAN_LOCK])
+            .unwrap();
+    });
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let dir = private_tempdir();
+    let started = std::time::Instant::now();
+    let store = Backend::open_test(dir.path());
+    let took = started.elapsed();
+    if let Err(err) = &store {
+        panic!("the open failed while the cleanup lock was held: {err}");
+    }
+    drop(store);
+    holder.join().unwrap();
+    assert!(
+        took >= std::time::Duration::from_millis(5_000),
+        "the open did not wait for the cleanup lock: {took:?}"
+    );
+}
+
 /// A finished test's schema drops at a later sweep: the backend closed,
 /// its directory is gone, and no connection names the schema. The
 /// registry row goes with it.
