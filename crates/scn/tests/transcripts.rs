@@ -122,6 +122,9 @@ fn parse(at: &Path, text: &str) -> Transcript {
             other => panic!("{}:{} names unknown key {other}", at.display(), n + 1),
         }
     }
+    // The header's format is checked here, so a malformed since fails
+    // the corpus run too, not only the N-1 legs.
+    let _since_version = version_of(since.as_deref().expect("the file names its since"));
     Transcript {
         path: at.display().to_string(),
         since: since.unwrap_or_else(|| panic!("{} names no since", at.display())),
@@ -662,17 +665,18 @@ fn pick_n1_files(
             Some((ov, os)) if ov <= v => (ov, os),
             _ => (v, t.since.clone()),
         });
-        if version_of(&t.since) > prev {
-            continue;
-        }
         // SHORTCUT: the Scion files stay out of both legs, counted only:
         // their fixture names a changeset id this tree's store landed,
         // and the N-1 side's changeset id differs, so the files'
         // request.changeset_id would not resolve there. Issue #921 pairs
         // the fixture through the ref; then the legs run them like the
-        // rest.
+        // rest. The count comes before the since filter, so a file whose
+        // behaviour is newer than the side still counts as a Scion file.
         if t.method.starts_with("Scion/") {
             scion_files += 1;
+            continue;
+        }
+        if v > prev {
             continue;
         }
         qualifying.push((file.clone(), t));
@@ -708,6 +712,7 @@ fn the_n1_side_answers_as_its_files_say() {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("the work dir is made");
     make_private(&dir);
+    eprintln!("the N-1 work dir: {}", dir.display());
 
     // The N-1 version decides which files qualify: a file's `since`
     // must be at or under it. `PREV_REF` names the ref the
@@ -831,7 +836,7 @@ fn n1_fresh_pair_keys(
         .map(|k| format!("--ticket-public-key={k}"))
         .collect();
     let cache_log = dir.join(format!("fresh-{index}-cache.log"));
-    let cache = spawn_logged(
+    let mut cache = spawn_logged(
         prev_bin.join("scion-cache"),
         std::iter::empty()
             .chain(["--listen", "127.0.0.1:0", "--upstream", server])
@@ -839,13 +844,13 @@ fn n1_fresh_pair_keys(
         &tier_tokens(),
         &cache_log,
     );
-    let port = serving_port(&cache_log);
+    let port = serving_port(&mut cache, &cache_log);
     let cache_url = format!("http://127.0.0.1:{port}");
     let relay_dir = dir.join(format!("fresh-{index}"));
     fs::create_dir_all(&relay_dir).expect("the fresh pair's dir is made");
     make_private(&relay_dir);
     let sock = dir.join(format!("fresh-{index}.sock"));
-    let daemon = spawn_logged(
+    let mut daemon = spawn_logged(
         prev_bin.join("scion-daemon"),
         [
             "--data",
@@ -858,7 +863,7 @@ fn n1_fresh_pair_keys(
         &tier_tokens(),
         &dir.join(format!("fresh-{index}.log")),
     );
-    wait_serving(&dir.join(format!("fresh-{index}.log")));
+    wait_serving(&mut daemon, &dir.join(format!("fresh-{index}.log")));
     FreshPair {
         cache_url,
         socket: format!("unix://{}", sock.display()),
@@ -886,7 +891,7 @@ fn start_n1_tiers(tiers: &common::Tiers, prev_bin: &Path, dir: &Path) -> N1Leg2 
         .map(|k| format!("--ticket-public-key={k}"))
         .collect();
     let cache_log = dir.join("tiers-cache.log");
-    let cache = spawn_logged(
+    let mut cache = spawn_logged(
         prev_bin.join("scion-cache"),
         std::iter::empty()
             .chain(["--listen", "127.0.0.1:0", "--upstream", &tiers.server])
@@ -894,12 +899,12 @@ fn start_n1_tiers(tiers: &common::Tiers, prev_bin: &Path, dir: &Path) -> N1Leg2 
         &tier_tokens(),
         &cache_log,
     );
-    let cport = serving_port(&cache_log);
+    let cport = serving_port(&mut cache, &cache_log);
     let relay_dir = dir.join("tiers");
     fs::create_dir_all(&relay_dir).expect("the leg-2 tiers dir is made");
     make_private(&relay_dir);
     let relay_sock = dir.join("tier.sock");
-    let daemon = spawn_logged(
+    let mut daemon = spawn_logged(
         prev_bin.join("scion-daemon"),
         [
             "--data",
@@ -912,7 +917,7 @@ fn start_n1_tiers(tiers: &common::Tiers, prev_bin: &Path, dir: &Path) -> N1Leg2 
         &tier_tokens(),
         &dir.join("tiers.log"),
     );
-    wait_serving(&dir.join("tiers.log"));
+    wait_serving(&mut daemon, &dir.join("tiers.log"));
     N1Leg2 {
         cache: format!("http://127.0.0.1:{cport}"),
         socket: format!("unix://{}", relay_sock.display()),
@@ -955,6 +960,14 @@ struct N1Leg2 {
 /// A child killed when the test ends, so a red run leaves no server.
 struct Child(std::process::Child);
 
+impl Child {
+    /// Whether the child has exited: the waiters fail at once on a
+    /// child that died before serving.
+    fn try_wait(&mut self) -> Option<std::process::ExitStatus> {
+        self.0.try_wait().expect("the child's state is readable")
+    }
+}
+
 impl Drop for Child {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -987,8 +1000,15 @@ where
 
 /// Reads the `serving listen=127.0.0.1:PORT` line of LOG, waiting up to
 /// 30 s, so a slow start is not a race.
-fn serving_port(log: &Path) -> u16 {
+fn serving_port(child: &mut Child, log: &Path) -> u16 {
     for _ in 0..300 {
+        if let Some(status) = child.try_wait() {
+            panic!(
+                "{}, the child exited with {status} before serving: {}",
+                log.display(),
+                log_tail(log)
+            );
+        }
         if let Ok(text) = fs::read_to_string(log) {
             for line in text.lines().rev() {
                 let Some(rest) = line.split_once("serving listen=127.0.0.1:") else {
@@ -1006,13 +1026,36 @@ fn serving_port(log: &Path) -> u16 {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    panic!("{}, no serving listen line in 30 s", log.display());
+    panic!(
+        "{}, no serving listen line in 30 s: {}",
+        log.display(),
+        log_tail(log)
+    );
+}
+
+/// The log's last lines, for a panic that must say why the child died.
+fn log_tail(log: &Path) -> String {
+    let lines: Vec<String> = fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .rev()
+        .take(5)
+        .map(str::to_owned)
+        .collect();
+    lines.into_iter().rev().collect::<Vec<_>>().join(" | ")
 }
 
 /// Waits for LOG's first ` serving` line, up to 30 s: a daemon serves a
 /// socket, not a port, and its serving line is the readiness.
-fn wait_serving(log: &Path) {
+fn wait_serving(child: &mut Child, log: &Path) {
     for _ in 0..300 {
+        if let Some(status) = child.try_wait() {
+            panic!(
+                "{}, the child exited with {status} before serving: {}",
+                log.display(),
+                log_tail(log)
+            );
+        }
         if let Ok(text) = fs::read_to_string(log)
             && text.contains(" serving")
         {
@@ -1020,7 +1063,11 @@ fn wait_serving(log: &Path) {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    panic!("{}, no serving line in 30 s", log.display());
+    panic!(
+        "{}, no serving line in 30 s: {}",
+        log.display(),
+        log_tail(log)
+    );
 }
 
 /// CHMOD 0700 on DIR: the daemon refuses a data directory open to
@@ -1150,7 +1197,7 @@ struct N1Db {
 
 impl Drop for N1Db {
     fn drop(&mut self) {
-        let _ = Command::new("psql")
+        let out = Command::new("psql")
             .args([
                 &self.admin,
                 "-X",
@@ -1158,7 +1205,16 @@ impl Drop for N1Db {
                 "-c",
                 &format!("DROP DATABASE IF EXISTS \"{}\"", self.db),
             ])
-            .status();
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => eprintln!(
+                "the N-1 database {} may be left behind: {}",
+                self.db,
+                String::from_utf8_lossy(&o.stderr)
+            ),
+            Err(e) => eprintln!("the N-1 database {} may be left behind: {e}", self.db),
+        }
     }
 }
 
@@ -1182,25 +1238,26 @@ fn start_n1_stack(prev_bin: &Path, dir: &Path, pg: &str) -> N1Stack {
         &[("SCION_POSTGRES_URL", pg)],
     );
     let key = dir.join("ticket.key");
-    let pub_hex = String::from_utf8_lossy(
-        &Command::new(&scion)
-            .args([
-                "--data",
-                &server_dir.display().to_string(),
-                "ticket-key",
-                "--out",
-                &key.display().to_string(),
-            ])
-            .env("SCION_POSTGRES_URL", pg)
-            .output()
-            .expect("the ticket key prints")
-            .stdout,
-    )
-    .trim()
-    .to_owned();
+    let key_out = Command::new(&scion)
+        .args([
+            "--data",
+            &server_dir.display().to_string(),
+            "ticket-key",
+            "--out",
+            &key.display().to_string(),
+        ])
+        .env("SCION_POSTGRES_URL", pg)
+        .output()
+        .expect("the ticket key runs");
+    assert!(
+        key_out.status.success(),
+        "the ticket key failed: {}",
+        String::from_utf8_lossy(&key_out.stderr)
+    );
+    let pub_hex = String::from_utf8_lossy(&key_out.stdout).trim().to_owned();
 
     let server_log = dir.join("server.log");
-    let server = spawn_logged(
+    let mut server = spawn_logged(
         scion.clone(),
         [
             "--data",
@@ -1214,11 +1271,11 @@ fn start_n1_stack(prev_bin: &Path, dir: &Path, pg: &str) -> N1Stack {
         &[("SCION_POSTGRES_URL", pg), ("SCION_TOKEN", common::TOKEN)],
         &server_log,
     );
-    let sport = serving_port(&server_log);
+    let sport = serving_port(&mut server, &server_log);
     let server_url = format!("http://127.0.0.1:{sport}");
 
     let cache_log = dir.join("cache.log");
-    let cache = spawn_logged(
+    let mut cache = spawn_logged(
         prev_bin.join("scion-cache"),
         [
             "--listen",
@@ -1231,7 +1288,7 @@ fn start_n1_stack(prev_bin: &Path, dir: &Path, pg: &str) -> N1Stack {
         &tier_tokens(),
         &cache_log,
     );
-    let cport = serving_port(&cache_log);
+    let cport = serving_port(&mut cache, &cache_log);
     let cache_url = format!("http://127.0.0.1:{cport}");
 
     let relay_dir = dir.join("daemon");
@@ -1239,7 +1296,7 @@ fn start_n1_stack(prev_bin: &Path, dir: &Path, pg: &str) -> N1Stack {
     make_private(&relay_dir);
     let relay_sock = dir.join("daemon.sock");
     let relay_log = dir.join("daemon.log");
-    let daemon = spawn_logged(
+    let mut daemon = spawn_logged(
         prev_bin.join("scion-daemon"),
         [
             "--data",
@@ -1252,7 +1309,7 @@ fn start_n1_stack(prev_bin: &Path, dir: &Path, pg: &str) -> N1Stack {
         &tier_tokens(),
         &relay_log,
     );
-    wait_serving(&relay_log);
+    wait_serving(&mut daemon, &relay_log);
     let socket_url = format!("unix://{}", relay_sock.display());
 
     N1Stack {
