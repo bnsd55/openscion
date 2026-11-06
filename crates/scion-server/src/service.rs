@@ -2450,12 +2450,29 @@ mod tests {
 
     use super::*;
 
+    /// The free-space tests' shared slot: both tests drive the one
+    /// process-global park (TEST_FREE_STAT_PARKED holds a single
+    /// directory) and the one pair of poll overrides, so a second
+    /// test's park steals the first's — its statvfs answers, its
+    /// samples land, and its age freezes at 0, which is the red the
+    /// CI's one-process run caught. Each test holds the slot for its
+    /// whole body; tests in separate processes share nothing.
+    static FREE_SPACE_POLL_SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Takes the free-space tests' slot for the caller's whole body.
+    fn free_space_poll_slot() -> std::sync::MutexGuard<'static, ()> {
+        FREE_SPACE_POLL_SLOT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// A statvfs that never answers does not stop the poll: the stuck
     /// sample warns, the age gauge counts from the last good sample on
     /// every tick, and the next sample still lands once the stat
     /// answers. The park is the statvfs's test hook.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_stuck_free_space_sample_does_not_stop_the_poll() {
+        let _slot = free_space_poll_slot();
         const PERIOD: u64 = 50;
         let dir = crate::test_support::private_tempdir();
         let metrics = Arc::new(Metrics::default());
@@ -2522,6 +2539,7 @@ mod tests {
     /// series — the red proof on main.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_age_gauge_counts_from_boot_while_no_sample_lands() {
+        let _slot = free_space_poll_slot();
         const PERIOD: u64 = 50;
         let dir = crate::test_support::private_tempdir();
         let metrics = Arc::new(Metrics::default());
