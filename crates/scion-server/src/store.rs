@@ -1037,9 +1037,9 @@ static TEST_FREE_BYTES: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(No
 /// The inodes free for this user on the filesystem that holds `dir`:
 /// the other wall of a blob store, one file per blob. `f_favail`, not
 /// `f_ffree`: the inodes a non-root process can really get. `None` when
-/// the filesystem has no fixed inode table (f_files == 0; btrfs reports
-/// 0 and grows inodes on demand), so an operator does not get a false
-/// InodesCritical on a healthy store.
+/// the filesystem has no fixed inode table (`f_files` == 0; btrfs
+/// reports 0 and grows inodes on demand), so an operator does not get a
+/// false `InodesCritical` on a healthy store.
 ///
 /// # Errors
 ///
