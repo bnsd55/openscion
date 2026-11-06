@@ -1904,7 +1904,6 @@ impl Scion for ScionService {
         // does not depend on this handler living: the job needs its own
         // copies of what the lines name.
         let pre = handler_started.elapsed();
-        crate::land_profile::seed_pre_parts(pre_checks, pre_intent);
         let (job_request_id, job_principal) = (request_id.clone(), principal.clone());
         let (job_repo, job_ref) = (repo.clone(), target_ref.clone());
         let audit = self.audit.clone();
@@ -1944,7 +1943,11 @@ impl Scion for ScionService {
                     access
                         .check_write(&caller, &req.repo, cs.changes().keys())
                         .map_err(Status::from)?;
+                    // The parts seed on the worker's thread: the thread
+                    // locals cannot cross threads, and the land's trace
+                    // is born here.
                     crate::land_profile::seed_pre(pre);
+                    crate::land_profile::seed_pre_parts(pre_checks, pre_intent);
                     lands.land(&store, &caller, &req, pre).map_err(Status::from)
                 })();
                 // The job that changed the state writes the state change's
