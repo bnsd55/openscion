@@ -2478,7 +2478,7 @@ mod tests {
         // The stat parks: the samples stop, the poll does not. The
         // stuck window runs whole seconds, because the age gauge
         // counts seconds and a stuck poll must show in it.
-        let park = crate::store::ParkFreeStat::now();
+        let park = crate::store::ParkFreeStat::now(dir.path().to_path_buf());
         tokio::time::sleep(Duration::from_millis(PERIOD * 44)).await;
         // The age counts from the last good sample, on the poll's own
         // ticks, while nothing new lands: about two seconds here.

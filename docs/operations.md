@@ -1334,8 +1334,8 @@ the process, scraped from there. The names:
   poll's last good sample, set on every poll tick. It grows while the
   statvfs is stuck and resets when a sample lands. An age above three
   poll periods (90 s) says the sample is stuck: the disk and inode
-  alerts on the free values are then reading stale numbers, so alert on
-  the age too.
+  alerts on the free values are then reading stale numbers, so the
+  FreeSpaceSampleStuck alert fires on the age.
 - `scion_blob_count` — blobs the store's metadata names, refreshed every
   60 s by one bounded count query over the blob rows (never a directory
   walk, never per scrape). At 1,000,000 blobs the query itself costs

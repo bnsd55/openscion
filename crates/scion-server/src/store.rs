@@ -1008,7 +1008,7 @@ fn too_large() -> Error {
 /// The `statvfs` of `dir` failed (a directory that is gone).
 pub fn free_bytes(dir: &Path) -> std::io::Result<u64> {
     #[cfg(any(test, feature = "test-hooks"))]
-    park_free_stat();
+    park_free_stat(dir);
     #[cfg(any(test, feature = "test-hooks"))]
     if let Some(bytes) = *TEST_FREE_BYTES
         .lock()
@@ -1020,41 +1020,54 @@ pub fn free_bytes(dir: &Path) -> std::io::Result<u64> {
     Ok(stats.f_bavail.saturating_mul(stats.f_frsize))
 }
 
-/// Holds every free-space read that lands while the flag stands, in a
-/// loop the test's reset ends: a test that needs a statvfs which never
-/// answers sets the flag and resets it on the way out, so the parked
-/// thread comes back. Test-only, and dead to the crates whose features
-/// build without the hooks.
+/// Holds the free-space read of the parked directory, in a loop the
+/// test's reset ends: a test that needs a statvfs which never answers
+/// names its own directory and resets on the way out, so the parked
+/// thread comes back and no other directory's read waits. Test-only,
+/// and dead to the crates whose features build without the hooks.
 #[cfg(any(test, feature = "test-hooks"))]
-fn park_free_stat() {
-    while TEST_FREE_STAT_PARKED.load(std::sync::atomic::Ordering::Relaxed) {
+fn park_free_stat(dir: &Path) {
+    loop {
+        let parked = TEST_FREE_STAT_PARKED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if parked.as_deref() != Some(dir) {
+            return;
+        }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
-static TEST_FREE_STAT_PARKED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static TEST_FREE_STAT_PARKED: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
 
-/// Parks the free-space reads until the guard drops. The test hook of
-/// a statvfs that never answers.
+/// Parks the free-space reads of one directory until the guard drops.
+/// The test hook of a statvfs that never answers, scoped to the
+/// directory the test itself stats, so the binary's other reads of
+/// other directories go on.
 #[cfg(any(test, feature = "test-hooks"))]
 #[allow(dead_code)]
-pub(crate) struct ParkFreeStat;
+pub(crate) struct ParkFreeStat(std::path::PathBuf);
 
 #[cfg(any(test, feature = "test-hooks"))]
 #[allow(dead_code)]
 impl ParkFreeStat {
-    pub(crate) fn now() -> Self {
-        TEST_FREE_STAT_PARKED.store(true, std::sync::atomic::Ordering::Relaxed);
-        Self
+    pub(crate) fn now(dir: std::path::PathBuf) -> Self {
+        *TEST_FREE_STAT_PARKED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(dir.clone());
+        Self(dir)
     }
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
 impl Drop for ParkFreeStat {
     fn drop(&mut self) {
-        TEST_FREE_STAT_PARKED.store(false, std::sync::atomic::Ordering::Relaxed);
+        *TEST_FREE_STAT_PARKED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 }
 
@@ -1086,7 +1099,7 @@ static TEST_FREE_BYTES: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(No
 /// The `statvfs` of `dir` failed (a directory that is gone).
 pub fn free_inodes(dir: &Path) -> std::io::Result<Option<u64>> {
     #[cfg(any(test, feature = "test-hooks"))]
-    park_free_stat();
+    park_free_stat(dir);
     let stats = rustix::fs::statvfs(dir)?;
     Ok(inode_headroom(stats.f_files, stats.f_favail))
 }
