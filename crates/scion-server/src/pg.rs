@@ -2782,7 +2782,7 @@ fn run_with_retry(
     fence: Option<&Arc<Fence>>,
 ) -> Result<Reply> {
     let out = run_statement(client, job);
-    if out.is_ok() || !client.is_closed() {
+    if out.is_ok() || (!client.is_closed() && !connection_gone(&out)) {
         return out;
     }
     let Ok(fresh) = reconnect(client, conn) else {
@@ -3521,6 +3521,42 @@ fn connect_on_deadline(
 /// A database error that a caller may retry maps to a busy [`Storage`]:
 /// the importer retries a batch on it, and the gRPC status becomes
 /// UNAVAILABLE. The rest keep the engine's error as the source.
+/// Whether the statement's error says the connection is gone, even
+/// when the client's closed flag has not caught up: the server sent a
+/// connection-fatal (an administrator's terminate, a shutdown, the
+/// startup races) or the socket broke under the statement. A FATAL can
+/// be the statement's own answer on a connection the worker still reads
+/// as open, and the caller must take the reconnect path, not the raw
+/// error (#922).
+fn connection_gone(out: &Result<Reply>) -> bool {
+    use std::error::Error as _;
+    let Err(error) = out else {
+        return false;
+    };
+    let Error::Storage(storage) = error else {
+        return false;
+    };
+    let Some(pg) = storage
+        .source()
+        .and_then(|source| source.downcast_ref::<postgres::Error>())
+    else {
+        return false;
+    };
+    if pg.is_closed() {
+        return true;
+    }
+    match pg.code() {
+        // An administrator's terminate (57P01), a shutdown in progress
+        // (57P02, 57P03), or the connection class itself: the backend is
+        // going away whatever the client's flag says.
+        Some(code) => {
+            matches!(code.code(), "57P01" | "57P02" | "57P03") || code.code().starts_with("08")
+        }
+        // A connection error with no SQLSTATE: the socket broke.
+        None => true,
+    }
+}
+
 pub(crate) fn map_pg_error(e: postgres::Error) -> Error {
     let code = e
         .code()

@@ -264,6 +264,54 @@ fn a_lost_server_lock_fences_the_backend() {
     drop(taker);
 }
 
+/// The statement goes out before the client reads the FATAL: the kill
+/// is delivered while the worker sits between jobs, so the next
+/// statement sends on the dead socket and reads the FATAL as its own
+/// answer - the order that once handed the raw FATAL to the caller
+/// (#922). The reconnect path must answer that the transaction was
+/// lost.
+#[test]
+fn a_statement_sent_before_the_fatal_is_read_answers_the_transaction_was_lost() {
+    let dir = scion_server::test_support::private_tempdir();
+    let store = Backend::open_test(dir.path()).unwrap();
+    store
+        .write(|c| c.create_repo("before").map(|_| ()))
+        .unwrap();
+    let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+    let schema = Backend::test_schema(dir.path());
+    let mut killer = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    let error = store
+        .commit(|c| -> Result<(), scion_server::Error> {
+            killer
+                .batch_execute(&format!(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+                     WHERE application_name = '{schema}' AND pid <> pg_backend_pid()"
+                ))
+                .unwrap();
+            // The kill is delivered before the next statement goes out:
+            // the backend has exited, and the FATAL sits on the socket
+            // the worker has not read.
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let first = c.repo_id("before");
+            assert!(
+                matches!(&first, Err(scion_server::Error::Unavailable(message))
+                    if message.contains("lost with the connection")),
+                "the statement sent before the FATAL was read answers that \
+                 the transaction was lost: {first:?}"
+            );
+            Err(scion_server::Error::NotFound("ends the transaction".into()))
+        })
+        .expect_err("the transaction was lost");
+    assert!(
+        matches!(error, scion_server::Error::NotFound(_)),
+        "{error:?}"
+    );
+    // The store recovers without a restart.
+    store
+        .commit(|c| c.create_repo("after").map(|_| ()))
+        .expect("a new transaction runs after the dead one was ended");
+}
+
 /// A reconnect ends the transaction of the dead session, and nothing of
 /// the old transaction runs on the new session: every statement of the
 /// dead transaction fails until its caller ends it, a new BEGIN opens a
