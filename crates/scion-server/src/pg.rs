@@ -3915,7 +3915,10 @@ fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
 /// migration that fails rolls its own statements back, and the
 /// versions before it stand. The steps name themselves, with the
 /// migration's ledger name in the statement the failure names (#905).
-fn run_one_migration(client: &mut PgClient, n: u32, sql: &str) -> Result<()> {
+/// `from_version` is the version the database stood at before the
+/// open: a fresh database's story is a creation, not a migration, so
+/// the step log only answers a database that had one.
+fn run_one_migration(client: &mut PgClient, from_version: u32, n: u32, sql: &str) -> Result<()> {
     let step = std::time::Instant::now();
     let mut pending = Vec::new();
     let mut derived = DerivedPending::default();
@@ -3948,11 +3951,14 @@ fn run_one_migration(client: &mut PgClient, n: u32, sql: &str) -> Result<()> {
     })?;
     tx.commit()
         .map_err(|e| named_step("the migration's commit", "COMMIT", e))?;
-    tracing::info!(
-        to_version = n,
-        elapsed_ms = u64::try_from(step.elapsed().as_millis()).unwrap_or(u64::MAX),
-        "the metadata schema migrated one step"
-    );
+    if from_version != 0 {
+        tracing::info!(
+            from_version = n - 1,
+            to_version = n,
+            elapsed_ms = u64::try_from(step.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "the metadata schema migrated one step"
+        );
+    }
     Ok(())
 }
 
@@ -4049,7 +4055,7 @@ fn migrate_under_lock(client: &mut PgClient, allow: bool) -> Result<Option<(u32,
         // One transaction per migration, with its version bump: a
         // migration that fails rolls its own statements back, and the
         // versions before it stand.
-        run_one_migration(client, n, sql)?;
+        run_one_migration(client, version, n, sql)?;
     }
     if version == 0 {
         tracing::info!(
