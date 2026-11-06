@@ -1806,6 +1806,13 @@ mod tests {
     }
 
     #[test]
+    fn free_inodes_of_a_tempdir_is_positive() {
+        let dir = crate::test_support::private_tempdir();
+        let free = free_inodes(dir.path()).unwrap();
+        assert!(free > 0, "{free}");
+    }
+
+    #[test]
     fn concurrent_puts_share_full_flushes() {
         const WRITERS: u64 = 32;
         let dir = crate::test_support::private_tempdir();

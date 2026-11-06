@@ -130,11 +130,21 @@ fn spawn_free_space_poll(
         let mut stop = stop;
         loop {
             let data = data.clone();
-            let free = tokio::task::spawn_blocking(move || crate::store::free_bytes(&data));
+            let free = tokio::task::spawn_blocking(move || {
+                crate::store::free_bytes(&data).and_then(|bytes| {
+                    crate::store::free_inodes(&data).map(|inodes| (bytes, inodes))
+                })
+            });
             match free.await {
-                Ok(Ok(bytes)) => metrics.data_free_bytes(bytes),
+                Ok(Ok((bytes, inodes))) => {
+                    metrics.data_free_bytes(bytes);
+                    metrics.data_free_inodes(inodes);
+                }
                 Ok(Err(e)) => {
-                    tracing::warn!(error = %e, "cannot stat the data directory's free space");
+                    tracing::warn!(
+                        error = %e,
+                        "cannot stat the data directory's free space or inodes"
+                    );
                 }
                 Err(e) => tracing::warn!(error = %e, "the free-space poll failed"),
             }

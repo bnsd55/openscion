@@ -153,6 +153,12 @@ pub struct Metrics {
     /// latest poll saw them (`data_free_set` says whether any poll ran).
     data_free_bytes: AtomicU64,
     data_free_set: std::sync::atomic::AtomicBool,
+    /// Free inodes of the filesystem that holds the data directory: one
+    /// blob costs one inode (docs/operations.md "The inode budget"). The
+    /// latest poll saw it (`data_free_inodes_set` says whether any poll
+    /// ran); it shares the free-bytes poll's failure policy.
+    data_free_inodes: AtomicU64,
+    data_free_inodes_set: std::sync::atomic::AtomicBool,
     /// Blobs the metadata names, as the latest refresh saw them
     /// (`blob_count_set` says whether any refresh ran).
     blob_count: AtomicU64,
@@ -340,6 +346,13 @@ impl Metrics {
         self.data_free_set.store(true, Ordering::Relaxed);
     }
 
+    /// Sets the free-inodes gauge. Same policy as [`Self::data_free_bytes`]:
+    /// the latest poll is the value.
+    pub fn data_free_inodes(&self, inodes: u64) {
+        self.data_free_inodes.store(inodes, Ordering::Relaxed);
+        self.data_free_inodes_set.store(true, Ordering::Relaxed);
+    }
+
     /// Sets the blob count the metadata names, from the latest refresh.
     pub fn set_blob_count(&self, blobs: u64) {
         self.blob_count.store(blobs, Ordering::Relaxed);
@@ -493,12 +506,17 @@ impl Metrics {
         self.render_blob_sync(&mut text);
         self.render_collector_key_wait(&mut text);
         if self.data_free_set.load(Ordering::Relaxed) {
+            let inodes = self.data_free_inodes.load(Ordering::Relaxed);
             let _ = writeln!(
                 text,
                 "# HELP scion_data_free_bytes Free bytes of the filesystem that holds the data directory.\n\
                  # TYPE scion_data_free_bytes gauge\n\
-                 scion_data_free_bytes {}",
-                self.data_free_bytes.load(Ordering::Relaxed)
+                 scion_data_free_bytes {}\n\
+                 # HELP scion_data_free_inodes Free inodes of the filesystem that holds the data directory; one blob costs one inode (docs/operations.md, The inode budget).\n\
+                 # TYPE scion_data_free_inodes gauge\n\
+                 scion_data_free_inodes {}",
+                self.data_free_bytes.load(Ordering::Relaxed),
+                inodes
             );
         }
         if self.blob_count_set.load(Ordering::Relaxed) {

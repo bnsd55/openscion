@@ -1,0 +1,1 @@
+`scion_data_free_inodes` gauge, polled beside `scion_data_free_bytes` from one `statvfs` each every 30 s (never a scrape-time walk); `InodesLow` fires under 100,000 free inodes (10% of the headroom one blob per inode needs) and `InodesCritical` under 10,000, with runbook steps in docs/operations.md section 6.

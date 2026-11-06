@@ -1632,6 +1632,42 @@ What to do at each level:
 
 Proof: crates/scion-server/tests/blob_count_gauge.rs::the_count_is_what_the_metadata_names_not_what_the_folder_holds (behaviour, no command: the runbook's steps are operator actions - watch the trend, plan the split - and each alert's firing is proven by the promtool cases deploy/prometheus/openscion-alerts-test.yml runs, which fire past the threshold and stay quiet just below it).
 
+### The store near its inode floor
+
+`InodesLow` fires when `scion_data_free_inodes` drops under 100,000 - 10%
+of the inode headroom the 1,000,000-blob ceiling implies, because a
+filesystem spends one inode and one directory entry per blob whatever
+the blob's size (docs/operations.md "The inode budget"). `InodesCritical`
+fires under 10,000. Both need the line crossed for 15 and 5 minutes; the
+gauge refreshes with the free-space poll, every 30 s, one `statvfs` per
+value.
+
+Read the level and its trend:
+
+```sh
+curl -s 127.0.0.1:9100/metrics | grep '^scion_data_free_inodes'
+```
+
+What to do at each level:
+
+- At `InodesLow` (`high`): nothing fails yet, and bytes may still have
+  room. Stop creating repos on this store, and plan the room: grow the
+  volume's inode count (a reformat on most filesystems), or plan the
+  second store the blob-ceiling section above describes - a new store
+  takes new repos, which take new inodes on the old store.
+- At `InodesCritical` (`critical`): new blob writes fail soon or already
+  fail, while bytes may have room. Stop writes (a read-only tier or a
+  stop), move the data directory to a filesystem with more free inodes
+  (a stop, a copy per section 3, a start at the new path), or give new
+  repos a second store. A blob whose upload failed must be uploaded
+  again by the client; the server never kept half of it.
+
+Nothing in the store needs repair because inodes ran out: a write that
+failed out-of-inodes left no torn file, and when inodes are back,
+writes resume with no restart.
+
+Proof: crates/scion-server/tests/served_metrics.rs::a_served_server_renders_the_operating_metrics (behaviour, no command: the poll is the free-space poll's own code path, and the served render names both gauges; each alert's firing is proven by the promtool cases deploy/prometheus/openscion-alerts-test.yml runs, which fire past the threshold and stay quiet just above 100,000).
+
 ## 7. Capacity
 
 What one server takes, measured on one named machine, so the numbers have
