@@ -93,6 +93,20 @@ pub(crate) struct Tiers {
     pub socket: String,
     pub runtime: Runtime,
     pub dirs: [TempDir; 2],
+    /// The public keys this set's server signs with; a fresh relay pair
+    /// verifies the same tickets against them.
+    verify_keys: Vec<ed25519_dalek::VerifyingKey>,
+}
+
+/// A cache and daemon no earlier call touched: the same server and keys
+/// as the [`Tiers`] they came from, empty stores of their own.
+pub(crate) struct FreshRelays {
+    /// Address of the fresh cache.
+    pub cache_url: String,
+    /// `unix://` address of the fresh daemon.
+    pub socket: String,
+    /// Keeps the daemon's private directory alive.
+    _node: TempDir,
 }
 
 impl Tiers {
@@ -137,7 +151,7 @@ impl Tiers {
             TOKEN,
             CACHE_UPSTREAM_TIMEOUT,
             None,
-            verify_keys,
+            verify_keys.clone(),
         )
         .unwrap();
         let (listener, cache_url) = tcp();
@@ -169,6 +183,58 @@ impl Tiers {
             socket: format!("unix://{}", path.display()),
             runtime,
             dirs: [data, node],
+            verify_keys: verify_keys.clone(),
+        }
+    }
+
+    /// Starts a cache and daemon no earlier call touched: the same server
+    /// and keys as `self`, so the same tickets verify; empty stores, so
+    /// nothing is answered from a warm disk. They run on `self`'s runtime
+    /// and live until the return value drops.
+    pub(crate) fn fresh_relays(&self) -> FreshRelays {
+        let pending = std::future::pending;
+        let memory = MemoryStore::new(64 << 20);
+        let cache = Tier::new(
+            memory,
+            &self.server,
+            TOKEN,
+            CACHE_UPSTREAM_TIMEOUT,
+            None,
+            self.verify_keys.clone(),
+        )
+        .unwrap();
+        let listener = self
+            .runtime
+            .block_on(TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let cache_url = format!("http://{}", listener.local_addr().unwrap());
+        let incoming = TcpListenerStream::new(listener);
+        self.runtime.spawn(cache.clone().serve(
+            TOKEN,
+            incoming,
+            Limits::default(),
+            None,
+            pending(),
+        ));
+
+        let node = private_tempdir();
+        let store_dir = DiskStore::open(&node.path().join("data"), 64 << 20).unwrap();
+        let daemon =
+            Tier::new_relay(store_dir, &cache_url, TOKEN, DAEMON_UPSTREAM_TIMEOUT, None).unwrap();
+        let path = node.path().join("daemon.sock");
+        let incoming = UnixListenerStream::new(self.runtime.block_on(bind_unix(&path)).unwrap());
+        self.runtime.spawn(daemon.clone().serve(
+            TOKEN,
+            incoming,
+            Limits::default(),
+            None,
+            pending(),
+        ));
+
+        FreshRelays {
+            cache_url,
+            socket: format!("unix://{}", path.display()),
+            _node: node,
         }
     }
 

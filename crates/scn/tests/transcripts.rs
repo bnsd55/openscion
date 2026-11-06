@@ -145,8 +145,11 @@ struct Fixture {
     missing: [u8; 32],
     /// A read ticket for the fixture's root tree: the permission that
     /// `GetObjects` spends.
-    /// spends.
     ticket: Vec<u8>,
+    /// The same ticket with one signature byte flipped: it parses, the
+    /// server's keys do not sign it, and a daemon that checks no ticket
+    /// still serves what its store holds.
+    unsigned: Vec<u8>,
 }
 
 /// Builds the one fixture the corpus uses: the conformance test's landed
@@ -178,6 +181,7 @@ fn landed() -> (Tiers, Fixture) {
         tree,
         cs: id,
         missing: missing_id(0xab),
+        unsigned: unsigned_of(&ticket),
         ticket,
     };
     (tiers, fixture)
@@ -185,6 +189,15 @@ fn landed() -> (Tiers, Fixture) {
 
 /// Mints a read ticket for the root tree of `cs` and names the root
 /// tree, as the conformance test does with the same call.
+/// The ticket with one byte of its signature flipped: the format still
+/// parses, the signature does not verify.
+fn unsigned_of(ticket: &[u8]) -> Vec<u8> {
+    let mut unsigned = ticket.to_vec();
+    let n = unsigned.len();
+    unsigned[n - 1] ^= 0xff;
+    unsigned
+}
+
 fn mint(tiers: &Tiers, cs: ChangesetId) -> (Vec<u8>, [u8; 32]) {
     let runtime = &tiers.runtime;
     let _entered = runtime.enter();
@@ -228,6 +241,7 @@ fn resolve(value: &str, f: &Fixture) -> String {
         .replace("$tree", &hex(&f.tree))
         .replace("$cs", &hex(f.cs.as_bytes()))
         .replace("$missing", &hex(&f.missing))
+        .replace("$unsigned", &hex(&f.unsigned))
         .replace("$ticket", &hex(&f.ticket))
 }
 
@@ -328,6 +342,32 @@ fn walk(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
 /// `tiers: refuse` files get a fresh cache and daemon, so a warm disk or
 /// a relay that does not check signatures cannot answer for them; the
 /// rest share one warm pair, cold only for the first file that touches it.
+/// A tier serves GetObjects only: its refusal of the other calls is the
+/// contract (section 7.1).
+async fn assert_tier_refuses(url: &str, t: &Transcript, file: &Path) {
+    let mut client = connect(url).await;
+    let refused = match t.method.as_str() {
+        "Objects/ResolveRef" => client
+            .resolve_ref(ResolveRefRequest::default())
+            .await
+            .err()
+            .map(|s| s.code()),
+        "Objects/GetRootTree" => client
+            .get_root_tree(GetRootTreeRequest::default())
+            .await
+            .err()
+            .map(|s| s.code()),
+        _ => None,
+    };
+    assert_eq!(
+        refused,
+        Some(Code::Unimplemented),
+        "{}, a tier refuses {} with UNIMPLEMENTED",
+        file.display(),
+        t.method
+    );
+}
+
 /// The per-tier run for one file on one pair: the tier refusal, the warm
 /// daemon's serve pin, then the file's own expectations.
 fn run_objects_across_tiers(tiers: &common::Tiers, t: &Transcript, f: &Fixture, file: &Path) {
@@ -340,29 +380,7 @@ fn run_objects_across_tiers(tiers: &common::Tiers, t: &Transcript, f: &Fixture, 
         if tier_refuses && url != &tiers.server {
             // A tier serves GetObjects only: its refusal of the
             // other calls is the contract (section 7.1).
-            tiers.runtime.block_on(async {
-                let mut client = connect(url).await;
-                let refused = match t.method.as_str() {
-                    "Objects/ResolveRef" => client
-                        .resolve_ref(ResolveRefRequest::default())
-                        .await
-                        .err()
-                        .map(|s| s.code()),
-                    "Objects/GetRootTree" => client
-                        .get_root_tree(GetRootTreeRequest::default())
-                        .await
-                        .err()
-                        .map(|s| s.code()),
-                    _ => None,
-                };
-                assert_eq!(
-                    refused,
-                    Some(Code::Unimplemented),
-                    "{}, a tier refuses {} with UNIMPLEMENTED",
-                    file.display(),
-                    t.method
-                );
-            });
+            tiers.runtime.block_on(assert_tier_refuses(url, t, file));
             continue;
         }
         if url == &tiers.socket && daemon_warm_serves {
@@ -419,6 +437,7 @@ fn the_corpus_answers_as_its_files_say() {
         let minted_at = std::time::Instant::now();
         let (ticket, _) = mint(&tiers, base.cs);
         let f = Fixture {
+            unsigned: unsigned_of(&ticket),
             ticket,
             ..base.clone()
         };
@@ -436,15 +455,17 @@ fn the_corpus_answers_as_its_files_say() {
             run_objects_across_tiers(&tiers, &t, &f, &file);
             if tiers_fresh {
                 // The same file again on a cache and daemon no earlier
-                // file touched: a fresh daemon forwards, and the upstream
-                // refuses, so the file's own expectations hold everywhere.
-                let fresh = Tiers::start(common::private_tempdir(), tiers.store.clone());
-                let _fresh_entered = fresh.runtime.enter();
-                for url in [&fresh.server, &fresh.cache_url, &fresh.socket] {
-                    if tier_refuses && url != &fresh.server {
+                // file touched: the same server and keys, so the file's
+                // ticket still verifies; the fresh daemon forwards, and
+                // the upstream refuses, so the file's own expectations
+                // hold everywhere.
+                let fresh = tiers.fresh_relays();
+                for url in [&fresh.cache_url, &fresh.socket] {
+                    if tier_refuses {
+                        tiers.runtime.block_on(assert_tier_refuses(url, &t, &file));
                         continue;
                     }
-                    fresh
+                    tiers
                         .runtime
                         .block_on(run_objects(&t, url, &f))
                         .unwrap_or_else(|e| panic!("{} at {} (fresh): {e}", file.display(), url));
