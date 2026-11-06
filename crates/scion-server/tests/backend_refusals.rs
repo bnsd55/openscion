@@ -284,14 +284,14 @@ fn a_statement_sent_before_the_fatal_is_read_answers_the_transaction_was_lost() 
         .commit(|c| -> Result<(), scion_server::Error> {
             killer
                 .batch_execute(&format!(
-                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+                    "SELECT pg_terminate_backend(pid, 5000) FROM pg_stat_activity \
                      WHERE application_name = '{schema}' AND pid <> pg_backend_pid()"
                 ))
                 .unwrap();
-            // The kill is delivered before the next statement goes out:
-            // the backend has exited, and the FATAL sits on the socket
-            // the worker has not read.
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            // pg_terminate_backend's second argument waits until the
+            // backend is gone: the kill is delivered before the next
+            // statement goes out, and the FATAL sits on the socket the
+            // worker has not read.
             let first = c.repo_id("before");
             assert!(
                 matches!(&first, Err(scion_server::Error::Unavailable(message))

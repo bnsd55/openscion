@@ -3545,15 +3545,22 @@ fn connection_gone(out: &Result<Reply>) -> bool {
     if pg.is_closed() {
         return true;
     }
-    match pg.code() {
+    match pg.as_db_error() {
         // An administrator's terminate (57P01), a shutdown in progress
         // (57P02, 57P03), or the connection class itself: the backend is
         // going away whatever the client's flag says.
-        Some(code) => {
-            matches!(code.code(), "57P01" | "57P02" | "57P03") || code.code().starts_with("08")
+        Some(db) => {
+            matches!(db.code().code(), "57P01" | "57P02" | "57P03")
+                || db.code().code().starts_with("08")
         }
-        // A connection error with no SQLSTATE: the socket broke.
-        None => true,
+        // An error with no database part - a conversion, a bad
+        // parameter, a row-count mismatch - is a bug of the caller, not
+        // a lost connection: only a socket error reads as one. The
+        // source of such an error is the io error itself, when there
+        // was one.
+        None => pg
+            .source()
+            .is_some_and(<dyn std::error::Error + 'static>::is::<std::io::Error>),
     }
 }
 
