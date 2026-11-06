@@ -413,7 +413,7 @@ fn every_alert_response_anchor_resolves() {
     );
 }
 
-/// Every heading of the guide, as GitHub slugs it (docs_common::github_slug).
+/// Every heading of the guide, as GitHub slugs it (`docs_common::github_slug`).
 fn headings(doc: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in doc.lines() {
