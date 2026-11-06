@@ -623,18 +623,24 @@ async fn run_scion_resolve_ref(
     }
 }
 
+/// One bounded stream read: a tier that sends one item and then holds
+/// the stream open fails the file after 30 s instead of hanging the
+/// runner (review F1).
+async fn read_bounded<R>(stream: &mut tonic::Streaming<R>) -> Result<Option<R>, String> {
+    tokio::time::timeout(std::time::Duration::from_secs(30), stream.message())
+        .await
+        .map_err(|_| "the stream sent nothing for 30s".to_owned())?
+        .map_err(|status| format!("stream {}", status.code()))
+}
+
 /// The stream items a server-streamed call sent, hex-decoded.
 async fn stream_bytes<R>(
     stream: &mut tonic::Streaming<R>,
     take: fn(&R) -> Vec<u8>,
 ) -> Result<Vec<Vec<u8>>, String> {
     let mut out = Vec::new();
-    loop {
-        match stream.message().await {
-            Ok(Some(item)) => out.push(take(&item)),
-            Ok(None) => break,
-            Err(status) => return Err(format!("stream {}", status.code())),
-        }
+    while let Some(item) = read_bounded(stream).await? {
+        out.push(take(&item));
     }
     Ok(out)
 }
@@ -772,12 +778,8 @@ async fn run_log(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> Res
             let mut stream = reply.into_inner();
             check_status(t, Code::Ok)?;
             let mut count = 0usize;
-            loop {
-                match stream.message().await {
-                    Ok(Some(item)) => count += item.entries.len(),
-                    Ok(None) => break,
-                    Err(status) => return Err(format!("stream {}", status.code())),
-                }
+            while let Some(item) = read_bounded(&mut stream).await? {
+                count += item.entries.len();
             }
             if let Some((_, v)) = t.expect.iter().find(|(k, _)| k == "entries") {
                 let want: usize = v.parse().unwrap_or(0);
@@ -812,12 +814,8 @@ async fn run_blame(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> R
             let mut stream = reply.into_inner();
             check_status(t, Code::Ok)?;
             let mut count = 0usize;
-            loop {
-                match stream.message().await {
-                    Ok(Some(item)) => count += item.changesets.len(),
-                    Ok(None) => break,
-                    Err(status) => return Err(format!("stream {}", status.code())),
-                }
+            while let Some(item) = read_bounded(&mut stream).await? {
+                count += item.changesets.len();
             }
             if let Some((_, v)) = t.expect.iter().find(|(k, _)| k == "entries") {
                 let want: usize = v.parse().unwrap_or(0);
