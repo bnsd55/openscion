@@ -793,5 +793,8 @@ echo "$out" | grep -q "1 passed;" ||
   die "leg 7 (corpus N-1 legs): the runner reports no test run"
 echo "$out" | grep -q "the N-1 legs ran " ||
   die "leg 7 (corpus N-1 legs): the runner printed no count line"
+# A green leg 7 says what it proved: the work dir (the red's log path),
+# the test verdict, and the count line.
+echo "$out" | grep -E "the N-1 work dir:|the N-1 legs ran |test result:"
 
 summary "version matrix passed: N-1 $ref against N $(git -C "$ROOT" rev-parse --short HEAD), all six pairs (scn, tier, daemon, store, ticket window, snapshot window) and the corpus's N-1 legs"
