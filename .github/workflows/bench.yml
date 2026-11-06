@@ -213,7 +213,7 @@ jobs:
           docker run -d --name profile-pg -p 5432:5432 \
             -e POSTGRES_PASSWORD=scion -e POSTGRES_DB=scion_capacity_profile \
             postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe \
-            postgres -c shared_preload_libraries=pg_stat_statements
+            postgres -c shared_preload_libraries=pg_stat_statements -c track_wal_io_timing=on
           for i in $(seq 1 60); do
             if docker exec profile-pg pg_isready -U postgres > /dev/null 2>&1; then
               echo "postgres is ready" && exit 0

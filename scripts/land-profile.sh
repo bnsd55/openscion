@@ -212,6 +212,10 @@ cell() {
     -c "SELECT calls, round(total_exec_time::numeric, 3), left(query, 160)
         FROM pg_stat_statements ORDER BY total_exec_time DESC" \
     > "$WORK/pg-statements-$name.csv" || die "the statements dump failed"
+  psql "$SCION_PG_URL" -X -A -t \
+    -c "SELECT wal_sync, round(wal_sync_time::numeric, 3)
+        FROM pg_stat_wal" \
+    > "$WORK/wal-$name.txt" || die "the wal dump failed"
   stop_server
   mv -f "$WORK/server.log" "$WORK/server-$name.log"
 }
@@ -270,6 +274,9 @@ done
   echo "completed $tries checkouts, p50 ${p50:--} ms, p99 ${p99:--} ms"
   if [ -s "$WORK/cpu-$name.log" ]; then
     awk '{ b += $2; l += $4; if ($4 > m) m = $4; n++ } END { printf "runner: mean busy %.0f%%, loadavg mean %.1f, max %.1f\n", b / n, l / n, m }' "$WORK/cpu-$name.log"
+  fi
+  if [ -s "$WORK/wal-$name.txt" ]; then
+    echo "wal syncs in the window: $(cat "$WORK/wal-$name.txt")"
   fi
 } >> "$sum"
 
@@ -370,11 +377,12 @@ for name in $names; do
       { lands = $1 - $2 }
       END {
         if (lands <= 0) { print "no lands"; exit }
-        printf "%-14s %8s %10s %10s %10s %8s\n", "customer", "calls", "queuedms", "heldms", "stmt_ms", "stmts"
+        printf "%-14s %8s %10s %10s %10s %8s %9s\n", "customer", "calls", "queuedms", "heldms", "stmt_ms", "stmts", "commitms"
         for (i = 1; i <= m; i++) {
           p = order[i]
           if (calls[p] == 0) continue
-          printf "%-14s %8.1f %10.2f %10.2f %10.2f %8.1f\n", p, calls[p] / lands, queued[p] * 1000 / lands, held[p] * 1000 / lands, stmtns[p] * 1000 / lands, stmts[p] / lands
+          commit[p] = val(after, "scion_lane_commit_seconds{phase=\"" p "\"}") - val(before, "scion_lane_commit_seconds{phase=\"" p "\"}")
+          printf "%-14s %8.1f %10.2f %10.2f %10.2f %8.1f %9.2f\n", p, calls[p] / lands, queued[p] * 1000 / lands, held[p] * 1000 / lands, stmtns[p] * 1000 / lands, stmts[p] / lands, commit[p] * 1000 / lands
         }
         printf "lane holds total %.1f ms/land; the window is %.1f s for %d lands, so 1/rate is %.1f ms; holds/rate %.1f%%\n", total_held * 1000 / lands, secs, lands, secs * 1000 / lands, 100 * total_held * 1000 / lands / (secs * 1000 / lands)
       }' <(printf '%s %s\n' \
