@@ -488,7 +488,10 @@ fn the_corpus_answers_as_its_files_say() {
         let tier_refuses = tier_value("tiers") == Some("refuse");
         let tiers_fresh = tier_value("tiers") == Some("fresh");
         if t.method.starts_with("Objects/") {
-            if daemon_warm_serves {
+            if t.expect
+                .iter()
+                .any(|(k, v)| k == "daemon_warm" && v == "serves")
+            {
                 // The file names a warm daemon: warm it as part of the
                 // file's setup - its refs through this daemon with its
                 // valid ticket - so the pin below tests a warm store
@@ -497,7 +500,7 @@ fn the_corpus_answers_as_its_files_say() {
                     let mut client = connect(&tiers.socket).await;
                     let mut stream = client
                         .get_objects(
-                            request_with_ticket(t, &f, f.ticket.clone())
+                            request_with_ticket(&t, &f, f.ticket.clone())
                                 .expect("the file's request builds"),
                         )
                         .await
