@@ -448,7 +448,8 @@ fn run_objects_across_tiers(tiers: &common::Tiers, t: &Transcript, f: &Fixture, 
 
                 let mut stream = client
                     .get_objects(
-                        request_with_ticket(t, f, &f.unsigned).expect("the file's request builds"),
+                        request_with_ticket(t, f, f.unsigned.clone())
+                            .expect("the file's request builds"),
                     )
                     .await
                     .expect("the pinned call answers")
@@ -1319,7 +1320,7 @@ fn get_objects_request(t: &Transcript, f: &Fixture) -> Result<GetObjectsRequest,
         .find(|(path, _)| path == "ticket")
         .map(|(_, v)| resolve(v, f))
         .ok_or_else(|| "the file names no ticket".to_owned())?;
-    request_with_ticket(t, f, &unhex(&value))
+    request_with_ticket(t, f, unhex(&value))
 }
 
 /// The file's `GetObjects` request with `ticket` in place of the file's
@@ -1327,12 +1328,12 @@ fn get_objects_request(t: &Transcript, f: &Fixture) -> Result<GetObjectsRequest,
 fn request_with_ticket(
     t: &Transcript,
     f: &Fixture,
-    ticket: &[u8],
+    ticket: Vec<u8>,
 ) -> Result<GetObjectsRequest, String> {
     let mut req = GetObjectsRequest::default();
     for (path, value) in &t.request {
         match path.as_str() {
-            "ticket" => req.ticket.clone_from(ticket),
+            "ticket" => req.ticket = ticket,
             "refs" => req.refs.push(object_ref(&resolve(value, f))?),
             "accept" => {
                 req.accept.push(match resolve(value, f).as_str() {
