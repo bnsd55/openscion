@@ -669,6 +669,32 @@ fn pick_n1_files(files: &[PathBuf], prev: (u64, u64, u64)) -> (Vec<(PathBuf, Tra
     (qualifying, oldest.expect("the corpus is not empty"))
 }
 
+/// The Ok-on-$cs control guards the Scion refusal files that name $cs:
+/// a wrong changeset id passes them with the refusal they expect anyway
+/// - the same NOT_FOUND answers a missing path and a missing changeset
+/// alike. Both sides derive from the files' content, so a new refusal
+/// file joins the guard by itself. The control runs first, so a wrong
+/// id fails early with the clearest line the corpus has; the leg fails
+/// naming the file when the control does not qualify with it.
+fn guard_cs_refusals(qualifying: &mut Vec<(PathBuf, Transcript)>) {
+    let names_cs = |t: &Transcript| t.request.iter().any(|(_, v)| v.contains("$cs"));
+    let expects =
+        |t: &Transcript, want: &str| t.expect.iter().any(|(k, v)| k == "status" && v == want);
+    let needs_control =
+        |t: &Transcript| t.method.starts_with("Scion/") && names_cs(t) && !expects(t, "ok");
+    let answers_ok_on_cs =
+        |t: &Transcript| t.method.starts_with("Scion/") && names_cs(t) && expects(t, "ok");
+    qualifying.sort_by_key(|(_, t)| !answers_ok_on_cs(t));
+    let has_control = qualifying.iter().any(|(_, t)| answers_ok_on_cs(t));
+    for (file, t) in qualifying.iter() {
+        assert!(
+            !needs_control(t) || has_control,
+            "{}, a $cs refusal file qualifies without an Ok-on-$cs control: the wrong-changeset pass is unguarded",
+            file.display()
+        );
+    }
+}
+
 /// The N-1 legs of the corpus (Refs #890): every file whose `since` is
 /// at or under the N-1 version replays against the N-1 server and its
 /// tiers, and the N-1 tiers in front of this server - the real upgrade
@@ -724,31 +750,7 @@ fn the_n1_side_answers_as_its_files_say() {
         !qualifying.is_empty(),
         "the N-1 legs have nothing to prove: the corpus's oldest since is {oldest_printed}, the N-1 side is {prev:?} ({printed})"
     );
-    // The Ok-on-$cs control guards the Scion refusal files that name
-    // $cs: a wrong changeset id passes them with the refusal they expect
-    // anyway - the same NOT_FOUND answers a missing path and a missing
-    // changeset alike. Both sides derive from the files' content, so a
-    // new refusal file joins the guard by itself. The control qualifies
-    // only when it runs: fail the leg naming both otherwise.
-    let names_cs = |t: &Transcript| t.request.iter().any(|(_, v)| v.contains("$cs"));
-    let expects =
-        |t: &Transcript, want: &str| t.expect.iter().any(|(k, v)| k == "status" && v == want);
-    let needs_control =
-        |t: &Transcript| t.method.starts_with("Scion/") && names_cs(t) && !expects(t, "ok");
-    let answers_ok_on_cs =
-        |t: &Transcript| t.method.starts_with("Scion/") && names_cs(t) && expects(t, "ok");
-    // The control runs first, so a wrong id fails early with the
-    // clearest line the corpus has.
-    qualifying.sort_by_key(|(_, t)| !answers_ok_on_cs(t));
-    let has_control = qualifying.iter().any(|(_, t)| answers_ok_on_cs(t));
-    for (file, t) in &qualifying {
-        if needs_control(t) && !has_control {
-            panic!(
-                "{}, a $cs refusal file qualifies without an Ok-on-$cs control: the wrong-changeset pass is unguarded",
-                file.display()
-            );
-        }
-    }
+    guard_cs_refusals(&mut qualifying);
 
     // Leg 1: the qualifying files against the N-1 server and its tiers.
     let (db_guard, pg) = n1_database();
