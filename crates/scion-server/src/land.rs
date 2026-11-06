@@ -777,6 +777,7 @@ fn derive_history(
     deadline: &Deadline,
 ) -> Result<()> {
     tracing::info!(%head, "deriving the history of the head for a land on an old base");
+    let _customer = profile::lane_customer(profile::Phase::DeriveSteps);
     derived::fill_by::<CommitGraph>(store, repo, head, deadline)?;
     derived::fill_by::<PathHistory>(store, repo, head, deadline)?;
     Ok(())
@@ -2196,7 +2197,11 @@ mod tests {
         // before its first step, so only the record commits. This is
         // the early release the permit and the ref's slot lock ride.
         let commits = f.store.commits();
-        let outcome = f.lands.land(&f.store, &caller(), &request).unwrap_err();
+        let outcome = f
+            .lands
+            .land(&f.store, &caller(), &request, std::time::Duration::ZERO)
+            .0
+            .unwrap_err();
         assert!(
             matches!(outcome, Error::DeadlineExceeded(_)),
             "the fill's deadline stops the land: {outcome:?}"
@@ -2209,7 +2214,13 @@ mod tests {
         // The land stayed pending: the same key retries.
         let retry = f
             .lands
-            .land(&f.store, &caller(), &req(cs, "fills"))
+            .land(
+                &f.store,
+                &caller(),
+                &req(cs, "fills"),
+                std::time::Duration::ZERO,
+            )
+            .0
             .unwrap();
         assert_eq!(retry.state, LandState::Landed);
     }

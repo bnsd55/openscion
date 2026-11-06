@@ -165,6 +165,7 @@ pub fn create_changeset(
     // that gave up leaves the committed steps, and the next create or
     // land resumes from them instead of running to the end.
     tree::fill_root_tree_by(store, repo_id, parent, deadline)?;
+    let _customer = crate::land_profile::lane_customer(crate::land_profile::Phase::CreateCommit);
     store.write(|c| {
         // The rules re-checked inside the transaction, one statement for
         // the repo and both membership questions: the parent's, and the
@@ -239,6 +240,7 @@ pub fn put_blob(store: &Backend, repo: RepoId, upload: Upload) -> Result<BlobId>
     // or a PutBlob that answered ok would store nothing for the repo.
     // One statement either way, and the file the row names is on the
     // drive: `put_upload` kept it and touched it, or wrote it again.
+    let _customer = crate::land_profile::lane_customer(crate::land_profile::Phase::PutBlobRow);
     store.commit(|c| c.add_repo_blob(repo, id))?;
     store.flush()?;
     Ok(id)

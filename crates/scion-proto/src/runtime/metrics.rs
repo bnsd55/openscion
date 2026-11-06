@@ -1041,6 +1041,23 @@ pub async fn shutdown_signal() {
 ///
 /// Never, in the paths this function runs; the panic in the reply builder
 /// is on a static response that always builds.
+/// The extra lines a binary's branch-only gauges append to /metrics:
+/// installed once, before the endpoint serves. None by default.
+static EXTRA_RENDER: std::sync::OnceLock<fn() -> Option<String>> = std::sync::OnceLock::new();
+
+/// Install the extra render; see [`EXTRA_RENDER`].
+#[doc(hidden)]
+pub fn install_extra_render(render: fn() -> Option<String>) {
+    let _ = EXTRA_RENDER.set(render);
+}
+
+#[allow(non_upper_case_globals)]
+/// Read the installed render, if any.
+fn self_extra_render() -> Option<String> {
+    EXTRA_RENDER.get().and_then(|render| render())
+}
+
+/// Serve the /metrics endpoint of one `Metrics` until `shutdown` ends.
 pub async fn serve(
     listener: TcpListener,
     metrics: std::sync::Arc<Metrics>,
@@ -1072,7 +1089,10 @@ pub async fn serve(
                 async move {
                     type Reply = http::Response<Full<bytes::Bytes>>;
                     if request.uri().path() == "/metrics" {
-                        let body = metrics.render();
+                        // An extra render the server can install for its
+                        // own branch-only gauges; the default is empty.
+                        let extra = (self_extra_render)().unwrap_or_default();
+                        let body = format!("{}{extra}", metrics.render());
                         Ok(http::Response::builder()
                             .header("content-type", "text/plain; version=0.0.4")
                             .body(Full::new(body.into_bytes().into()))
