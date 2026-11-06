@@ -1333,9 +1333,10 @@ fn request_with_ticket(
     ticket: Vec<u8>,
 ) -> Result<GetObjectsRequest, String> {
     let mut req = GetObjectsRequest::default();
+    let mut ticket = Some(ticket);
     for (path, value) in &t.request {
         match path.as_str() {
-            "ticket" => req.ticket = ticket,
+            "ticket" => req.ticket = ticket.take().expect("the file names one ticket"),
             "refs" => req.refs.push(object_ref(&resolve(value, f))?),
             "accept" => {
                 req.accept.push(match resolve(value, f).as_str() {
