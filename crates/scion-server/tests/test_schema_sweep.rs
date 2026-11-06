@@ -11,8 +11,8 @@
 
 use std::path::Path;
 
-use scion_server::Backend;
 use scion_server::test_support::private_tempdir;
+use scion_server::{Backend, Error, StorageClass};
 
 /// The database's URL, and a client that reaches it. Every test here
 /// needs no store of its own, only the registry and the catalog.
