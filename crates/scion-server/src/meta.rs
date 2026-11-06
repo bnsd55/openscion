@@ -450,6 +450,7 @@ pub trait MetaTx {
     /// Database errors.
     fn preload_derived(
         &mut self,
+        _repo: RepoId,
         _kinds: &[(&'static str, u32)],
         _css: &[ChangesetId],
     ) -> Result<()> {

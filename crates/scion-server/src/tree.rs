@@ -388,6 +388,7 @@ fn store_changeset_impl(
         let mut css = cs.parents().to_vec();
         css.push(cs.id());
         c.preload_derived(
+            repo,
             &[
                 (RootTree::NAME, RootTree::VERSION),
                 (CommitGraph::NAME, CommitGraph::VERSION),

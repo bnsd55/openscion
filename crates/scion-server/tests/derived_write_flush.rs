@@ -244,7 +244,7 @@ fn the_write_paths_derived_reads_ride_one_preload() {
         .count();
     let preloads = log
         .iter()
-        .filter(|sql| sql.starts_with("SELECT kind, version, cs, value FROM derived"))
+        .filter(|sql| sql.starts_with("SELECT kind, version, cs, value"))
         .count();
     assert_eq!(
         reads, 0,
