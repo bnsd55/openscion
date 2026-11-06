@@ -188,10 +188,13 @@ fn a_record_keeps_its_refusals() {
     let error = store
         .write(|c| c.record_land(&Caller("t".into()), &request, Some(8)))
         .unwrap_err();
-    assert_eq!(error, Error::NotFound("repo \"nope\"".into()), "{error:?}");
+    assert!(
+        matches!(error, Error::NotFound(ref m) if m == "repo \"nope\""),
+        "{error:?}"
+    );
 
     // A changeset that does not exist in the repo.
-    let missing = scion_core::ChangesetId::of(b"not a changeset");
+    let missing = scion_core::ChangesetId::from_bytes([7; 32]);
     let error = store
         .write(|c| {
             c.record_land(
@@ -201,9 +204,8 @@ fn a_record_keeps_its_refusals() {
             )
         })
         .unwrap_err();
-    assert_eq!(
-        error,
-        Error::NotFound(format!("changeset {missing}")),
+    assert!(
+        matches!(error, Error::NotFound(ref m) if m == &format!("changeset {missing}")),
         "{error:?}"
     );
 
@@ -231,13 +233,10 @@ fn a_record_keeps_its_refusals() {
             )
         })
         .unwrap_err();
-    assert_eq!(
-        error,
-        Error::ResourceExhausted(
-            "principal \"t\" has its 0 lands pending \
-             (--max-principal-pending-lands 0); wait for one to finish"
-                .into()
-        ),
+    assert!(
+        matches!(error, Error::ResourceExhausted(ref m)
+            if m == "principal \"t\" has its 0 lands pending \
+                 (--max-principal-pending-lands 0); wait for one to finish"),
         "{error:?}"
     );
 
