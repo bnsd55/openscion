@@ -1,0 +1,11 @@
+# An ID that is not 32 bytes is malformed.
+since: v0.7
+method: Objects/GetRootTree
+fixture: landed
+
+request.repo: r
+request.changeset_id: aabb
+
+tiers: refuse
+
+status: invalid_argument

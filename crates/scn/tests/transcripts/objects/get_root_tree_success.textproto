@@ -1,0 +1,12 @@
+# The root tree of the fixture's changeset.
+since: v0.7
+method: Objects/GetRootTree
+fixture: landed
+
+request.repo: r
+request.changeset_id: $cs
+
+tiers: refuse
+
+status: ok
+reply.tree_id: $tree

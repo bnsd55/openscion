@@ -1,0 +1,13 @@
+# The tree and the blob of the fixture, in request order, whole.
+since: v0.7
+method: Objects/GetObjects
+fixture: landed
+
+request.ticket: $ticket
+request.refs: kind=tree id=$tree
+request.refs: kind=blob id=$blob path=src/main.rs
+
+status: ok
+objects: kind=tree id=$tree
+objects: kind=blob id=$blob
+end: none
