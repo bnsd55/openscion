@@ -423,6 +423,57 @@ fn warm_daemon_for(
     });
 }
 
+/// A cache and daemon no other file touched: the pair a `tiers: fresh`
+/// file reruns on. The in-process pair's directory guard and the N-1
+/// pair's children keep their pair alive for the file's run.
+struct FreshPair {
+    cache_url: String,
+    socket: String,
+    _in_process: Option<common::FreshRelays>,
+    _processes: Vec<Child>,
+}
+
+/// One file's full run on one environment: the warm-up a `daemon_warm:
+/// serves` file pins, the file's run across the warm trio, and the
+/// `tiers: fresh` rerun on a pair no earlier file touched. The corpus
+/// test and the N-1 legs share this, so the legs run the same steps the
+/// main test runs.
+fn run_one_object_file(
+    runtime: &tokio::runtime::Runtime,
+    warm: [&str; 3],
+    fresh: &dyn Fn() -> FreshPair,
+    t: &Transcript,
+    f: &Fixture,
+    file: &Path,
+) {
+    let tier_value = |name: &str| {
+        t.expect
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    };
+    let tier_refuses = tier_value("tiers") == Some("refuse");
+    if t.expect
+        .iter()
+        .any(|(k, v)| k == "daemon_warm" && v == "serves")
+    {
+        warm_daemon_for(runtime, warm[2], t, f, file);
+    }
+    run_objects_across_tiers(runtime, warm, t, f, file);
+    if tier_value("tiers") == Some("fresh") {
+        let fresh = fresh();
+        for url in [&fresh.cache_url, &fresh.socket] {
+            if tier_refuses {
+                runtime.block_on(assert_tier_refuses(url, t, file));
+                continue;
+            }
+            runtime
+                .block_on(run_objects(t, url, f))
+                .unwrap_or_else(|e| panic!("{} at {} (fresh): {e}", file.display(), url));
+        }
+    }
+}
+
 /// The per-tier run for one file on one pair: the tier refusal, the warm
 /// daemon's serve pin, then the file's own expectations.
 fn run_objects_across_tiers(
@@ -529,46 +580,29 @@ fn the_corpus_answers_as_its_files_say() {
         };
         let mint_age = minted_at.elapsed().as_secs_f64();
         let started_at = std::time::Instant::now();
-        let tier_value = |name: &str| {
-            t.expect
-                .iter()
-                .find(|(k, _)| k == name)
-                .map(|(_, v)| v.as_str())
-        };
-        let tier_refuses = tier_value("tiers") == Some("refuse");
-        let tiers_fresh = tier_value("tiers") == Some("fresh");
         if t.method.starts_with("Objects/") {
-            if t.expect
-                .iter()
-                .any(|(k, v)| k == "daemon_warm" && v == "serves")
-            {
-                warm_daemon_for(&tiers.runtime, &tiers.socket, &t, &f, &file);
-            }
-            run_objects_across_tiers(
-                &tiers.runtime,
-                [&tiers.server, &tiers.cache_url, &tiers.socket],
-                &t,
-                &f,
-                &file,
-            );
-            if tiers_fresh {
+            let fresh = || {
                 // The same file again on a cache and daemon no earlier
                 // file touched: the same server and keys, so the file's
                 // ticket still verifies; the fresh daemon forwards, and
                 // the upstream refuses, so the file's own expectations
                 // hold everywhere.
                 let fresh = tiers.fresh_relays();
-                for url in [&fresh.cache_url, &fresh.socket] {
-                    if tier_refuses {
-                        tiers.runtime.block_on(assert_tier_refuses(url, &t, &file));
-                        continue;
-                    }
-                    tiers
-                        .runtime
-                        .block_on(run_objects(&t, url, &f))
-                        .unwrap_or_else(|e| panic!("{} at {} (fresh): {e}", file.display(), url));
+                FreshPair {
+                    cache_url: fresh.cache_url.clone(),
+                    socket: fresh.socket.clone(),
+                    _in_process: Some(fresh),
+                    _processes: Vec::new(),
                 }
-            }
+            };
+            run_one_object_file(
+                &tiers.runtime,
+                [&tiers.server, &tiers.cache_url, &tiers.socket],
+                &fresh,
+                &t,
+                &f,
+                &file,
+            );
         } else {
             tiers
                 .runtime
@@ -588,14 +622,19 @@ fn the_corpus_answers_as_its_files_say() {
 }
 
 /// The release version a ref carries: `v0.7` and `v0.7.1` parse; a
-/// commit hash or a branch name carries none.
+/// commit hash or a branch name carries none. A `v`-prefixed ref whose
+/// version does not parse is a wiring mistake and fails.
 fn ref_version(r: &str) -> Option<(u64, u64, u64)> {
     let rest = r.strip_prefix('v')?;
+    let bad = || panic!("PREV_REF names a release whose version does not parse: {r}");
     let mut parts = rest.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-    Some((major, minor, patch))
+    let one =
+        |p: Option<&str>| -> u64 { p.and_then(|p| p.parse::<u64>().ok()).unwrap_or_else(bad) };
+    Some((
+        one(parts.next()),
+        one(parts.next()),
+        one(parts.next().or(Some("0"))),
+    ))
 }
 
 /// The files the N-1 legs run: every file whose `since` is at or under
@@ -605,19 +644,23 @@ fn ref_version(r: &str) -> Option<(u64, u64, u64)> {
 /// such a file stays out of the legs and the count reports it. Returns
 /// the qualifying files, the Scion count, and the corpus's oldest
 /// `since`.
+/// A `since:` value's version and the text it came from.
+type Since = ((u64, u64, u64), String);
+
 fn pick_n1_files(
     files: &[PathBuf],
     prev: (u64, u64, u64),
-) -> (Vec<(PathBuf, Transcript)>, usize, String) {
+) -> (Vec<(PathBuf, Transcript)>, usize, Since) {
     let mut qualifying = Vec::new();
     let mut scion_files = 0usize;
-    let mut oldest = None;
+    let mut oldest: Option<Since> = None;
     for file in files {
         let text = fs::read_to_string(file).expect("the transcript opens");
         let t = parse(file, &text);
+        let v = version_of(&t.since);
         oldest = Some(match oldest {
-            Some(o) if o <= t.since => o,
-            _ => t.since.clone(),
+            Some((ov, os)) if ov <= v => (ov, os),
+            _ => (v, t.since.clone()),
         });
         if version_of(&t.since) > prev {
             continue;
@@ -651,8 +694,14 @@ fn the_n1_side_answers_as_its_files_say() {
         return;
     };
     let prev_bin = PathBuf::from(prev_bin);
-    let work = common::private_tempdir();
-    let dir = work.path();
+
+    // The logs must outlive a red run: the version-matrix job uploads
+    // /tmp/scion-matrix*/, so the work dir sits there, named for this
+    // run, and only a green run removes it.
+    let dir = std::env::temp_dir().join(format!("scion-matrix-n1-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("the work dir is made");
+    make_private(&dir);
 
     // The N-1 version decides which files qualify: a file's `since`
     // must be at or under it. `PREV_REF` names the ref the
@@ -673,25 +722,34 @@ fn the_n1_side_answers_as_its_files_say() {
     let mut files = Vec::new();
     walk(&corpus, &mut files).expect("the corpus holds only transcripts");
     files.sort();
-    let (qualifying, scion_files, oldest) = pick_n1_files(&files, prev);
-    if qualifying.is_empty() {
-        panic!(
-            "the N-1 legs have nothing to prove: the corpus's oldest since is {oldest:?}, the N-1 side is {prev:?} ({printed})"
-        );
-    }
+    let (qualifying, scion_files, (oldest_v, oldest_s)) = pick_n1_files(&files, prev);
+    assert!(
+        !qualifying.is_empty(),
+        "the N-1 legs have nothing to prove: the corpus's oldest since is {oldest_s} at version {oldest_v:?}, the N-1 side is {prev:?} ({printed})"
+    );
 
     // Leg 1: the qualifying files against the N-1 server and its tiers.
-    let stack = start_n1_stack(&prev_bin, dir);
+    let (db_guard, pg) = n1_database();
+    let stack = start_n1_stack(&prev_bin, &dir, &pg);
     let runtime = tokio::runtime::Runtime::new().expect("the runtime starts");
     let _entered = runtime.enter();
-    let fixture = n1_fixture(&runtime, &stack.server);
+    let base = n1_fixture(&runtime, &stack.server);
     let mut ran = 0usize;
     for (file, t) in &qualifying {
-        run_objects_across_tiers(
+        let ticket = n1_mint(&runtime, &stack.server, &base.cs);
+        let f = Fixture {
+            unsigned: unsigned_of(&ticket),
+            ticket,
+            ..base.clone()
+        };
+        let index = ran;
+        let fresh = || n1_fresh_pair(&prev_bin, &dir, index, &stack.server, &stack.pub_hex);
+        run_one_object_file(
             &runtime,
             [&stack.server, &stack.cache, &stack.socket],
+            &fresh,
             t,
-            &fixture,
+            &f,
             file,
         );
         ran += 1;
@@ -701,17 +759,29 @@ fn the_n1_side_answers_as_its_files_say() {
     // The corpus's landed store and tickets are the fixture; the N-1
     // cache verifies the tickets of this server's keys, the N-1 daemon
     // forwards to it.
-    let (tiers, base) = landed();
+    let (tiers, base2) = landed();
     let _entered2 = tiers.runtime.enter();
-    let leg2 = start_n1_tiers(&tiers, &prev_bin, dir);
+    let leg2 = start_n1_tiers(&tiers, &prev_bin, &dir);
     for (file, t) in &qualifying {
+        let (ticket, _) = mint(&tiers, base2.cs);
         let f = Fixture {
-            ticket: mint(&tiers, base.cs).0,
-            ..base.clone()
+            unsigned: unsigned_of(&ticket),
+            ticket,
+            ..base2.clone()
         };
-        run_objects_across_tiers(
+        let index = ran;
+        let fresh = || {
+            let keys: Vec<String> = tiers
+                .ticket_public_keys()
+                .into_iter()
+                .map(|k| format!("--ticket-public-key={k}"))
+                .collect();
+            n1_fresh_pair_keys(&prev_bin, &dir, index, &tiers.server, &keys)
+        };
+        run_one_object_file(
             &tiers.runtime,
             [&tiers.server, &leg2.cache, &leg2.socket],
+            &fresh,
             t,
             &f,
             file,
@@ -720,8 +790,83 @@ fn the_n1_side_answers_as_its_files_say() {
     }
     drop(leg2);
     eprintln!(
-        "the N-1 legs ran {ran} file-runs over the two legs; {scion_files} Scion files stayed out (their fixture needs the N-1 changeset id, the next slice)"
+        "the N-1 legs ran {ran} file-runs over the two legs; {scion_files} Scion files stayed out (issue #921: their fixture needs the N-1 changeset id)"
     );
+    // A green run leaves nothing: the children die with the guards, the
+    // database drops with `db_guard`, and the work dir goes last.
+    drop(stack);
+    drop(db_guard);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A fresh N-1 cache and daemon in front of `server`, verifying the key
+/// whose hex is `pub_hex`: the pair a `tiers: fresh` file reruns on.
+fn n1_fresh_pair(
+    prev_bin: &Path,
+    dir: &Path,
+    index: usize,
+    server: &str,
+    pub_hex: &str,
+) -> FreshPair {
+    n1_fresh_pair_keys(prev_bin, dir, index, server, &[pub_hex.to_owned()])
+}
+
+/// The same, for a caller that holds several public keys.
+fn n1_fresh_pair_keys(
+    prev_bin: &Path,
+    dir: &Path,
+    index: usize,
+    server: &str,
+    keys: &[String],
+) -> FreshPair {
+    let key_flags: Vec<String> = keys
+        .iter()
+        .map(|k| format!("--ticket-public-key={k}"))
+        .collect();
+    let cache_log = dir.join(format!("fresh-{index}-cache.log"));
+    let cache = spawn_logged(
+        prev_bin.join("scion-cache"),
+        std::iter::empty()
+            .chain(["--listen", "127.0.0.1:0", "--upstream", server])
+            .chain(key_flags.iter().map(String::as_str)),
+        &tier_tokens(),
+        &cache_log,
+    );
+    let port = serving_port(&cache_log);
+    let cache_url = format!("http://127.0.0.1:{port}");
+    let relay_dir = dir.join(format!("fresh-{index}"));
+    fs::create_dir_all(&relay_dir).expect("the fresh pair's dir is made");
+    make_private(&relay_dir);
+    let sock = dir.join(format!("fresh-{index}.sock"));
+    let daemon = spawn_logged(
+        prev_bin.join("scion-daemon"),
+        [
+            "--data",
+            &relay_dir.display().to_string(),
+            "--socket",
+            &sock.display().to_string(),
+            "--upstream",
+            &cache_url,
+        ],
+        &tier_tokens(),
+        &dir.join(format!("fresh-{index}.log")),
+    );
+    wait_serving(&dir.join(format!("fresh-{index}.log")));
+    FreshPair {
+        cache_url,
+        socket: format!("unix://{}", sock.display()),
+        _in_process: None,
+        _processes: vec![cache, daemon],
+    }
+}
+
+/// The token pair every tier process speaks: the corpus client's token
+/// as the process's own, and the same upstream, so a relay forwards.
+fn tier_tokens() -> [(&'static str, &'static str); 2] {
+    [
+        ("SCION_TOKEN", common::TOKEN),
+        ("SCION_UPSTREAM_TOKEN", common::TOKEN),
+    ]
 }
 
 /// Leg 2's tiers: the N-1 cache in front of this server, the N-1 daemon
@@ -739,7 +884,7 @@ fn start_n1_tiers(tiers: &common::Tiers, prev_bin: &Path, dir: &Path) -> N1Leg2 
         std::iter::empty()
             .chain(["--listen", "127.0.0.1:0", "--upstream", &tiers.server])
             .chain(keys.iter().map(String::as_str)),
-        &[],
+        &tier_tokens(),
         &cache_log,
     );
     let cport = serving_port(&cache_log);
@@ -757,7 +902,7 @@ fn start_n1_tiers(tiers: &common::Tiers, prev_bin: &Path, dir: &Path) -> N1Leg2 
             "--upstream",
             &format!("http://127.0.0.1:{cport}"),
         ],
-        &[],
+        &tier_tokens(),
         &dir.join("tiers.log"),
     );
     wait_serving(&dir.join("tiers.log"));
@@ -771,9 +916,25 @@ fn start_n1_tiers(tiers: &common::Tiers, prev_bin: &Path, dir: &Path) -> N1Leg2 
 /// The version a `since:` or a binary names, as (major, minor, patch);
 /// a missing part is zero, so `v0.7` is `(0, 7, 0)`.
 fn version_of(v: &str) -> (u64, u64, u64) {
-    let one = |p: Option<&str>| p.and_then(|p| p.parse().ok()).unwrap_or(0);
-    let mut parts = v.trim().trim_start_matches('v').split('.');
-    (one(parts.next()), one(parts.next()), one(parts.next()))
+    if v.trim() == "unreleased" {
+        // Newer than every release named so far: it qualifies on no
+        // N-1 side until a release names it (the release steps bump it).
+        return (u64::MAX, 0, 0);
+    }
+    let rest = v.trim().strip_prefix('v').unwrap_or_else(|| {
+        panic!("a since value that is not vMAJOR.MINOR[.PATCH] or unreleased: {v}")
+    });
+    let mut parts = rest.split('.');
+    let one = |p: Option<&str>| -> u64 {
+        p.and_then(|p| p.parse::<u64>().ok()).unwrap_or_else(|| {
+            panic!("a since value that is not vMAJOR.MINOR[.PATCH] or unreleased: {v}")
+        })
+    };
+    (
+        one(parts.next()),
+        one(parts.next()),
+        one(parts.next().or(Some("0"))),
+    )
 }
 
 /// Leg 2's tiers: the cache url, the daemon's socket url, and the
@@ -899,6 +1060,9 @@ struct N1Stack {
     server: String,
     cache: String,
     socket: String,
+    /// The server's ticket public key, hex: a fresh pair's cache
+    /// verifies the tickets with it.
+    pub_hex: String,
     _children: Vec<Child>,
 }
 
@@ -932,8 +1096,9 @@ fn n1_repo(dir: &Path) -> PathBuf {
 
 /// The N-1 server's database: one of this run's own, as version-matrix's
 /// `pg_db_for` makes one - the two builds share the database server,
-/// never its rows. Returns the address.
-fn n1_database() -> String {
+/// never its rows. The guard drops the database when the run ends,
+/// green or by unwind. Returns the guard and the address.
+fn n1_database() -> (N1Db, String) {
     let base = std::env::var("SCION_TEST_POSTGRES_URL")
         .expect("SCION_TEST_POSTGRES_URL names the test database");
     let base = base.split('?').next().expect("the base url").to_owned();
@@ -957,11 +1122,36 @@ fn n1_database() -> String {
         ],
         &[],
     );
-    format!("{base}/{db}")
+    (
+        N1Db {
+            admin,
+            db: db.clone(),
+        },
+        format!("{base}/{db}"),
+    )
 }
 
-fn start_n1_stack(prev_bin: &Path, dir: &Path) -> N1Stack {
-    let pg = n1_database();
+/// The N-1 run's database, dropped on the way out.
+struct N1Db {
+    admin: String,
+    db: String,
+}
+
+impl Drop for N1Db {
+    fn drop(&mut self) {
+        let _ = Command::new("psql")
+            .args([
+                &self.admin,
+                "-X",
+                "-q",
+                "-c",
+                &format!("DROP DATABASE IF EXISTS \"{}\"", self.db),
+            ])
+            .status();
+    }
+}
+
+fn start_n1_stack(prev_bin: &Path, dir: &Path, pg: &str) -> N1Stack {
     let src = n1_repo(dir);
 
     let server_dir = dir.join("server");
@@ -974,9 +1164,11 @@ fn start_n1_stack(prev_bin: &Path, dir: &Path) -> N1Stack {
             "--data",
             &server_dir.display().to_string(),
             "import",
+            "--repo",
+            common::REPO,
             &src.display().to_string(),
         ],
-        &[("SCION_POSTGRES_URL", &pg)],
+        &[("SCION_POSTGRES_URL", pg)],
     );
     let key = dir.join("ticket.key");
     let pub_hex = String::from_utf8_lossy(
@@ -988,7 +1180,7 @@ fn start_n1_stack(prev_bin: &Path, dir: &Path) -> N1Stack {
                 "--out",
                 &key.display().to_string(),
             ])
-            .env("SCION_POSTGRES_URL", &pg)
+            .env("SCION_POSTGRES_URL", pg)
             .output()
             .expect("the ticket key prints")
             .stdout,
@@ -1008,7 +1200,7 @@ fn start_n1_stack(prev_bin: &Path, dir: &Path) -> N1Stack {
             "--ticket-key",
             &key.display().to_string(),
         ],
-        &[("SCION_POSTGRES_URL", &pg)],
+        &[("SCION_POSTGRES_URL", pg), ("SCION_TOKEN", common::TOKEN)],
         &server_log,
     );
     let sport = serving_port(&server_log);
@@ -1025,7 +1217,7 @@ fn start_n1_stack(prev_bin: &Path, dir: &Path) -> N1Stack {
             "--ticket-public-key",
             &pub_hex,
         ],
-        &[],
+        &tier_tokens(),
         &cache_log,
     );
     let cport = serving_port(&cache_log);
@@ -1046,7 +1238,7 @@ fn start_n1_stack(prev_bin: &Path, dir: &Path) -> N1Stack {
             "--upstream",
             &cache_url,
         ],
-        &[],
+        &tier_tokens(),
         &relay_log,
     );
     wait_serving(&relay_log);
@@ -1056,8 +1248,30 @@ fn start_n1_stack(prev_bin: &Path, dir: &Path) -> N1Stack {
         server: server_url,
         cache: cache_url,
         socket: socket_url,
+        pub_hex,
         _children: vec![server, cache, daemon],
     }
+}
+
+/// A fresh ticket from the N-1 server, seconds old at the call, as the
+/// corpus test mints one per file.
+fn n1_mint(
+    runtime: &tokio::runtime::Runtime,
+    server: &str,
+    cs: &scion_core::ChangesetId,
+) -> Vec<u8> {
+    runtime.block_on(async {
+        let mut client = connect(server).await;
+        client
+            .get_root_tree(scion_proto::v1::GetRootTreeRequest {
+                repo: common::REPO.into(),
+                changeset_id: cs.as_bytes().to_vec(),
+            })
+            .await
+            .expect("the N-1 server mints")
+            .into_inner()
+            .ticket
+    })
 }
 
 /// The N-1 side's fixture: the ref's changeset, then the root tree and
