@@ -1,0 +1,9 @@
+# A repo that does not exist is NOT_FOUND.
+since: v0.7
+method: Scion/PutBlob
+fixture: landed
+
+request.repo: no-such-repo
+request.data: $blob_bytes
+
+status: not_found

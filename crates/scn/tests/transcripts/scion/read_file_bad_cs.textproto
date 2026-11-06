@@ -1,0 +1,10 @@
+# A changeset ID that is not 32 bytes is malformed.
+since: v0.7
+method: Scion/ReadFile
+fixture: landed
+
+request.repo: r
+request.changeset_id: aabb
+request.path: src/main.rs
+
+status: invalid_argument

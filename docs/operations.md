@@ -27,18 +27,33 @@ The pieces:
 
 ### First boot
 
-A first start on a fresh machine is a token file and three commands,
-and each command promises something. The token goes in a file, not in
-argv: any user of the machine reads argv with `ps`.
+A first start on a fresh machine is a token file, a preflight, and a
+serve, and each command promises something. The token goes in a file,
+not in argv: any user of the machine reads argv with `ps`.
 
 ```sh
 umask 077
 printf %s "$SCION_TOKEN" > /srv/scion-token
+./scion-server --data /srv/scion preflight \
+  --postgres-url-file /srv/scion-db-url --token-file /srv/scion-token
+```
+
+The `umask 077` and the printf make the token file private (0600). The
+preflight runs every check a first boot needs and prints one line per
+check - `ok`, `warn` or `fail`, the fix named in the same words serve's
+refusals use - and exits 0 all pass, 1 one warns, 2 one fails. It
+writes nothing: no marker, no schema move, no lock. The checks are
+serve's own: the data directory's refusals, the database's build
+version and schema state, the store's pairing, a live server on the
+store, the listen addresses, the memory floor, and the data
+directory's free bytes and inodes. The token, TLS and ticket rules are
+the `serve` command's own flags check, run before any check prints.
+
+```sh
 ./scion-server --data /srv/scion serve --token-file /srv/scion-token
 ```
 
-The `umask 077` and the printf make the token file private (0600). A
-data directory the server does not find is refused, not created: every
+A data directory the server does not find is refused, not created: every
 subcommand except restore answers "<path> does not exist; create it or
 pass --data" (#578), so make the directory before the first command.
 The serve command keeps
@@ -1310,6 +1325,14 @@ the process, scraped from there. The names:
   counts says a drive that cannot keep up with the imports.
 - `scion_data_free_bytes` — free bytes on the filesystem that holds the
   data directory, refreshed every 30 s; alert before it reaches zero.
+- `scion_blob_count` — blobs the store's metadata names, refreshed every
+  60 s by one bounded count query over the blob rows (never a directory
+  walk, never per scrape). At 1,000,000 blobs the query itself costs
+  about 0.6 s of one pooled read connection ([run
+  42040632163](https://github.com/bnsd55/openscion/actions/runs/42040632163)).
+- `scion_blob_ceiling_share` — the blob count as a share of the 1,000,000
+  blobs docs/support.md supports per data directory; the store alerts
+  that watch fsck's future read this gauge, not the count.
 - `scion_derive_walks_in_flight` / `scion_derive_walks_waiting` — derive
   walks that hold a permit, and walks that wait for one; waits that pile
   up while the in-flight count sits at the cap mean a cold history read
@@ -1574,6 +1597,78 @@ Escalate when the ratio stays high with the caps raised and the box's
 memory free: the tier's placement or shape needs its owner.
 
 Proof: crates/scion-server/tests/docs_alerts.rs::tier_miss_ratio_falls_when_the_store_serves_the_second_read
+
+### The store near its blob ceiling
+
+`BlobCount70`, `BlobCount85` and `BlobCount100` fire when
+`scion_blob_ceiling_share` passes 70%, 85% and 100% of the 1,000,000
+blobs docs/support.md supports per data directory, and stays past the
+line for 15 minutes. The share is the count the metadata names, divided
+by the ceiling; the gauge refreshes every 60 s from one bounded query.
+
+Read the share and its trend:
+
+```sh
+curl -s 127.0.0.1:9100/metrics | grep '^scion_blob_ceiling_share'
+```
+
+What to do at each level:
+
+- At 70% (`medium`): nothing is slow yet. Watch the share's trend across
+  a week; a store that adds blobs faster than the gc takes them lands
+  on the next line by itself.
+- At 85% (`high`): plan the move. The first cold `fsck` walk costs about
+  62 s at 1,000,000 blobs (61.7 µs a blob, run 41716921823) and the cost
+  a blob grows with the count: 863 s a walk, 172.6 µs a blob, at
+  5,000,000 (#828). What exists to move to: a second store - its own
+  database, data directory and server, because one server runs per
+  database - that takes new repos. There is no tool to move existing
+  repos between stores yet.
+- At 100% (`critical`): the store is past the count docs/support.md
+  supports. The walk is seconds today and grows past them; the store
+  still works, but nothing below this line is tested. Give new repos a
+  second store now (as at 85%); there is no tool to move existing repos
+  between stores yet.
+
+Proof: crates/scion-server/tests/blob_count_gauge.rs::the_count_is_what_the_metadata_names_not_what_the_folder_holds (behaviour, no command: the runbook's steps are operator actions - watch the trend, plan the split - and each alert's firing is proven by the promtool cases deploy/prometheus/openscion-alerts-test.yml runs, which fire past the threshold and stay quiet just below it).
+
+### The store near its inode floor
+
+`InodesLow` fires when `scion_data_free_inodes` drops under 100,000 - 10%
+of the inode headroom the 1,000,000-blob ceiling implies, because a
+filesystem spends one inode and one directory entry per blob whatever
+the blob's size (docs/operations.md "The inode budget"). `InodesCritical`
+fires under 10,000. Both need the line crossed for 15 and 5 minutes; the
+gauge refreshes with the free-space poll, every 30 s, one `statvfs` per
+value.
+
+Read the level and its trend:
+
+```sh
+curl -s 127.0.0.1:9100/metrics | grep '^scion_data_free_inodes'
+```
+
+What to do at each level:
+
+- At `InodesLow` (`high`): nothing fails yet, and bytes may still have
+  room. Stop creating repos on this store, and plan the room: grow the
+  volume's inode count (a reformat on most filesystems), or plan the
+  second store the blob-ceiling section above describes - a new store
+  takes new repos, which take new inodes on the old store.
+- At `InodesCritical` (`critical`): new blob writes fail soon or already
+  fail, while bytes may have room. Stop writes (a read-only tier or a
+  stop), move the data directory to a filesystem with more free inodes
+  (a stop, a copy per section 3, a start at the new path), or give new
+  repos a second store. A blob whose upload failed must be uploaded
+  again by the client; the server never kept half of it.
+
+Nothing in the store needs repair because inodes ran out: a write that
+failed out-of-inodes left no torn file, and when inodes are back,
+writes resume with no restart. A filesystem without a fixed inode table
+(btrfs) exports no inode gauge at all, so the inode alerts stay quiet
+there by design.
+
+Proof: crates/scion-server/tests/served_metrics.rs::a_served_server_renders_the_operating_metrics (behaviour, no command: the poll is the free-space poll's own code path, and the served render names both gauges; each alert's firing is proven by the promtool cases deploy/prometheus/openscion-alerts-test.yml runs, which fire past the threshold and stay quiet just above 100,000).
 
 ## 7. Capacity
 

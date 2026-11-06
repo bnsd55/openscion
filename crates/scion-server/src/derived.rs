@@ -28,6 +28,7 @@ use crate::backend::Backend;
 use crate::deadline::Deadline;
 use crate::error::{Error, Result};
 use crate::meta::Meta as _;
+use crate::meta::StartRead;
 use crate::meta::{MetaTx, RepoId};
 use crate::tree;
 
@@ -574,7 +575,6 @@ pub(crate) fn backfill<K: Kind>(
     repo: &str,
     cs: ChangesetId,
 ) -> Result<DeriveReport> {
-    use crate::meta::Meta as _;
     let repo = store.read(|c| c.repo_id(repo))?;
     let (_value, written) = fill_until::<K>(store, repo, cs, None)?;
     // Every step removes at most a step's worth, and a short step means
@@ -603,17 +603,23 @@ pub(crate) fn backfill<K: Kind>(
 ///
 /// [`Error::NotFound`] if `repo` does not have `cs`. Errors of
 /// [`Kind::derive`].
+/// `deadline`: the call's deadline, when the caller serves a request -
+/// the walk and the chain check it per changeset, so a cancelled call's
+/// job stops between changesets instead of holding its permit to the
+/// chain's end. `None` for command and test callers, which have no
+/// request to serve.
 pub(crate) fn derive<K: Kind>(
     c: &mut dyn MetaTx,
     repo: RepoId,
     cs: ChangesetId,
     lens: crate::tree::BlobLens<'_>,
+    deadline: Option<&Deadline>,
 ) -> Result<K::Value> {
     let mut walk = match Walk::start::<K>(c, repo, cs)? {
         ControlFlow::Break(value) => return Ok(value),
         ControlFlow::Continue(walk) => walk,
     };
-    walk.step::<K>(c, usize::MAX)?;
+    walk.step::<K>(c, usize::MAX, deadline)?;
     let (value, _written) = derive_chain::<K>(c, repo, &walk.into_pending(), lens)?;
     value.ok_or_else(|| Error::NotFound(format!("changeset {cs}")))
 }
@@ -679,7 +685,7 @@ fn walk_all<K: Kind>(
         Ok(match Walk::start::<K>(c, repo, cs)? {
             ControlFlow::Continue(mut walk) => {
                 take_walk_bytes(budget, held, &walk)?;
-                walk.step::<K>(c, STEP)?;
+                walk.step::<K>(c, STEP, None)?;
                 ControlFlow::Continue(walk)
             }
             stored @ ControlFlow::Break(_) => stored,
@@ -692,7 +698,7 @@ fn walk_all<K: Kind>(
     while !walk.next.is_empty() {
         check()?;
         take_walk_bytes(budget, held, &walk)?;
-        store.read_unflushed(|c| walk.step::<K>(c, STEP))?;
+        store.read_unflushed(|c| walk.step::<K>(c, STEP, None))?;
     }
     Ok(ControlFlow::Continue(walk.into_pending()))
 }
@@ -736,31 +742,49 @@ struct Walk {
 impl Walk {
     /// The stored value for `cs`, or a walk that starts there.
     ///
-    /// Rows are keyed by changeset alone, so this checks the repo: a stored
+    /// Rows are keyed by changeset alone, so this checks the repo: the
+    /// start's one statement joins the repo's membership, and a stored
     /// value must not leak to a repo that cannot see the changeset. Every
     /// parent of a changeset in a repo is in that repo too, so the rest of
-    /// the walk stays in it.
+    /// the walk stays in it. A value the transaction holds answers with
+    /// no statement - the only rows a transaction holds are the parents
+    /// and the changeset it stores into `repo`, and the changesets insert
+    /// refuses a parent `repo` cannot see before any row is written.
     fn start<K: Kind>(
         c: &mut dyn MetaTx,
         repo: RepoId,
         cs: ChangesetId,
     ) -> Result<ControlFlow<K::Value, Self>> {
-        let generation = c.generation(repo, cs)?;
-        if let Some(value) = load::<K>(c, cs)? {
-            return Ok(ControlFlow::Break(value));
+        match c.generation_and_stored(repo, K::NAME, K::VERSION, cs)? {
+            StartRead::Stored(bytes) => {
+                let value = K::decode(&bytes).ok_or_else(|| {
+                    Error::Corrupt(format!("derived {} v{} for {cs}", K::NAME, K::VERSION))
+                })?;
+                Ok(ControlFlow::Break(value))
+            }
+            StartRead::Generation(generation) => Ok(ControlFlow::Continue(Self {
+                next: vec![(cs, generation)],
+                pending: Vec::new(),
+                seen: HashSet::new(),
+            })),
         }
-        Ok(ControlFlow::Continue(Self {
-            next: vec![(cs, generation)],
-            pending: Vec::new(),
-            seen: HashSet::new(),
-        }))
     }
 
     /// Visits at most `limit` changesets. Each one without a stored value
     /// goes to `pending`, and the walk goes on to the parents that `K`
     /// reads.
-    fn step<K: Kind>(&mut self, c: &mut dyn MetaTx, limit: usize) -> Result<()> {
+    fn step<K: Kind>(
+        &mut self,
+        c: &mut dyn MetaTx,
+        limit: usize,
+        deadline: Option<&Deadline>,
+    ) -> Result<()> {
         for _ in 0..limit {
+            if let Some(deadline) = deadline {
+                // A cancelled call's job stops between changesets, and
+                // frees its permit, instead of walking on.
+                deadline.check()?;
+            }
             let Some((id, generation)) = self.next.pop() else {
                 break;
             };
@@ -1024,6 +1048,8 @@ mod tests {
     use scion_core::{BlobId, FileState, IdentityTime, RepoPath};
 
     use super::*;
+    use crate::graph::CommitGraph;
+    use crate::history::PathHistory;
     use crate::meta::testing;
     use crate::pg::damage;
     use crate::store::{DERIVE_WALKS_CAP, FSYNC_LEAVES_DRIVE_CACHE};
@@ -1557,9 +1583,56 @@ mod tests {
             Err(Error::NotFound(_))
         ));
         assert!(matches!(
-            store.commit(|c| derive::<ChangedPathsV1>(c, other, tip, &mut tree::lens_none())),
+            store.commit(|c| derive::<ChangedPathsV1>(c, other, tip, &mut tree::lens_none(), None)),
             Err(Error::NotFound(_))
         ));
+
+        // A write into `other` of a child whose parent is `repo`'s
+        // changeset refuses too: the walk may answer the parent's value
+        // from the preload, and the changesets insert is the step that
+        // refuses the parent `other` cannot see - before any row is
+        // written.
+        let child = Changeset::new(
+            vec![tip],
+            IdentityTime::new(b"a".to_vec(), b"a@x".to_vec(), 0, 0)
+                .expect("identity fits the format"),
+            None,
+            vec![],
+            [(
+                RepoPath::new("child").unwrap(),
+                Some(FileState::Regular {
+                    content: BlobId::of(b"child".as_slice()),
+                    executable: false,
+                }),
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .expect("changeset fits the format");
+        let child_id = child.id();
+        let err = store.write(|c| tree::store_changeset(c, other, &child, &mut tree::lens_none()));
+        assert!(matches!(err, Err(Error::NotFound(_))), "{err:?}");
+        let membership = store.read(|c| c.generation(other, child_id)).unwrap_err();
+        assert!(
+            matches!(membership, Error::NotFound(_)),
+            "no changeset row in `other`"
+        );
+        let derived_rows = store
+            .read(|c| {
+                Ok([
+                    c.get_derived(RootTree::NAME, RootTree::VERSION, child_id)?
+                        .is_some(),
+                    c.get_derived(CommitGraph::NAME, CommitGraph::VERSION, child_id)?
+                        .is_some(),
+                    c.get_derived(PathHistory::NAME, PathHistory::VERSION, child_id)?
+                        .is_some(),
+                ])
+            })
+            .unwrap();
+        assert!(
+            derived_rows.iter().all(|stored| !stored),
+            "no derived row for the refused child: {derived_rows:?}"
+        );
     }
 
     #[test]
@@ -1605,7 +1678,7 @@ mod tests {
                 else {
                     panic!("no value is stored yet");
                 };
-                walk.step::<ChangedPathsV1>(c, STEP)?;
+                walk.step::<ChangedPathsV1>(c, STEP, None)?;
                 Ok(walk)
             })
             .unwrap();
@@ -1945,7 +2018,7 @@ mod tests {
                 };
                 let mut visits = 0;
                 while !walk.next.is_empty() {
-                    walk.step::<Ancestry>(c, 1)?;
+                    walk.step::<Ancestry>(c, 1, None)?;
                     let mut ids_in_next: Vec<ChangesetId> =
                         walk.next.iter().map(|&(id, _)| id).collect();
                     let count = ids_in_next.len();
@@ -1973,7 +2046,7 @@ mod tests {
                 let ControlFlow::Continue(mut walk) = Walk::start::<Ancestry>(c, repo, tip)? else {
                     panic!("no value is stored yet");
                 };
-                walk.step::<Ancestry>(c, STEP)?;
+                walk.step::<Ancestry>(c, STEP, None)?;
                 Ok(walk)
             })
             .unwrap();

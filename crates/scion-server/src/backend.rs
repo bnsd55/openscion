@@ -125,6 +125,17 @@ pub(crate) fn store_uuid_of(data: &Path) -> Option<[u8; 16]> {
     marker_uuid(data)
 }
 
+/// The directory checks an open runs before it reads the marker: the
+/// kind refusals of the object store, a damaged marker, a directory
+/// that holds a sqlite store. Preflight runs the same three, so the
+/// two cannot drift.
+pub(crate) fn check_dir(data: &Path) -> Result<()> {
+    crate::store::refuse_bad_dir(data)?;
+    refuse_damaged_marker(data)?;
+    refuse_sqlite_dir(data)?;
+    Ok(())
+}
+
 fn marker_uuid(data: &Path) -> Option<[u8; 16]> {
     let text = std::fs::read_to_string(data.join(MARKER)).ok()?;
     let line = text.lines().nth(1)?.trim();
@@ -287,13 +298,10 @@ impl Backend {
         // components only).
         scion_proto::runtime::auth::create_private_dir_all(data)
             .map_err(crate::error::Error::Io)?;
-        // The directory's own checks run before anything reads it: a
-        // symlink or a shared mode is refused by kind, before the marker
-        // read could follow a link.
-        crate::store::refuse_bad_dir(data)?;
-        refuse_damaged_marker(data)?;
+        // The directory's own checks run before anything reads it: the
+        // same three an exclusive open runs, so the two cannot drift.
+        check_dir(data)?;
         let marker = Marker::read(data);
-        refuse_sqlite_dir(data)?;
         let pg = open(url, ca, PG_READERS, data, marker)?;
         marker_agrees(data, pg.store_uuid())?;
         Ok(Self { pg })

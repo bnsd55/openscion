@@ -102,6 +102,47 @@ fn wait_unnamed(client: &mut postgres::Client, schema: &str) {
     );
 }
 
+/// The key `register_test_schema` and the drain serialize on: the same
+/// constant of the test schema preparation names `CLEAN_LOCK`, spelled
+/// here so the
+/// test holds exactly that lock.
+const CLEAN_LOCK: i64 = 0x5343_494F_4E53_5445;
+
+/// One open whose registration waits for the cleanup lock: a test
+/// session holds `CLEAN_LOCK` just over the writer's 5 s lock clock while
+/// an open runs. The test guards the preparer's absence of a lock
+/// clock: the registration runs on the preparer's session, which
+/// carries none, so the open must succeed - slow, not failed. A 55P03
+/// here would name the statement that waited (#905).
+#[test]
+fn an_open_whose_cleanup_lock_is_held_over_the_writer_s_clock_succeeds() {
+    let _lock = locked();
+    let holder = std::thread::spawn(|| {
+        let mut client = connect();
+        client
+            .execute("SELECT pg_advisory_lock($1)", &[&CLEAN_LOCK])
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5_500));
+        client
+            .execute("SELECT pg_advisory_unlock($1)", &[&CLEAN_LOCK])
+            .unwrap();
+    });
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let dir = private_tempdir();
+    let started = std::time::Instant::now();
+    let store = Backend::open_test(dir.path());
+    let took = started.elapsed();
+    if let Err(err) = &store {
+        panic!("the open failed while the cleanup lock was held: {err}");
+    }
+    drop(store);
+    holder.join().unwrap();
+    assert!(
+        took >= std::time::Duration::from_millis(5_000),
+        "the open did not wait for the cleanup lock: {took:?}"
+    );
+}
+
 /// A finished test's schema drops at a later sweep: the backend closed,
 /// its directory is gone, and no connection names the schema. The
 /// registry row goes with it.
@@ -296,6 +337,16 @@ fn a_sweep_drops_at_most_fifty_oldest_first() {
             "DELETE FROM public.scion_test_schemas WHERE schema LIKE 'scion_test_cap{pid}_%'"
         ))
         .unwrap();
+    // Leftover registry rows from earlier runs - some older than this
+    // test's rows - would eat the fifty slots and shift the survivors.
+    // The backlog goes first: sweeps of fifty until one drops fewer,
+    // so this run's rows are the oldest the measured sweep sees.
+    for _ in 0..20 {
+        let (dropped, _) = Backend::sweep_stale_test_schemas().unwrap();
+        if dropped < 50 {
+            break;
+        }
+    }
     let made: Vec<String> = (0..55)
         .map(|i| {
             let name = format!("scion_test_cap{pid}_{i}");
@@ -463,4 +514,221 @@ fn the_drain_reaches_past_the_schemas_it_keeps() {
             "a schema whose directory exists never drops: {name}"
         );
     }
+}
+
+/// One open whose migration waits for its schema's migration lock: a
+/// session holds the schema's own migration key until the open has
+/// returned, so the writer's 5 s clock - not a fixed sleep - is the
+/// race. The open of the held schema fails with the named error, the
+/// migration's lock step and its statement; an open of another schema
+/// during the same hold succeeds: the migrations touch only their own
+/// schema, so two schemas never take turns (#905).
+#[test]
+fn an_open_waits_for_its_own_schemas_migration_lock_and_not_for_another_s() {
+    let _lock = locked();
+    let dir = private_tempdir();
+    let held = Backend::test_migration_lock(dir.path()).unwrap();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let mut client = connect();
+        client
+            .execute("SELECT pg_advisory_lock($1)", &[&held])
+            .unwrap();
+        // The hold lasts until the open has returned: the writer's
+        // clock is the race, not a sleep.
+        let _ = released.recv();
+        client
+            .execute("SELECT pg_advisory_unlock($1)", &[&held])
+            .unwrap();
+    });
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let started = std::time::Instant::now();
+    let Err(err) = Backend::open_test(dir.path()) else {
+        panic!("the open succeeded while its schema's migration lock was held");
+    };
+    let took = started.elapsed();
+    // Another schema's open is not the holder's business: its migrate
+    // takes its own schema's key, inside the hold.
+    let other = private_tempdir();
+    let other_open = Backend::open_test(other.path());
+    drop(release);
+    holder.join().unwrap();
+    assert!(
+        format!("{err:?}").contains("the schema migration lock")
+            && format!("{err:?}").contains("SELECT pg_advisory_lock($1)"),
+        "the error names the migration's lock step: {err:?}"
+    );
+    assert!(
+        took >= std::time::Duration::from_millis(5_000),
+        "the open did not wait out its schema's clock: {took:?}"
+    );
+    assert!(
+        other_open.is_ok(),
+        "another schema's open succeeds during the hold: {:?}",
+        other_open.err()
+    );
+}
+
+/// An older build's migrator and this build still take turns: the older
+/// build takes the database's bare migration key alone, exclusive, and
+/// this build takes that key shared beside its own schema's key - so a
+/// hold of the bare key keeps this build's open waiting on its shared
+/// take, and the open answers after the hold lifts (#905).
+#[test]
+fn an_open_waits_while_an_older_builds_migration_holds_the_bare_key() {
+    let _lock = locked();
+    let held = Backend::test_bare_migration_lock();
+    let (held_hi, held_lo) = (held >> 32, held & 0xFFFF_FFFF);
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let mut client = connect();
+        client
+            .execute("SELECT pg_advisory_lock($1)", &[&held])
+            .unwrap();
+        // The hold lasts until the main thread releases it, about a
+        // second after the open started: an older build's quick
+        // migration window, well under the writer's clock, so no other
+        // open in the window reaches it.
+        let _ = released.recv();
+        client
+            .execute("SELECT pg_advisory_unlock($1)", &[&held])
+            .unwrap();
+    });
+    // The hold is seen in pg_locks, not assumed from a sleep: the open
+    // starts only once the older build's turn is real. The holder may
+    // still be connecting, so the poll waits for the row; a poll that
+    // gives up names whatever holds the key instead.
+    let mut holding = Vec::new();
+    let poll = std::time::Instant::now();
+    while poll.elapsed() < std::time::Duration::from_secs(10) {
+        holding = connect()
+            .query(
+                &format!(
+                    "SELECT 1 FROM pg_locks WHERE locktype = 'advisory'
+                     AND classid = {held_hi} AND objid = {held_lo}
+                     AND mode = 'ExclusiveLock' AND granted"
+                ),
+                &[],
+            )
+            .unwrap();
+        if !holding.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    if holding.is_empty() {
+        let holders = connect()
+            .query(
+                &format!(
+                    "SELECT l.pid, l.mode, l.granted, a.application_name, a.query
+                     FROM pg_locks l LEFT JOIN pg_stat_activity a ON a.pid = l.pid
+                     WHERE l.locktype = 'advisory'
+                       AND l.classid = {held_hi} AND l.objid = {held_lo}"
+                ),
+                &[],
+            )
+            .unwrap();
+        for row in &holders {
+            eprintln!(
+                "DEBUG the bare key: pid {} mode {} granted {} app {} query {}",
+                row.get::<_, i32>(0),
+                row.get::<_, String>(1),
+                row.get::<_, bool>(2),
+                row.get::<_, Option<String>>(3).unwrap_or_default(),
+                row.get::<_, String>(4),
+            );
+        }
+    }
+    assert_eq!(holding.len(), 1, "the older build's turn is real");
+    let dir = private_tempdir();
+    let started = std::time::Instant::now();
+    let opened = std::thread::spawn(move || Backend::open_test(dir.path()));
+    std::thread::sleep(std::time::Duration::from_millis(1_000));
+    drop(release);
+    let opened = opened.join().unwrap();
+    holder.join().unwrap();
+    let took = started.elapsed();
+    assert!(
+        opened.is_ok(),
+        "the open answers after the older build's migration: {:?}",
+        opened.err()
+    );
+    assert!(
+        took >= std::time::Duration::from_millis(1_000),
+        "the open waited inside the hold to its release: {took:?}"
+    );
+}
+
+/// The two key spaces never meet for the same schema: the one-server
+/// lock a server holds for its whole life and the migration lock an
+/// open takes mix the schema's hash differently, and a debug build's
+/// overflow panic cannot happen on an XOR. Pinned over a thousand
+/// names (#905).
+#[test]
+fn the_migration_key_never_meets_the_one_server_key() {
+    for i in 0..1_000u64 {
+        let schema = format!("scion_test_sweep_{i}");
+        let migration = Backend::test_migration_lock_for(&schema);
+        let one_server = Backend::test_server_lock_for(&schema);
+        assert_ne!(
+            migration, one_server,
+            "the migration key met the one-server key for {schema}"
+        );
+        assert_ne!(
+            migration,
+            Backend::test_bare_migration_lock(),
+            "the migration key met the database's bare key for {schema}"
+        );
+    }
+}
+
+/// The shared take goes back with the open: a writer that ran its
+/// migrations keeps no advisory lock on the database's bare migration
+/// key, or an older build's exclusive take would wait for as long as
+/// any new server runs (#905).
+#[test]
+fn an_open_keeps_no_lock_on_the_bare_migration_key() {
+    let _lock = locked();
+    let dir = private_tempdir();
+    let store = Backend::open_test(dir.path()).unwrap();
+    // The writer's session is the one holding the store's one-server
+    // key for its whole life.
+    let server_key = Backend::test_server_lock(dir.path()).unwrap();
+    let bare = Backend::test_bare_migration_lock();
+    // Postgres splits a one-argument advisory key into the two ints
+    // pg_locks shows: the high half in classid, the low in objid.
+    let (server_hi, server_lo) = (server_key >> 32, server_key & 0xFFFF_FFFF);
+    let (bare_hi, bare_lo) = (bare >> 32, bare & 0xFFFF_FFFF);
+    let rows = connect()
+        .query(
+            &format!(
+                "SELECT l.pid FROM pg_locks l
+                 WHERE l.locktype = 'advisory' AND l.classid = {server_hi}
+                   AND l.objid = {server_lo} AND l.granted"
+            ),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the writer's session is on the one-server key"
+    );
+    let pid: i32 = rows[0].get(0);
+    let leaked = connect()
+        .query(
+            &format!(
+                "SELECT l.mode FROM pg_locks l
+                 WHERE l.locktype = 'advisory' AND l.classid = {bare_hi}
+                   AND l.objid = {bare_lo}
+                   AND l.pid = {pid} AND l.granted"
+            ),
+            &[],
+        )
+        .unwrap();
+    assert!(
+        leaked.is_empty(),
+        "the writer keeps no lock on the bare migration key, holds: {leaked:?}"
+    );
+    drop(store);
 }

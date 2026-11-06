@@ -188,6 +188,17 @@ pub(crate) const DERIVED_BATCH: usize = 1_000;
 #[allow(clippy::cast_possible_wrap)] // 1,000, far from any wrap
 pub(crate) const DERIVED_BATCH_I64: i64 = DERIVED_BATCH as i64;
 
+/// What the walk's start read: the stored bytes of the value, or the
+/// generation to walk from when none is stored.
+pub enum StartRead {
+    /// The value is stored (or the transaction holds it): the walk
+    /// breaks on it, and no generation was read.
+    Stored(Vec<u8>),
+    /// The repo has the changeset and nothing is stored for it: the
+    /// walk starts from this generation.
+    Generation(i64),
+}
+
 /// The queries on the metadata tables. Every query fails with a database
 /// error, or with the `NotFound` or `Corrupt` error that its doc says; the
 /// docs do not repeat that per method. A query may be called in a read or
@@ -333,6 +344,21 @@ pub trait MetaTx {
     fn get_derived(&mut self, kind: &str, version: u32, cs: ChangesetId)
     -> Result<Option<Vec<u8>>>;
 
+    /// The generation of a changeset that `repo` may see, and the stored
+    /// bytes of a derived value for it, one statement. The join with the
+    /// repo's membership is the check that a stored value does not leak
+    /// to a repo that cannot see the changeset; no row is
+    /// [`Error::NotFound`], the same words `generation` answers with. A
+    /// value the transaction already holds comes back as
+    /// [`StartRead::Stored`] without a statement.
+    fn generation_and_stored(
+        &mut self,
+        repo: RepoId,
+        kind: &str,
+        version: u32,
+        cs: ChangesetId,
+    ) -> Result<StartRead>;
+
     /// The stored bytes of up to [`DERIVED_BATCH`] derived values, in the
     /// order asked. One read transaction, one statement: a land between two
     /// ids of the batch cannot mix two states.
@@ -434,6 +460,7 @@ pub trait MetaTx {
     /// Database errors.
     fn preload_derived(
         &mut self,
+        _repo: RepoId,
         _kinds: &[(&'static str, u32)],
         _css: &[ChangesetId],
     ) -> Result<()> {
@@ -533,6 +560,10 @@ pub trait MetaTx {
 
     /// The length of a tree's stored bytes, without reading them.
     fn tree_size(&mut self, id: TreeId) -> Result<usize>;
+
+    /// The number of distinct blobs the store's metadata names: the
+    /// authoritative count, whatever the blob folder holds.
+    fn blob_count(&mut self) -> Result<u64>;
 
     /// Adds a blob to the blobs that `repo` may name. `Ok(true)` if new.
     fn add_repo_blob(&mut self, repo: RepoId, blob: BlobId) -> Result<bool>;

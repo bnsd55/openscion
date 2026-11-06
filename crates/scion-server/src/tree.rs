@@ -93,15 +93,52 @@ pub fn apply(
     changes: &BTreeMap<RepoPath, Option<FileState>>,
     lens: BlobLens<'_>,
 ) -> Result<TreeId> {
+    apply_impl(c, base, changes, lens, None)
+}
+
+/// The build checks the deadline per path, so a cancelled call's job
+/// stops between paths and frees its permit instead of building on.
+///
+/// # Errors
+///
+/// As [`apply`].
+pub fn apply_within(
+    c: &mut dyn MetaTx,
+    base: Option<TreeId>,
+    changes: &BTreeMap<RepoPath, Option<FileState>>,
+    lens: BlobLens<'_>,
+    deadline: &Deadline,
+) -> Result<TreeId> {
+    apply_impl(c, base, changes, lens, Some(deadline))
+}
+
+fn apply_impl(
+    c: &mut dyn MetaTx,
+    base: Option<TreeId>,
+    changes: &BTreeMap<RepoPath, Option<FileState>>,
+    lens: BlobLens<'_>,
+    deadline: Option<&Deadline>,
+) -> Result<TreeId> {
     // The stored trees on every changed path, one get_trees per level of
     // depth: a commit that touches many directories loads them in one
     // statement per level instead of one per directory.
     let mut loaded = prefetch(c, base, changes)?;
     let mut root = base.map_or_else(|| Dir::Loaded(BTreeMap::new()), Dir::Stored);
     for (path, _) in changes.iter().filter(|(_, change)| change.is_none()) {
+        if let Some(deadline) = deadline {
+            // A cancelled call's job stops between paths, and frees its
+            // permit, instead of building the tree on. The transaction
+            // rolls the partial build back: no tree names it.
+            deadline.check()?;
+        }
         root.delete(c, &mut loaded, path, &parts(path))?;
     }
     for (path, state) in changes {
+        if let Some(deadline) = deadline {
+            // The same check on the put path: a large tree's store is
+            // all puts, and its job stops between puts like a delete's.
+            deadline.check()?;
+        }
         if let Some(state) = state {
             // A gitlink names no blob, so it carries no length; its entry
             // ends at the commit bytes.
@@ -111,6 +148,12 @@ pub fn apply(
             };
             root.put(c, &mut loaded, path, &parts(path), 0, entry)?;
         }
+        // The test seam of the cancelled tree build: the caller parks
+        // here, cancels its call, and lets the job reach the next
+        // path's check. The park's id is the path, so a test's armed
+        // seam sees only its own build's paths.
+        #[cfg(test)]
+        crate::write::PARK_APPLY.park(String::from_utf8_lossy(path.as_bytes()));
     }
     let mut rows = Vec::new();
     let tree = root.store(&mut rows)?;
@@ -240,6 +283,23 @@ pub fn fill_root_tree(store: &Backend, repo: RepoId, cs: ChangesetId) -> Result<
     derived::fill::<RootTree>(store, repo, cs)
 }
 
+/// [`fill_root_tree`], but it stops between steps once `deadline` has
+/// passed, so a cancelled call's job frees its permit and its land's
+/// ref lock instead of filling to the end. The steps before the stop
+/// stay, and the land's retry resumes from them.
+///
+/// # Errors
+///
+/// As [`derive_root_tree`], and [`Error::DeadlineExceeded`].
+pub fn fill_root_tree_by(
+    store: &Backend,
+    repo: RepoId,
+    cs: ChangesetId,
+    deadline: &Deadline,
+) -> Result<TreeId> {
+    derived::fill_by::<RootTree>(store, repo, cs, deadline)
+}
+
 /// Derives the root tree of `cs` inside the caller's transaction, as the
 /// `derived` mechanism computes a kind's value.
 ///
@@ -253,7 +313,23 @@ pub fn derive_root_tree(
     cs: ChangesetId,
     lens: BlobLens<'_>,
 ) -> Result<TreeId> {
-    derived::derive::<RootTree>(c, repo, cs, lens)
+    derived::derive::<RootTree>(c, repo, cs, lens, None)
+}
+
+/// The walk checks the deadline per changeset, so a cancelled call's
+/// job stops between changesets and frees its permit.
+///
+/// # Errors
+///
+/// As [`derive_root_tree`].
+pub fn derive_root_tree_within(
+    c: &mut dyn MetaTx,
+    repo: RepoId,
+    cs: ChangesetId,
+    lens: BlobLens<'_>,
+    deadline: &Deadline,
+) -> Result<TreeId> {
+    derived::derive::<RootTree>(c, repo, cs, lens, Some(deadline))
 }
 
 /// Stores a changeset in `repo` with its root tree: the first parent's tree
@@ -288,6 +364,32 @@ pub fn store_changeset(
     cs: &Changeset,
     lens: BlobLens<'_>,
 ) -> Result<(ChangesetId, TreeId)> {
+    store_changeset_impl(c, repo, cs, lens, None)
+}
+
+/// The build checks the deadline per path, so a cancelled call's job
+/// stops between paths and frees its permit instead of building on.
+///
+/// # Errors
+///
+/// As [`store_changeset`].
+pub fn store_changeset_within(
+    c: &mut dyn MetaTx,
+    repo: RepoId,
+    cs: &Changeset,
+    lens: BlobLens<'_>,
+    deadline: &Deadline,
+) -> Result<(ChangesetId, TreeId)> {
+    store_changeset_impl(c, repo, cs, lens, Some(deadline))
+}
+
+fn store_changeset_impl(
+    c: &mut dyn MetaTx,
+    repo: RepoId,
+    cs: &Changeset,
+    lens: BlobLens<'_>,
+    deadline: Option<&Deadline>,
+) -> Result<(ChangesetId, TreeId)> {
     // The build reads each kind's value for the parents, then deletes a
     // few old rows per kind: the reads ride one preloaded statement and
     // the deletes ride the commit's flush, so the transaction spends
@@ -303,6 +405,7 @@ pub fn store_changeset(
         let mut css = cs.parents().to_vec();
         css.push(cs.id());
         c.preload_derived(
+            repo,
             &[
                 (RootTree::NAME, RootTree::VERSION),
                 (CommitGraph::NAME, CommitGraph::VERSION),
@@ -314,9 +417,15 @@ pub fn store_changeset(
     let base = cs
         .parents()
         .first()
-        .map(|&parent| derive_root_tree(c, repo, parent, lens))
+        .map(|&parent| match deadline {
+            Some(deadline) => derive_root_tree_within(c, repo, parent, lens, deadline),
+            None => derive_root_tree(c, repo, parent, lens),
+        })
         .transpose()?;
-    let tree = apply(c, base, cs.changes(), lens)?;
+    let tree = match deadline {
+        Some(deadline) => apply_within(c, base, cs.changes(), lens, deadline),
+        None => apply(c, base, cs.changes(), lens),
+    }?;
     let id = c.insert_changeset(repo, cs)?;
     // One round trip for every blob the changeset puts, however many
     // paths name the same one.

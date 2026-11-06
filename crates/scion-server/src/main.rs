@@ -155,6 +155,11 @@ struct ServeArgs {
 enum Command {
     /// Serve the gRPC API.
     Serve(ServeArgs),
+    /// Check everything a first boot needs, read-only: one line per
+    /// check, and an exit code for the shell (0 all pass, 1 one warns,
+    /// 2 one fails). The flags are `serve`'s; nothing is written, no
+    /// lock is taken, and the database is read through plain selects.
+    Preflight(ServeArgs),
     /// Move the metadata schema to this build's version: the steps an
     /// open would run, one transaction each, under the schema's lock.
     /// `serve` without `--migrate` refuses a database that is behind.
@@ -879,6 +884,35 @@ async fn main() -> anyhow::Result<()> {
     // before the store opens, so a restore's empty target stays empty of
     // one, and an archive check opens nothing at all.
     match cli.command {
+        // `preflight` reports a missing directory as a failed check, so
+        // it runs before the refusal and writes nothing anywhere.
+        Command::Preflight(ref args) => {
+            // The flags' rules are serve's own: the token source, the
+            // listen rules, the TLS and ticket files. A failure here is
+            // one failed check, not the whole answer: the line prints
+            // and the checks still run - one bad flag must not hide
+            // every other check, which is what this command exists to
+            // stop. The chain prints whole ({error:#}), as serve's own
+            // exit does, so the cause shows.
+            let flags_error = serve_flags(args).err();
+            if let Some(error) = &flags_error {
+                println!("fail serve flags: {error:#}");
+            }
+            let options = preflight_options(&cli, args);
+            // The checks' database reads are synchronous, and main runs
+            // in tokio's runtime: the run takes a thread of its own,
+            // where a blocking connect is just a blocking connect.
+            let report = std::thread::spawn(move || scion_server::preflight::run(&options))
+                .join()
+                .expect("the preflight thread does not panic");
+            for line in report.lines {
+                println!("{line}");
+            }
+            // The higher of the checks' code and the flags' failure: a
+            // warn with a bad flag still exits 2, and a fail without
+            // one does too.
+            std::process::exit(report.code.max(if flags_error.is_some() { 2 } else { 0 }));
+        }
         Command::Verify { archive } => verify_command(&archive),
         // `hash-token` reads none of the store: it runs before the URL
         // is resolved, so an operator who hashes a token needs no
@@ -1030,7 +1064,8 @@ async fn main() -> anyhow::Result<()> {
         // `verify`, `restore`, `hash-token` and `ticket-key` ended the
         // function above: verify exits, and the others return. `migrate`
         // ran its command above and returned: it opens no store here.
-        Command::Verify { .. }
+        Command::Preflight(_)
+        | Command::Verify { .. }
         | Command::Restore { .. }
         | Command::HashToken { .. }
         | Command::TicketKey { .. }
@@ -1109,6 +1144,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::HashToken { .. }
         | Command::TicketKey { .. }
+        | Command::Preflight(_)
         | Command::Verify { .. }
         | Command::Restore { .. }
         | Command::Migrate { .. } => {
@@ -1492,6 +1528,20 @@ fn secret_file(file: &Path) -> anyhow::Result<String> {
     let token = text.trim();
     anyhow::ensure!(!token.is_empty(), "{} holds no secret", file.display());
     Ok(token.to_owned())
+}
+
+/// The options of a `preflight` run, as the flags hand them over. The
+/// data directory, the URL file and the CA ride the command line's
+/// global flags; the rest are serve's own.
+fn preflight_options(cli: &Cli, args: &ServeArgs) -> scion_server::preflight::PreflightOptions {
+    scion_server::preflight::PreflightOptions {
+        data: cli.data.clone(),
+        postgres_url_file: cli.postgres_url_file.clone(),
+        postgres_ca: cli.postgres_ca.clone(),
+        listen: args.listen,
+        metrics_listen: args.metrics_listen,
+        migrate: args.migrate,
+    }
 }
 
 /// The Postgres URL of the CLI, required: a checked file named by

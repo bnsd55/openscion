@@ -1,0 +1,12 @@
+# A repo that does not exist, or that the caller may not see, is
+# NOT_FOUND - never permission denied (section 2 of protocol-v1.md).
+since: v0.7
+method: Objects/ResolveRef
+fixture: landed
+
+request.repo: no-such-repo
+request.name: main
+
+tiers: refuse
+
+status: not_found

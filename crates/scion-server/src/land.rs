@@ -943,6 +943,7 @@ fn settle(
     index: &mut Option<PathIndex>,
 ) -> Result<Finished> {
     let target = req.target_ref.as_str();
+    let deadline = &req.deadline;
     let (rebased, head, head_tree_stored) = match plan {
         Plan::Derive(head) => return Ok(Finished::Derive(head)),
         Plan::Reject { reason, detail } => {
@@ -980,7 +981,7 @@ fn settle(
     // the derive would run unbounded and hold the write connection.
     if !head_tree_stored {
         let _guard = profile::Guard::enter(Phase::FillRoot);
-        tree::fill_root_tree(store, repo, head.target)?;
+        tree::fill_root_tree_by(store, repo, head.target, deadline)?;
     }
     // The blob lengths the tree build needs, read before the write
     // transaction, so the write connection does no file I/O.
@@ -993,7 +994,13 @@ fn settle(
         store.write_slot_holder(|c| {
             let (id, _) = {
                 let _guard = profile::Guard::enter(Phase::Build);
-                tree::store_changeset(c, repo, &rebased, &mut tree::lens_from(&lens))?
+                tree::store_changeset_within(
+                    c,
+                    repo,
+                    &rebased,
+                    &mut tree::lens_from(&lens),
+                    deadline,
+                )?
             };
             let changed = {
                 let _guard = profile::Guard::enter(Phase::Cas);
@@ -2168,6 +2175,52 @@ mod tests {
         );
     }
 
+    /// A land whose head tree is missing stops at the fill's deadline:
+    /// the answer is the deadline's error, the land stays pending, and a
+    /// retry with a fresh deadline lands. The fill is the one long step
+    /// the land runs outside every transaction, so it is the one a
+    /// cancelled call must not run to the end (#871's class).
+    #[test]
+    fn a_missing_head_tree_stops_at_the_fills_deadline_and_retries() {
+        let _slot = damage::slot();
+        let f = fixture();
+        // The fixture stores changesets without root trees, as after a
+        // version bump of the kind.
+        let head = (0..4).fold(f.root, |head, i| {
+            f.commit(head, &[put("c", &i.to_string())])
+        });
+        f.move_main(head);
+        let cs = f.commit(head, &[put("d", "new")]);
+        // The deadline expires between the plan and the fill: the
+        // before-settle hook expires it once the plan has passed.
+        let deadline = Deadline::new(Instant::now() + std::time::Duration::from_secs(600));
+        let hook_deadline = deadline.clone();
+        f.lands
+            .set_before_settle(Box::new(move || hook_deadline.test_expire()));
+        let mut request = req(cs, "fills");
+        request.deadline = deadline;
+        // The fill must not have run: the expired deadline stops it
+        // before its first step, so only the record commits. This is
+        // the early release the permit and the ref's slot lock ride.
+        let commits = f.store.commits();
+        let outcome = f.lands.land(&f.store, &caller(), &request).unwrap_err();
+        assert!(
+            matches!(outcome, Error::DeadlineExceeded(_)),
+            "the fill's deadline stops the land: {outcome:?}"
+        );
+        assert_eq!(
+            f.store.commits() - commits,
+            1,
+            "the fill ran past its deadline and did its work anyway"
+        );
+        // The land stayed pending: the same key retries.
+        let retry = f
+            .lands
+            .land(&f.store, &caller(), &req(cs, "fills"))
+            .unwrap();
+        assert_eq!(retry.state, LandState::Landed);
+    }
+
     #[test]
     fn rebases_disjoint_changes_from_the_same_base() {
         let _slot = damage::slot();
@@ -3175,8 +3228,8 @@ mod tests {
             store
                 .write(|c| {
                     for &tip in &ids {
-                        derived::derive::<CommitGraph>(c, repo, tip, &mut crate::tree::lens_none())?;
-                        derived::derive::<PathHistory>(c, repo, tip, &mut crate::tree::lens_none())?;
+                        derived::derive::<CommitGraph>(c, repo, tip, &mut crate::tree::lens_none(), None)?;
+                        derived::derive::<PathHistory>(c, repo, tip, &mut crate::tree::lens_none(), None)?;
                     }
                     Ok(())
                 })

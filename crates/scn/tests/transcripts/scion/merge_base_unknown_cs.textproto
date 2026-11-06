@@ -1,0 +1,10 @@
+# A changeset the repo does not have is NOT_FOUND.
+since: v0.7
+method: Scion/MergeBase
+fixture: landed
+
+request.repo: r
+request.a_changeset_id: id=$missing
+request.b_changeset_id: id=$cs
+
+status: not_found

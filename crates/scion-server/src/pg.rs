@@ -48,7 +48,9 @@ use crate::land::{
     EXPIRE_PER_LAND, LAND_RETENTION_SECS, LandOutcome, LandRejectReason, LandRequest, LandState,
     decode_paths, encode_paths,
 };
-use crate::meta::{FsckDerivedRow, Meta, MetaTx, RefState, RepoChangeset, RepoId, StaleLand};
+use crate::meta::{
+    FsckDerivedRow, Meta, MetaTx, RefState, RepoChangeset, RepoId, StaleLand, StartRead,
+};
 use crate::store::Blobs;
 use crate::tree::RootTree;
 
@@ -97,8 +99,10 @@ thread_local! {
     pub(crate) static CHANGESET_READS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
 }
-/// The advisory lock of one migration run of a database.
-const SCHEMA_LOCK: i64 = 0x5343_494F_4E53_4348;
+/// The advisory lock of one migration run of a database. An older
+/// build takes it alone, exclusive; this build takes it shared beside
+/// its own schema's key.
+pub(crate) const SCHEMA_LOCK: i64 = 0x5343_494F_4E53_4348;
 
 /// Schema migrations in order. Migration `n`, from 1, moves the database
 /// from version `n - 1` to version `n`. A released migration never changes.
@@ -323,7 +327,10 @@ impl Readers {
         let idle = (0..size)
             .map(|_| {
                 let client = connect_with(url, ca, options, schema)?;
-                let on: String = client.query("SHOW synchronous_commit", &[])?[0].get(0);
+                let on: String = client.query("SHOW synchronous_commit", &[]).map_err(|e| {
+                    named_step("a reader's durability check", "SHOW synchronous_commit", e)
+                })?[0]
+                    .get(0);
                 if on != "on" {
                     return Err(Error::FailedPrecondition(format!(
                         "the database runs synchronous_commit={on}; this \
@@ -752,6 +759,30 @@ fn open_transaction(c: &PgClient, open: &str) -> Result<()> {
 }
 
 impl PgClient {
+    /// Runs one closure with the client on the worker thread. The sync
+    /// client must never be touched from a tokio thread; the test
+    /// schema's preparation calls it. No production path needs the
+    /// client whole, so the method is test-only.
+    #[cfg(any(test, feature = "test-hooks"))]
+    fn raw(&self, f: RawFn) -> Result<()> {
+        let (reply, rx) = std::sync::mpsc::channel();
+        self.jobs
+            .send(Job {
+                sql: String::new(),
+                params: Vec::new(),
+                kind: Kind::Raw,
+                reply,
+                raw: Some(f),
+            })
+            .map_err(|_| Error::Corrupt(WORKER_STOPPED.into()))?;
+        match rx.recv() {
+            Ok(Ok(Reply::Count(_))) => Ok(()),
+            Ok(Ok(_)) => unreachable!("a raw job replies with a count"),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(Error::Corrupt(WORKER_STOPPED.into())),
+        }
+    }
+
     /// Puts `client` on its own worker thread.
     ///
     /// # Errors
@@ -923,6 +954,64 @@ const LOCK_TIMEOUT_FOR_WRITERS: &str = "5s";
 /// queue drains as fast as the writers commit.
 const LOCK_TIMEOUT_FOR_KEY: &str = "60s";
 
+/// The one decision an open and a preflight both need, made here so
+/// the two cannot drift.
+pub(crate) enum Pairing {
+    /// The marker and the row name one store.
+    Agree,
+    /// The database names a store the directory has no marker of, and
+    /// the schema holds no repos: a first open cut before its marker.
+    /// The open adopts the database's store and writes the marker.
+    AdoptCut,
+    /// Neither side names a store: the first open mints one.
+    Fresh,
+    /// A refusal, in the open's own words.
+    Refuse(Error),
+}
+
+/// The marker's pairing with the database's store row. `has_repos`:
+/// the schema holds at least one repo row, so a store ever served it -
+/// the one meaning the flag carries at every call.
+pub(crate) fn pairing_decision(
+    marker: Option<[u8; 16]>,
+    held: Option<[u8; 16]>,
+    has_repos: bool,
+) -> Pairing {
+    match (marker, held) {
+        (Some(marker_uuid), Some(held_uuid)) if marker_uuid == held_uuid => Pairing::Agree,
+        (Some(marker_uuid), Some(held_uuid)) => {
+            Pairing::Refuse(Error::FailedPrecondition(format!(
+                "this data directory belongs to the store whose \
+                 UUID is {}, but the database names the store {}: \
+                 one was restored over the other; give the \
+                 directory of the database's own store, or a \
+                 directory the database has never served",
+                hex16(&marker_uuid),
+                hex16(&held_uuid)
+            )))
+        }
+        (None, Some(held_uuid)) if has_repos => {
+            Pairing::Refuse(Error::FailedPrecondition(format!(
+                "this database names the store {}, but the data \
+                 directory carries no marker of it: give the \
+                 directory the database was served with, or a \
+                 directory it has never served",
+                hex16(&held_uuid)
+            )))
+        }
+        (None, Some(_)) => Pairing::AdoptCut,
+        (Some(marker_uuid), None) if !has_repos => {
+            Pairing::Refuse(Error::FailedPrecondition(format!(
+                "this data directory belongs to the store whose UUID \
+                 is {}, but this database holds no store: check \
+                 SCION_POSTGRES_URL and its search_path",
+                hex16(&marker_uuid)
+            )))
+        }
+        (Some(_) | None, None) => Pairing::Fresh,
+    }
+}
+
 /// The identity of this database, minted at the first open. The marker
 /// file of the data directory carries the same UUID, and an open that
 /// finds the two different refuses: a database restored on a directory
@@ -930,7 +1019,15 @@ const LOCK_TIMEOUT_FOR_KEY: &str = "60s";
 /// the mint run before anything else is written, so a refusal leaves the
 /// schema untouched.
 fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
-    let first = writer.query("SELECT uuid FROM store_uuid WHERE one = 1", &[])?;
+    let first = writer
+        .query("SELECT uuid FROM store_uuid WHERE one = 1", &[])
+        .map_err(|e| {
+            named_step(
+                "the store identity read",
+                "SELECT uuid FROM store_uuid WHERE one = 1",
+                e,
+            )
+        })?;
     if let Some(row) = first.first() {
         // The database already names its store, and the comparison runs
         // before anything is written: no marker, or the marker of
@@ -938,8 +1035,25 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
         // directory of another store would serve metadata whose blobs
         // are not on this disk.
         let uuid = uuid_of(row.get::<_, Vec<u8>>("uuid"))?;
-        match marker.uuid {
-            None => {
+        // The repos probe only decides the no-marker case: a schema
+        // that holds repos was served, one that holds none was not. No
+        // arm reads the flag while the marker is there, so the probe
+        // runs then not at all - the reopen costs exactly main's
+        // statements.
+        let has_repos = marker.uuid.is_none()
+            && !writer
+                .query("SELECT 1 FROM repos LIMIT 1", &[])
+                .map_err(|e| {
+                    named_step(
+                        "the store identity's repos probe",
+                        "SELECT 1 FROM repos LIMIT 1",
+                        e,
+                    )
+                })?
+                .is_empty();
+        match pairing_decision(marker.uuid, Some(uuid), has_repos) {
+            Pairing::Agree => {}
+            Pairing::AdoptCut => {
                 // A first open cut between its store's UUID row and
                 // its marker: the row commits early in the open, the
                 // marker is written at its end, and a kill in that
@@ -947,20 +1061,7 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
                 // schema with no repos row served nothing, so no
                 // blob of another disk can be named: the directory
                 // takes the database's store as its own, and this
-                // open writes the marker the cut fell before. A
-                // schema that holds repos was served by a store
-                // whose marker went missing - a fresh directory
-                // pointed at a served store - and refuses.
-                let served = writer.query("SELECT 1 FROM repos LIMIT 1", &[])?;
-                if !served.is_empty() {
-                    return Err(Error::FailedPrecondition(format!(
-                        "this database names the store {}, but the data \
-                         directory carries no marker of it: give the \
-                         directory the database was served with, or a \
-                         directory it has never served",
-                        hex16(&uuid)
-                    )));
-                }
+                // open writes the marker the cut fell before.
                 tracing::warn!(
                     "the data directory carries no marker of store {}; \
                      the schema holds no repos, so this open takes the \
@@ -968,18 +1069,8 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
                     hex16(&uuid)
                 );
             }
-            Some(held) if held != uuid => {
-                return Err(Error::FailedPrecondition(format!(
-                    "this data directory belongs to the store whose \
-                     UUID is {}, but the database names the store {}: \
-                     one was restored over the other; give the \
-                     directory of the database's own store, or a \
-                     directory the database has never served",
-                    hex16(&held),
-                    hex16(&uuid)
-                )));
-            }
-            Some(_) => {}
+            Pairing::Fresh => unreachable!("the database names its store"),
+            Pairing::Refuse(error) => return Err(error),
         }
         Ok(uuid)
     } else {
@@ -994,25 +1085,40 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
         // served - and every caller would read "repo not found"
         // with no error at the start. An empty schema refuses while
         // the marker names a store, and mints when it names none.
-        let served = writer.query("SELECT 1 FROM repos LIMIT 1", &[])?;
-        if let (Some(held), []) = (marker.uuid, served.as_slice()) {
-            return Err(Error::FailedPrecondition(format!(
-                "this data directory belongs to the store whose UUID \
-                 is {}, but this database holds no store: check \
-                 SCION_POSTGRES_URL and its search_path",
-                hex16(&held)
-            )));
-        }
-        let fresh = marker.uuid.unwrap_or_else(uuid_new);
-        writer.query(
-            "INSERT INTO store_uuid (one, uuid) VALUES (1, $1) \
+        let repos = writer
+            .query("SELECT 1 FROM repos LIMIT 1", &[])
+            .map_err(|e| named_step("the repos probe", "SELECT 1 FROM repos LIMIT 1", e))?;
+        let has_repos = !repos.is_empty();
+        let fresh = match pairing_decision(marker.uuid, None, has_repos) {
+            Pairing::Agree | Pairing::AdoptCut => unreachable!("the database holds no store"),
+            Pairing::Fresh => marker.uuid.unwrap_or_else(uuid_new),
+            Pairing::Refuse(error) => return Err(error),
+        };
+        writer
+            .query(
+                "INSERT INTO store_uuid (one, uuid) VALUES (1, $1) \
              ON CONFLICT (one) DO NOTHING",
-            &[P::bytes(&fresh)],
-        )?;
+                &[P::bytes(&fresh)],
+            )
+            .map_err(|e| {
+                named_step(
+                    "the store identity write",
+                    "INSERT INTO store_uuid (one, uuid) VALUES (1, $1) ON CONFLICT (one) DO NOTHING",
+                    e,
+                )
+            })?;
         // A concurrent first open may have minted its own: read the
         // row again, and whatever it holds is the identity.
         Ok(uuid_of(
-            writer.query("SELECT uuid FROM store_uuid WHERE one = 1", &[])?[0]
+            writer
+                .query("SELECT uuid FROM store_uuid WHERE one = 1", &[])
+                .map_err(|e| {
+                    named_step(
+                        "the store identity read",
+                        "SELECT uuid FROM store_uuid WHERE one = 1",
+                        e,
+                    )
+                })?[0]
                 .get::<_, Vec<u8>>("uuid"),
         )?)
     }
@@ -1116,7 +1222,10 @@ impl Pg {
         let migrated = migrate(&mut writer, allow_migrate)?;
         // The durability of a commit is a promise of this backend: check
         // that the server kept its side of it.
-        let on: String = writer.query("SHOW synchronous_commit", &[])?[0].get(0);
+        let on: String = writer
+            .query("SHOW synchronous_commit", &[])
+            .map_err(|e| named_step("the durability check", "SHOW synchronous_commit", e))?[0]
+            .get(0);
         if on != "on" {
             return Err(Error::FailedPrecondition(format!(
                 "the database runs synchronous_commit={on}; this backend \
@@ -1924,6 +2033,35 @@ fn delete_prefixes(calls: &[(String, i64)], belows: &[i64]) -> (Vec<String>, Vec
 }
 
 impl<'a> PgTx<'a> {
+    /// The derived rows the transaction already holds: the batching's
+    /// pending buffer first, then the preload's. One read filled the
+    /// preload at the start of a write path, and every put of this
+    /// transaction keeps it true. A row it deleted is of an older
+    /// version, which no read of this kind asks for, so no stale answer
+    /// can hide there.
+    ///
+    /// A held answer skips the repo-membership join on purpose: the only
+    /// rows a transaction holds are the parents and the changeset it
+    /// stores into `repo`, and the changesets insert refuses a parent
+    /// `repo` cannot see before any row is written.
+    fn held_derived(&mut self, kind: &str, version: u32, cs: ChangesetId) -> Option<Vec<u8>> {
+        let version = i64::from(version);
+        let key = id_bytes(cs.as_bytes());
+        if self.cs_batching
+            && let Some(pending) = self.derived_pending.as_deref()
+        {
+            for (k, v, c, value) in pending.iter().rev() {
+                if *k == kind && *v == version && id_bytes(c.as_bytes()) == key {
+                    return Some(value.clone());
+                }
+            }
+        }
+        self.derived_preload
+            .as_deref()
+            .and_then(|preload| preload.get(&(kind.to_owned(), version, key.clone())))
+            .cloned()
+    }
+
     /// The pending-lands quota counts new pending rows. A retry of an
     /// existing key resumes its land and adds no row, so a client can
     /// always finish what it started. The count and the insert need no
@@ -2203,12 +2341,18 @@ impl<'a> PgTx<'a> {
         &mut self,
         caller: &Caller,
         req: &LandRequest,
-    ) -> Result<(RepoId, Option<LandOutcome>)> {
+    ) -> Result<(RepoId, Option<i64>, Option<LandOutcome>)> {
+        // The input's generation rides the lookup as a column: the
+        // record's existence guard for the changeset, one round trip
+        // instead of two (NULL when no changeset has this id in this
+        // repo).
         let row = self
             .c
             .query_opt(
                 "SELECT r.repo_id, l.land_id, l.input_cs, l.target_ref, l.state,
-                        l.detail, l.result_cs, l.conflict_paths, l.reject_reason
+                        l.detail, l.result_cs, l.conflict_paths, l.reject_reason,
+                        (SELECT gen FROM changesets JOIN repo_changesets ON cs = id
+                         WHERE repo_id = r.repo_id AND id = $4) AS input_gen
                  FROM repos r
                  LEFT JOIN lands l
                    ON l.repo_id = r.repo_id AND l.caller = $2 AND l.request_key = $3
@@ -2217,6 +2361,7 @@ impl<'a> PgTx<'a> {
                     P::text(&req.repo),
                     P::text(&caller.0),
                     P::text(&req.request_key),
+                    P::bytes(&id_bytes(req.changeset.as_bytes())),
                 ],
             )?
             .map(|row| {
@@ -2230,14 +2375,25 @@ impl<'a> PgTx<'a> {
                     row.get::<_, Option<Option<Vec<u8>>>>(6),
                     row.get::<_, Option<Vec<u8>>>(7),
                     row.get::<_, Option<String>>(8),
+                    row.get::<_, Option<i64>>(9),
                 )
             })
             .ok_or_else(|| Error::NotFound(format!("repo {:?}", req.repo)))?;
-        let (repo_id, land_id, input, target, state, detail, result_cs, conflict_paths, reason) =
-            row;
+        let (
+            repo_id,
+            land_id,
+            input,
+            target,
+            state,
+            detail,
+            result_cs,
+            conflict_paths,
+            reason,
+            input_gen,
+        ) = row;
         let repo = RepoId(repo_id);
         let Some(land_id) = land_id else {
-            return Ok((repo, None));
+            return Ok((repo, input_gen, None));
         };
         // A LEFT JOIN's land columns are all set or all null together: the
         // row exists only when the join found the land.
@@ -2276,20 +2432,18 @@ impl<'a> PgTx<'a> {
             .map(|bytes| ChangesetId::try_from(bytes.as_slice()))
             .transpose()
             .map_err(|e| Error::Corrupt(format!("land {land_id} result: {e}")))?;
-        Ok((
-            repo,
-            Some(LandOutcome {
-                moved: false,
-                land_id,
-                state: LandState::parse(&state)?,
-                result,
-                previous: None,
-                detail,
-                conflict_paths: decode_paths(&conflict_paths)
-                    .ok_or_else(|| Error::Corrupt(format!("land {land_id} conflict paths")))?,
-                reject_reason: LandRejectReason::parse(&reason)?,
-            }),
-        ))
+        let recorded = LandOutcome {
+            moved: false,
+            land_id,
+            state: LandState::parse(&state)?,
+            result,
+            previous: None,
+            detail,
+            conflict_paths: decode_paths(&conflict_paths)
+                .ok_or_else(|| Error::Corrupt(format!("land {land_id} conflict paths")))?,
+            reject_reason: LandRejectReason::parse(&reason)?,
+        };
+        Ok((repo, input_gen, Some(recorded)))
     }
 
     /// Reads the land a request key recorded back, for the ON CONFLICT
@@ -2509,6 +2663,10 @@ struct Setup {
     /// import).
     exclusive: bool,
     outcome: SetupOutcome,
+    /// The statement whose execution failed, with the database's error:
+    /// the error names what waited, and the source keeps the SQLSTATE
+    /// (#905).
+    failed: Option<(String, postgres::Error)>,
 }
 
 impl Setup {
@@ -2519,6 +2677,7 @@ impl Setup {
             schema: schema.map(str::to_owned),
             exclusive,
             outcome: SetupOutcome::Unreachable,
+            failed: None,
         };
         setup.outcome = setup.apply(client);
         setup
@@ -2541,13 +2700,12 @@ impl Setup {
             // cleanup's real check: a live connection holds it, so its
             // schema never yields the cleanup's exclusive try, whatever
             // a snapshot saw.
-            if client
-                .batch_execute(&format!(
-                    "SET search_path TO {schema}; SET application_name TO '{schema}';
-                     SELECT pg_advisory_lock_shared(hashtext('{schema}'))"
-                ))
-                .is_err()
-            {
+            let sql = format!(
+                "SET search_path TO {schema}; SET application_name TO '{schema}';
+                 SELECT pg_advisory_lock_shared(hashtext('{schema}'))"
+            );
+            if let Err(e) = client.batch_execute(&sql) {
+                self.failed = Some((sql, e));
                 return SetupOutcome::Unreachable;
             }
         }
@@ -2556,8 +2714,12 @@ impl Setup {
             // spelled: a plain URL and one that rides
             // `--search_path=public` land in the same schema and must
             // fence each other, and schemas ride separately.
-            let Ok(row) = client.query_one("SELECT current_schema()::text", &[]) else {
-                return SetupOutcome::Unreachable;
+            let row = match client.query_one("SELECT current_schema()::text", &[]) {
+                Ok(row) => row,
+                Err(e) => {
+                    self.failed = Some(("SELECT current_schema()::text".to_owned(), e));
+                    return SetupOutcome::Unreachable;
+                }
             };
             // A search_path whose members all miss answers NULL: the
             // connection would create nothing, and no lock names it.
@@ -2584,7 +2746,7 @@ fn uuid_new() -> [u8; 16] {
 
 /// The 16 bytes of a UUID row, checked: a row of another length is a
 /// database that is not this backend's.
-fn uuid_of(raw: Vec<u8>) -> Result<[u8; 16]> {
+pub(crate) fn uuid_of(raw: Vec<u8>) -> Result<[u8; 16]> {
     let len = raw.len();
     raw.try_into().map_err(|_| {
         Error::Corrupt(format!(
@@ -2734,16 +2896,24 @@ fn run_statement(client: &mut Client, job: &Job) -> Result<Reply> {
 
 /// The reply of a failed setup: a takeover names the loss; an
 /// unreachable database answers what a client retries against.
-fn setup_error(setup: &Setup, ever_held: bool) -> Error {
+fn setup_error(setup: &mut Setup, ever_held: bool) -> Error {
     if matches!(setup.outcome, SetupOutcome::NoSchema) {
         return Error::FailedPrecondition(
             "the URL's search_path names no existing schema; create it first".into(),
         );
     }
     if matches!(setup.outcome, SetupOutcome::Unreachable) {
-        return Error::Storage(Storage::busy(std::io::Error::other(
-            "the database was unreachable at setup",
-        )));
+        return match setup.failed.take() {
+            Some((sql, source)) => {
+                Error::Storage(Storage::busy(std::io::Error::other(SetupFailure {
+                    sql,
+                    source,
+                })))
+            }
+            None => Error::Storage(Storage::busy(std::io::Error::other(
+                "the database was unreachable at setup, and the failing statement is unnamed",
+            ))),
+        };
     }
     Error::FailedPrecondition(lost_message(ever_held).into())
 }
@@ -2838,6 +3008,27 @@ struct ClientConfig {
     /// The process fence of the exclusive client: tripped when a setup
     /// that once held the lock no longer does.
     fence: Option<Arc<Fence>>,
+}
+
+/// The advisory-lock key of one schema's migrations: migrations touch
+/// only their own schema, so two schemas never take turns (#905). The
+/// database's bare key stays the fallback for a connection whose
+/// search path names no schema.
+///
+/// The derivation cannot overflow: XOR has no carry, so a debug build
+/// cannot panic on it. The fixed prefix byte `0x2D` names this key
+/// space; the schema's hash fills the rest. Against the one-server
+/// lock the guarantee is two-fold: a session that already holds
+/// `schema_lock_key` for its own schema re-enters any lock on the same
+/// key, so a running server never blocks its own store's migrations;
+/// and for the same schema the two derivations mix the hash
+/// differently, which the test below pins over a thousand names.
+pub(crate) fn migration_lock_key(schema: &str) -> i64 {
+    let hash = blake3::hash(schema.as_bytes());
+    let mut key = [0u8; 8];
+    key[0] = 0x2D;
+    key[1..].copy_from_slice(&hash.as_bytes()[..7]);
+    SCHEMA_LOCK ^ i64::from_be_bytes(key)
 }
 
 /// The advisory-lock key of one test schema, so parallel tests of
@@ -3063,7 +3254,9 @@ fn connect_exclusive(
     // server starts against a taken database sees it now, and not in the
     // errors of the first call a client makes.
     let client = spawn_client(url, ca, options, schema, true, Some(fence))?;
-    client.query_opt("SELECT 1", &[])?;
+    client
+        .query_opt("SELECT 1", &[])
+        .map_err(|e| named_step("the one-server lock's probe", "SELECT 1", e))?;
     Ok(client)
 }
 
@@ -3340,13 +3533,108 @@ pub(crate) fn map_pg_error(e: postgres::Error) -> Error {
     pg_error_of(code.as_deref(), e)
 }
 
+/// The setup's failure: the statement rides the message, and the
+/// database's own error - the SQLSTATE with it - stays the source
+/// (#905).
+#[derive(Debug)]
+struct SetupFailure {
+    sql: String,
+    source: postgres::Error,
+}
+
+impl std::fmt::Display for SetupFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the database was unreachable at setup, waiting on:\n{}",
+            self.sql
+        )
+    }
+}
+
+impl std::error::Error for SetupFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// An open step's failure: the step's name and statement ride the
+/// error's display, and the source stays the mapped engine error, whose
+/// own source is the database's error - the whole chain survives
+/// (#905).
+#[derive(Debug)]
+struct NamedStep {
+    step: &'static str,
+    sql: String,
+    source: Error,
+}
+
+impl std::fmt::Display for NamedStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the open step `{}` waited or failed:\n{}",
+            self.step, self.sql
+        )
+    }
+}
+
+impl std::error::Error for NamedStep {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// The step of the open that failed, with its statement, in the class
+/// the mapped error already carries (#905).
+pub(crate) fn named_step(step: &'static str, sql: &str, err: Error) -> Error {
+    use crate::error::StorageClass;
+    let class = match &err {
+        Error::Storage(storage) => Some(storage.class()),
+        _ => None,
+    };
+    let named = NamedStep {
+        step,
+        sql: sql.to_owned(),
+        source: err,
+    };
+    match class {
+        Some(StorageClass::Busy) => Error::Storage(Storage::busy(std::io::Error::other(named))),
+        Some(StorageClass::DiskFull) => {
+            Error::Storage(Storage::disk_full(std::io::Error::other(named)))
+        }
+        Some(StorageClass::Internal) => {
+            Error::Storage(Storage::internal(std::io::Error::other(named)))
+        }
+        // The classes a step's own message carries: the clock's answer
+        // names the step, and the rest stand - a NotFound or a
+        // precondition is the step's own words already.
+        None => match named.source {
+            Error::DeadlineExceeded(why) => Error::DeadlineExceeded(format!(
+                "{why}; the open step `{}` waited or failed:\n{}",
+                named.step, named.sql
+            )),
+            other => other,
+        },
+    }
+}
+
 /// The mapping on one SQLSTATE, split from [`map_pg_error`] so a unit
 /// test can hand it a code: the `postgres` crate's error type cannot be
 /// built with a chosen one.
 fn pg_error_of(code: Option<&str>, e: postgres::Error) -> Error {
+    let closed = e.is_closed();
+    pg_error_of_source(code, closed, Box::new(e))
+}
+
+fn pg_error_of_source(
+    code: Option<&str>,
+    closed: bool,
+    source: Box<dyn std::error::Error + Send + Sync>,
+) -> Error {
     // A connection the database dropped is as retryable as a busy one.
-    if e.is_closed() {
-        return Error::Storage(Storage::busy(e));
+    if closed {
+        return Error::Storage(Storage::busy(source));
     }
     match code {
         // Deadlock, serialization failure, an administrative shutdown, a
@@ -3355,21 +3643,21 @@ fn pg_error_of(code: Option<&str>, e: postgres::Error) -> Error {
             if matches!(code, "40P01" | "40001" | "57P01" | "57P03" | "55P03")
                 || code.starts_with("08") =>
         {
-            tracing::warn!("the database is busy: {e}");
-            Error::Storage(Storage::busy(e))
+            tracing::warn!("the database is busy: {source}");
+            Error::Storage(Storage::busy(source))
         }
         // The lock or the statement waited past its clock: the caller
         // has been at it too long, and the client retries past its own
         // deadline.
         Some("57014") => {
-            tracing::warn!("the database gave the statement up: {e}");
+            tracing::warn!("the database gave the statement up: {source}");
             Error::DeadlineExceeded("the database kept the caller waiting".to_owned())
         }
         // A violation the code handles (a duplicate key, a check, a
         // foreign key) is one answer among many: it logs quietly.
         Some(code) if code.starts_with("23") => {
-            tracing::debug!("the database refused a statement: {e}");
-            Error::Storage(Storage::internal(e))
+            tracing::debug!("the database refused a statement: {source}");
+            Error::Storage(Storage::internal(source))
         }
         // Out of space: the same shortage, wherever the metadata lives.
         // 53100 is the database's one disk-full code - errcode_for_file_access
@@ -3383,23 +3671,23 @@ fn pg_error_of(code: Option<&str>, e: postgres::Error) -> Error {
         // succeed - and 58030 is an io_error - a failing device is the
         // EIO row's internal, not a space shortage.
         Some("53100") => {
-            tracing::error!("the server is out of disk space: {e}");
-            Error::Storage(Storage::disk_full(e))
+            tracing::error!("the server is out of disk space: {source}");
+            Error::Storage(Storage::disk_full(source))
         }
         // A statement the database never saw: the connection could not
         // be made or was cut on the way. No SQLSTATE names it, and a
         // client retries it as it retries a busy one.
         None => {
-            tracing::warn!("the database is unreachable: {e}");
-            Error::Storage(Storage::busy(e))
+            tracing::warn!("the database is unreachable: {source}");
+            Error::Storage(Storage::busy(source))
         }
         // The rest keep the engine's error as the source, and it reaches
         // the log in full: a bug of this backend, such as a bad parameter,
         // must not look busy, or the importer retries it and the log says
         // nothing but "busy".
         _ => {
-            tracing::warn!("the database refused a statement: {e}");
-            Error::Storage(Storage::internal(e))
+            tracing::warn!("the database refused a statement: {source}");
+            Error::Storage(Storage::internal(source))
         }
     }
 }
@@ -3435,10 +3723,27 @@ fn make_tls(ca: &Path) -> Result<MakeRustlsConnect> {
 
 /// What every store opener answers when the database is behind this
 /// build and the opener may not migrate: the fix is named.
-fn pending_migration_message(db: u32, build: u32) -> String {
+pub(crate) fn pending_migration_message(db: u32, build: u32) -> String {
     format!(
         "the database is at schema version {db}, this build ships {build}; \
          run `scion-server migrate` first, or pass --migrate to serve"
+    )
+}
+
+/// One raw connection for preflight: the URL's own TLS and option
+/// rules, the pool's connect discipline, and no setup - no schema
+/// write, and no lock of any kind: the one-server lock and the
+/// schema's shared lock both stay untouched. The session is read-only
+/// at the database itself (`default_transaction_read_only=on`), so a
+/// check cannot write even by accident.
+pub(crate) fn preflight_client(url: &str, ca: Option<&Path>) -> Result<Client> {
+    connect_on(
+        url,
+        ca,
+        &format!(
+            "-cdefault_transaction_read_only=on -cstatement_timeout=600000 \
+             -clock_timeout={LOCK_TIMEOUT_FOR_WRITERS}"
+        ),
     )
 }
 
@@ -3446,15 +3751,38 @@ fn pending_migration_message(db: u32, build: u32) -> String {
 /// version 0 is a database with no schema yet. The check and the open's
 /// pending-migration refusal read it; the migration itself runs under
 /// the schema's lock, and its first step makes the ledger.
-fn schema_version(client: &mut PgClient) -> Result<u32> {
+/// The two statement paths one schema-state read may take: the open's
+/// migration reads through the worker's client, the preflight's check
+/// and `migrate --check`'s read through a plain session of their own.
+/// One trait, so the read is one code path, not a copy.
+pub(crate) trait SchemaRows {
+    /// The statement's rows, in this backend's errors.
+    fn schema_query(&mut self, sql: &str) -> Result<Vec<postgres::Row>>;
+}
+
+impl SchemaRows for Client {
+    fn schema_query(&mut self, sql: &str) -> Result<Vec<postgres::Row>> {
+        Client::query(self, sql, &[]).map_err(map_pg_error)
+    }
+}
+
+impl SchemaRows for PgClient {
+    fn schema_query(&mut self, sql: &str) -> Result<Vec<postgres::Row>> {
+        self.query(sql, &[])
+    }
+}
+
+fn schema_version(client: &mut impl SchemaRows) -> Result<u32> {
     let ledger: Option<String> = client
-        .query_opt("SELECT to_regclass('schema_migrations')::text", &[])?
+        .schema_query("SELECT to_regclass('schema_migrations')::text")?
+        .into_iter()
+        .next()
         .and_then(|row| row.get(0));
     if ledger.is_none() {
         return Ok(0);
     }
     let version: i64 = client
-        .query("SELECT max(version) FROM schema_migrations", &[])?
+        .schema_query("SELECT max(version) FROM schema_migrations")?
         .first()
         .and_then(|row| row.get::<_, Option<i64>>(0))
         .unwrap_or(0);
@@ -3510,7 +3838,19 @@ impl SchemaCheck {
 /// database gives every opener.
 pub fn check_schema(url: &str, ca: Option<&Path>) -> Result<SchemaCheck> {
     let mut client = connect_with(url, ca, &base_options(), None)?;
-    let db_version = schema_version(&mut client)?;
+    check_schema_on(&mut client)
+}
+
+/// [`check_schema`]'s decision, on a caller's connection: the preflight
+/// runs it on its read-only session, so the check opens no second
+/// session outside that discipline.
+///
+/// # Errors
+///
+/// What the database returns, and the newer-schema refusal a newer
+/// database gives every opener.
+pub(crate) fn check_schema_on(client: &mut impl SchemaRows) -> Result<SchemaCheck> {
+    let db_version = schema_version(client)?;
     if db_version > PG_SCHEMA_VERSION {
         return Err(Error::FailedPrecondition(format!(
             "database schema version {db_version} is newer than this build \
@@ -3591,7 +3931,51 @@ fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
     // turns while the migrations are quick, and the version the loser
     // reads is the one the winner left. A lock past its 5 s clock leaves
     // the taker busy: an open that hits one waits and tries again.
-    client.query_opt("SELECT pg_advisory_lock($1)", &[P::i64(SCHEMA_LOCK)])?;
+    //
+    // The lock is the schema's, not the database's: the migrations touch
+    // only their own schema, so two schemas never take turns, and a
+    // database with one schema behaves as it did (#905).
+    //
+    // The database's bare key is taken SHARED beside it: an older build
+    // takes that key alone, exclusive, so an older migrator and this
+    // one still take turns on the same schema, while two opens of this
+    // build - whose shared takes agree - never queue on each other.
+    // When the search path names no schema, both takes land on the
+    // bare key itself - exclusive, then shared, which one session may
+    // hold together - and the two unlocks below match them one for
+    // one.
+    let schema: Option<String> = client
+        .query_opt("SELECT current_schema()::text", &[])
+        .map_err(|e| {
+            named_step(
+                "the migration lock's schema read",
+                "SELECT current_schema()::text",
+                e,
+            )
+        })?
+        .and_then(|row| row.get::<_, Option<String>>(0));
+    let lock = schema.as_deref().map_or(SCHEMA_LOCK, migration_lock_key);
+    client
+        .query_opt("SELECT pg_advisory_lock($1)", &[P::i64(lock)])
+        .map_err(|e| {
+            named_step(
+                "the schema migration lock",
+                "SELECT pg_advisory_lock($1)",
+                e,
+            )
+        })?;
+    client
+        .query_opt("SELECT pg_advisory_lock_shared($1)", &[P::i64(SCHEMA_LOCK)])
+        .map_err(|e| {
+            // The schema's own key stays on this session: the failed
+            // open drops the client, and the connection's death takes
+            // every session lock with it.
+            named_step(
+                "the migration's shared turn on the database",
+                "SELECT pg_advisory_lock_shared($1)",
+                e,
+            )
+        })?;
     let outcome = migrate_under_lock(client, allow);
     // The base statement budget goes back whatever the migrations did:
     // only the migration window ran without it, and this client — for
@@ -3601,16 +3985,79 @@ fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
     // writer with no answer is the silent path the base budget exists
     // to prevent. The migration's own error comes first, and the
     // restore's failure answers when the migrations left none.
-    let restored = client.execute(
-        &format!("SET statement_timeout = '{}'", base_statement_timeout()),
-        &[],
-    );
+    let restored = client
+        .execute(
+            &format!("SET statement_timeout = '{}'", base_statement_timeout()),
+            &[],
+        )
+        .map_err(|e| {
+            named_step(
+                "the base budget's return",
+                "SET statement_timeout = <the open's budget>",
+                e,
+            )
+        });
     // The lock lives on the client's session: it goes back whatever the
     // migrations did. A client that died mid-migration lost the lock with
     // its connection, and the unlock names a lock the new connection
     // never held, which answers false and costs nothing.
-    let _ = client.query_opt("SELECT pg_advisory_unlock($1)", &[P::i64(SCHEMA_LOCK)]);
+    let _ = client.query_opt("SELECT pg_advisory_unlock($1)", &[P::i64(lock)]);
+    let _ = client.query_opt(
+        "SELECT pg_advisory_unlock_shared($1)",
+        &[P::i64(SCHEMA_LOCK)],
+    );
     outcome.and_then(|value| restored.map(|_| value))
+}
+
+/// One migration, in its own transaction with its version bump: a
+/// migration that fails rolls its own statements back, and the
+/// versions before it stand. The steps name themselves, with the
+/// migration's ledger name in the statement the failure names (#905).
+/// `from_version` is the version the database stood at before the
+/// open: a fresh database's story is a creation, not a migration, so
+/// the step log only answers a database that had one.
+fn run_one_migration(client: &mut PgClient, from_version: u32, n: u32, sql: &str) -> Result<()> {
+    let step = std::time::Instant::now();
+    let mut pending = Vec::new();
+    let mut derived = DerivedPending::default();
+    let mut preload = std::collections::HashMap::new();
+    let mut history = HistoryPending::default();
+    let step_name = PG_MIGRATION_NAMES
+        .get(usize::try_from(n).expect("a schema version fits in usize") - 1)
+        .copied()
+        .unwrap_or("unnamed");
+    let mut tx = PgTx::begin(
+        client,
+        &mut pending,
+        &mut derived,
+        &mut preload,
+        &mut history,
+        None,
+    )
+    .map_err(|e| named_step("the migration's begin", "BEGIN", e))?;
+    tx.c.batch(&format!(
+        "{sql}\nINSERT INTO schema_migrations (version, name) \
+             VALUES ({}, 'postgres schema')",
+        i64::from(n)
+    ))
+    .map_err(|e| {
+        named_step(
+            "the migration itself",
+            &format!("migration {n} ({step_name})"),
+            e,
+        )
+    })?;
+    tx.commit()
+        .map_err(|e| named_step("the migration's commit", "COMMIT", e))?;
+    if from_version != 0 {
+        tracing::info!(
+            from_version = n - 1,
+            to_version = n,
+            elapsed_ms = u64::try_from(step.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "the metadata schema migrated one step"
+        );
+    }
+    Ok(())
 }
 
 /// The migrations themselves, under the session's schema lock. `allow`
@@ -3623,7 +4070,13 @@ fn migrate_under_lock(client: &mut PgClient, allow: bool) -> Result<Option<(u32,
     // alone — and a role that may read the ledger but not create in the
     // schema still reaches the refusal instead of dying on the ledger's
     // DDL first.
-    let version = schema_version(client)?;
+    let version = schema_version(client).map_err(|e| {
+        named_step(
+            "the migration's version read",
+            "the schema_migrations ledger",
+            e,
+        )
+    })?;
     if version > PG_SCHEMA_VERSION {
         return Err(Error::FailedPrecondition(format!(
             "database schema version {version} is newer than this build \
@@ -3645,15 +4098,31 @@ fn migrate_under_lock(client: &mut PgClient, allow: bool) -> Result<Option<(u32,
     // The runner will write: a migration is the operator's ask, not a
     // lane's call, so its statements are not bounded by the open's
     // per-statement budget. `migrate` puts the base budget back.
-    client.execute("SET statement_timeout = 0", &[])?;
+    client
+        .execute("SET statement_timeout = 0", &[])
+        .map_err(|e| {
+            named_step(
+                "the migration window's budget lift",
+                "SET statement_timeout = 0",
+                e,
+            )
+        })?;
     // The ledger of the versions, made first, in its own transaction: a
     // migration that fails leaves the ledger and every version before it.
-    client.batch(
-        "CREATE TABLE IF NOT EXISTS schema_migrations (
+    client
+        .batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
              version BIGINT PRIMARY KEY,
              name    TEXT NOT NULL
          )",
-    )?;
+        )
+        .map_err(|e| {
+            named_step(
+                "the migration ledger's create",
+                "CREATE TABLE IF NOT EXISTS schema_migrations",
+                e,
+            )
+        })?;
     if version != 0 {
         tracing::info!(
             from_version = version,
@@ -3684,33 +4153,7 @@ fn migrate_under_lock(client: &mut PgClient, allow: bool) -> Result<Option<(u32,
         // One transaction per migration, with its version bump: a
         // migration that fails rolls its own statements back, and the
         // versions before it stand.
-        let step = std::time::Instant::now();
-        let mut pending = Vec::new();
-        let mut derived = DerivedPending::default();
-        let mut preload = std::collections::HashMap::new();
-        let mut history = HistoryPending::default();
-        let mut tx = PgTx::begin(
-            client,
-            &mut pending,
-            &mut derived,
-            &mut preload,
-            &mut history,
-            None,
-        )?;
-        tx.c.batch(&format!(
-            "{sql}\nINSERT INTO schema_migrations (version, name) \
-             VALUES ({}, 'postgres schema')",
-            i64::from(n)
-        ))?;
-        tx.commit()?;
-        if version != 0 {
-            tracing::info!(
-                from_version = n - 1,
-                to_version = n,
-                elapsed_ms = u64::try_from(step.elapsed().as_millis()).unwrap_or(u64::MAX),
-                "the metadata schema migrated one step"
-            );
-        }
+        run_one_migration(client, version, n, sql)?;
     }
     if version == 0 {
         tracing::info!(
@@ -4072,6 +4515,17 @@ impl MetaTx for PgTx<'_> {
 
     /// Adds `blob` to the blobs that `repo` may name. Returns whether it is
     /// new.
+    /// One statement over `repo_blobs`: the hash-agg of its distinct
+    /// blobs. Bounded: it reads one table once, and returns one number.
+    fn blob_count(&mut self) -> Result<u64> {
+        let rows = self.c.query(
+            "SELECT count(*) FROM (SELECT DISTINCT blob FROM repo_blobs) t",
+            &[],
+        )?;
+        let n: i64 = rows[0].get(0);
+        Ok(u64::try_from(n).unwrap_or(0))
+    }
+
     fn add_repo_blob(&mut self, repo: RepoId, blob: BlobId) -> Result<bool> {
         let added = self.c.execute(
             "INSERT INTO repo_blobs (repo_id, blob) VALUES ($1, $2)
@@ -4541,6 +4995,51 @@ impl MetaTx for PgTx<'_> {
         Ok(())
     }
 
+    /// One statement for the walk's start: the generation rides the
+    /// repo-membership join (the guard), the value is a left join on the
+    /// same row. A hold in the transaction's memory answers with
+    /// [`StartRead::Stored`] and no statement - the only rows the
+    /// transaction holds are the parents and the changeset it stores
+    /// into `repo`, and the changesets insert refuses a parent `repo`
+    /// cannot see before any row is written.
+    fn generation_and_stored(
+        &mut self,
+        repo: RepoId,
+        kind: &str,
+        version: u32,
+        cs: ChangesetId,
+    ) -> Result<StartRead> {
+        if let Some(bytes) = self.held_derived(kind, version, cs) {
+            return Ok(StartRead::Stored(bytes));
+        }
+        let version = i64::from(version);
+        let key = id_bytes(cs.as_bytes());
+        let row = self
+            .c
+            .query_opt(
+                "SELECT gen, value FROM changesets
+                 JOIN repo_changesets ON cs = id
+                 LEFT JOIN derived
+                   ON derived.cs = changesets.id AND kind = $2 AND version = $3
+                 WHERE repo_id = $1 AND changesets.id = $4",
+                &[
+                    P::i64(repo.0),
+                    P::text(kind),
+                    P::i64(version),
+                    P::bytes(&key),
+                ],
+            )?
+            .ok_or_else(|| Error::NotFound(format!("changeset {cs}")))?;
+        let generation: i64 = row.get(0);
+        // The read caches, like `generation` does: the write that follows
+        // the walk asks the same changeset's generation, and the cache
+        // answers it.
+        self.gen_cache.insert((repo.0, key), generation);
+        Ok(row
+            .get::<_, Option<Vec<u8>>>(1)
+            .map_or(StartRead::Generation(generation), StartRead::Stored))
+    }
+
     /// The stored bytes of a derived value, if computed. While the
     /// importer's batching is on, the values this transaction inserted
     /// answer first (newest insert wins), then the chains the importer
@@ -4553,29 +5052,11 @@ impl MetaTx for PgTx<'_> {
         version: u32,
         cs: ChangesetId,
     ) -> Result<Option<Vec<u8>>> {
+        if let Some(bytes) = self.held_derived(kind, version, cs) {
+            return Ok(Some(bytes));
+        }
         let version = i64::from(version);
         let key = id_bytes(cs.as_bytes());
-        if self.cs_batching
-            && let Some(pending) = self.derived_pending.as_deref()
-        {
-            for (k, v, c, value) in pending.iter().rev() {
-                if *k == kind && *v == version && id_bytes(c.as_bytes()) == key {
-                    return Ok(Some(value.clone()));
-                }
-            }
-        }
-        // The transaction's own memory of the derived rows it preloaded
-        // or wrote: one statement filled it at the start of a write path,
-        // and every put of this transaction keeps it true. A row it
-        // deleted is of an older version, which no read of this kind
-        // asks for, so no stale answer can hide there.
-        if let Some(value) = self
-            .derived_preload
-            .as_deref()
-            .and_then(|preload| preload.get(&(kind.to_owned(), version, key.clone())))
-        {
-            return Ok(Some(value.clone()));
-        }
         Ok(self
             .c
             .query_opt(
@@ -4869,6 +5350,7 @@ impl MetaTx for PgTx<'_> {
     /// memory, so the answers stay the transaction's own.
     fn preload_derived(
         &mut self,
+        repo: RepoId,
         kinds: &[(&'static str, u32)],
         css: &[ChangesetId],
     ) -> Result<()> {
@@ -4884,8 +5366,16 @@ impl MetaTx for PgTx<'_> {
             .map(|(_, version)| i64::from(*version))
             .collect();
         let keys: Vec<Vec<u8>> = css.iter().map(|cs| id_bytes(cs.as_bytes())).collect();
+        // The generation rides the rows under the repo-membership join -
+        // the same guard every generation read keeps - and the read
+        // caches it: the changesets insert of the write that follows asks
+        // the first parent's generation, and the cache answers it.
         let rows = self.c.query(
-            "SELECT kind, version, cs, value FROM derived
+            "SELECT kind, version, cs, value,
+                    (SELECT gen FROM changesets
+                     JOIN repo_changesets ON cs = id
+                     WHERE repo_id = $4 AND id = d.cs) AS gen
+             FROM derived AS d
              WHERE cs = ANY($3)
                AND (kind, version) IN (SELECT kind, version
                                        FROM unnest($1::text[], $2::int8[]) AS t(kind, version))",
@@ -4893,10 +5383,15 @@ impl MetaTx for PgTx<'_> {
                 P::text_array(kind_names),
                 P::i64_array(versions),
                 P::bytea_array(keys),
+                P::i64(repo.0),
             ],
         )?;
         for row in rows {
             preload.insert((row.get(0), row.get(1), row.get(2)), row.get(3));
+            if let Some(read_gen) = row.try_get::<_, Option<i64>>(4).map_err(map_pg_error)? {
+                let cs: Vec<u8> = row.get(2);
+                self.gen_cache.insert((repo.0, cs), read_gen);
+            }
         }
         Ok(())
     }
@@ -5137,13 +5632,21 @@ impl MetaTx for PgTx<'_> {
     ) -> Result<(RepoId, LandOutcome)> {
         // The outcome's columns ride the lookup the record already runs:
         // the caller learns a settled twin without a second read of the
-        // row, and the repo's id rides the same statement, so the record
-        // pays no separate repos read. A row that is still pending must
-        // be finished: the land's own next step reads the outcome in its
-        // first transaction, where a twin that settles between the
-        // record and the finish answers.
-        let (repo, recorded) = self.repo_and_land_by_key(caller, req)?;
-        self.generation(repo, req.changeset)?;
+        // row, the repo's id rides the same statement, so the record
+        // pays no separate repos read, and the input's generation rides
+        // it as a column, so the record pays no separate gen read. A row
+        // that is still pending must be finished: the land's own next
+        // step reads the outcome in its first transaction, where a twin
+        // that settles between the record and the finish answers.
+        let (repo, input_gen, recorded) = self.repo_and_land_by_key(caller, req)?;
+        // The generation ride is the input's existence guard: a land
+        // whose changeset does not exist fails here, before any pending
+        // row is written, and the found value warms the cache the
+        // separate read warmed.
+        let generation =
+            input_gen.ok_or_else(|| Error::NotFound(format!("changeset {}", req.changeset)))?;
+        self.gen_cache
+            .insert((repo.0, id_bytes(req.changeset.as_bytes())), generation);
         let recorded = if let Some(recorded) = recorded {
             recorded
         } else {
@@ -5920,8 +6423,53 @@ impl Meta for Pg {
 #[cfg(test)]
 mod tests {
     use super::{Client, NoTls, delete_prefixes, merged_options};
-    use crate::pg::Pg;
+    use crate::pg::{Pairing, Pg, pairing_decision};
     use std::sync::Arc;
+
+    /// The pairing decision's whole table: every arm of the match, on
+    /// both sides of the repos flag. A rename or an arm that flips
+    /// shows here, not in a store that refuses or adopts wrongly.
+    #[test]
+    fn the_pairing_table_covers_every_case() {
+        let marker = [1u8; 16];
+        let held = [2u8; 16];
+        let refuse = |pairing: Pairing| matches!(pairing, Pairing::Refuse(_));
+        // One store on both sides agrees, whatever the schema holds.
+        assert!(matches!(
+            pairing_decision(Some(marker), Some(marker), true),
+            Pairing::Agree
+        ));
+        assert!(matches!(
+            pairing_decision(Some(marker), Some(marker), false),
+            Pairing::Agree
+        ));
+        // Two stores on one disk refuse, whatever the schema holds.
+        assert!(refuse(pairing_decision(Some(marker), Some(held), true)));
+        assert!(refuse(pairing_decision(Some(marker), Some(held), false)));
+        // A served database with no marker refuses; a schema that
+        // never served is a first open's cut, and the marker is
+        // written.
+        assert!(refuse(pairing_decision(None, Some(held), true)));
+        assert!(matches!(
+            pairing_decision(None, Some(held), false),
+            Pairing::AdoptCut
+        ));
+        // A marker over a schema that holds no store and no repos is
+        // the wrong-URL refusal; over one that holds repos it is a
+        // dump beside its own directory, and the open mints the row.
+        assert!(refuse(pairing_decision(Some(marker), None, false)));
+        assert!(matches!(
+            pairing_decision(Some(marker), None, true),
+            Pairing::Fresh
+        ));
+        // Neither side names a store: a first boot, whatever the
+        // schema holds.
+        assert!(matches!(pairing_decision(None, None, true), Pairing::Fresh));
+        assert!(matches!(
+            pairing_decision(None, None, false),
+            Pairing::Fresh
+        ));
+    }
 
     #[test]
     fn the_delete_prefix_folds_the_calls_of_one_kind_in_order() {
@@ -5961,9 +6509,9 @@ mod tests {
         let url = crate::backend::test_hooks::test_url().unwrap();
         let client = super::test_hooks::connect(&url, None).unwrap();
         let error = client
-            .as_raw(|_| -> crate::error::Result<()> {
+            .raw(Box::new(|_| -> crate::error::Result<()> {
                 panic!("the worker's test panic");
-            })
+            }))
             .unwrap_err();
         assert!(
             error.to_string().contains("its log line names why"),
@@ -6021,9 +6569,9 @@ mod tests {
     fn a_search_path_that_names_no_schema_refuses_with_the_fix() {
         let url = crate::backend::test_hooks::test_url().unwrap();
         let mut client = Client::connect(&url, NoTls).unwrap();
-        let setup = super::Setup::new(Some("scion_test_missing"), true, &mut client);
+        let mut setup = super::Setup::new(Some("scion_test_missing"), true, &mut client);
         assert!(!setup.ok(), "a missing schema cannot hold the setup");
-        let error = super::setup_error(&setup, false);
+        let error = super::setup_error(&mut setup, false);
         assert!(
             error
                 .to_string()

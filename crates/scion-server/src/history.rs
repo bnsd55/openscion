@@ -967,7 +967,7 @@ mod tests {
                 .write(|c| {
                     let ids = testing::insert_history(c, repo, &parents, &edits)?;
                     for &tip in &ids {
-                        derived::derive::<PathHistory>(c, repo, tip, &mut crate::tree::lens_none())?;
+                        derived::derive::<PathHistory>(c, repo, tip, &mut crate::tree::lens_none(), None)?;
                     }
                     Ok(ids)
                 })
