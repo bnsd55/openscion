@@ -43,6 +43,8 @@ const CORPUS: &str = "transcripts";
 /// the expectation lines, in file order.
 #[derive(Debug)]
 struct Transcript {
+    /// The file's own path: the Land  is per file.
+    path: String,
     /// The release the behaviour exists since; the N-1 run skips files
     /// newer than the server it runs.
     /// SHORTCUT: unread until the N-1 matrix slice; that slice reads it.
@@ -84,9 +86,17 @@ fn parse(at: &Path, text: &str) -> Transcript {
             k if let Some(rest) = k.strip_prefix("request.") => {
                 request.push((rest.to_owned(), value.to_owned()));
             }
-            "status" | "status_message" | "end" | "tiers" => {
+            "status" | "end" | "resume_status" => {
                 expect.push((key.to_owned(), value.to_owned()));
             }
+            "tiers" if value == "refuse" => {
+                expect.push((key.to_owned(), value.to_owned()));
+            }
+            "tiers" => panic!(
+                "{}:{}: the runner handles no tiers value but refuse: {value}",
+                at.display(),
+                n + 1
+            ),
             k if let Some(rest) = k.strip_prefix("reply.") => {
                 expect.push((format!("reply.{rest}"), value.to_owned()));
             }
@@ -95,6 +105,7 @@ fn parse(at: &Path, text: &str) -> Transcript {
         }
     }
     Transcript {
+        path: at.display().to_string(),
         since: since.unwrap_or_else(|| panic!("{} names no since", at.display())),
         method: method.unwrap_or_else(|| panic!("{} names no method", at.display())),
         fixture: fixture.unwrap_or_else(|| panic!("{} names no fixture", at.display())),
@@ -282,31 +293,41 @@ fn parse_end(value: &str) -> Option<End> {
 }
 
 /// The corpus walks subdirectories: `service/method/behaviour.textproto`.
-fn walk(dir: &Path, files: &mut Vec<PathBuf>) {
+fn walk(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
     for entry in fs::read_dir(dir).expect("the corpus dir opens") {
         let path = entry.unwrap().path();
         if path.is_dir() {
-            walk(&path, files);
-        } else {
+            walk(&path, files)?;
+        } else if path.extension().is_some_and(|e| e == "textproto") {
             files.push(path);
+        } else {
+            return Err(format!(
+                "the corpus holds a non-transcript file: {}",
+                path.display()
+            ));
         }
     }
+    Ok(())
 }
 
 /// The corpus test: every file, against the server; the `Objects` cases
-/// also through the cache and the daemon, cold and warm.
+/// also through the cache and the daemon. Files whose behaviour depends
+/// on the ticket (`bad_ticket`, `unknown_object`) and the per-file
+/// `tiers: refuse` files get a fresh cache and daemon, so a warm disk or
+/// a relay that does not check signatures cannot answer for them; the
+/// rest share one warm pair, cold only for the first file that touches it.
 #[test]
 fn the_corpus_answers_as_its_files_say() {
     let corpus = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join(CORPUS);
     let mut files = Vec::new();
-    walk(&corpus, &mut files);
+    walk(&corpus, &mut files).expect("the corpus holds only transcripts");
     files.sort();
-    assert!(
-        files.len() >= 12,
-        "the corpus pins the Objects service: {} files",
-        files.len()
+    assert_eq!(
+        files.len(),
+        25,
+        "the corpus pins 25 behaviours; a file added or removed must update this count"
     );
     // One store and one set of tiers for the whole run: the fixture is
     // the expensive part. Each file still mints its own ticket, right
@@ -455,6 +476,11 @@ async fn run_put_blob(
     f: &Fixture,
 ) -> Result<(), String> {
     let repo = field(t, "repo").unwrap_or_else(|| resolve("r", f));
+    for (k, _) in &t.request {
+        if k != "repo" && k != "data" {
+            return Err(unknown_field("PutBlob", k));
+        }
+    }
     let requests: Vec<scion_proto::v1::PutBlobRequest> = t
         .request
         .iter()
@@ -481,6 +507,11 @@ async fn run_create_changeset(
     client: &mut ScionClientOf,
     f: &Fixture,
 ) -> Result<(), String> {
+    for (k, _) in &t.request {
+        if !matches!(k.as_str(), "repo" | "changeset") {
+            return Err(unknown_field("CreateChangeset", k));
+        }
+    }
     let req = scion_proto::v1::CreateChangesetRequest {
         repo: resolve(&field(t, "repo").unwrap_or_else(|| "r".to_owned()), f),
         changeset: unhex(&resolve(&field(t, "changeset").unwrap_or_default(), f)),
@@ -499,11 +530,16 @@ async fn run_create_changeset(
 /// A land whose changeset the fixture names: the request key must be
 /// unique per repo and caller, so the runner mints one.
 async fn run_land(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> Result<(), String> {
+    for (k, _) in &t.request {
+        if !matches!(k.as_str(), "repo" | "changeset_id" | "target_ref") {
+            return Err(unknown_field("Land", k));
+        }
+    }
     let req = scion_proto::v1::LandRequest {
         repo: resolve(&field(t, "repo").unwrap_or_else(|| "r".to_owned()), f),
         changeset_id: unhex(&resolve(&field(t, "changeset_id").unwrap_or_default(), f)),
         target_ref: field(t, "target_ref").unwrap_or_else(|| "main".to_owned()),
-        request_key: format!("transcript-{}", std::process::id()),
+        request_key: format!("transcript-{}-{}", std::process::id(), t.path),
     };
     match client.land(req).await {
         Ok(reply) => {
@@ -534,6 +570,11 @@ async fn run_get_land(
     client: &mut ScionClientOf,
     f: &Fixture,
 ) -> Result<(), String> {
+    for (k, _) in &t.request {
+        if !matches!(k.as_str(), "repo" | "land_id") {
+            return Err(unknown_field("GetLand", k));
+        }
+    }
     let req = scion_proto::v1::GetLandRequest {
         repo: resolve(&field(t, "repo").unwrap_or_else(|| "r".to_owned()), f),
         land_id: resolve(&field(t, "land_id").unwrap_or_default(), f),
@@ -627,6 +668,11 @@ async fn run_get_changeset(
     client: &mut ScionClientOf,
     f: &Fixture,
 ) -> Result<(), String> {
+    for (k, _) in &t.request {
+        if !matches!(k.as_str(), "repo" | "changeset_id") {
+            return Err(unknown_field("GetChangeset", k));
+        }
+    }
     let req = scion_proto::v1::GetChangesetRequest {
         repo: resolve(&field(t, "repo").unwrap_or_else(|| "r".to_owned()), f),
         changeset_id: unhex(&resolve(&field(t, "changeset_id").unwrap_or_default(), f)),
@@ -652,6 +698,11 @@ async fn run_read_file(
     client: &mut ScionClientOf,
     f: &Fixture,
 ) -> Result<(), String> {
+    for (k, _) in &t.request {
+        if !matches!(k.as_str(), "repo" | "changeset_id" | "path") {
+            return Err(unknown_field("ReadFile", k));
+        }
+    }
     let req = scion_proto::v1::ReadFileRequest {
         repo: resolve(&field(t, "repo").unwrap_or_else(|| "r".to_owned()), f),
         changeset_id: unhex(&resolve(&field(t, "changeset_id").unwrap_or_default(), f)),
@@ -678,6 +729,11 @@ async fn run_list_dir(
     client: &mut ScionClientOf,
     f: &Fixture,
 ) -> Result<(), String> {
+    for (k, _) in &t.request {
+        if !matches!(k.as_str(), "repo" | "changeset_id" | "path") {
+            return Err(unknown_field("ListDir", k));
+        }
+    }
     let req = scion_proto::v1::ListDirRequest {
         repo: resolve(&field(t, "repo").unwrap_or_else(|| "r".to_owned()), f),
         changeset_id: unhex(&resolve(&field(t, "changeset_id").unwrap_or_default(), f)),
@@ -700,6 +756,11 @@ async fn run_list_dir(
 }
 
 async fn run_log(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> Result<(), String> {
+    for (k, _) in &t.request {
+        if !matches!(k.as_str(), "repo" | "changeset_id" | "path" | "cursor") {
+            return Err(unknown_field("Log", k));
+        }
+    }
     let req = scion_proto::v1::LogRequest {
         repo: resolve(&field(t, "repo").unwrap_or_else(|| "r".to_owned()), f),
         changeset_id: unhex(&resolve(&field(t, "changeset_id").unwrap_or_default(), f)),
@@ -735,6 +796,11 @@ async fn run_log(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> Res
 }
 
 async fn run_blame(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> Result<(), String> {
+    for (k, _) in &t.request {
+        if !matches!(k.as_str(), "repo" | "changeset_id" | "path" | "cursor") {
+            return Err(unknown_field("Blame", k));
+        }
+    }
     let req = scion_proto::v1::BlameRequest {
         repo: resolve(&field(t, "repo").unwrap_or_else(|| "r".to_owned()), f),
         changeset_id: unhex(&resolve(&field(t, "changeset_id").unwrap_or_default(), f)),
@@ -774,6 +840,11 @@ async fn run_merge_base(
     client: &mut ScionClientOf,
     f: &Fixture,
 ) -> Result<(), String> {
+    for (k, _) in &t.request {
+        if !matches!(k.as_str(), "repo" | "a_changeset_id" | "b_changeset_id") {
+            return Err(unknown_field("MergeBase", k));
+        }
+    }
     let req = scion_proto::v1::MergeBaseRequest {
         repo: resolve(&field(t, "repo").unwrap_or_else(|| "r".to_owned()), f),
         a_changeset_id: unhex(&resolve(
@@ -806,6 +877,11 @@ async fn run_is_ancestor(
     client: &mut ScionClientOf,
     f: &Fixture,
 ) -> Result<(), String> {
+    for (k, _) in &t.request {
+        if !matches!(k.as_str(), "repo" | "ancestor_id" | "descendant_id") {
+            return Err(unknown_field("IsAncestor", k));
+        }
+    }
     let req = scion_proto::v1::IsAncestorRequest {
         repo: resolve(&field(t, "repo").unwrap_or_else(|| "r".to_owned()), f),
         ancestor_id: unhex(&resolve(
@@ -836,6 +912,14 @@ async fn run_is_ancestor(
 }
 
 async fn run_diff(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> Result<(), String> {
+    for (k, _) in &t.request {
+        if !matches!(
+            k.as_str(),
+            "repo" | "old_changeset_id" | "new_changeset_id" | "path"
+        ) {
+            return Err(unknown_field("Diff", k));
+        }
+    }
     let req = scion_proto::v1::DiffRequest {
         repo: resolve(&field(t, "repo").unwrap_or_else(|| "r".to_owned()), f),
         old_changeset_id: unhex(&resolve(
@@ -1062,6 +1146,12 @@ async fn read_part_stream(
     }
 }
 
+/// F6: an unknown `request.*` key is a typo that would otherwise send an
+/// empty field and pass for the wrong reason.
+fn unknown_field(what: &str, name: &str) -> String {
+    format!("{what} knows no request field {name}")
+}
+
 /// Builds the file's first `GetObjects` request.
 fn get_objects_request(t: &Transcript, f: &Fixture) -> Result<GetObjectsRequest, String> {
     let mut req = GetObjectsRequest::default();
@@ -1141,8 +1231,29 @@ async fn run_get_objects(
             Ok(stream) => stream.into_inner(),
             Err(status) => {
                 // The call itself failed: the file pins the code as the
-                // status.
-                check_status(t, status.code()).map_err(|e| format!("{e}: {}", status.message()))?;
+                // status, or as `resume_status` when this is a resumed
+                // round - section 8 allows a short OK reply and then the
+                // upstream error on the next call.
+                let want = if rounds > 1 {
+                    t.expect
+                        .iter()
+                        .find(|(k, _)| k == "resume_status")
+                        .map(|(_, v)| v.as_str())
+                } else {
+                    None
+                };
+                let got = status.code();
+                let ok = match want {
+                    Some(name) => got == code(name),
+                    None => check_status(t, got).is_ok(),
+                };
+                if !ok {
+                    return Err(format!(
+                        "the resumed round's status is {got:?}, the file pins {:?}: {}",
+                        want,
+                        status.message()
+                    ));
+                }
                 end = Some(End::Call(status.code()));
                 break;
             }
@@ -1205,13 +1316,25 @@ async fn run_get_objects(
 /// conformance test checks: an ID must verify against its bytes.
 fn checked(object: &InProgress) -> Result<(i32, String), String> {
     let kind = object.kind;
+    // The reply's encoding decides the bytes: a zstd answer is unpacked
+    // with the first part's size as the bound, then hashed.
+    let raw = match Encoding::try_from(object.encoding) {
+        Ok(Encoding::Raw) => object.data.clone(),
+        Ok(Encoding::Zstd) => zstd::bulk::decompress(
+            &object.data,
+            usize::try_from(object.size)
+                .map_err(|e| format!("size {} is no usize: {e}", object.size))?,
+        )
+        .map_err(|e| format!("the zstd frame does not unpack: {e}"))?,
+        _ => return Err(format!("the encoding {} is no encoding", object.encoding)),
+    };
     let id: Vec<u8> = match ObjectKind::try_from(kind) {
-        Ok(ObjectKind::Tree) => Tree::decode_with_id(&object.data)
+        Ok(ObjectKind::Tree) => Tree::decode_with_id(&raw)
             .map_err(|e| format!("the tree bytes do not decode: {e}"))?
             .1
             .as_bytes()
             .to_vec(),
-        Ok(ObjectKind::Blob) => scion_core::BlobId::of(&object.data).as_bytes().to_vec(),
+        Ok(ObjectKind::Blob) => scion_core::BlobId::of(&raw).as_bytes().to_vec(),
         _ => return Err(format!("the kind {kind} is no object kind")),
     };
     // The part rules: the declared id must be the bytes' own, the parts
@@ -1224,22 +1347,16 @@ fn checked(object: &InProgress) -> Result<(i32, String), String> {
             hex(&id)
         ));
     }
-    let carried = object.data.len() as u64;
-    if carried != object.encoded_size {
-        return Err(format!(
-            "the parts carry {carried} bytes, the first part said encoded_size {}",
-            object.encoded_size
-        ));
-    }
     if object.encoding == Encoding::Raw as i32 && object.encoded_size != object.size {
         return Err(format!(
             "raw encoded_size {} does not equal size {}",
             object.encoded_size, object.size
         ));
     }
-    if carried != object.size {
+    if raw.len() as u64 != object.size {
         return Err(format!(
-            "the object is {carried} bytes, the first part said size {}",
+            "the object is {} bytes, the first part said size {}",
+            raw.len(),
             object.size
         ));
     }
