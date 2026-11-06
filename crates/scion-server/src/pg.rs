@@ -2082,28 +2082,6 @@ impl<'a> PgTx<'a> {
     /// # Errors
     ///
     /// [`Error::ResourceExhausted`] when the principal is over its cap.
-    fn check_pending_lands_quota(&mut self, caller: &Caller, limit: Option<usize>) -> Result<()> {
-        let Some(limit) = limit else {
-            return Ok(());
-        };
-        let pending: i64 = self
-            .c
-            .query_opt(
-                "SELECT count(*) FROM lands WHERE caller = $1 AND state = 'pending'",
-                &[P::text(&caller.0)],
-            )?
-            .and_then(|row| row.get(0))
-            .unwrap_or(0);
-        if pending >= i64::try_from(limit).unwrap_or(i64::MAX) {
-            return Err(Error::ResourceExhausted(format!(
-                "principal {:?} has its {limit} lands pending \
-                 (--max-principal-pending-lands {limit}); wait for one to finish",
-                caller.0
-            )));
-        }
-        Ok(())
-    }
-
     /// Writes the per-row flushes a deferring write path collected: the
     /// history nodes the build wrote, one statement per 1,000 rows, and
     /// the derived old-row deletes, one query for the counts and one
@@ -2351,18 +2329,26 @@ impl<'a> PgTx<'a> {
         &mut self,
         caller: &Caller,
         req: &LandRequest,
-    ) -> Result<(RepoId, Option<i64>, Option<LandOutcome>)> {
+    ) -> Result<(RepoId, Option<i64>, Option<LandOutcome>, bool, i64)> {
         // The input's generation rides the lookup as a column: the
         // record's existence guard for the changeset, one round trip
         // instead of two (NULL when no changeset has this id in this
-        // repo).
+        // repo). The ref check and the caller's pending count ride it
+        // too, so the record's three precheck SELECTs are one statement:
+        // under READ COMMITTED they answer from one snapshot, which the
+        // land's own CAS re-decides (the ref) or may lag one concurrent
+        // record by a statement either way (the quota).
         let row = self
             .c
             .query_opt(
                 "SELECT r.repo_id, l.land_id, l.input_cs, l.target_ref, l.state,
                         l.detail, l.result_cs, l.conflict_paths, l.reject_reason,
                         (SELECT gen FROM changesets JOIN repo_changesets ON cs = id
-                         WHERE repo_id = r.repo_id AND id = $4) AS input_gen
+                         WHERE repo_id = r.repo_id AND id = $4) AS input_gen,
+                        EXISTS(SELECT 1 FROM refs
+                               WHERE repo_id = r.repo_id AND name = $5) AS ref_exists,
+                        (SELECT count(*) FROM lands
+                         WHERE caller = $2 AND state = 'pending') AS pending
                  FROM repos r
                  LEFT JOIN lands l
                    ON l.repo_id = r.repo_id AND l.caller = $2 AND l.request_key = $3
@@ -2372,6 +2358,7 @@ impl<'a> PgTx<'a> {
                     P::text(&caller.0),
                     P::text(&req.request_key),
                     P::bytes(&id_bytes(req.changeset.as_bytes())),
+                    P::text(&req.target_ref),
                 ],
             )?
             .map(|row| {
@@ -2386,6 +2373,8 @@ impl<'a> PgTx<'a> {
                     row.get::<_, Option<Vec<u8>>>(7),
                     row.get::<_, Option<String>>(8),
                     row.get::<_, Option<i64>>(9),
+                    row.get::<_, bool>(10),
+                    row.get::<_, i64>(11),
                 )
             })
             .ok_or_else(|| Error::NotFound(format!("repo {:?}", req.repo)))?;
@@ -2400,10 +2389,12 @@ impl<'a> PgTx<'a> {
             conflict_paths,
             reason,
             input_gen,
+            ref_exists,
+            pending,
         ) = row;
         let repo = RepoId(repo_id);
         let Some(land_id) = land_id else {
-            return Ok((repo, input_gen, None));
+            return Ok((repo, input_gen, None, ref_exists, pending));
         };
         // A LEFT JOIN's land columns are all set or all null together: the
         // row exists only when the join found the land.
@@ -2453,7 +2444,7 @@ impl<'a> PgTx<'a> {
                 .ok_or_else(|| Error::Corrupt(format!("land {land_id} conflict paths")))?,
             reject_reason: LandRejectReason::parse(&reason)?,
         };
-        Ok((repo, input_gen, Some(recorded)))
+        Ok((repo, input_gen, Some(recorded), ref_exists, pending))
     }
 
     /// Reads the land a request key recorded back, for the ON CONFLICT
@@ -2558,10 +2549,24 @@ impl<'a> PgTx<'a> {
         caller: &Caller,
         req: &LandRequest,
         pending_limit: Option<usize>,
+        ref_exists: bool,
+        pending: i64,
     ) -> Result<LandOutcome> {
+        // The ref's existence and the caller's pending count answered in
+        // the record's one precheck statement; the quota is the same
+        // refusal, evaluated here before any row is written.
+        if let Some(limit) = pending_limit {
+            if pending >= i64::try_from(limit).unwrap_or(i64::MAX) {
+                return Err(Error::ResourceExhausted(format!(
+                    "principal {:?} has its {limit} lands pending \
+                     (--max-principal-pending-lands {limit}); wait for one to finish",
+                    caller.0
+                )));
+            }
+        }
         // A land to a ref that does not exist is rejected at once.
         let detail = format!("ref {:?} does not exist", req.target_ref);
-        let (state, detail, reason) = if self.get_ref(repo, &req.target_ref)?.is_some() {
+        let (state, detail, reason) = if ref_exists {
             (
                 LandState::Pending,
                 String::new(),
@@ -2570,7 +2575,6 @@ impl<'a> PgTx<'a> {
         } else {
             (LandState::Rejected, detail, LandRejectReason::MissingRef)
         };
-        self.check_pending_lands_quota(caller, pending_limit)?;
         let inserted = self
             .c
             .query_opt(
@@ -5692,7 +5696,8 @@ impl MetaTx for PgTx<'_> {
         // that is still pending must be finished: the land's own next
         // step reads the outcome in its first transaction, where a twin
         // that settles between the record and the finish answers.
-        let (repo, input_gen, recorded) = self.repo_and_land_by_key(caller, req)?;
+        let (repo, input_gen, recorded, ref_exists, pending) =
+            self.repo_and_land_by_key(caller, req)?;
         // The generation ride is the input's existence guard: a land
         // whose changeset does not exist fails here, before any pending
         // row is written, and the found value warms the cache the
@@ -5704,7 +5709,7 @@ impl MetaTx for PgTx<'_> {
         let recorded = if let Some(recorded) = recorded {
             recorded
         } else {
-            self.record_new_land(repo, caller, req, pending_limit)?
+            self.record_new_land(repo, caller, req, pending_limit, ref_exists, pending)?
         };
         Ok((repo, recorded))
     }
