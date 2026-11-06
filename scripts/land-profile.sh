@@ -100,6 +100,23 @@ stop_server() {
   sleep 1
 }
 
+# cpu_sample: one /proc/stat delta sample every 5 s into the cell's
+# cpu log, until the cell's teardown kills this pid.
+cpu_sample() {
+  prev=""
+  while :; do
+    cur=$(awk '/^cpu /{print $2+$3+$4+$6+$7+$8, $5}' /proc/stat)
+    if [ -n "$prev" ]; then
+      busy=$(( $(echo "$cur" | cut -d' ' -f1) - $(echo "$prev" | cut -d' ' -f1) ))
+      idle=$(( $(echo "$cur" | cut -d' ' -f2) - $(echo "$prev" | cut -d' ' -f2) ))
+      total=$((busy + idle))
+      [ "$total" -gt 0 ] && echo "busy_pct $((100 * busy / total)) load $(cut -d' ' -f1 /proc/loadavg)" >> "$WORK/cpu-$CELL.log"
+    fi
+    prev="$cur"
+    sleep 5
+  done
+}
+
 # metrics_land SUM|COUNT: the Land rpc's histogram number of a
 # snapshot.
 metrics_land() {
@@ -159,6 +176,13 @@ cell() {
       sed -n 's/^pid=//p' "$WORK/owned/readers-$i" >> "$WORK/readers.pids"
     done
   fi
+  # The runner's own load, sampled through the cell: "the runner, not
+  # the lane" needs a number, not the vCPU count alone. busy_pct is the
+  # non-idle share of /proc/stat between samples; load is loadavg's
+  # first minute figure.
+  : > "$WORK/cpu-$name.log"
+  cpu_sample &
+  cpu_pid=$!
   rep=1
   while [ "$rep" -le "$PROFILE_REPS" ]; do
     if ! "$TIMEOUT" 900 "$BIN/scn" --server "$SERVER" bench --agents "$writers" \
@@ -180,6 +204,8 @@ cell() {
     while read -r pid; do kill -CONT "$pid" 2> /dev/null || true; done < "$WORK/readers.pids"
     while read -r pid; do wait "$pid" 2> /dev/null || true; done < "$WORK/readers.pids"
   fi
+  kill "$cpu_pid" 2> /dev/null || true
+  wait "$cpu_pid" 2> /dev/null || true
   curl -fsS "http://127.0.0.1:$SERVER_METRICS_PORT/metrics" \
     > "$WORK/metrics-$name-after.txt" || die "no metrics after the bench"
   psql "$SCION_PG_URL" -X -A -t \
@@ -211,6 +237,8 @@ for w in $PROFILE_CELLS; do
 done
 {
   echo "one land, taken apart (runner: ${CAPACITY_MACHINE:-unspecified})"
+  echo "branch: $(git rev-parse --short HEAD); the main it carries: $(git log --format=%P -1 HEAD | awk '{print $2}' | cut -c1-7)"
+  echo "runner cpus: $(nproc) vCPU"
   names=""
   for w in $PROFILE_CELLS; do
     names="$names land-w$w-r0 land-w$w-r$PROFILE_READERS"
@@ -240,6 +268,9 @@ done
   p99=$(pct "$WORK/read-times-$name.csv" 0.99 2> /dev/null || true)
   tries=$(wc -l < "$WORK/read-times-$name.csv" 2> /dev/null | tr -d ' ')
   echo "completed $tries checkouts, p50 ${p50:--} ms, p99 ${p99:--} ms"
+  if [ -s "$WORK/cpu-$name.log" ]; then
+    awk '{ b += $2; l += $4; if ($4 > m) m = $4; n++ } END { printf "runner: mean busy %.0f%%, loadavg mean %.1f, max %.1f\n", b / n, l / n, m }' "$WORK/cpu-$name.log"
+  fi
 } >> "$sum"
 
 # The slice's phases, per cell: the land's own per-phase lines, averaged
