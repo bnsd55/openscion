@@ -1,6 +1,6 @@
 # A named object the ticket's walk did not reach: the reply ends with
 # NOT_FOUND in the stream, after any object before it (section 7.3).
-since: v0.7
+since: v0.1
 method: Objects/GetObjects
 fixture: landed
 

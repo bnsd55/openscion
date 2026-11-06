@@ -2,7 +2,7 @@
 # daemon_warm line makes the runner warm the daemon with the valid
 # ticket first, so the pin below tests a warm store and the file can
 # sort anywhere.
-since: v0.7
+since: v0.1
 method: Objects/GetObjects
 fixture: landed
 
