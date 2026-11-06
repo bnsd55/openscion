@@ -378,8 +378,8 @@ for name in $names; do
         }
         printf "lane holds total %.1f ms/land; the window is %.1f s for %d lands, so 1/rate is %.1f ms; holds/rate %.1f%%\n", total_held * 1000 / lands, secs, lands, secs * 1000 / lands, 100 * total_held * 1000 / lands / (secs * 1000 / lands)
       }' <(printf '%s %s\n' \
-        "$(awk '$1 == "scion_lands_total" { s += $2 } END { print s + 0 }' "$after")" \
-        "$(awk '$1 == "scion_lands_total" { s += $2 } END { print s + 0 }' "$before")")
+        "$(awk 'index($1, "scion_lands_total") == 1 { s += $2 } END { print s + 0 }' "$after")" \
+        "$(awk 'index($1, "scion_lands_total") == 1 { s += $2 } END { print s + 0 }' "$before")")
   } >> "$sum"
 done
 
