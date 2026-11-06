@@ -283,6 +283,23 @@ pub fn fill_root_tree(store: &Backend, repo: RepoId, cs: ChangesetId) -> Result<
     derived::fill::<RootTree>(store, repo, cs)
 }
 
+/// [`fill_root_tree`], but it stops between steps once `deadline` has
+/// passed, so a cancelled call's job frees its permit and its land's
+/// ref lock instead of filling to the end. The steps before the stop
+/// stay, and the land's retry resumes from them.
+///
+/// # Errors
+///
+/// As [`derive_root_tree`], and [`Error::DeadlineExceeded`].
+pub fn fill_root_tree_by(
+    store: &Backend,
+    repo: RepoId,
+    cs: ChangesetId,
+    deadline: &Deadline,
+) -> Result<TreeId> {
+    derived::fill_by::<RootTree>(store, repo, cs, deadline)
+}
+
 /// Derives the root tree of `cs` inside the caller's transaction, as the
 /// `derived` mechanism computes a kind's value.
 ///

@@ -15,6 +15,14 @@
 //! match; unlisted fields never block, so a new optional field does not
 //! break the corpus. The runner parses these lines itself, so an unknown
 //! key fails the file instead of passing in silence.
+//!
+//! Tier keys, for the `Objects` files: `tiers: refuse` asserts a tier's
+//! UNIMPLEMENTED refusal of the non-GetObjects calls (section 7.1);
+//! `tiers: fresh` adds a second run of the file on a cache and daemon no
+//! earlier file touched, over the same store; `daemon_warm: serves` warms
+//! the daemon with the file's valid ticket as its setup, then pins the
+//! warm daemon serving the file's unsigned ticket from its store - a
+//! daemon checks no ticket by design (docs/protocol-v1.md section 7.1).
 #![cfg(unix)]
 
 use std::fs;
@@ -96,11 +104,19 @@ fn parse(at: &Path, text: &str) -> Transcript {
             "status" | "end" | "resume_status" => {
                 expect.push((key.to_owned(), value.to_owned()));
             }
-            "tiers" if value == "refuse" => {
+            "tiers" if value == "refuse" || value == "fresh" => {
                 expect.push((key.to_owned(), value.to_owned()));
             }
             "tiers" => panic!(
-                "{}:{}: the runner handles no tiers value but refuse: {value}",
+                "{}:{}: the runner handles no tiers value but refuse or fresh: {value}",
+                at.display(),
+                n + 1
+            ),
+            "daemon_warm" if value == "serves" => {
+                expect.push((key.to_owned(), value.to_owned()));
+            }
+            "daemon_warm" => panic!(
+                "{}:{}: the runner handles no daemon_warm value but serves: {value}",
                 at.display(),
                 n + 1
             ),
@@ -137,8 +153,11 @@ struct Fixture {
     missing: [u8; 32],
     /// A read ticket for the fixture's root tree: the permission that
     /// `GetObjects` spends.
-    /// spends.
     ticket: Vec<u8>,
+    /// The same ticket with one signature byte flipped: it parses, the
+    /// server's keys do not sign it, and a daemon that checks no ticket
+    /// still serves what its store holds.
+    unsigned: Vec<u8>,
 }
 
 /// Builds the one fixture the corpus uses: the conformance test's landed
@@ -170,6 +189,7 @@ fn landed() -> (Tiers, Fixture) {
         tree,
         cs: id,
         missing: missing_id(0xab),
+        unsigned: unsigned_of(&ticket),
         ticket,
     };
     (tiers, fixture)
@@ -177,6 +197,15 @@ fn landed() -> (Tiers, Fixture) {
 
 /// Mints a read ticket for the root tree of `cs` and names the root
 /// tree, as the conformance test does with the same call.
+/// The ticket with one byte of its signature flipped: the format still
+/// parses, the signature does not verify.
+fn unsigned_of(ticket: &[u8]) -> Vec<u8> {
+    let mut unsigned = ticket.to_vec();
+    let n = unsigned.len();
+    unsigned[n - 1] ^= 0xff;
+    unsigned
+}
+
 fn mint(tiers: &Tiers, cs: ChangesetId) -> (Vec<u8>, [u8; 32]) {
     let runtime = &tiers.runtime;
     let _entered = runtime.enter();
@@ -220,6 +249,7 @@ fn resolve(value: &str, f: &Fixture) -> String {
         .replace("$tree", &hex(&f.tree))
         .replace("$cs", &hex(f.cs.as_bytes()))
         .replace("$missing", &hex(&f.missing))
+        .replace("$unsigned", &hex(&f.unsigned))
         .replace("$ticket", &hex(&f.ticket))
 }
 
@@ -316,10 +346,149 @@ fn walk(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
 
 /// The corpus test: every file, against the server; the `Objects` cases
 /// also through the cache and the daemon. Files whose behaviour depends
-/// on the ticket (`bad_ticket`, `unknown_object`) and the per-file
-/// `tiers: refuse` files get a fresh cache and daemon, so a warm disk or
-/// a relay that does not check signatures cannot answer for them; the
-/// rest share one warm pair, cold only for the first file that touches it.
+/// on the ticket and the per-file `tiers: refuse` files get a fresh
+/// cache and daemon, so a warm disk or a relay that does not check
+/// signatures cannot answer for them; the rest share one warm pair,
+/// cold only for the first file that touches it.
+///
+/// The ticket files also pin the warm daemon's serve (`daemon_warm:
+/// serves`): a daemon checks no ticket by design, and the blob is in its
+/// disk store from the success file on. Note the refusal is enforced in
+/// depth: a cache that skipped only its signature check would still
+/// refuse, because its walk re-fetches the trees from upstream with the
+/// call's ticket, and the server refuses the unsigned one. A file that
+/// pins a refusal therefore catches a cache or daemon that serves
+/// without ANY proof, which is what the fresh pair and the warm runs are
+/// for.
+/// A tier serves `GetObjects` only: its refusal of the other calls is the
+/// contract (section 7.1).
+async fn assert_tier_refuses(url: &str, t: &Transcript, file: &Path) {
+    let mut client = connect(url).await;
+    let refused = match t.method.as_str() {
+        "Objects/ResolveRef" => client
+            .resolve_ref(ResolveRefRequest::default())
+            .await
+            .err()
+            .map(|s| s.code()),
+        "Objects/GetRootTree" => client
+            .get_root_tree(GetRootTreeRequest::default())
+            .await
+            .err()
+            .map(|s| s.code()),
+        _ => None,
+    };
+    assert_eq!(
+        refused,
+        Some(Code::Unimplemented),
+        "{}, a tier refuses {} with UNIMPLEMENTED",
+        file.display(),
+        t.method
+    );
+}
+
+/// The warm-up a `daemon_warm: serves` file runs as its setup: the
+/// file's refs through the daemon with its valid ticket, and the blob
+/// checked as arrived, so the pin below tests a warm store wherever the
+/// file sorts.
+fn warm_daemon_for(tiers: &common::Tiers, t: &Transcript, f: &Fixture, file: &Path) {
+    tiers.runtime.block_on(async {
+        let mut client = connect(&tiers.socket).await;
+        let mut stream = client
+            .get_objects(
+                request_with_ticket(t, f, f.ticket.clone()).expect("the file's request builds"),
+            )
+            .await
+            .expect("the warm-up call answers")
+            .into_inner();
+        let mut warmed = Vec::new();
+        read_part_stream(
+            &tiers.socket,
+            &mut stream,
+            &mut warmed,
+            std::time::Instant::now(),
+        )
+        .await
+        .expect("the warm-up stream reads");
+        let want = t
+            .request
+            .iter()
+            .find(|(path, _)| path == "refs")
+            .map(|(_, v)| item(&resolve(v, f)))
+            .expect("the file names the object it reads");
+        let want = (want.0, hex(&want.1));
+        assert!(
+            warmed.contains(&want),
+            "{}, the warm-up did not deliver {want:?} (it sent {warmed:?})",
+            file.display()
+        );
+    });
+}
+
+/// The per-tier run for one file on one pair: the tier refusal, the warm
+/// daemon's serve pin, then the file's own expectations.
+fn run_objects_across_tiers(tiers: &common::Tiers, t: &Transcript, f: &Fixture, file: &Path) {
+    let tier_refuses = t.expect.iter().any(|(k, v)| k == "tiers" && v == "refuse");
+    let daemon_warm_serves = t
+        .expect
+        .iter()
+        .any(|(k, v)| k == "daemon_warm" && v == "serves");
+    for url in [&tiers.server, &tiers.cache_url, &tiers.socket] {
+        if tier_refuses && url != &tiers.server {
+            // A tier serves GetObjects only: its refusal of the
+            // other calls is the contract (section 7.1).
+            tiers.runtime.block_on(assert_tier_refuses(url, t, file));
+            continue;
+        }
+        if url == &tiers.socket && daemon_warm_serves {
+            // A daemon checks no ticket by design: it serves what its
+            // store holds (docs/protocol-v1.md, section 7.1's daemon
+            // paragraph). The setup warmed this daemon with the file's
+            // valid ticket; pin the serve of the unsigned ticket by the
+            // stream, not by the call's headers: a daemon that answers
+            // OK and ends the stream with an error must not pass.
+            tiers.runtime.block_on(async {
+                let mut client = connect(url).await;
+                let want = t
+                    .request
+                    .iter()
+                    .find(|(path, _)| path == "refs")
+                    .map(|(_, v)| item(&resolve(v, f)))
+                    .expect("the file names the object it reads");
+                let want = (want.0, hex(&want.1));
+
+                let mut stream = client
+                    .get_objects(
+                        request_with_ticket(t, f, f.unsigned.clone())
+                            .expect("the file's request builds"),
+                    )
+                    .await
+                    .expect("the pinned call answers")
+                    .into_inner();
+                let mut served = Vec::new();
+                let ended =
+                    read_part_stream(url, &mut stream, &mut served, std::time::Instant::now())
+                        .await
+                        .expect("the pinned stream reads");
+                assert!(
+                    served.contains(&want),
+                    "{}, a warm daemon serves what its store holds (it sent {served:?})",
+                    file.display()
+                );
+                assert!(
+                    ended.is_none(),
+                    "{}, a warm daemon ends the unsigned serve clean (it ended {ended:?})",
+                    file.display()
+                );
+            });
+            continue;
+        }
+        tiers
+            .runtime
+            .block_on(run_objects(t, url, f))
+            .unwrap_or_else(|e| panic!("{} at {}: {e}", file.display(), url));
+    }
+}
+
 #[test]
 fn the_corpus_answers_as_its_files_say() {
     let corpus = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -350,46 +519,45 @@ fn the_corpus_answers_as_its_files_say() {
         let minted_at = std::time::Instant::now();
         let (ticket, _) = mint(&tiers, base.cs);
         let f = Fixture {
+            unsigned: unsigned_of(&ticket),
             ticket,
             ..base.clone()
         };
         let mint_age = minted_at.elapsed().as_secs_f64();
         let started_at = std::time::Instant::now();
-        let tier_refuses = t.expect.iter().any(|(k, v)| k == "tiers" && v == "refuse");
+        let tier_value = |name: &str| {
+            t.expect
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        };
+        let tier_refuses = tier_value("tiers") == Some("refuse");
+        let tiers_fresh = tier_value("tiers") == Some("fresh");
         if t.method.starts_with("Objects/") {
-            for url in [&tiers.server, &tiers.cache_url, &tiers.socket] {
-                if tier_refuses && url != &tiers.server {
-                    // A tier serves GetObjects only: its refusal of the
-                    // other calls is the contract (section 7.1).
-                    tiers.runtime.block_on(async {
-                        let mut client = connect(url).await;
-                        let refused = match t.method.as_str() {
-                            "Objects/ResolveRef" => client
-                                .resolve_ref(ResolveRefRequest::default())
-                                .await
-                                .err()
-                                .map(|s| s.code()),
-                            "Objects/GetRootTree" => client
-                                .get_root_tree(GetRootTreeRequest::default())
-                                .await
-                                .err()
-                                .map(|s| s.code()),
-                            _ => None,
-                        };
-                        assert_eq!(
-                            refused,
-                            Some(Code::Unimplemented),
-                            "{}, a tier refuses {} with UNIMPLEMENTED",
-                            file.display(),
-                            t.method
-                        );
-                    });
-                    continue;
+            if t.expect
+                .iter()
+                .any(|(k, v)| k == "daemon_warm" && v == "serves")
+            {
+                warm_daemon_for(&tiers, &t, &f, &file);
+            }
+            run_objects_across_tiers(&tiers, &t, &f, &file);
+            if tiers_fresh {
+                // The same file again on a cache and daemon no earlier
+                // file touched: the same server and keys, so the file's
+                // ticket still verifies; the fresh daemon forwards, and
+                // the upstream refuses, so the file's own expectations
+                // hold everywhere.
+                let fresh = tiers.fresh_relays();
+                for url in [&fresh.cache_url, &fresh.socket] {
+                    if tier_refuses {
+                        tiers.runtime.block_on(assert_tier_refuses(url, &t, &file));
+                        continue;
+                    }
+                    tiers
+                        .runtime
+                        .block_on(run_objects(&t, url, &f))
+                        .unwrap_or_else(|e| panic!("{} at {} (fresh): {e}", file.display(), url));
                 }
-                tiers
-                    .runtime
-                    .block_on(run_objects(&t, url, &f))
-                    .unwrap_or_else(|e| panic!("{} at {}: {e}", file.display(), url));
             }
         } else {
             tiers
@@ -1156,10 +1324,27 @@ fn unknown_field(what: &str, name: &str) -> String {
 
 /// Builds the file's first `GetObjects` request.
 fn get_objects_request(t: &Transcript, f: &Fixture) -> Result<GetObjectsRequest, String> {
+    let value = t
+        .request
+        .iter()
+        .find(|(path, _)| path == "ticket")
+        .map(|(_, v)| resolve(v, f))
+        .ok_or_else(|| "the file names no ticket".to_owned())?;
+    request_with_ticket(t, f, unhex(&value))
+}
+
+/// The file's `GetObjects` request with `ticket` in place of the file's
+/// own ticket value, so a pin can send the ticket it names.
+fn request_with_ticket(
+    t: &Transcript,
+    f: &Fixture,
+    ticket: Vec<u8>,
+) -> Result<GetObjectsRequest, String> {
     let mut req = GetObjectsRequest::default();
+    let mut ticket = Some(ticket);
     for (path, value) in &t.request {
         match path.as_str() {
-            "ticket" => req.ticket = unhex(&resolve(value, f)),
+            "ticket" => req.ticket = ticket.take().expect("the file names one ticket"),
             "refs" => req.refs.push(object_ref(&resolve(value, f))?),
             "accept" => {
                 req.accept.push(match resolve(value, f).as_str() {
@@ -1230,7 +1415,14 @@ async fn run_get_objects(
         let sent_at = std::time::Instant::now();
         eprintln!("CALL {} GetObjects refs={} sent", url, call.refs.len());
         let mut stream = match client.get_objects(call).await {
-            Ok(stream) => stream.into_inner(),
+            Ok(stream) => {
+                // The call's headers are OK: the file's `status:` pin
+                // must be Ok, or the pin would never be compared on a
+                // served reply and a file that pins a failure would pass
+                // on one.
+                check_status(t, Code::Ok)?;
+                stream.into_inner()
+            }
             Err(status) => {
                 // The call itself failed: the file pins the code as the
                 // status, or as `resume_status` when this is a resumed
