@@ -28,6 +28,9 @@ pub(crate) enum Phase {
     /// The rest of the handler's pre-land wall: the worker's dispatch
     /// and the permit wait.
     PreRest,
+    /// The reply's build, after the land's phases end and before the
+    /// call answers.
+    Post,
     /// The `record_land` commit, before the ref's slot.
     Record,
     /// Waiting for the ref's slot lock. No statements: the wait is
@@ -55,7 +58,7 @@ pub(crate) enum Phase {
     Other,
 }
 
-pub(crate) const PHASES: [Phase; 14] = [
+pub(crate) const PHASES: [Phase; 15] = [
     Phase::PreChecks,
     Phase::PreIntent,
     Phase::PreRest,
@@ -69,6 +72,7 @@ pub(crate) const PHASES: [Phase; 14] = [
     Phase::Build,
     Phase::Cas,
     Phase::SetState,
+    Phase::Post,
     Phase::Other,
 ];
 
@@ -83,6 +87,7 @@ impl Phase {
             Phase::PreChecks => "pre_checks",
             Phase::PreIntent => "pre_intent",
             Phase::PreRest => "pre_rest",
+            Phase::Post => "post",
             Phase::Record => "record",
             Phase::SlotWait => "slot_wait",
             Phase::Outcome => "outcome",
@@ -100,23 +105,28 @@ impl Phase {
 
 /// One phase's counters: wall time, the statements it ran, and the
 /// round-trip wall time of those statements.
-#[derive(Default, Clone, Copy)]
-struct Slot {
-    ns: u128,
-    stmts: u64,
-    stmt_ns: u128,
+#[derive(Default, Clone, Copy, Debug)]
+pub struct Slot {
+    /// The phase's wall time.
+    pub ns: u128,
+    /// The phase's statement count.
+    pub stmts: u64,
+    /// The phase's statements' round-trip time.
+    pub stmt_ns: u128,
 }
 
 /// The counters of one land. The current phase is a stack: the guards
 /// nest (build, cas and `set_state` ride inside the settle's commit), and
 /// a flat "current" leaked the enclosing phase's statements into the
 /// last inner phase that dropped.
-#[derive(Default, Clone, Copy)]
-pub(crate) struct Trace {
-    slots: [Slot; PHASES.len()],
+#[derive(Default, Clone, Copy, Debug)]
+pub struct Trace {
+    /// One slot per phase, in `PHASES` order.
+    pub slots: [Slot; PHASES.len()],
     stack: [Option<Phase>; PHASES.len()],
     depth: usize,
-    pub(crate) attempts: u64,
+    /// The plan attempts the land used.
+    pub attempts: u64,
 }
 
 thread_local! {

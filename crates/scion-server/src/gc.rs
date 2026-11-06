@@ -897,6 +897,7 @@ mod tests {
         };
         let err = lands
             .land(&store, &Caller("t".into()), &req, std::time::Duration::ZERO)
+            .0
             .unwrap_err();
         assert!(matches!(err, crate::Error::DeadlineExceeded(_)), "{err:?}");
         // Every stored blob is old, and nothing new is orphaned.

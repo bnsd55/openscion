@@ -157,7 +157,7 @@ fn twin_calls_land_once_and_answer_one_outcome() {
     }
     let mut results = Vec::new();
     for thread in threads {
-        results.push(thread.join().unwrap().unwrap());
+        results.push(thread.join().unwrap().0.unwrap());
     }
     // Both calls report the same landed outcome, and the ref moved once.
     let schema = Backend::test_schema(dir.path());
@@ -229,6 +229,7 @@ fn a_call_resumed_after_its_twin_settled_returns_the_twin_s_outcome() {
     // The twin finishes the land: the ref moves once.
     let twin = Lands::default()
         .land(&store, &Caller("t".into()), &req, std::time::Duration::ZERO)
+        .0
         .unwrap();
     assert_eq!(twin.state, LandState::Landed, "{}", twin.detail);
     let (head, version) = main_ref(&store);
@@ -238,6 +239,7 @@ fn a_call_resumed_after_its_twin_settled_returns_the_twin_s_outcome() {
     // returns its twin's outcome, without moving the ref again.
     let resumed = Lands::default()
         .land(&store, &Caller("t".into()), &req, std::time::Duration::ZERO)
+        .0
         .unwrap();
     assert_eq!(resumed.land_id, land_id, "a stable land id");
     assert_eq!(resumed.state, LandState::Landed, "{}", resumed.detail);

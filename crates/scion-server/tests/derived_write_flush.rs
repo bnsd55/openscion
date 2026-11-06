@@ -371,6 +371,7 @@ fn land_once(
             },
             std::time::Duration::ZERO,
         )
+        .0
         .unwrap()
 }
 
