@@ -1018,9 +1018,10 @@ mod tests {
         let url = crate::Backend::test_postgres_url(dir.path()).unwrap();
         let key = crate::Backend::test_server_lock(dir.path()).unwrap();
         let holder_url = url.clone();
-        // The second session connects up front, then queues on the key
-        // as soon as the open's session holds it: the queue puts its
-        // grant in the first moments after the drop.
+        // The second session waits for the open's session to hold the
+        // key, then asks for it: the ask queues in `pg_locks` ungranted,
+        // its grant lands the moment the drop releases, and the session
+        // holds the key for 300 ms after that.
         let held = std::thread::spawn(move || {
             let mut holder =
                 postgres::Client::connect(holder_url.as_str(), postgres::NoTls).unwrap();
@@ -1052,6 +1053,32 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(300));
         });
         let store = crate::Backend::open_test(dir.path()).unwrap();
+        // Drop only once the holder's ask is queued: the ungranted row
+        // in `pg_locks` pins the order, so the grant lands exactly at
+        // the release and neither thread can miss the window.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let queued = postgres::Client::connect(url.as_str(), postgres::NoTls)
+                .unwrap()
+                .query_one(
+                    "SELECT count(*) FROM pg_locks
+                     WHERE locktype = 'advisory'
+                       AND classid = (($1::bigint >> 32) & 4294967295)::oid
+                       AND objid = ($1::bigint & 4294967295)::oid
+                       AND NOT granted",
+                    &[&key],
+                )
+                .unwrap()
+                .get::<_, i64>(0);
+            if queued == 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the second session never queued on the key"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         drop(store);
         await_no_holders(&url);
         let file = url_file(dir.path(), &url);
