@@ -3963,6 +3963,9 @@ fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
     client
         .query_opt("SELECT pg_advisory_lock_shared($1)", &[P::i64(SCHEMA_LOCK)])
         .map_err(|e| {
+            // The schema's own key stays on this session: the failed
+            // open drops the client, and the connection's death takes
+            // every session lock with it.
             named_step(
                 "the migration's shared turn on the database",
                 "SELECT pg_advisory_lock_shared($1)",
