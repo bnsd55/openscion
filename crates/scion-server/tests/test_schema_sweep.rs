@@ -103,17 +103,18 @@ fn wait_unnamed(client: &mut postgres::Client, schema: &str) {
 }
 
 /// The key `register_test_schema` and the drain serialize on: the same
-/// constant test_support/pg.rs names CLEAN_LOCK, spelled here so the
+/// constant of the test schema preparation names `CLEAN_LOCK`, spelled
+/// here so the
 /// test holds exactly that lock.
 const CLEAN_LOCK: i64 = 0x5343_494F_4E53_5445;
 
 /// The key `migrate` takes before the migrations run: the same constant
-/// pg.rs names SCHEMA_LOCK, spelled here so the test holds exactly that
-/// lock.
+/// the migration names `SCHEMA_LOCK`, spelled here so the test holds
+/// exactly that lock.
 const SCHEMA_LOCK: i64 = 0x5343_494F_4E53_4348;
 
 /// One open whose registration waits for the cleanup lock: a test
-/// session holds CLEAN_LOCK just over the writer's 5 s lock clock while
+/// session holds `CLEAN_LOCK` just over the writer's 5 s lock clock while
 /// an open runs. The test guards the preparer's absence of a lock
 /// clock: the registration runs on the preparer's session, which
 /// carries none, so the open must succeed - slow, not failed. A 55P03
@@ -148,7 +149,7 @@ fn an_open_whose_cleanup_lock_is_held_for_six_seconds_succeeds() {
 }
 
 /// One open whose migration waits for the schema lock: a test session
-/// holds SCHEMA_LOCK just over the writer's 5 s lock clock while one
+/// holds `SCHEMA_LOCK` just over the writer's 5 s lock clock while one
 /// open runs. The migration's lock is one key per database, so the
 /// open's migrate queues behind the holder under the writer's clock -
 /// on main this fails with 55P03 Busy, and the named error says which
@@ -168,12 +169,13 @@ fn an_open_whose_migration_lock_is_held_for_five_and_a_half_seconds_fails() {
     });
     std::thread::sleep(std::time::Duration::from_millis(200));
     let dir = private_tempdir();
-    let opened = Backend::open_test(dir.path());
+    let Err(err) = Backend::open_test(dir.path()) else {
+        panic!("the open succeeded while the migration lock was held")
+    };
     holder.join().unwrap();
-    let err = opened.unwrap_err();
     assert!(
-        err.to_string().contains("the schema migration lock")
-            && err.to_string().contains("SELECT pg_advisory_lock($1)"),
+        format!("{err:?}").contains("the schema migration lock")
+            && format!("{err:?}").contains("SELECT pg_advisory_lock($1)"),
         "the error names the migration's lock step: {err:?}"
     );
 }
@@ -190,7 +192,11 @@ fn eight_parallel_opens_succeed_while_stale_schemas_wait_to_drain() {
         let stale = format!("scion_test_stall{pid}_{i}");
         let mut tables = String::new();
         for t in 0..60 {
-            tables.push_str(&format!("CREATE TABLE {stale}.t{t} (a int); "));
+            tables.push_str("CREATE TABLE ");
+            tables.push_str(&stale);
+            tables.push_str(".t");
+            tables.push_str(&t.to_string());
+            tables.push_str(" (a int); ");
         }
         client
             .batch_execute(&format!(

@@ -3463,18 +3463,23 @@ pub(crate) fn map_pg_error(e: postgres::Error) -> Error {
 }
 
 /// An open step's failure: the step's name and statement ride the
-/// error's display, and the source stays the engine's own error, so a
-/// caller that matches on the class still can (#905).
+/// error's display, and the source stays the mapped engine error, whose
+/// own source is the database's error - the whole chain survives
+/// (#905).
 #[derive(Debug)]
 struct NamedStep {
     step: &'static str,
     sql: String,
-    source: postgres::Error,
+    source: Error,
 }
 
 impl std::fmt::Display for NamedStep {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "the open step `{}` failed", self.step)
+        write!(
+            f,
+            "the open step `{}` waited or failed:\n{}",
+            self.step, self.sql
+        )
     }
 }
 
@@ -3484,20 +3489,38 @@ impl std::error::Error for NamedStep {
     }
 }
 
-/// The step of the open that failed, with its statement, wrapped in the
-/// class the SQLSTATE maps to (#905).
-pub(crate) fn named_step(step: &'static str, sql: &str, e: postgres::Error) -> Error {
-    let closed = e.is_closed();
-    let code = e.code().map(|c| c.code().to_owned());
-    pg_error_of_source(
-        code.as_deref(),
-        closed,
-        Box::new(NamedStep {
-            step,
-            sql: sql.to_owned(),
-            source: e,
-        }),
-    )
+/// The step of the open that failed, with its statement, in the class
+/// the mapped error already carries (#905).
+pub(crate) fn named_step(step: &'static str, sql: &str, err: Error) -> Error {
+    use crate::error::StorageClass;
+    let class = match &err {
+        Error::Storage(storage) => Some(storage.class()),
+        _ => None,
+    };
+    let named = NamedStep {
+        step,
+        sql: sql.to_owned(),
+        source: err,
+    };
+    match class {
+        Some(StorageClass::Busy) => Error::Storage(Storage::busy(std::io::Error::other(named))),
+        Some(StorageClass::DiskFull) => {
+            Error::Storage(Storage::disk_full(std::io::Error::other(named)))
+        }
+        Some(StorageClass::Internal) => {
+            Error::Storage(Storage::internal(std::io::Error::other(named)))
+        }
+        // The classes a step's own message carries: the clock's answer
+        // names the step, and the rest stand - a NotFound or a
+        // precondition is the step's own words already.
+        None => match named.source {
+            Error::DeadlineExceeded(why) => Error::DeadlineExceeded(format!(
+                "{why}; the open step `{}` waited or failed:\n{}",
+                named.step, named.sql
+            )),
+            other => other,
+        },
+    }
 }
 
 /// The mapping on one SQLSTATE, split from [`map_pg_error`] so a unit

@@ -275,7 +275,7 @@ fn prepare_test_schema(url: &str, schema: &str, dir: &Path) -> Result<()> {
             );
             client
                 .batch_execute(&sql)
-                .map_err(|e| named_step("the test schema's name lock", &sql, e))
+                .map_err(|e| named_step("the test schema's name lock", &sql, map_pg_error(e)))
         }
     }))?;
     // The run's own sweep runs once; every preparation then drains a
@@ -290,12 +290,12 @@ fn prepare_test_schema(url: &str, schema: &str, dir: &Path) -> Result<()> {
             let sql = format!("CREATE SCHEMA IF NOT EXISTS {name};");
             client
                 .batch_execute(&sql)
-                .map_err(|e| named_step("the test schema's create", &sql, e))?;
+                .map_err(|e| named_step("the test schema's create", &sql, map_pg_error(e)))?;
             register_test_schema(client, &name, &dir).map_err(|e| {
                 named_step(
                     "the test schema's registration",
                     "SELECT pg_advisory_xact_lock(CLEAN_LOCK); ...",
-                    e,
+                    map_pg_error(e),
                 )
             })
         }
@@ -312,12 +312,12 @@ fn prepare_test_schema(url: &str, schema: &str, dir: &Path) -> Result<()> {
 /// # Errors
 ///
 /// What the database returns for the maker's connect.
-/// The step of the open that failed, with its statement, wrapped in the
-/// class the SQLSTATE maps to - the test helper's re-export of the
-/// metadata side's helper (#905).
+/// The step of the open that failed, with its statement, in the class
+/// the mapped error already carries - the test helper's re-export of
+/// the metadata side's helper (#905).
 #[cfg(any(test, feature = "test-hooks"))]
-fn named_step(step: &'static str, sql: &str, e: postgres::Error) -> Error {
-    crate::pg::named_step(step, sql, e)
+fn named_step(step: &'static str, sql: &str, err: Error) -> Error {
+    crate::pg::named_step(step, sql, err)
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
