@@ -499,13 +499,57 @@ mod tests {
         file
     }
 
+    /// Waits until no session holds the store's one-server key. A
+    /// dropped store returns before its server ends the session, and
+    /// the lock rides `pg_locks` until that session ends, so a check
+    /// that runs at once can mistake the dropped store for a live
+    /// server. The bound keeps a real holder a failure, with the count
+    /// it saw.
+    fn await_no_holders(url: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let mut db = postgres::Client::connect(url, postgres::NoTls).unwrap();
+            let schema: Option<String> = db
+                .query_one("SELECT current_schema()::text", &[])
+                .unwrap()
+                .get(0);
+            let Some(schema) = schema else {
+                panic!("the test URL's search_path names no schema");
+            };
+            let holders = db
+                .query_one(
+                    "SELECT count(*) FROM pg_locks
+                     WHERE locktype = 'advisory'
+                       AND classid = (($1::bigint >> 32) & 4294967295)::oid
+                       AND objid = ($1::bigint & 4294967295)::oid
+                       AND database = (SELECT oid FROM pg_database
+                                       WHERE datname = current_database())
+                       AND granted",
+                    &[&crate::pg::schema_lock_key(&schema)],
+                )
+                .unwrap()
+                .get::<_, i64>(0);
+            if holders == 0 {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the dropped store's lock is still held by {holders} server(s)"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+
     /// A store ready for a first boot: the test database, a marker, a
-    /// schema at this build's version, no server holding the lock.
+    /// schema at this build's version, no server holding the lock. The
+    /// open's drop returns before its server ends the session, so this
+    /// waits the session out before the caller reads `pg_locks`.
     fn ready_store() -> (tempfile::TempDir, PathBuf) {
         let dir = private_tempdir();
         let url = crate::Backend::test_postgres_url(dir.path()).unwrap();
         let store = crate::Backend::open_test(dir.path()).unwrap();
         drop(store);
+        await_no_holders(&url);
         let file = url_file(dir.path(), &url);
         (dir, file)
     }
@@ -955,6 +999,101 @@ mod tests {
                 &[&crate::pg::schema_lock_key(&schema)],
             )
             .unwrap();
+    }
+
+    /// A dropped store's session can outlive the drop in `pg_locks`:
+    /// the server ends the session after the client lets go. A second
+    /// session queued on the key takes it the moment the drop releases,
+    /// and holds it for 300 ms, so the preflight runs inside a hold
+    /// that began after the drop. The helper waits that session out
+    /// instead of handing the test a store whose lock a ghost holds,
+    /// so the preflight sees no holder.
+    #[test]
+    fn the_helper_waits_out_a_session_that_outlives_the_drop() {
+        let lock = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_memory, ()) = MemoryOverride::set(&lock);
+        let dir = private_tempdir();
+        let url = crate::Backend::test_postgres_url(dir.path()).unwrap();
+        let key = crate::Backend::test_server_lock(dir.path()).unwrap();
+        let holder_url = url.clone();
+        // The second session waits for the open's session to hold the
+        // key, then asks for it: the ask queues in `pg_locks` ungranted,
+        // its grant lands the moment the drop releases, and the session
+        // holds the key for 300 ms after that.
+        let held = std::thread::spawn(move || {
+            let mut holder =
+                postgres::Client::connect(holder_url.as_str(), postgres::NoTls).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let held: i64 = holder
+                    .query_one(
+                        "SELECT count(*) FROM pg_locks
+                         WHERE locktype = 'advisory'
+                           AND classid = (($1::bigint >> 32) & 4294967295)::oid
+                           AND objid = ($1::bigint & 4294967295)::oid
+                           AND granted",
+                        &[&key],
+                    )
+                    .unwrap()
+                    .get(0);
+                if held == 1 {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the store never took its lock"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            holder
+                .query_one("SELECT pg_advisory_lock($1)", &[&key])
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        });
+        let store = crate::Backend::open_test(dir.path()).unwrap();
+        // Drop only once the holder's ask is queued: the ungranted row
+        // in `pg_locks` pins the order, so the grant lands exactly at
+        // the release and neither thread can miss the window.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let queued = postgres::Client::connect(url.as_str(), postgres::NoTls)
+                .unwrap()
+                .query_one(
+                    "SELECT count(*) FROM pg_locks
+                     WHERE locktype = 'advisory'
+                       AND classid = (($1::bigint >> 32) & 4294967295)::oid
+                       AND objid = ($1::bigint & 4294967295)::oid
+                       AND NOT granted",
+                    &[&key],
+                )
+                .unwrap()
+                .get::<_, i64>(0);
+            if queued == 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the second session never queued on the key"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        drop(store);
+        await_no_holders(&url);
+        let file = url_file(dir.path(), &url);
+        let report = run_cli(dir.path(), Some(&file));
+        held.join().unwrap();
+        assert_eq!(
+            report.code, 0,
+            "a session that outlived the drop is not a live server:\n{:#?}",
+            report.lines
+        );
+        assert!(
+            line(&report, "one-server lock").starts_with("ok"),
+            "no server holds the store:\n{:#?}",
+            report.lines
+        );
     }
 
     /// A host under the floor warns: the floor never refuses, as in
