@@ -163,7 +163,7 @@ cell() {
   reset_cell "$name"
   curl -fsS "http://127.0.0.1:$SERVER_METRICS_PORT/metrics" \
     > "$WORK/metrics-$name-before.txt" || die "no metrics before the bench"
-  psql "$SCION_PG_URL" -X -A -t -c "SELECT wal_sync, wal_sync_time" \
+  psql "$SCION_PG_URL" -X -A -t -c "SELECT wal_sync, wal_sync_time FROM pg_stat_wal" \
     > "$WORK/wal-$name-before.txt" || die "no wal before the bench"
   window_start=$(date +%s)
   psql "$SCION_PG_URL" -X -q -c "SELECT pg_stat_statements_reset()" > /dev/null \
@@ -213,7 +213,7 @@ cell() {
   curl -fsS "http://127.0.0.1:$SERVER_METRICS_PORT/metrics" \
     > "$WORK/metrics-$name-after.txt" || die "no metrics after the bench"
   window_end=$(date +%s)
-  psql "$SCION_PG_URL" -X -A -t -c "SELECT wal_sync, wal_sync_time" \
+  psql "$SCION_PG_URL" -X -A -t -c "SELECT wal_sync, wal_sync_time FROM pg_stat_wal" \
     > "$WORK/wal-$name-after.txt" || die "no wal after the bench"
   psql "$SCION_PG_URL" -X -A -t \
     -c "SELECT calls, round(total_exec_time::numeric, 3), left(query, 160)
