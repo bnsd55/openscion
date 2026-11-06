@@ -108,11 +108,6 @@ fn wait_unnamed(client: &mut postgres::Client, schema: &str) {
 /// test holds exactly that lock.
 const CLEAN_LOCK: i64 = 0x5343_494F_4E53_5445;
 
-/// The key `migrate` takes before the migrations run: the same constant
-/// the migration names `SCHEMA_LOCK`, spelled here so the test holds
-/// exactly that lock.
-const SCHEMA_LOCK: i64 = 0x5343_494F_4E53_4348;
-
 /// One open whose registration waits for the cleanup lock: a test
 /// session holds `CLEAN_LOCK` just over the writer's 5 s lock clock while
 /// an open runs. The test guards the preparer's absence of a lock
@@ -120,7 +115,7 @@ const SCHEMA_LOCK: i64 = 0x5343_494F_4E53_4348;
 /// carries none, so the open must succeed - slow, not failed. A 55P03
 /// here would name the statement that waited (#905).
 #[test]
-fn an_open_whose_cleanup_lock_is_held_for_six_seconds_succeeds() {
+fn an_open_whose_cleanup_lock_is_held_over_the_writer_s_clock_succeeds() {
     let _lock = locked();
     let holder = std::thread::spawn(|| {
         let mut client = connect();
