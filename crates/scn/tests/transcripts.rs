@@ -665,6 +665,12 @@ fn pick_n1_files(
         if version_of(&t.since) > prev {
             continue;
         }
+        // SHORTCUT: the Scion files stay out of both legs, counted only:
+        // their fixture names a changeset id this tree's store landed,
+        // and the N-1 side's changeset id differs, so the files'
+        // request.changeset_id would not resolve there. Issue #921 pairs
+        // the fixture through the ref; then the legs run them like the
+        // rest.
         if t.method.starts_with("Scion/") {
             scion_files += 1;
             continue;
@@ -723,9 +729,14 @@ fn the_n1_side_answers_as_its_files_say() {
     walk(&corpus, &mut files).expect("the corpus holds only transcripts");
     files.sort();
     let (qualifying, scion_files, (oldest_v, oldest_s)) = pick_n1_files(&files, prev);
+    let oldest_printed = if oldest_v.0 == u64::MAX {
+        oldest_s.clone()
+    } else {
+        format!("{oldest_s} at version {oldest_v:?}")
+    };
     assert!(
         !qualifying.is_empty(),
-        "the N-1 legs have nothing to prove: the corpus's oldest since is {oldest_s} at version {oldest_v:?}, the N-1 side is {prev:?} ({printed})"
+        "the N-1 legs have nothing to prove: the corpus's oldest since is {oldest_printed}, the N-1 side is {prev:?} ({printed})"
     );
 
     // Leg 1: the qualifying files against the N-1 server and its tiers.
