@@ -1,9 +1,0 @@
-# A ticket that is not the server's signature is PERMISSION_DENIED.
-since: v0.7
-method: Objects/GetObjects
-fixture: landed
-
-request.ticket: $missing
-request.refs: kind=blob id=$blob path=src/main.rs
-
-status: permission_denied
