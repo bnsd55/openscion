@@ -161,7 +161,10 @@ pub fn create_changeset(
         PARK_CREATE.park(blob);
     }
     // See `tree::store_changeset`. The write's flush covers these steps.
-    tree::fill_root_tree(store, repo_id, parent)?;
+    // The fill stops at the call's deadline, as the land's does: a call
+    // that gave up leaves the committed steps, and the next create or
+    // land resumes from them instead of running to the end.
+    tree::fill_root_tree_by(store, repo_id, parent, deadline)?;
     store.write(|c| {
         let repo_id = check_parent(c, repo, parent)?;
         if c.has_changeset(repo_id, id)? {
@@ -591,6 +594,59 @@ mod tests {
         let commits = store.commits();
         create_changeset(&store, "main", &child(tip, &[]), &later()).unwrap();
         // Five root trees in steps, then the write.
+        assert_eq!(store.commits() - commits, crate::derived::steps(5) + 1);
+    }
+
+    #[test]
+    fn a_create_whose_deadline_expires_stops_at_the_fills_deadline() {
+        let _slot = damage::slot();
+        let (_dir, store, root) = store_with_root();
+        // Changesets without root trees, as after a version bump of the kind.
+        let tip = store
+            .write(|c| {
+                let repo = c.repo_id("main")?;
+                (0..4).try_fold(root, |tip, _| {
+                    c.insert_changeset(repo, &changeset(vec![tip]))
+                })
+            })
+            .unwrap();
+        let blob = upload(&store, repo(&store, "main"), b"fill\n");
+        let bytes = child(tip, &[("f", blob)]);
+        let commits = store.commits();
+        // The create parks between its file check and the fill; the test
+        // expires the deadline while it sits there, so the fill's own
+        // check is the first to see it.
+        let hooks = crate::test_support::private_tempdir();
+        PARK_CREATE.arm(hooks.path());
+        std::fs::write(hooks.path().join(format!("park-{blob}")), b"").unwrap();
+        let deadline = later();
+        let held = deadline.clone();
+        let writer = store.clone();
+        let created = std::thread::spawn(move || create_changeset(&writer, "main", &bytes, &held));
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !hooks.path().join(format!("parked-{blob}")).exists() {
+            assert!(
+                std::time::Instant::now() < give_up,
+                "the create never parked before its fill"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        deadline.test_expire();
+        std::fs::remove_file(hooks.path().join(format!("park-{blob}"))).unwrap();
+        let answer = created.join().expect("the create's thread answers");
+        PARK_CREATE.lift();
+        assert!(
+            matches!(answer, Err(crate::Error::DeadlineExceeded(_))),
+            "the fill's deadline stops the create: {answer:?}"
+        );
+        assert_eq!(
+            store.commits(),
+            commits,
+            "the fill ran past its deadline and did its work anyway"
+        );
+        // The retry create lands: the fill's steps resume under a fresh
+        // deadline, then the write commits.
+        create_changeset(&store, "main", &child(tip, &[("f", blob)]), &later()).unwrap();
         assert_eq!(store.commits() - commits, crate::derived::steps(5) + 1);
     }
 

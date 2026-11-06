@@ -338,9 +338,10 @@ pub fn derive_root_tree_within(
 ///
 /// If the first parent has no root tree, for example after a version bump,
 /// this derives it in the caller's transaction, with no bound, and holds
-/// the write connection while it runs. So a request calls [`fill_root_tree`]
-/// on the first parent before its transaction, and so does git import, for
-/// each first parent from before its batch.
+/// the write connection while it runs. So a request calls
+/// [`fill_root_tree_by`] on the first parent before its transaction,
+/// stopping at the call's deadline, and git import calls
+/// [`fill_root_tree`] for each first parent from before its batch.
 ///
 /// Like each fill step of the `derived` mechanism, it also removes a few
 /// root trees of older versions.
