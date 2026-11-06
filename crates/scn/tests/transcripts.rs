@@ -96,11 +96,19 @@ fn parse(at: &Path, text: &str) -> Transcript {
             "status" | "end" | "resume_status" => {
                 expect.push((key.to_owned(), value.to_owned()));
             }
-            "tiers" if value == "refuse" => {
+            "tiers" if value == "refuse" || value == "fresh" => {
                 expect.push((key.to_owned(), value.to_owned()));
             }
             "tiers" => panic!(
-                "{}:{}: the runner handles no tiers value but refuse: {value}",
+                "{}:{}: the runner handles no tiers value but refuse or fresh: {value}",
+                at.display(),
+                n + 1
+            ),
+            "daemon_warm" if value == "serves" => {
+                expect.push((key.to_owned(), value.to_owned()));
+            }
+            "daemon_warm" => panic!(
+                "{}:{}: the runner handles no daemon_warm value but serves: {value}",
                 at.display(),
                 n + 1
             ),
@@ -355,7 +363,15 @@ fn the_corpus_answers_as_its_files_say() {
         };
         let mint_age = minted_at.elapsed().as_secs_f64();
         let started_at = std::time::Instant::now();
-        let tier_refuses = t.expect.iter().any(|(k, v)| k == "tiers" && v == "refuse");
+        let tier_value = |name: &str| {
+            t.expect
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        };
+        let tier_refuses = tier_value("tiers") == Some("refuse");
+        let tiers_fresh = tier_value("tiers") == Some("fresh");
+        let daemon_warm_serves = tier_value("daemon_warm") == Some("serves");
         if t.method.starts_with("Objects/") {
             for url in [&tiers.server, &tiers.cache_url, &tiers.socket] {
                 if tier_refuses && url != &tiers.server {
@@ -386,10 +402,44 @@ fn the_corpus_answers_as_its_files_say() {
                     });
                     continue;
                 }
+                let daemon_warm = url == &tiers.socket;
+                if daemon_warm && daemon_warm_serves {
+                    // A daemon checks no ticket by design: it serves what
+                    // its store holds, and this file's blob is already
+                    // there from an earlier file (docs/protocol-v1.md,
+                    // section 7.1's daemon paragraph). Pin the serve, so
+                    // a daemon that starts refusing breaks the file.
+                    tiers.runtime.block_on(async {
+                        let mut client = connect(url).await;
+                        let served = client.get_objects(req_of(&t, &f)).await.is_ok();
+                        assert!(
+                            served,
+                            "{}, a warm daemon serves what its store holds",
+                            file.display()
+                        );
+                    });
+                    continue;
+                }
                 tiers
                     .runtime
                     .block_on(run_objects(&t, url, &f))
                     .unwrap_or_else(|e| panic!("{} at {}: {e}", file.display(), url));
+            }
+            if tiers_fresh {
+                // The same file again on a cache and daemon no earlier
+                // file touched: a fresh daemon forwards, and the upstream
+                // refuses, so the file's own expectations hold everywhere.
+                let fresh = Tiers::start(common::private_tempdir(), tiers.store.clone());
+                let _fresh_entered = fresh.runtime.enter();
+                for url in [&fresh.server, &fresh.cache_url, &fresh.socket] {
+                    if tier_refuses && url != &fresh.server {
+                        continue;
+                    }
+                    fresh
+                        .runtime
+                        .block_on(run_objects(&t, url, &f))
+                        .unwrap_or_else(|e| panic!("{} at {} (fresh): {e}", file.display(), url));
+                }
             }
         } else {
             tiers
@@ -1152,6 +1202,11 @@ async fn read_part_stream(
 /// empty field and pass for the wrong reason.
 fn unknown_field(what: &str, name: &str) -> String {
     format!("{what} knows no request field {name}")
+}
+
+/// The file's first `GetObjects` request, for the warm-daemon pin.
+fn req_of(t: &Transcript, f: &Fixture) -> GetObjectsRequest {
+    get_objects_request(t, f).expect("the file's request builds")
 }
 
 /// Builds the file's first `GetObjects` request.

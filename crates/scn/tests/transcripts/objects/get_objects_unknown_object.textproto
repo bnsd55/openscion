@@ -8,6 +8,8 @@ request.ticket: $ticket
 request.refs: kind=blob id=$blob path=src/main.rs
 request.refs: kind=blob id=$missing path=src/gone.rs
 
+tiers: fresh
+
 status: ok
 objects: kind=blob id=$blob
 end: stream=not_found

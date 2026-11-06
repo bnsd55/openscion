@@ -6,4 +6,12 @@ fixture: landed
 request.ticket: $missing
 request.refs: kind=blob id=$blob path=src/main.rs
 
+# On a warm daemon this blob is already in the relay's disk store, and a
+# daemon checks no ticket by design: it serves what its store holds
+# (docs/protocol-v1.md section 7.1, the daemon paragraph). The daemon_warm
+# line pins that serve; the fresh pair's daemon forwards, and the upstream
+# refuses.
+daemon_warm: serves
+tiers: fresh
+
 status: permission_denied
