@@ -337,6 +337,16 @@ fn a_sweep_drops_at_most_fifty_oldest_first() {
             "DELETE FROM public.scion_test_schemas WHERE schema LIKE 'scion_test_cap{pid}_%'"
         ))
         .unwrap();
+    // Leftover registry rows from earlier runs - some older than this
+    // test's rows - would eat the fifty slots and shift the survivors.
+    // The backlog goes first: sweeps of fifty until one drops fewer,
+    // so this run's rows are the oldest the measured sweep sees.
+    for _ in 0..20 {
+        let (dropped, _) = Backend::sweep_stale_test_schemas().unwrap();
+        if dropped < 50 {
+            break;
+        }
+    }
     let made: Vec<String> = (0..55)
         .map(|i| {
             let name = format!("scion_test_cap{pid}_{i}");
@@ -568,38 +578,48 @@ fn an_open_waits_for_its_own_schemas_migration_lock_and_not_for_another_s() {
 fn an_open_waits_while_an_older_builds_migration_holds_the_bare_key() {
     let _lock = locked();
     let held = Backend::test_bare_migration_lock();
+    let (held_hi, held_lo) = (held >> 32, held & 0xFFFF_FFFF);
     let (release, released) = std::sync::mpsc::channel::<()>();
     let holder = std::thread::spawn(move || {
         let mut client = connect();
         client
             .execute("SELECT pg_advisory_lock($1)", &[&held])
             .unwrap();
-        // The hold lasts until the open has returned, as an older
-        // build's migration window would.
-        let _ = released.recv();
+        // The hold is short - an older build's quick migration window
+        // - and lifts on its own, so no other open in the window
+        // reaches the writer's clock.
+        let _ = released.recv_timeout(std::time::Duration::from_secs(1));
         client
             .execute("SELECT pg_advisory_unlock($1)", &[&held])
             .unwrap();
     });
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    // The hold is seen in pg_locks, not assumed from a sleep: the open
+    // starts only once the older build's turn is real.
+    let holding = connect()
+        .query(
+            &format!(
+                "SELECT 1 FROM pg_locks WHERE locktype = 'advisory'
+                 AND classid = {held_hi} AND objid = {held_lo}
+                 AND mode = 'ExclusiveLock' AND granted"
+            ),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(holding.len(), 1, "the older build's turn is real");
+    let started = std::time::Instant::now();
     let dir = private_tempdir();
-    let Err(err) = Backend::open_test(dir.path()) else {
-        panic!("the open succeeded while the older build held the bare key");
-    };
+    let opened = Backend::open_test(dir.path());
+    let took = started.elapsed();
     drop(release);
     holder.join().unwrap();
-    assert!(
-        format!("{err:?}").contains("the migration's shared turn on the database")
-            && format!("{err:?}").contains("SELECT pg_advisory_lock_shared($1)"),
-        "the error names the shared take the older build kept waiting: {err:?}"
-    );
-    // With the older build's window closed, this build answers.
-    let after = private_tempdir();
-    let opened = Backend::open_test(after.path());
     assert!(
         opened.is_ok(),
         "the open answers after the older build's migration: {:?}",
         opened.err()
+    );
+    assert!(
+        took >= std::time::Duration::from_millis(1_000),
+        "the open waited out the older build's turn: {took:?}"
     );
 }
 
