@@ -1,5 +1,5 @@
 # A changeset the repo does not have is NOT_FOUND, on either side.
-since: unreleased
+since: v0.1
 method: Scion/IsAncestor
 fixture: landed
 

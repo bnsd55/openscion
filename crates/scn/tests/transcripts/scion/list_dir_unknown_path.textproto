@@ -1,5 +1,5 @@
 # A directory the snapshot does not hold is NOT_FOUND.
-since: unreleased
+since: v0.1
 method: Scion/ListDir
 fixture: landed
 

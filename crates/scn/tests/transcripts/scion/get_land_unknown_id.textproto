@@ -1,5 +1,5 @@
 # A land the repo does not hold is NOT_FOUND.
-since: unreleased
+since: v0.1
 method: Scion/GetLand
 fixture: landed
 

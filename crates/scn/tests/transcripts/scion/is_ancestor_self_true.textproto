@@ -1,5 +1,5 @@
 # A changeset is an ancestor of itself.
-since: unreleased
+since: v0.1
 method: Scion/IsAncestor
 fixture: landed
 
