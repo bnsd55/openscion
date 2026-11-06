@@ -585,10 +585,11 @@ fn an_open_waits_while_an_older_builds_migration_holds_the_bare_key() {
         client
             .execute("SELECT pg_advisory_lock($1)", &[&held])
             .unwrap();
-        // The hold is short - an older build's quick migration window
-        // - and lifts on its own, so no other open in the window
-        // reaches the writer's clock.
-        let _ = released.recv_timeout(std::time::Duration::from_secs(1));
+        // The hold lasts until the main thread releases it, about a
+        // second after the open started: an older build's quick
+        // migration window, well under the writer's clock, so no other
+        // open in the window reaches it.
+        let _ = released.recv();
         client
             .execute("SELECT pg_advisory_unlock($1)", &[&held])
             .unwrap();
@@ -606,12 +607,14 @@ fn an_open_waits_while_an_older_builds_migration_holds_the_bare_key() {
         )
         .unwrap();
     assert_eq!(holding.len(), 1, "the older build's turn is real");
-    let started = std::time::Instant::now();
     let dir = private_tempdir();
-    let opened = Backend::open_test(dir.path());
-    let took = started.elapsed();
+    let started = std::time::Instant::now();
+    let opened = std::thread::spawn(move || Backend::open_test(dir.path()));
+    std::thread::sleep(std::time::Duration::from_millis(1_000));
     drop(release);
+    let opened = opened.join().unwrap();
     holder.join().unwrap();
+    let took = started.elapsed();
     assert!(
         opened.is_ok(),
         "the open answers after the older build's migration: {:?}",
@@ -619,7 +622,7 @@ fn an_open_waits_while_an_older_builds_migration_holds_the_bare_key() {
     );
     assert!(
         took >= std::time::Duration::from_millis(1_000),
-        "the open waited out the older build's turn: {took:?}"
+        "the open waited inside the hold to its release: {took:?}"
     );
 }
 
