@@ -3911,6 +3911,51 @@ fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
     outcome.and_then(|value| restored.map(|_| value))
 }
 
+/// One migration, in its own transaction with its version bump: a
+/// migration that fails rolls its own statements back, and the
+/// versions before it stand. The steps name themselves, with the
+/// migration's ledger name in the statement the failure names (#905).
+fn run_one_migration(client: &mut PgClient, n: u32, sql: &str) -> Result<()> {
+    let step = std::time::Instant::now();
+    let mut pending = Vec::new();
+    let mut derived = DerivedPending::default();
+    let mut preload = std::collections::HashMap::new();
+    let mut history = HistoryPending::default();
+    let step_name = PG_MIGRATION_NAMES
+        .get(usize::try_from(n).expect("a schema version fits in usize") - 1)
+        .copied()
+        .unwrap_or("unnamed");
+    let mut tx = PgTx::begin(
+        client,
+        &mut pending,
+        &mut derived,
+        &mut preload,
+        &mut history,
+        None,
+    )
+    .map_err(|e| named_step("the migration's begin", "BEGIN", e))?;
+    tx.c.batch(&format!(
+        "{sql}\nINSERT INTO schema_migrations (version, name) \
+             VALUES ({}, 'postgres schema')",
+        i64::from(n)
+    ))
+    .map_err(|e| {
+        named_step(
+            "the migration itself",
+            &format!("migration {n} ({step_name})"),
+            e,
+        )
+    })?;
+    tx.commit()
+        .map_err(|e| named_step("the migration's commit", "COMMIT", e))?;
+    tracing::info!(
+        to_version = n,
+        elapsed_ms = u64::try_from(step.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "the metadata schema migrated one step"
+    );
+    Ok(())
+}
+
 /// The migrations themselves, under the session's schema lock. `allow`
 /// is the opener's right to move the schema: false turns a behind
 /// database into the refusal that names `scion-server migrate`.
@@ -4004,46 +4049,7 @@ fn migrate_under_lock(client: &mut PgClient, allow: bool) -> Result<Option<(u32,
         // One transaction per migration, with its version bump: a
         // migration that fails rolls its own statements back, and the
         // versions before it stand.
-        let step = std::time::Instant::now();
-        let mut pending = Vec::new();
-        let mut derived = DerivedPending::default();
-        let mut preload = std::collections::HashMap::new();
-        let mut history = HistoryPending::default();
-        let step_name = PG_MIGRATION_NAMES
-            .get(usize::try_from(n).expect("a schema version fits in usize") - 1)
-            .copied()
-            .unwrap_or("unnamed");
-        let mut tx = PgTx::begin(
-            client,
-            &mut pending,
-            &mut derived,
-            &mut preload,
-            &mut history,
-            None,
-        )
-        .map_err(|e| named_step("the migration's begin", "BEGIN", e))?;
-        tx.c.batch(&format!(
-            "{sql}\nINSERT INTO schema_migrations (version, name) \
-             VALUES ({}, 'postgres schema')",
-            i64::from(n)
-        ))
-        .map_err(|e| {
-            named_step(
-                "the migration itself",
-                &format!("migration {n} ({step_name})"),
-                e,
-            )
-        })?;
-        tx.commit()
-            .map_err(|e| named_step("the migration's commit", "COMMIT", e))?;
-        if version != 0 {
-            tracing::info!(
-                from_version = n - 1,
-                to_version = n,
-                elapsed_ms = u64::try_from(step.elapsed().as_millis()).unwrap_or(u64::MAX),
-                "the metadata schema migrated one step"
-            );
-        }
+        run_one_migration(client, n, sql)?;
     }
     if version == 0 {
         tracing::info!(
