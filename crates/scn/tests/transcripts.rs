@@ -329,6 +329,67 @@ fn walk(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
 /// a relay that does not check signatures cannot answer for them; the
 /// rest share one warm pair, cold only for the first file that touches it.
 #[test]
+/// The per-tier run for one file on one pair: the tier refusal, the warm
+/// daemon's serve pin, then the file's own expectations.
+fn run_objects_across_tiers(tiers: &common::Tiers, t: &Transcript, f: &Fixture, file: &Path) {
+    let tier_refuses = t.expect.iter().any(|(k, v)| k == "tiers" && v == "refuse");
+    let daemon_warm_serves = t
+        .expect
+        .iter()
+        .any(|(k, v)| k == "daemon_warm" && v == "serves");
+    for url in [&tiers.server, &tiers.cache_url, &tiers.socket] {
+        if tier_refuses && url != &tiers.server {
+            // A tier serves GetObjects only: its refusal of the
+            // other calls is the contract (section 7.1).
+            tiers.runtime.block_on(async {
+                let mut client = connect(url).await;
+                let refused = match t.method.as_str() {
+                    "Objects/ResolveRef" => client
+                        .resolve_ref(ResolveRefRequest::default())
+                        .await
+                        .err()
+                        .map(|s| s.code()),
+                    "Objects/GetRootTree" => client
+                        .get_root_tree(GetRootTreeRequest::default())
+                        .await
+                        .err()
+                        .map(|s| s.code()),
+                    _ => None,
+                };
+                assert_eq!(
+                    refused,
+                    Some(Code::Unimplemented),
+                    "{}, a tier refuses {} with UNIMPLEMENTED",
+                    file.display(),
+                    t.method
+                );
+            });
+            continue;
+        }
+        if url == &tiers.socket && daemon_warm_serves {
+            // A daemon checks no ticket by design: it serves what its
+            // store holds, and this file's blob is already there from an
+            // earlier file (docs/protocol-v1.md, section 7.1's daemon
+            // paragraph). Pin the serve, so a daemon that starts
+            // refusing breaks the file.
+            tiers.runtime.block_on(async {
+                let mut client = connect(url).await;
+                let served = client.get_objects(req_of(t, f)).await.is_ok();
+                assert!(
+                    served,
+                    "{}, a warm daemon serves what its store holds",
+                    file.display()
+                );
+            });
+            continue;
+        }
+        tiers
+            .runtime
+            .block_on(run_objects(t, url, f))
+            .unwrap_or_else(|e| panic!("{} at {}: {e}", file.display(), url));
+    }
+}
+
 fn the_corpus_answers_as_its_files_say() {
     let corpus = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -373,58 +434,7 @@ fn the_corpus_answers_as_its_files_say() {
         let tiers_fresh = tier_value("tiers") == Some("fresh");
         let daemon_warm_serves = tier_value("daemon_warm") == Some("serves");
         if t.method.starts_with("Objects/") {
-            for url in [&tiers.server, &tiers.cache_url, &tiers.socket] {
-                if tier_refuses && url != &tiers.server {
-                    // A tier serves GetObjects only: its refusal of the
-                    // other calls is the contract (section 7.1).
-                    tiers.runtime.block_on(async {
-                        let mut client = connect(url).await;
-                        let refused = match t.method.as_str() {
-                            "Objects/ResolveRef" => client
-                                .resolve_ref(ResolveRefRequest::default())
-                                .await
-                                .err()
-                                .map(|s| s.code()),
-                            "Objects/GetRootTree" => client
-                                .get_root_tree(GetRootTreeRequest::default())
-                                .await
-                                .err()
-                                .map(|s| s.code()),
-                            _ => None,
-                        };
-                        assert_eq!(
-                            refused,
-                            Some(Code::Unimplemented),
-                            "{}, a tier refuses {} with UNIMPLEMENTED",
-                            file.display(),
-                            t.method
-                        );
-                    });
-                    continue;
-                }
-                let daemon_warm = url == &tiers.socket;
-                if daemon_warm && daemon_warm_serves {
-                    // A daemon checks no ticket by design: it serves what
-                    // its store holds, and this file's blob is already
-                    // there from an earlier file (docs/protocol-v1.md,
-                    // section 7.1's daemon paragraph). Pin the serve, so
-                    // a daemon that starts refusing breaks the file.
-                    tiers.runtime.block_on(async {
-                        let mut client = connect(url).await;
-                        let served = client.get_objects(req_of(&t, &f)).await.is_ok();
-                        assert!(
-                            served,
-                            "{}, a warm daemon serves what its store holds",
-                            file.display()
-                        );
-                    });
-                    continue;
-                }
-                tiers
-                    .runtime
-                    .block_on(run_objects(&t, url, &f))
-                    .unwrap_or_else(|e| panic!("{} at {}: {e}", file.display(), url));
-            }
+            run_objects_across_tiers(&tiers, &t, &f, &file);
             if tiers_fresh {
                 // The same file again on a cache and daemon no earlier
                 // file touched: a fresh daemon forwards, and the upstream
