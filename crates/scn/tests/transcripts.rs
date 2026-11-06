@@ -670,13 +670,13 @@ fn pick_n1_files(files: &[PathBuf], prev: (u64, u64, u64)) -> (Vec<(PathBuf, Tra
 }
 
 /// The Ok-on-$cs control guards the Scion refusal files that name $cs:
-/// a wrong changeset id passes them with the refusal they expect anyway
-/// - the same NOT_FOUND answers a missing path and a missing changeset
-/// alike. Both sides derive from the files' content, so a new refusal
-/// file joins the guard by itself. The control runs first, so a wrong
-/// id fails early with the clearest line the corpus has; the leg fails
-/// naming the file when the control does not qualify with it.
-fn guard_cs_refusals(qualifying: &mut Vec<(PathBuf, Transcript)>) {
+/// a wrong changeset id passes them with the refusal they expect anyway,
+/// because the same `NOT_FOUND` answers a missing path and a missing
+/// changeset alike. Both sides derive from the files' content, so a new
+/// refusal file joins the guard by itself. The control runs first, so a
+/// wrong id fails early with the clearest line the corpus has; the leg
+/// fails naming the file when the control does not qualify with it.
+fn guard_cs_refusals(qualifying: &mut [(PathBuf, Transcript)]) {
     let names_cs = |t: &Transcript| t.request.iter().any(|(_, v)| v.contains("$cs"));
     let expects =
         |t: &Transcript, want: &str| t.expect.iter().any(|(k, v)| k == "status" && v == want);
