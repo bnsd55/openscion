@@ -663,8 +663,8 @@ fn an_open_keeps_no_lock_on_the_bare_migration_key() {
         .query(
             &format!(
                 "SELECT l.mode FROM pg_locks l
-                 WHERE l.locktype = 'advisory' AND l.classid = 0
-                   AND l.classid = {bare_hi} AND l.objid = {bare_lo}
+                 WHERE l.locktype = 'advisory' AND l.classid = {bare_hi}
+                   AND l.objid = {bare_lo}
                    AND l.pid = {pid} AND l.granted"
             ),
             &[],
