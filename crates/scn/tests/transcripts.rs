@@ -665,10 +665,9 @@ fn the_n1_side_answers_as_its_files_say() {
     files.sort();
     let (qualifying, scion_files, oldest) = pick_n1_files(&files, prev);
     if qualifying.is_empty() {
-        eprintln!(
-            "the N-1 legs ran nothing: the corpus's oldest since is {oldest:?}, the N-1 side is {prev:?} ({printed})",
+        panic!(
+            "the N-1 legs have nothing to prove: the corpus's oldest since is {oldest:?}, the N-1 side is {prev:?} ({printed})"
         );
-        return;
     }
 
     // Leg 1: the qualifying files against the N-1 server and its tiers.
