@@ -102,6 +102,85 @@ fn wait_unnamed(client: &mut postgres::Client, schema: &str) {
     );
 }
 
+/// The key `register_test_schema` and the drain serialize on: the same
+/// constant test_support/pg.rs names CLEAN_LOCK, spelled here so the
+/// test holds exactly that lock.
+const CLEAN_LOCK: i64 = 0x5343_494F_4E53_5445;
+
+/// One open whose registration waits for the cleanup lock: a test
+/// session holds CLEAN_LOCK for six seconds while an open runs, longer
+/// than the writer's 5 s lock clock. The registration runs on the
+/// preparer's session, which carries no lock clock, so the open must
+/// succeed - slow, not failed. A 55P03 here names the statement that
+/// waited (#905).
+#[test]
+fn an_open_whose_cleanup_lock_is_held_for_six_seconds_succeeds() {
+    let _lock = locked();
+    let holder = std::thread::spawn(|| {
+        let mut client = connect();
+        client
+            .execute("SELECT pg_advisory_lock($1)", &[&CLEAN_LOCK])
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(6));
+        client
+            .execute("SELECT pg_advisory_unlock($1)", &[&CLEAN_LOCK])
+            .unwrap();
+    });
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let dir = private_tempdir();
+    let started = std::time::Instant::now();
+    let store = Backend::open_test(dir.path());
+    if let Err(err) = &store {
+        panic!("the open failed while the cleanup lock was held: {err}");
+    }
+    drop(store);
+    holder.join().unwrap();
+    let took = started.elapsed();
+    assert!(
+        took >= std::time::Duration::from_secs(5),
+        "the open did not wait for the cleanup lock: {took:?}"
+    );
+}
+
+/// Eight parallel opens while stale schemas wait to be drained: the
+/// drain holds the cleanup lock across its drops, and every open's
+/// writer must start inside its own 5 s lock clock (#905).
+#[test]
+fn eight_parallel_opens_succeed_while_stale_schemas_wait_to_drain() {
+    let _lock = locked();
+    let mut client = connect();
+    let pid = std::process::id();
+    for i in 0..10 {
+        let stale = format!("scion_test_stall{pid}_{i}");
+        let mut tables = String::new();
+        for t in 0..60 {
+            tables.push_str(&format!("CREATE TABLE {stale}.t{t} (a int); "));
+        }
+        client
+            .batch_execute(&format!(
+                "CREATE SCHEMA IF NOT EXISTS {stale}; {tables}
+                 COMMENT ON SCHEMA {stale} IS '/the/directory/is/gone'"
+            ))
+            .unwrap();
+        register(&mut client, &stale, 86_400_000 * 10 - 100);
+    }
+    std::thread::scope(|scope| {
+        let results: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    let dir = private_tempdir();
+                    let opened = Backend::open_test(dir.path()).is_ok();
+                    (opened, dir)
+                })
+            })
+            .collect();
+        for result in results {
+            let (opened, _dir) = result.join().unwrap();
+            assert!(opened, "a parallel open failed");
+        }
+    });
+}
+
 /// A finished test's schema drops at a later sweep: the backend closed,
 /// its directory is gone, and no connection names the schema. The
 /// registry row goes with it.

@@ -2584,6 +2584,9 @@ struct Setup {
     /// import).
     exclusive: bool,
     outcome: SetupOutcome,
+    /// The statement whose execution failed, so the error names what
+    /// waited: a flake says which lock it lost (#905).
+    failed_sql: Option<String>,
 }
 
 impl Setup {
@@ -2594,6 +2597,7 @@ impl Setup {
             schema: schema.map(str::to_owned),
             exclusive,
             outcome: SetupOutcome::Unreachable,
+            failed_sql: None,
         };
         setup.outcome = setup.apply(client);
         setup
@@ -2616,13 +2620,12 @@ impl Setup {
             // cleanup's real check: a live connection holds it, so its
             // schema never yields the cleanup's exclusive try, whatever
             // a snapshot saw.
-            if client
-                .batch_execute(&format!(
-                    "SET search_path TO {schema}; SET application_name TO '{schema}';
-                     SELECT pg_advisory_lock_shared(hashtext('{schema}'))"
-                ))
-                .is_err()
-            {
+            let sql = format!(
+                "SET search_path TO {schema}; SET application_name TO '{schema}';
+                 SELECT pg_advisory_lock_shared(hashtext('{schema}'))"
+            );
+            if client.batch_execute(&sql).is_err() {
+                self.failed_sql = Some(sql);
                 return SetupOutcome::Unreachable;
             }
         }
@@ -2632,6 +2635,7 @@ impl Setup {
             // `--search_path=public` land in the same schema and must
             // fence each other, and schemas ride separately.
             let Ok(row) = client.query_one("SELECT current_schema()::text", &[]) else {
+                self.failed_sql = Some("SELECT current_schema()::text".to_owned());
                 return SetupOutcome::Unreachable;
             };
             // A search_path whose members all miss answers NULL: the
@@ -2816,9 +2820,13 @@ fn setup_error(setup: &Setup, ever_held: bool) -> Error {
         );
     }
     if matches!(setup.outcome, SetupOutcome::Unreachable) {
-        return Error::Storage(Storage::busy(std::io::Error::other(
-            "the database was unreachable at setup",
-        )));
+        let waited = setup
+            .failed_sql
+            .as_deref()
+            .unwrap_or("the failing statement is unnamed");
+        return Error::Storage(Storage::busy(std::io::Error::other(format!(
+            "the database was unreachable at setup, waiting on:\n{waited}"
+        ))));
     }
     Error::FailedPrecondition(lost_message(ever_held).into())
 }
