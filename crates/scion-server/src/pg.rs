@@ -48,7 +48,9 @@ use crate::land::{
     EXPIRE_PER_LAND, LAND_RETENTION_SECS, LandOutcome, LandRejectReason, LandRequest, LandState,
     decode_paths, encode_paths,
 };
-use crate::meta::{FsckDerivedRow, Meta, MetaTx, RefState, RepoChangeset, RepoId, StaleLand};
+use crate::meta::{
+    FsckDerivedRow, Meta, MetaTx, RefState, RepoChangeset, RepoId, StaleLand, StartRead,
+};
 use crate::store::Blobs;
 use crate::tree::RootTree;
 
@@ -1989,6 +1991,11 @@ impl<'a> PgTx<'a> {
     /// transaction keeps it true. A row it deleted is of an older
     /// version, which no read of this kind asks for, so no stale answer
     /// can hide there.
+    ///
+    /// A held answer skips the repo-membership join on purpose: the only
+    /// rows a transaction holds are the parents and the changeset it
+    /// stores into `repo`, and the changesets insert refuses a parent
+    /// `repo` cannot see before any row is written.
     fn held_derived(&mut self, kind: &str, version: u32, cs: ChangesetId) -> Option<Vec<u8>> {
         let version = i64::from(version);
         let key = id_bytes(cs.as_bytes());
@@ -4703,26 +4710,22 @@ impl MetaTx for PgTx<'_> {
         Ok(())
     }
 
-    /// The stored bytes of a derived value, if computed. While the
-    /// importer's batching is on, the values this transaction inserted
-    /// answer first (newest insert wins), then the chains the importer
-    /// preloaded, then the database: the batch's derives chain through
-    /// the values it inserted, and the reads of the ancestors outside
-    /// the transaction cost what the preload already paid for.
     /// One statement for the walk's start: the generation rides the
     /// repo-membership join (the guard), the value is a left join on the
-    /// same row. A hold in the transaction's memory answers without a
-    /// statement, its generation `None` - the caller that breaks on a
-    /// stored value needs no generation.
+    /// same row. A hold in the transaction's memory answers with
+    /// [`StartRead::Stored`] and no statement - the only rows the
+    /// transaction holds are the parents and the changeset it stores
+    /// into `repo`, and the changesets insert refuses a parent `repo`
+    /// cannot see before any row is written.
     fn generation_and_stored(
         &mut self,
         repo: RepoId,
         kind: &str,
         version: u32,
         cs: ChangesetId,
-    ) -> Result<(Option<i64>, Option<Vec<u8>>)> {
+    ) -> Result<StartRead> {
         if let Some(bytes) = self.held_derived(kind, version, cs) {
-            return Ok((None, Some(bytes)));
+            return Ok(StartRead::Stored(bytes));
         }
         let version = i64::from(version);
         let key = id_bytes(cs.as_bytes());
@@ -4747,9 +4750,17 @@ impl MetaTx for PgTx<'_> {
         // the walk asks the same changeset's generation, and the cache
         // answers it.
         self.gen_cache.insert((repo.0, key), generation);
-        Ok((Some(generation), row.get(1)))
+        Ok(row
+            .get::<_, Option<Vec<u8>>>(1)
+            .map_or(StartRead::Generation(generation), StartRead::Stored))
     }
 
+    /// The stored bytes of a derived value, if computed. While the
+    /// importer's batching is on, the values this transaction inserted
+    /// answer first (newest insert wins), then the chains the importer
+    /// preloaded, then the database: the batch's derives chain through
+    /// the values it inserted, and the reads of the ancestors outside
+    /// the transaction cost what the preload already paid for.
     fn get_derived(
         &mut self,
         kind: &str,

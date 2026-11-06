@@ -28,6 +28,7 @@ use crate::backend::Backend;
 use crate::deadline::Deadline;
 use crate::error::{Error, Result};
 use crate::meta::Meta as _;
+use crate::meta::StartRead;
 use crate::meta::{MetaTx, RepoId};
 use crate::tree;
 
@@ -747,25 +748,27 @@ impl Walk {
     /// value must not leak to a repo that cannot see the changeset. Every
     /// parent of a changeset in a repo is in that repo too, so the rest of
     /// the walk stays in it. A value the transaction holds answers with
-    /// no statement and no generation - the walk breaks on it.
+    /// no statement - the only rows a transaction holds are the parents
+    /// and the changeset it stores into `repo`, and the changesets insert
+    /// refuses a parent `repo` cannot see before any row is written.
     fn start<K: Kind>(
         c: &mut dyn MetaTx,
         repo: RepoId,
         cs: ChangesetId,
     ) -> Result<ControlFlow<K::Value, Self>> {
-        let (generation, stored) = c.generation_and_stored(repo, K::NAME, K::VERSION, cs)?;
-        if let Some(bytes) = stored {
-            let value = K::decode(&bytes).ok_or_else(|| {
-                Error::Corrupt(format!("derived {} v{} for {cs}", K::NAME, K::VERSION))
-            })?;
-            return Ok(ControlFlow::Break(value));
+        match c.generation_and_stored(repo, K::NAME, K::VERSION, cs)? {
+            StartRead::Stored(bytes) => {
+                let value = K::decode(&bytes).ok_or_else(|| {
+                    Error::Corrupt(format!("derived {} v{} for {cs}", K::NAME, K::VERSION))
+                })?;
+                Ok(ControlFlow::Break(value))
+            }
+            StartRead::Generation(generation) => Ok(ControlFlow::Continue(Self {
+                next: vec![(cs, generation)],
+                pending: Vec::new(),
+                seen: HashSet::new(),
+            })),
         }
-        let generation = generation.expect("a row that carried no value carried the generation");
-        Ok(ControlFlow::Continue(Self {
-            next: vec![(cs, generation)],
-            pending: Vec::new(),
-            seen: HashSet::new(),
-        }))
     }
 
     /// Visits at most `limit` changesets. Each one without a stored value
@@ -1582,6 +1585,41 @@ mod tests {
             store.commit(|c| derive::<ChangedPathsV1>(c, other, tip, &mut tree::lens_none(), None)),
             Err(Error::NotFound(_))
         ));
+
+        // A write into `other` of a child whose parent is `repo`'s
+        // changeset refuses too: the walk may answer the parent's value
+        // from the preload, and the changesets insert is the step that
+        // refuses the parent `other` cannot see - before any row is
+        // written.
+        let child = Changeset::new(
+            vec![tip],
+            IdentityTime::new(b"a".to_vec(), b"a@x".to_vec(), 0, 0)
+                .expect("identity fits the format"),
+            None,
+            vec![],
+            [(
+                RepoPath::new("child").unwrap(),
+                Some(FileState::Regular {
+                    content: BlobId::of(b"child".as_slice()),
+                    executable: false,
+                }),
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .expect("changeset fits the format");
+        let child_id = child.id();
+        let err = store.write(|c| tree::store_changeset(c, other, &child, &mut tree::lens_none()));
+        assert!(matches!(err, Err(Error::NotFound(_))), "{err:?}");
+        let membership = store.read(|c| c.generation(other, child_id)).unwrap_err();
+        assert!(
+            matches!(membership, Error::NotFound(_)),
+            "no changeset row in `other`"
+        );
+        let derived_row = store
+            .read(|c| Ok(c.get_derived(ChangedPathsV1::NAME, 1, child_id)?.is_some()))
+            .unwrap();
+        assert!(!derived_row, "no derived row for the refused child");
     }
 
     #[test]
