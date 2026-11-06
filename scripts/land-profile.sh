@@ -297,6 +297,59 @@ for name in $names; do
   } >> "$sum"
 done
 
+# The write lane's customers, per cell: the cumulative lane gauges of
+# /metrics, diffed across the window and divided by the lands. held is
+# the time one write transaction holds the connection; queued the time
+# it waited for it; stmt_ms the round-trip time of its statements. The
+# coverage row sums held over every customer and sets it against the
+# window's own 1/rate: the lane's whole busy time is its holds, so the
+# two agree unless an instrumented site is missing.
+names=""
+for w in $PROFILE_CELLS; do
+  names="$names land-w$w-r0 land-w$w-r$PROFILE_READERS"
+done
+for name in $names; do
+  before="$WORK/metrics-$name-before.txt"
+  after="$WORK/metrics-$name-after.txt"
+  [ -f "$before" ] && [ -f "$after" ] || continue
+  {
+    echo ""
+    echo "## the write lane in $name (per land)"
+    awk -v before="$before" -v after="$after" '
+      function val(file, gauge,   line, kv, v) {
+        v = 0
+        while ((getline line < file) > 0)
+          if (line ~ ("^" gauge "{")) { split(line, kv, " "); v += kv[2]; }
+        close(file)
+        return v
+      }
+      BEGIN {
+        m = split("record settle gc_sweep derive_steps create_commit put_blob_row other", order, " ")
+        total_held = 0
+        for (i = 1; i <= m; i++) {
+          p = order[i]
+          calls[p] = val(after, "scion_lane_calls{phase=\"" p "\"}") - val(before, "scion_lane_calls{phase=\"" p "\"}")
+          held[p] = val(after, "scion_lane_held_seconds{phase=\"" p "\"}") - val(before, "scion_lane_held_seconds{phase=\"" p "\"}")
+          queued[p] = val(after, "scion_lane_queued_seconds{phase=\"" p "\"}") - val(before, "scion_lane_queued_seconds{phase=\"" p "\"}")
+          stmts[p] = val(after, "scion_lane_stmts{phase=\"" p "\"}") - val(before, "scion_lane_stmts{phase=\"" p "\"}")
+          stmtns[p] = val(after, "scion_lane_stmt_seconds{phase=\"" p "\"}") - val(before, "scion_lane_stmt_seconds{phase=\"" p "\"}")
+          total_held += held[p]
+        }
+      }
+      { lands = $1; seconds = $2 }
+      END {
+        if (lands <= 0) { print "no lands"; exit }
+        printf "%-14s %8s %10s %10s %10s %8s\n", "customer", "calls", "queuedms", "heldms", "stmt_ms", "stmts"
+        for (i = 1; i <= m; i++) {
+          p = order[i]
+          if (calls[p] == 0) continue
+          printf "%-14s %8.1f %10.2f %10.2f %10.2f %8.1f\n", p, calls[p] / lands, queued[p] * 1000 / lands, held[p] * 1000 / lands, stmtns[p] * 1000 / lands, stmts[p] / lands
+        }
+        printf "lane holds total %.1f ms/land; the window is %.1f s for %d lands, so 1/rate is %.1f ms\n", total_held * 1000 / lands, seconds, lands, seconds * 1000 / lands
+      }' <(printf '%s %s\n' "$(jq -r '.landed' "$WORK/bench-$name-rep$PROFILE_REPS.json")" "$(jq -r '.seconds' "$WORK/bench-$name-rep$PROFILE_REPS.json")")
+  } >> "$sum"
+done
+
 note "land-profile: the summary"
 cat "$sum"
 cp "$sum" "$dest/"
