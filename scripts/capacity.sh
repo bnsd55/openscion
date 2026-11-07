@@ -102,39 +102,50 @@ pct() {
 }
 
 # cpu_ms PID CLK: the process's own CPU time (utime + stime from
-# /proc/<pid>/stat) in milliseconds since the process started. A pid
-# that is gone, or whose stat cannot be read, is an empty field - the
-# sampler's gap is data, not a crash.
+# /proc/<pid>/stat) in milliseconds since the process started. The
+# stat's second field (the name) can hold spaces and brackets, so the
+# numbers parse after the last ')': there, utime and stime are the
+# 11th and 12th fields. A pid that is gone, or whose stat cannot be
+# read, is an empty field - the sampler's gap is data, not a crash.
 cpu_ms() {
-  local pid=$1 clk=$2 stat
+  local pid=$1 clk=$2 ticks
   [ -n "$pid" ] || return 0
-  stat=$(cut -d ' ' -f 14,15 "/proc/$pid/stat" 2> /dev/null) || return 0
-  [ -n "$stat" ] || return 0
-  awk -v u="${stat%% *}" -v s="${stat#* }" -v clk="$clk" \
-    'BEGIN { printf "%d", (u + s) * 1000 / clk }'
+  ticks=$(awk '{ sub(/^[^)]*\) /, ""); print $11 + $12 }' "/proc/$pid/stat" 2> /dev/null) || return 0
+  [ -n "$ticks" ] || return 0
+  awk -v t="$ticks" -v clk="$clk" 'BEGIN { printf "%d", t * 1000 / clk }'
 }
 
-# pg_cpu_ms CLK: the postmaster's tree's CPU milliseconds, summed over
-# every postgres process the runner's /proc names (the service
-# container shares the runner's kernel, so they are all here).
+# pg_cpu_ms CLK: the Postgres service container's CPU milliseconds
+# since boot, from its cgroup's cpu.stat usage_usec. Cumulative, and
+# it keeps the CPU of backends that exited between samples - a sum of
+# /proc/<pid>/stat over the live processes does not (the sampler's own
+# psql opens and closes a backend every second, and every exit would
+# vanish from the next sum, dragging the delta low or negative). The
+# cgroup path rides any live postgres pid's /proc/<pid>/cgroup; no
+# live postgres, no row.
 pg_cpu_ms() {
-  local clk=$1 pid total=0 stat
-  for pid in $(pgrep -x postgres 2> /dev/null); do
-    stat=$(cut -d ' ' -f 14,15 "/proc/$pid/stat" 2> /dev/null) || continue
-    [ -n "$stat" ] || continue
-    total=$((total + ${stat%% *} + ${stat#* }))
-  done
-  awk -v t="$total" -v clk="$clk" 'BEGIN { printf "%d", t * 1000 / clk }'
+  local clk=$1 pid cgroup usec
+  pid=$(pgrep -x postgres 2> /dev/null | head -n 1)
+  [ -n "$pid" ] || return 0
+  cgroup=$(awk '/^0::/ { print $2 }' "/proc/$pid/cgroup" 2> /dev/null)
+  [ -n "$cgroup" ] || return 0
+  usec=$(awk '/^usage_usec / { print $2 }' "/sys/fs/cgroup$cgroup/cpu.stat" 2> /dev/null)
+  [ -n "$usec" ] || return 0
+  awk -v u="$usec" -v clk="$clk" 'BEGIN { printf "%d", u / 1000 }'
 }
 
-# bench_cpu_ms CLK: the bench clients' CPU milliseconds, summed over
-# every scn bench process the runner's /proc names.
+# bench_cpu_ms CLK: the bench client's CPU milliseconds, summed over
+# every scn bench process the runner's /proc names. One bench process
+# runs per repetition and lives the whole rep (its agents are
+# threads), so the sum loses only the exiting rep's last tick at a
+# rep boundary - at most one tick per rep, twice a cell, and the
+# rows that straddle a boundary are the cell's warm-up and cool-down.
 bench_cpu_ms() {
-  local clk=$1 pid total=0 stat
+  local clk=$1 pid total=0 ticks
   for pid in $(pgrep -f "$BIN/scn .* bench" 2> /dev/null); do
-    stat=$(cut -d ' ' -f 14,15 "/proc/$pid/stat" 2> /dev/null) || continue
-    [ -n "$stat" ] || continue
-    total=$((total + ${stat%% *} + ${stat#* }))
+    ticks=$(awk '{ sub(/^[^)]*\) /, ""); print $11 + $12 }' "/proc/$pid/stat" 2> /dev/null) || continue
+    [ -n "$ticks" ] || continue
+    total=$((total + ticks))
   done
   awk -v t="$total" -v clk="$clk" 'BEGIN { printf "%d", t * 1000 / clk }'
 }
