@@ -820,7 +820,9 @@ fn the_n1_side_answers_as_its_files_say() {
     let base = n1_fixture(&runtime, &stack.server);
     let mut ran = 0usize;
     for (file, t) in &qualifying {
-        let ticket = n1_mint(&runtime, &stack.server, &base.cs);
+        // The GetObjects file's refs name the root changeset's tree and
+        // blob: the ticket must be that tree's, as the corpus's is.
+        let ticket = n1_mint(&runtime, &stack.server, &base.root_cs);
         let f = Fixture {
             unsigned: unsigned_of(&ticket),
             ticket,
