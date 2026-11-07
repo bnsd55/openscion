@@ -1226,6 +1226,20 @@ fn n1_repo(dir: &Path) -> PathBuf {
     fs::write(src.join("src/main.rs"), b"pub fn main() {}\n").expect("the file writes");
     git(&["-C", &src.display().to_string(), "add", "-A"]);
     git(&["-C", &src.display().to_string(), "commit", "-qam", "first"]);
+    // The chain the Log, Blame and Land files replay: one line added to
+    // src/main.rs, then src/lib.rs, with the feature branch parked at
+    // the middle commit - the Land files' target.
+    fs::write(
+        src.join("src/main.rs"),
+        b"pub fn main() {}\npub fn extra() {}\n",
+    )
+    .expect("the file writes");
+    git(&["-C", &src.display().to_string(), "add", "-A"]);
+    git(&["-C", &src.display().to_string(), "commit", "-qam", "second"]);
+    git(&["-C", &src.display().to_string(), "branch", "feature"]);
+    fs::write(src.join("src/lib.rs"), b"pub const X: u8 = 7;\n").expect("the file writes");
+    git(&["-C", &src.display().to_string(), "add", "-A"]);
+    git(&["-C", &src.display().to_string(), "commit", "-qam", "third"]);
     src
 }
 
@@ -1299,6 +1313,33 @@ impl Drop for N1Db {
     }
 }
 
+/// Starts the imported N-1 server on a free port and answers its URL.
+fn start_n1_server(
+    scion: &Path,
+    server_dir: &Path,
+    key: &Path,
+    pg: &str,
+    dir: &Path,
+) -> (Child, String) {
+    let log = dir.join("server.log");
+    let mut server = spawn_logged(
+        scion.to_path_buf(),
+        [
+            "--data",
+            &server_dir.display().to_string(),
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--ticket-key",
+            &key.display().to_string(),
+        ],
+        &[("SCION_POSTGRES_URL", pg), ("SCION_TOKEN", common::TOKEN)],
+        &log,
+    );
+    let port = serving_port(&mut server, &log);
+    (server, format!("http://127.0.0.1:{port}"))
+}
+
 fn start_n1_stack(prev_bin: &Path, dir: &Path, pg: &str) -> N1Stack {
     let src = n1_repo(dir);
 
@@ -1306,18 +1347,25 @@ fn start_n1_stack(prev_bin: &Path, dir: &Path, pg: &str) -> N1Stack {
     fs::create_dir_all(&server_dir).expect("the data dir is made");
     make_private(&server_dir);
     let scion = prev_bin.join("scion-server");
-    run_to_end(
-        &scion,
-        &[
-            "--data",
-            &server_dir.display().to_string(),
-            "import",
-            "--repo",
-            common::REPO,
-            &src.display().to_string(),
-        ],
-        &[("SCION_POSTGRES_URL", pg)],
-    );
+    let data = server_dir.display().to_string();
+    for (rev, target) in [("HEAD", "main"), ("feature", "feature")] {
+        run_to_end(
+            &scion,
+            &[
+                "--data",
+                &data,
+                "import",
+                "--repo",
+                common::REPO,
+                "--rev",
+                rev,
+                "--ref",
+                target,
+                &src.display().to_string(),
+            ],
+            &[("SCION_POSTGRES_URL", pg)],
+        );
+    }
     let key = dir.join("ticket.key");
     let key_out = Command::new(&scion)
         .args([
@@ -1337,23 +1385,7 @@ fn start_n1_stack(prev_bin: &Path, dir: &Path, pg: &str) -> N1Stack {
     );
     let pub_hex = String::from_utf8_lossy(&key_out.stdout).trim().to_owned();
 
-    let server_log = dir.join("server.log");
-    let mut server = spawn_logged(
-        scion.clone(),
-        [
-            "--data",
-            &server_dir.display().to_string(),
-            "serve",
-            "--listen",
-            "127.0.0.1:0",
-            "--ticket-key",
-            &key.display().to_string(),
-        ],
-        &[("SCION_POSTGRES_URL", pg), ("SCION_TOKEN", common::TOKEN)],
-        &server_log,
-    );
-    let sport = serving_port(&mut server, &server_log);
-    let server_url = format!("http://127.0.0.1:{sport}");
+    let (server, server_url) = start_n1_server(&scion, &server_dir, &key, pg, dir);
 
     let cache_log = dir.join("cache.log");
     let mut cache = spawn_logged(
