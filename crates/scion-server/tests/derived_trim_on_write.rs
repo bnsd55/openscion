@@ -50,8 +50,11 @@ fn store_with_old_rows() -> (tempfile::TempDir, Backend) {
             let (root, _) =
                 scion_server::test_support::tree::store_changeset(c, repo, &root, &mut |_| Ok(0))?;
             assert!(c.cas_ref(repo, "main", None, root)?);
-            // One old-version row per kind: version 0 sits below each
-            // kind's current version, exactly what the trim deletes.
+            // One old-version row per kind the write path touches:
+            // version 0 sits below each kind's current version, exactly
+            // what the trim deletes. RootTree already trimmed on main;
+            // it rides the same assertion so the name covers every kind.
+            c.put_derived("root_tree", 0, root, b"old-tree")?;
             c.put_derived("commit_graph", 0, root, b"old-graph")?;
             c.put_derived("path_history", 0, root, b"old-history")?;
             Ok(())
@@ -91,6 +94,7 @@ fn one_create_trims_the_old_version_rows_of_every_kind_it_writes() {
     let left = store
         .read(|c| {
             Ok((
+                c.get_derived("root_tree", 0, base)?.is_some(),
                 c.get_derived("commit_graph", 0, base)?.is_some(),
                 c.get_derived("path_history", 0, base)?.is_some(),
             ))
@@ -98,7 +102,7 @@ fn one_create_trims_the_old_version_rows_of_every_kind_it_writes() {
         .unwrap();
     assert_eq!(
         left,
-        (false, false),
+        (false, false, false),
         "an old-version row of each kind survives one create: the write \
          path's trim is missing"
     );
