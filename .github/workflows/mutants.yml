@@ -43,15 +43,17 @@ on:
         type: string
       runner:
         description: >-
-          empty (the default) runs ubuntu-24.04 with the Postgres service;
-          "macos-15" runs the macOS runner without it - for the modules
-          whose killing tests are macOS-gated (the auth ACL code, #986).
-          A macOS runner has no service containers, so the database
-          cannot start there; a package whose tests open it cannot be
-          mutated on this runner.
+          the runner: ubuntu-24.04 (the default) with the Postgres service;
+          macos-15 without it - for the modules whose killing tests are
+          macOS-gated (the auth ACL code, #986). A macOS runner has no
+          service containers, so the database cannot start there; a
+          package whose tests open it cannot be mutated on this runner.
         required: false
-        default: ""
-        type: string
+        default: "ubuntu-24.04"
+        type: choice
+        options:
+          - ubuntu-24.04
+          - macos-15
 
 permissions:
   contents: read
