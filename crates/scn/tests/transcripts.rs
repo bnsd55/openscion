@@ -421,37 +421,43 @@ fn seeded(n: usize) -> Vec<u8> {
     out
 }
 
-/// The last cursor each streamed reply answered, by the file's name: a
-/// continuation file names the file whose cursor it sends back, and the
-/// runner feeds it here. The corpus's order is the sorted names, so the
-/// source file always runs first.
+/// The last cursor each streamed reply answered, by the file's
+/// corpus-relative path: a continuation file names the full path of the
+/// file whose cursor it sends back, and the runner feeds it here. The
+/// full path, not the name: the corpus leg and the N-1 leg run in one
+/// process when a whole pass runs locally, hold different stores, and
+/// a name key would let one leg overwrite the other's cursor.
 static CURSORS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
+/// The key a file's cursor sits under: the path's part after
+/// `tests/`, so a file's own path and a `cursor_from` value name the
+/// same key whatever form the walker printed the path in.
+fn cursor_key(path: &str) -> String {
+    let marker = "tests/";
+    match path.rfind(marker) {
+        Some(i) => path[i + marker.len()..].to_owned(),
+        None => path.to_owned(),
+    }
+}
+
 fn remember_cursor(t: &Transcript, cursor: Vec<u8>) {
-    let name = std::path::Path::new(&t.path)
-        .file_name()
-        .expect("the file has a name")
-        .to_string_lossy()
-        .to_string();
+    let key = cursor_key(&t.path);
     CURSORS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(name, cursor);
+        .insert(key, cursor);
 }
 
 /// The cursor a `cursor_from` file sends: the reply of the file it
-/// names. Empty when that file has not run - a wiring mistake.
+/// names. Missing when that file has not run - a wiring mistake, and
+/// an error, never an empty cursor sent by luck.
 fn cursor_of(source: &str) -> Result<Vec<u8>, String> {
-    let name = std::path::Path::new(source)
-        .file_name()
-        .expect("the source has a name")
-        .to_string_lossy()
-        .to_string();
+    let key = cursor_key(source);
     CURSORS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&name)
+        .get(&key)
         .cloned()
         .ok_or_else(|| format!("CURSOR_FROM names {source}, which has not run in this pass"))
 }
@@ -758,12 +764,8 @@ fn check_cursor_sources(files: &[PathBuf]) -> Result<(), String> {
         std::collections::HashMap::new();
     for file in files {
         let text = fs::read_to_string(file).expect("the transcript opens");
-        let name = file
-            .file_name()
-            .expect("the file has a name")
-            .to_string_lossy()
-            .to_string();
-        sinces.insert(name, version_of(&parse(file, &text).since));
+        let key = cursor_key(&file.display().to_string());
+        sinces.insert(key, version_of(&parse(file, &text).since));
     }
     for file in files {
         let text = fs::read_to_string(file).expect("the transcript opens");
@@ -772,11 +774,7 @@ fn check_cursor_sources(files: &[PathBuf]) -> Result<(), String> {
             if k != "cursor_from" {
                 continue;
             }
-            let name = std::path::Path::new(v)
-                .file_name()
-                .expect("the source has a name")
-                .to_string_lossy()
-                .to_string();
+            let name = cursor_key(v);
             let source = sinces
                 .get(&name)
                 .ok_or_else(|| format!("CURSOR_FROM names {v}, which is not in the corpus"))?;
@@ -784,6 +782,15 @@ fn check_cursor_sources(files: &[PathBuf]) -> Result<(), String> {
             if *source > mine {
                 return Err(format!(
                     "CURSOR_FROM names {v}, whose since is newer than {}'s",
+                    file.display()
+                ));
+            }
+            // The pass runs the corpus in the sorted path order, so the
+            // source must sort before its dependent: a source that
+            // sorts after would leave it without a cursor.
+            if name >= cursor_key(&file.display().to_string()) {
+                return Err(format!(
+                    "CURSOR_FROM names {v}, which sorts after {} in the corpus's run order",
                     file.display()
                 ));
             }
@@ -2461,15 +2468,10 @@ async fn run_list_dir(
 /// the fixture (an empty value pins the last page's empty cursor).
 /// `next_nonempty: true` pins that a cursor came at all.
 fn check_next(t: &Transcript, f: &Fixture) -> Result<(), String> {
-    let name = std::path::Path::new(&t.path)
-        .file_name()
-        .expect("the file has a name")
-        .to_string_lossy()
-        .to_string();
     let got = CURSORS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&name)
+        .get(&cursor_key(&t.path))
         .cloned()
         .unwrap_or_default();
     if let Some((_, v)) = t.expect.iter().find(|(k, _)| k == "next") {

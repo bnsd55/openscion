@@ -1,6 +1,8 @@
 # A changeset whose message passes one part size: the reply streams the
 # ChangesetV1 bytes in parts. The harness builds the message from a
-# seed; the transcript pins the joined length, hash and part count.
+# seed; the transcript pins the joined length and part count. A hash
+# pin cannot hold: the bytes carry the parent id, which differs per
+# store.
 since: v0.1
 method: Scion/GetChangeset
 fixture: landed
