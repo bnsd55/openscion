@@ -1,0 +1,16 @@
+# A file of more than one part size: the reply streams it in parts of
+# 1 MiB. The harness builds the file from a seed; the transcript pins
+# the joined length, its BLAKE3 and the part count.
+since: v0.1
+method: Scion/ReadFile
+fixture: landed
+ticket_for: $big_cs
+
+request.repo: r
+request.changeset_id: $big_cs
+request.path: big/seeded.txt
+
+status: ok
+reply.data_len: 1572864
+reply.data_blake3: $big_blake3
+reply.data_parts: 2

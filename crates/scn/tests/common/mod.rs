@@ -334,6 +334,20 @@ pub(crate) fn noise(len: usize) -> Vec<u8> {
 
 /// A changeset on `parent` that puts `files` (raw path and state).
 pub(crate) fn changeset(parent: Option<ChangesetId>, files: &[(&str, FileState)]) -> Changeset {
+    changeset_msg(parent, files, b"tiers\n")
+}
+
+/// A changeset on `parent` that puts `files` and carries `message`, as
+/// git import would write it: author Ada, committer n1, both at the
+/// fixed epoch, so a changeset the corpus builds and one the same
+/// commit's import builds encode to the same length.
+pub(crate) fn changeset_msg(
+    parent: Option<ChangesetId>,
+    files: &[(&str, FileState)],
+    message: &[u8],
+) -> Changeset {
+    let committer = IdentityTime::new(b"n1".to_vec(), b"n1@localhost".to_vec(), 1_700_000_000, 0)
+        .expect("identity fits the format");
     Changeset::new(
         parent.into_iter().collect(),
         IdentityTime::new(
@@ -343,8 +357,8 @@ pub(crate) fn changeset(parent: Option<ChangesetId>, files: &[(&str, FileState)]
             0,
         )
         .expect("identity fits the format"),
-        None,
-        b"tiers\n".to_vec(),
+        Some(committer),
+        message.to_vec(),
         files
             .iter()
             .map(|(path, state)| (RepoPath::new(*path).unwrap(), Some(*state)))

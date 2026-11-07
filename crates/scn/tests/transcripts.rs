@@ -63,6 +63,9 @@ struct Transcript {
     /// SHORTCUT: unread until the multi-fixture slice; that slice reads it.
     #[allow(dead_code)]
     fixture: String,
+    /// The changeset the file's ticket is minted for, when the file
+    /// reaches past the root changeset (`big_cs` and friends).
+    ticket_for: Option<String>,
     /// The `request.` lines, path and value, in file order.
     request: Vec<(String, String)>,
     /// The expectation lines, key and value, in file order.
@@ -75,6 +78,7 @@ fn parse(at: &Path, text: &str) -> Transcript {
     let mut since = None;
     let mut method = None;
     let mut fixture = None;
+    let mut ticket_for = None;
     let mut request = Vec::new();
     let mut expect = Vec::new();
     for (n, line) in text.lines().enumerate() {
@@ -100,8 +104,9 @@ fn parse(at: &Path, text: &str) -> Transcript {
             "since" => since = Some(value.to_owned()),
             "method" => method = Some(value.to_owned()),
             "fixture" => fixture = Some(value.to_owned()),
+            "ticket_for" => ticket_for = Some(value.to_owned()),
             "status" | "end" | "resume_status" | "objects" | "entries" | "next"
-            | "next_nonempty" | "cursor_from" => {
+            | "next_nonempty" | "cursor_from" | "objects_parts" => {
                 expect.push((key.to_owned(), value.to_owned()));
             }
             "tiers" if value == "refuse" || value == "fresh" => {
@@ -131,6 +136,7 @@ fn parse(at: &Path, text: &str) -> Transcript {
         since: since.unwrap_or_else(|| panic!("{} names no since", at.display())),
         method: method.unwrap_or_else(|| panic!("{} names no method", at.display())),
         fixture: fixture.unwrap_or_else(|| panic!("{} names no fixture", at.display())),
+        ticket_for,
         request,
         expect,
     }
@@ -157,6 +163,11 @@ struct Fixture {
     mid_cs: ChangesetId,
     /// The head of the blame chain: src/lines.txt at its 100th version.
     blame_head: ChangesetId,
+    /// The big side branch's head: the seeded blob, the wide tree and
+    /// the seeded message ride its one commit.
+    big_cs: ChangesetId,
+    /// The seeded content of big/seeded.txt, 1.5 MiB.
+    big_content: Vec<u8>,
     /// The root changeset's own tree: a CAS object, which `GetObjects`
     /// serves. The head's root tree is derived and lives elsewhere.
     root_tree: [u8; 32],
@@ -169,6 +180,47 @@ struct Fixture {
     /// server's keys do not sign it, and a daemon that checks no ticket
     /// still serves what its store holds.
     unsigned: Vec<u8>,
+}
+
+/// The big commit's message: the seeded bytes plus the one trailing
+/// newline git's cleanup leaves, so both sides encode to one length.
+fn big_message() -> Vec<u8> {
+    let mut msg = seeded(1_258_291);
+    msg.push(b'\n');
+    msg
+}
+
+/// The big side branch: one commit off `parent` carrying the seeded
+/// 1.5 MiB blob, the seeded 1.2 MiB message, and 14,000 one-entry files
+/// whose directory tree passes 1 MiB. Answers the branch head and the
+/// seeded blob's bytes.
+fn big_branch(store: &Backend, parent: ChangesetId) -> (ChangesetId, Vec<u8>) {
+    let big_content = seeded(1_572_864);
+    let big_blob = BlobId::of(&big_content);
+    store.blobs().put(&big_content).unwrap();
+    let mut big_files: Vec<(String, FileState)> = vec![(
+        "big/seeded.txt".to_owned(),
+        FileState::Regular {
+            content: big_blob,
+            executable: false,
+        },
+    )];
+    let dot_blob = BlobId::of(b".\n");
+    store.blobs().put(b".\n").unwrap();
+    for k in 0..14_000 {
+        big_files.push((
+            format!("wide/file-{k:05}-of-the-wide-tree-directory-entry.txt"),
+            FileState::Regular {
+                content: dot_blob,
+                executable: false,
+            },
+        ));
+    }
+    let big_changes: Vec<(&str, FileState)> =
+        big_files.iter().map(|(p, st)| (p.as_str(), *st)).collect();
+    let big_cs = common::changeset_msg(Some(parent), &big_changes, &big_message());
+    let big_id = common::land_ref(store, &big_cs, "big");
+    (big_id, big_content)
 }
 
 /// Builds the one fixture the corpus uses: the conformance test's
@@ -246,6 +298,11 @@ fn landed() -> (Tiers, Fixture) {
         );
         blame_parent = common::land_ref(&store, &version, "blame");
     }
+    // The big side branch: one commit off the head that carries the
+    // seeded 1.5 MiB blob, the seeded 1.2 MiB message, and 14,000
+    // one-entry files whose directory tree passes 1 MiB. The parts
+    // files replay its streams; the bytes ride no transcript file.
+    let (big_id, big_content) = big_branch(&store, id);
     store
         .write(|c| {
             let repo = c.repo_id(common::REPO)?;
@@ -270,6 +327,8 @@ fn landed() -> (Tiers, Fixture) {
         mid_cs: mid_id,
         root_tree,
         blame_head: blame_parent,
+        big_cs: big_id,
+        big_content,
 
         missing: missing_id(0xab),
         unsigned: unsigned_of(&ticket),
@@ -334,43 +393,71 @@ fn resolve(value: &str, f: &Fixture) -> String {
         .replace("$cs_root", &hex(f.root_cs.as_bytes()))
         .replace("$cs_mid", &hex(f.mid_cs.as_bytes()))
         .replace("$blame_head", &hex(f.blame_head.as_bytes()))
+        .replace("$big_cs", &hex(f.big_cs.as_bytes()))
+        .replace(
+            "$big_blake3",
+            &hex(blake3::hash(&f.big_content).as_bytes().as_slice()),
+        )
+        .replace("$big_blob", &hex(BlobId::of(&f.big_content).as_bytes()))
         .replace("$cs", &hex(f.cs.as_bytes()))
         .replace("$missing", &hex(&f.missing))
         .replace("$unsigned", &hex(&f.unsigned))
         .replace("$ticket", &hex(&f.ticket))
 }
 
-/// The last cursor each streamed reply answered, by the file's name: a
-/// continuation file names the file whose cursor it sends back, and the
-/// runner feeds it here. The corpus's order is the sorted names, so the
-/// source file always runs first.
+/// Builds `n` bytes of seeded text: a xorshift64 stream over the
+/// letters. The same seed answers the same bytes on every side, so the
+/// big fixtures ride no file and the transcripts pin their length and
+/// BLAKE3 instead.
+fn seeded(n: usize) -> Vec<u8> {
+    let mut x = 0x9E37_79B9_7F4A_7C15u64;
+    let mut out = Vec::with_capacity(n);
+    while out.len() < n {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        out.push(b'a' + (x % 26) as u8);
+    }
+    out
+}
+
+/// The last cursor each streamed reply answered, by the file's
+/// corpus-relative path: a continuation file names the full path of the
+/// file whose cursor it sends back, and the runner feeds it here. The
+/// full path, not the name: the corpus leg and the N-1 leg run in one
+/// process when a whole pass runs locally, hold different stores, and
+/// a name key would let one leg overwrite the other's cursor.
 static CURSORS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
+/// The key a file's cursor sits under: the path's part after
+/// `tests/`, so a file's own path and a `cursor_from` value name the
+/// same key whatever form the walker printed the path in.
+fn cursor_key(path: &str) -> String {
+    let marker = "tests/";
+    match path.rfind(marker) {
+        Some(i) => path[i + marker.len()..].to_owned(),
+        None => path.to_owned(),
+    }
+}
+
 fn remember_cursor(t: &Transcript, cursor: Vec<u8>) {
-    let name = std::path::Path::new(&t.path)
-        .file_name()
-        .expect("the file has a name")
-        .to_string_lossy()
-        .to_string();
+    let key = cursor_key(&t.path);
     CURSORS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(name, cursor);
+        .insert(key, cursor);
 }
 
 /// The cursor a `cursor_from` file sends: the reply of the file it
-/// names. Empty when that file has not run - a wiring mistake.
+/// names. Missing when that file has not run - a wiring mistake, and
+/// an error, never an empty cursor sent by luck.
 fn cursor_of(source: &str) -> Result<Vec<u8>, String> {
-    let name = std::path::Path::new(source)
-        .file_name()
-        .expect("the source has a name")
-        .to_string_lossy()
-        .to_string();
+    let key = cursor_key(source);
     CURSORS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&name)
+        .get(&key)
         .cloned()
         .ok_or_else(|| format!("CURSOR_FROM names {source}, which has not run in this pass"))
 }
@@ -648,7 +735,8 @@ fn run_objects_across_tiers(
                 let ended =
                     read_part_stream(url, &mut stream, &mut served, std::time::Instant::now())
                         .await
-                        .expect("the pinned stream reads");
+                        .expect("the pinned stream reads")
+                        .0;
                 assert!(
                     served.contains(&want),
                     "{}, a warm daemon serves what its store holds (it sent {served:?})",
@@ -676,12 +764,8 @@ fn check_cursor_sources(files: &[PathBuf]) -> Result<(), String> {
         std::collections::HashMap::new();
     for file in files {
         let text = fs::read_to_string(file).expect("the transcript opens");
-        let name = file
-            .file_name()
-            .expect("the file has a name")
-            .to_string_lossy()
-            .to_string();
-        sinces.insert(name, version_of(&parse(file, &text).since));
+        let key = cursor_key(&file.display().to_string());
+        sinces.insert(key, version_of(&parse(file, &text).since));
     }
     for file in files {
         let text = fs::read_to_string(file).expect("the transcript opens");
@@ -690,11 +774,7 @@ fn check_cursor_sources(files: &[PathBuf]) -> Result<(), String> {
             if k != "cursor_from" {
                 continue;
             }
-            let name = std::path::Path::new(v)
-                .file_name()
-                .expect("the source has a name")
-                .to_string_lossy()
-                .to_string();
+            let name = cursor_key(v);
             let source = sinces
                 .get(&name)
                 .ok_or_else(|| format!("CURSOR_FROM names {v}, which is not in the corpus"))?;
@@ -702,6 +782,15 @@ fn check_cursor_sources(files: &[PathBuf]) -> Result<(), String> {
             if *source > mine {
                 return Err(format!(
                     "CURSOR_FROM names {v}, whose since is newer than {}'s",
+                    file.display()
+                ));
+            }
+            // The pass runs the corpus in the sorted path order, so the
+            // source must sort before its dependent: a source that
+            // sorts after would leave it without a cursor.
+            if name >= cursor_key(&file.display().to_string()) {
+                return Err(format!(
+                    "CURSOR_FROM names {v}, which sorts after {} in the corpus's run order",
                     file.display()
                 ));
             }
@@ -720,8 +809,8 @@ fn the_corpus_answers_as_its_files_say() {
     files.sort();
     assert_eq!(
         files.len(),
-        39,
-        "the corpus pins 39 behaviours; a file added or removed must update this count"
+        43,
+        "the corpus pins 43 behaviours; a file added or removed must update this count"
     );
     check_cursor_sources(&files).unwrap_or_else(|e| panic!("{e}"));
     // One store and one set of tiers for the whole run: the fixture is
@@ -739,7 +828,8 @@ fn the_corpus_answers_as_its_files_say() {
             t.method
         );
         let minted_at = std::time::Instant::now();
-        let (ticket, _) = mint(&tiers, base.root_cs);
+        let ticket_cs = ticket_changeset(&t, &base, base.root_cs);
+        let (ticket, _) = mint(&tiers, ticket_cs);
         let f = Fixture {
             unsigned: unsigned_of(&ticket),
             ticket,
@@ -985,6 +1075,109 @@ fn n1_print_file(file: &std::path::Path, t: &Transcript, base: &Fixture, ticket:
     );
 }
 
+/// The blame diagnostics, before the leg's files run: the store's
+/// counts, and the N-1's own answer for the blame head (the parts'
+/// ranges and changesets, and the cursor's length).
+fn n1_blame_probe(runtime: &tokio::runtime::Runtime, pg: &str, server: &str, base: &Fixture) {
+    let blame = hex(base.blame_head.as_bytes());
+    let sql = "SELECT (SELECT count(*) FROM changesets) AS cs, (SELECT count(*) FROM derived WHERE kind = 'path_history') AS ph, (SELECT count(*) FROM repo_blobs) AS blobs";
+    let out = std::process::Command::new("psql")
+        .args(["-t", "-A", "-c", sql, pg])
+        .output()
+        .expect("psql runs");
+    eprintln!(
+        "N1 BLAME head={blame} store={}",
+        String::from_utf8_lossy(&out.stdout).trim()
+    );
+    runtime
+        .block_on(async {
+            let mut client = scion_client(server).await;
+            let reply = client
+                .blame(scion_proto::v1::BlameRequest {
+                    repo: common::REPO.into(),
+                    changeset_id: base.blame_head.as_bytes().to_vec(),
+                    path: b"src/lines.txt".to_vec(),
+                    cursor: Vec::new(),
+                })
+                .await;
+            match reply {
+                Ok(reply) => {
+                    let mut stream = reply.into_inner();
+                    let mut n = 0usize;
+                    while let Some(item) = read_bounded(&mut stream).await? {
+                        n += 1;
+                        eprintln!(
+                            "N1 BLAME part {n}: ranges={} changesets={} cursor_len={}",
+                            item.ranges.len(),
+                            item.changesets.len(),
+                            item.next_cursor.len()
+                        );
+                    }
+                }
+                Err(status) => eprintln!("N1 BLAME probe status={status:?}"),
+            }
+            Ok::<(), String>(())
+        })
+        .unwrap_or_else(|e| eprintln!("N1 BLAME probe error: {e}"));
+}
+
+/// The objects diagnostics, before the leg's files run: the N-1's own
+/// answer for the big blob through a ticket minted for its changeset.
+fn n1_objects_probe(runtime: &tokio::runtime::Runtime, server: &str, base: &Fixture) {
+    runtime
+        .block_on(async {
+            let mut client = connect(server).await;
+            let reply = client
+                .get_root_tree(GetRootTreeRequest {
+                    repo: common::REPO.into(),
+                    changeset_id: base.big_cs.as_bytes().to_vec(),
+                })
+                .await
+                .expect("the big root tree answers")
+                .into_inner();
+            eprintln!("N1 OBJECTS big_root_tree={}", hex(reply.tree_id.as_slice()));
+            let mut client = connect(server).await;
+            let req = GetObjectsRequest {
+                ticket: reply.ticket,
+                refs: vec![ObjectRef {
+                    kind: ObjectKind::Blob as i32,
+                    id: BlobId::of(&base.big_content).as_bytes().to_vec(),
+                    path: b"big/seeded.txt".to_vec(),
+                }],
+                accept: vec![Encoding::Raw as i32],
+            };
+            let mut stream = match client.get_objects(req).await {
+                Ok(stream) => stream.into_inner(),
+                Err(status) => {
+                    eprintln!("N1 OBJECTS probe status={status:?}");
+                    return Ok::<(), String>(());
+                }
+            };
+            let mut n = 0usize;
+            loop {
+                let item = match read_bounded(&mut stream).await {
+                    Ok(Some(item)) => item,
+                    Ok(None) => break,
+                    Err(e) => {
+                        eprintln!("N1 OBJECTS probe read: {e}");
+                        break;
+                    }
+                };
+                n += 1;
+                eprintln!(
+                    "N1 OBJECTS part {n}: id={} kind={} size={} data_len={}",
+                    hex(item.id.as_slice()),
+                    item.kind,
+                    item.size,
+                    item.data.len()
+                );
+            }
+            eprintln!("N1 OBJECTS parts={n}");
+            Ok::<(), String>(())
+        })
+        .unwrap_or_else(|e| eprintln!("N1 OBJECTS probe error: {e}"));
+}
+
 #[test]
 fn the_n1_side_answers_as_its_files_say() {
     let Ok(prev_bin) = std::env::var("PREV_BIN") else {
@@ -1015,10 +1208,16 @@ fn the_n1_side_answers_as_its_files_say() {
     // GetObjects file's refs name must be these.
     let (head_tree, root_tree) = n1_print_ids(&runtime, &stack.server, &base);
     n1_print_store(&pg, &base, &head_tree, &root_tree);
+    // The blame chain's shape on this side, and the N-1's own answer
+    // for the blame head, before the files run.
+    n1_blame_probe(&runtime, &pg, &stack.server, &base);
+    n1_objects_probe(&runtime, &stack.server, &base);
     for (file, t) in &qualifying {
         // The GetObjects file's refs name the root changeset's tree and
-        // blob: the ticket must be that tree's, as the corpus's is.
-        let ticket = n1_mint(&runtime, &stack.server, &base.root_cs);
+        // blob, unless the file names another changeset: the ticket
+        // must be that tree's, as the corpus's is.
+        let ticket_cs = ticket_changeset(t, &base, base.root_cs);
+        let ticket = n1_mint(&runtime, &stack.server, &ticket_cs);
         if t.method == "Objects/GetObjects" {
             n1_print_file(file, t, &base, &ticket);
         }
@@ -1064,8 +1263,10 @@ fn the_n1_side_answers_as_its_files_say() {
             continue;
         }
         // The GetObjects file's refs name the root changeset's tree and
-        // blob: the ticket must be that tree's, as leg 1's is.
-        let (ticket, _) = mint(&tiers, base2.root_cs);
+        // blob unless the file names another changeset: the ticket must
+        // be that tree's, as leg 1's is.
+        let ticket_cs = ticket_changeset(t, &base2, base2.root_cs);
+        let (ticket, _) = mint(&tiers, ticket_cs);
         let f = Fixture {
             unsigned: unsigned_of(&ticket),
             ticket,
@@ -1363,7 +1564,14 @@ fn make_private(dir: &Path) {
 
 /// Runs one git command, failing the test on a non-zero exit.
 fn git(args: &[&str]) {
-    let out = Command::new("git").args(args).output().expect("git runs");
+    let out = Command::new("git")
+        .args(args)
+        .env("GIT_AUTHOR_DATE", "1700000000 +0000")
+        .env("GIT_COMMITTER_DATE", "1700000000 +0000")
+        .env("GIT_COMMITTER_NAME", "n1")
+        .env("GIT_COMMITTER_EMAIL", "n1@localhost")
+        .output()
+        .expect("git runs");
     assert!(
         out.status.success(),
         "git {:?}: {}",
@@ -1468,6 +1676,51 @@ fn n1_repo(dir: &Path) -> PathBuf {
         ]);
     }
     git(&["-C", &src.display().to_string(), "branch", "blame"]);
+    // The big branch: the seeded 1.5 MiB file, the seeded 1.2 MiB
+    // message, and 14,000 one-entry files - the parts files' fixture.
+    // The commit rides its own branch, so main keeps its three commits.
+    git(&[
+        "-C",
+        &src.display().to_string(),
+        "checkout",
+        "-q",
+        "-b",
+        "bigtmp",
+        "main",
+    ]);
+    let big = seeded(1_572_864);
+    fs::create_dir_all(src.join("big")).expect("the big dir is made");
+    fs::write(src.join("big/seeded.txt"), &big).expect("the big file writes");
+    fs::create_dir_all(src.join("wide")).expect("the wide dir is made");
+    for k in 0..14_000 {
+        fs::write(
+            src.join(format!(
+                "wide/file-{k:05}-of-the-wide-tree-directory-entry.txt"
+            )),
+            b".\n",
+        )
+        .expect("the entry writes");
+    }
+    git(&["-C", &src.display().to_string(), "add", "-A"]);
+    let msg = big_message();
+    let msg_path = dir.join("big-message.txt");
+    fs::write(&msg_path, &msg).expect("the message writes");
+    // The commit's author, committer and times are fixed, so the
+    // imported changeset encodes to the length the corpus's own
+    // changeset encodes to; only the parent id differs per store.
+    git(&[
+        "-C",
+        &src.display().to_string(),
+        "-c",
+        "user.name=Ada",
+        "-c",
+        "user.email=ada@example.com",
+        "commit",
+        "-q",
+        "-F",
+        &msg_path.display().to_string(),
+    ]);
+    git(&["-C", &src.display().to_string(), "branch", "big"]);
     git(&["-C", &src.display().to_string(), "checkout", "-q", "main"]);
     src
 }
@@ -1577,7 +1830,12 @@ fn start_n1_stack(prev_bin: &Path, dir: &Path, pg: &str) -> N1Stack {
     make_private(&server_dir);
     let scion = prev_bin.join("scion-server");
     let data = server_dir.display().to_string();
-    for (rev, target) in [("HEAD", "main"), ("feature", "feature"), ("blame", "blame")] {
+    for (rev, target) in [
+        ("HEAD", "main"),
+        ("feature", "feature"),
+        ("blame", "blame"),
+        ("big", "big"),
+    ] {
         run_to_end(
             &scion,
             &[
@@ -1757,6 +2015,20 @@ fn n1_fixture(runtime: &tokio::runtime::Runtime, server: &str) -> Fixture {
                 .try_into()
                 .expect("the cs is 32 bytes"),
         );
+        let big_reply = client
+            .resolve_ref(scion_proto::v1::ResolveRefRequest {
+                repo: common::REPO.into(),
+                name: "big".into(),
+            })
+            .await
+            .expect("the big ref resolves")
+            .into_inner();
+        let big_cs = scion_core::ChangesetId::from_bytes(
+            big_reply
+                .changeset_id
+                .try_into()
+                .expect("the cs is 32 bytes"),
+        );
         let root_reply = client
             .get_root_tree(GetRootTreeRequest {
                 repo: common::REPO.into(),
@@ -1777,6 +2049,8 @@ fn n1_fixture(runtime: &tokio::runtime::Runtime, server: &str) -> Fixture {
             mid_cs,
             root_tree,
             blame_head,
+            big_cs,
+            big_content: seeded(1_572_864),
             missing: missing_id(0xab),
             unsigned: unsigned_of(&root_ticket),
             ticket: root_ticket,
@@ -2025,7 +2299,22 @@ async fn stream_bytes<R>(
     Ok(out)
 }
 
-/// Whether the file pins `want` as the joined stream bytes.
+/// The changeset a file's ticket names: its `ticket_for` resolved
+/// against the fixture, or the default when the file names none.
+fn ticket_changeset(t: &Transcript, f: &Fixture, default: ChangesetId) -> ChangesetId {
+    match &t.ticket_for {
+        Some(name) => {
+            let bytes = unhex(&resolve(name, f));
+            ChangesetId::from_bytes(bytes.try_into().expect("the cs is 32 bytes"))
+        }
+        None => default,
+    }
+}
+
+/// Whether the file pins `want` as the joined stream bytes, and the
+/// joined bytes' length, BLAKE3 and part count as it says. The big
+/// fixtures ride no file: the harness builds them from a seed, and the
+/// transcript pins `reply.<field>_len`, `_blake3` and `_parts`.
 fn check_stream_bytes(
     t: &Transcript,
     f: &Fixture,
@@ -2045,6 +2334,40 @@ fn check_stream_bytes(
             got.len(),
             want.iter().map(Vec::len).sum::<usize>()
         ));
+    }
+    let joined: Vec<u8> = got.concat();
+    let pins = |suffix: &str| {
+        t.expect
+            .iter()
+            .find(|(k, _)| k == &format!("reply.{field_name}{suffix}"))
+            .map(|(_, v)| v.clone())
+    };
+    if let Some(v) = pins("_len") {
+        let want_len: usize = v.parse().unwrap_or(0);
+        if joined.len() != want_len {
+            return Err(format!(
+                "reply.{field_name} joins to {} bytes, the file says {want_len}",
+                joined.len()
+            ));
+        }
+    }
+    if let Some(v) = pins("_blake3") {
+        let want_hash = resolve(&v, f);
+        let got_hash = hex(blake3::hash(&joined).as_bytes().as_slice());
+        if got_hash != want_hash {
+            return Err(format!(
+                "reply.{field_name} hashes to {got_hash}, the file says {want_hash}"
+            ));
+        }
+    }
+    if let Some(v) = pins("_parts") {
+        let want_parts: usize = v.parse().unwrap_or(0);
+        if got.len() != want_parts {
+            return Err(format!(
+                "reply.{field_name} came in {} parts, the file says {want_parts}",
+                got.len()
+            ));
+        }
     }
     Ok(())
 }
@@ -2145,15 +2468,10 @@ async fn run_list_dir(
 /// the fixture (an empty value pins the last page's empty cursor).
 /// `next_nonempty: true` pins that a cursor came at all.
 fn check_next(t: &Transcript, f: &Fixture) -> Result<(), String> {
-    let name = std::path::Path::new(&t.path)
-        .file_name()
-        .expect("the file has a name")
-        .to_string_lossy()
-        .to_string();
     let got = CURSORS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&name)
+        .get(&cursor_key(&t.path))
         .cloned()
         .unwrap_or_default();
     if let Some((_, v)) = t.expect.iter().find(|(k, _)| k == "next") {
@@ -2495,7 +2813,7 @@ async fn read_part_stream(
     stream: &mut tonic::Streaming<ObjectPart>,
     objects: &mut Vec<(i32, String)>,
     sent_at: std::time::Instant,
-) -> Result<Option<End>, String> {
+) -> Result<(Option<End>, usize), String> {
     let mut current: Option<InProgress> = None;
     let mut parts = 0usize;
     loop {
@@ -2553,7 +2871,7 @@ async fn read_part_stream(
                     sent_at.elapsed().as_secs_f64(),
                     parts
                 );
-                return Ok(None);
+                return Ok((None, parts));
             }
             Err(status) => {
                 // The object in progress ends here: check it if it came
@@ -2569,7 +2887,7 @@ async fn read_part_stream(
                     sent_at.elapsed().as_secs_f64(),
                     status.code()
                 );
-                return Ok(Some(End::Stream(status.code())));
+                return Ok((Some(End::Stream(status.code())), parts));
             }
         }
     }
@@ -2661,6 +2979,7 @@ async fn run_get_objects(
     let mut objects: Vec<(i32, String)> = Vec::new();
     let mut end = None;
     let mut rounds = 0usize;
+    let mut total_parts = 0usize;
     loop {
         rounds += 1;
         assert!(
@@ -2713,7 +3032,8 @@ async fn run_get_objects(
         };
         // The answer's part stream: the objects it sent join `objects`,
         // whole and in order. `how` is how the answer ended.
-        let how = read_part_stream(url, &mut stream, &mut objects, sent_at).await?;
+        let (how, came_parts) = read_part_stream(url, &mut stream, &mut objects, sent_at).await?;
+        total_parts += came_parts;
         if let Some(how) = how {
             end = Some(how);
             // A reply that ends in an error is over: the client asks
@@ -2761,6 +3081,14 @@ async fn run_get_objects(
         return Err(format!(
             "the answer ends {end:?}, the file says {want_end:?}"
         ));
+    }
+    if let Some((_, v)) = t.expect.iter().find(|(k, _)| k == "objects_parts") {
+        let want: usize = v.parse().unwrap_or(0);
+        if total_parts != want {
+            return Err(format!(
+                "the reply came in {total_parts} parts, the file says {want}"
+            ));
+        }
     }
     Ok(())
 }
