@@ -155,7 +155,7 @@ struct Fixture {
     /// the middle one, whose tree still holds the old src/main.rs.
     root_cs: ChangesetId,
     mid_cs: ChangesetId,
-    /// The root changeset's own tree: a CAS object, which GetObjects
+    /// The root changeset's own tree: a CAS object, which `GetObjects`
     /// serves. The head's root tree is derived and lives elsewhere.
     root_tree: [u8; 32],
     /// A well-formed ID nothing has, for not-found.
@@ -1869,7 +1869,10 @@ async fn run_list_dir(
 
 async fn run_log(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> Result<(), String> {
     for (k, _) in &t.request {
-        if !matches!(k.as_str(), "repo" | "changeset_id" | "path" | "cursor" | "limit") {
+        if !matches!(
+            k.as_str(),
+            "repo" | "changeset_id" | "path" | "cursor" | "limit"
+        ) {
             return Err(unknown_field("Log", k));
         }
     }
