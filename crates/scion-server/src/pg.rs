@@ -6484,9 +6484,10 @@ impl Meta for Pg {
 #[cfg(test)]
 mod tests {
     use super::{
-        Client, Conn, Job, Kind, NoTls, Setup, TxState, connect_on, delete_prefixes,
-        merged_options, run_with_retry,
+        Client, Conn, Job, Kind, NoTls, Setup, SetupFailure, TxState, connect_on, connection_gone,
+        delete_prefixes, merged_options, run_with_retry,
     };
+    use crate::error::{Error, Storage};
     use crate::pg::{Pairing, Pg, pairing_decision};
     use std::sync::Arc;
 
@@ -6881,6 +6882,48 @@ mod tests {
         tx = tx.after("BEGIN", out.is_ok());
         assert!(matches!(tx, TxState::InTx));
         let _ = client.execute("ROLLBACK", &[]);
+    }
+
+    /// A real `postgres::Error` from a connect to a port nothing
+    /// answers: its source is the io error, no database error behind it.
+    /// A helper, because `expect_err` needs a `Debug` the client's ok
+    /// type does not have.
+    fn connect_error() -> postgres::Error {
+        match postgres::Client::connect("postgres://127.0.0.1:1/scion", NoTls) {
+            Err(error) => error,
+            Ok(_) => unreachable!("nothing answers on port 1"),
+        }
+    }
+
+    /// `connection_gone` finds the statement's `postgres::Error` only as
+    /// the Storage error's direct source. Every error `run_statement`
+    /// produces rides there directly (`map_pg_error` boxes it as the
+    /// source), so the reconnect path classifies today; but the setup
+    /// path wraps two levels deep (`io::Error::other(SetupFailure)`),
+    /// and a future `run_statement` wrapper of the same shape would
+    /// silently unclassify - the raw FATAL would reach the caller again
+    /// with every test green. The pin holds the shape: one level
+    /// classifies gone, the two-level wrap of the very same error does
+    /// not, so a change in either direction fails here and names the
+    /// assumption.
+    #[test]
+    fn connection_gone_reads_the_source_chain_one_level_deep() {
+        // A connect to a port nothing answers: a real `postgres::Error`
+        // whose source is the io error, no database error behind it.
+        let pg_error = connect_error();
+        let one_level = Err(Error::Storage(Storage::busy(pg_error)));
+        assert!(connection_gone(&one_level));
+
+        // The setup path's shape: the same error two levels down, inside
+        // the io error that carries the failing statement's name.
+        let pg_error = connect_error();
+        let two_level = Err(Error::Storage(Storage::busy(std::io::Error::other(
+            SetupFailure {
+                sql: "SET search_path".to_owned(),
+                source: pg_error,
+            },
+        ))));
+        assert!(!connection_gone(&two_level));
     }
 }
 
