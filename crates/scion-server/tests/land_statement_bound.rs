@@ -268,12 +268,12 @@ fn a_record_keeps_its_refusals() {
 }
 
 /// The record's round trips, pinned alone. Without a pending limit:
-/// BEGIN, the one precheck statement (the key lookup with the ref's
-/// existence riding it as a column), the insert, the expiry, COMMIT.
-/// With a limit, the quota column's answer rides the same statement and
-/// the count is the same; the lane's key statement sits between BEGIN
-/// and the lookup, so the visible count is 6. On main the ref read is
-/// its own statement, so this fails there by design.
+/// BEGIN and the lane's key in one open batch, the one precheck
+/// statement (the key lookup with the ref's existence riding it as a
+/// column), the insert, the expiry, COMMIT. With a limit, the quota
+/// column's answer rides the same statement and the count is the same.
+/// On main the ref read is its own statement, so this fails there by
+/// design.
 #[test]
 fn a_record_costs_five_statements() {
     let _log = LOG_LOCK
@@ -304,8 +304,8 @@ fn a_record_costs_five_statements() {
     let count = Backend::test_statement_count();
     let log = Backend::test_statement_log();
     assert_eq!(
-        count, 6,
-        "a record cost {count} statements, not 6:\n{log:#?}"
+        count, 5,
+        "a record cost {count} statements, not 5:\n{log:#?}"
     );
     // The fold: the ref answers inside the lookup, never its own
     // statement.
@@ -345,7 +345,7 @@ fn a_record_costs_five_statements() {
 #[test]
 fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound() {
     const BOUND: u64 = 36;
-    const EXACT: u64 = 25;
+    const EXACT: u64 = 23;
     let _log = LOG_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -376,7 +376,6 @@ fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound()
     // quota column's answer; the land's own record passes none (measured
     // with the named test binary on main c7b14fd + this fold; whoever
     // merges later merges main and re-measures).
->>>>>>> ce0cbd0 (the record's measured count is 6, and the land's is 25)
     //
     // This run has no rival writer, so the land settles in one attempt;
     // the log's one verdict UPDATE proves it. On that run the count is
