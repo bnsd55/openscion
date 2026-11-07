@@ -701,3 +701,55 @@ tests:
                 them; give new repos a second store now
                 (docs/operations.md section 6).
 
+  # A4 AuditReopenFailing: a month of successful rotations, then the
+  # gauge flips to 1 at 20m and stays - fires after 15m more. The case
+  # that catches a ratio-of-totals rule: the counters alone would never
+  # fire after earlier successes.
+  - interval: 1m
+    input_series:
+      - series: 'scion_audit_reopens_failed_total'
+        values: "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'scion_audit_reopen_failing'
+        values: "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 22m
+        alertname: AuditReopenFailing
+        exp_alerts: []
+      - eval_time: 38m
+        alertname: AuditReopenFailing
+        exp_alerts:
+          - exp_labels:
+              severity: high
+            exp_annotations:
+              response: >-
+                A SIGHUP's reopen of the audit file was refused and no
+                later signal has succeeded: the rotation silently
+                stopped and the renamed file grows. Fix what the
+                reopen's error names (a symlink at the path, an
+                unwritable directory, a full disk) and signal again
+                (docs/operations.md section 5, the audit log's
+                rotation).
+
+  # A5 AuditReopenFailing: a failure at 5m that the next signal fixed
+  # at 8m - the gauge flips back to 0, the alert never fires.
+  - interval: 1m
+    input_series:
+      - series: 'scion_audit_reopen_failing'
+        values: "0 0 0 0 0 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: AuditReopenFailing
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: AuditReopenFailing
+        exp_alerts: []
+
+  # A6 AuditReopenFailing: no failure at all - never fires.
+  - interval: 1m
+    input_series:
+      - series: 'scion_audit_reopen_failing'
+        values: "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 21m
+        alertname: AuditReopenFailing
+        exp_alerts: []
