@@ -13,7 +13,7 @@ use scion_core::{Changeset, FileState, RepoPath};
 use scion_server::Error;
 use scion_server::test_support::auth::Caller;
 use scion_server::test_support::deadline::Deadline;
-use scion_server::test_support::land::{LandRequest, LandState, Lands};
+use scion_server::test_support::land::{LandRejectReason, LandRequest, LandState, Lands};
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use scion_server::{Backend, test_support::write};
 use std::collections::BTreeMap;
@@ -153,11 +153,202 @@ fn land_statement_count(paths: usize) -> u64 {
 /// would count each other's statements.
 static LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// A land request for `key` against `target_ref`.
+fn record_request(cs: scion_core::ChangesetId, target_ref: &str, key: &str) -> LandRequest {
+    LandRequest {
+        repo: REPO.into(),
+        changeset: cs,
+        target_ref: target_ref.into(),
+        request_key: key.into(),
+        deadline: later(),
+    }
+}
+
+/// Every refusal keeps its code and its detail string: the client sees
+/// the same Status the three-statement record answered.
+#[test]
+fn a_record_keeps_its_refusals() {
+    let _log = LOG_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (_dir, store) = store_with_root(&[]);
+    let repo = store.read(|c| c.repo_id(REPO)).unwrap();
+    let base = store
+        .read(|c| {
+            Ok(c.get_ref(repo, "main")?
+                .expect("the root ref exists")
+                .target)
+        })
+        .unwrap();
+    let cs = changeset_on(&store, base, &["p000.txt".into()]);
+
+    // A repo that does not exist.
+    let request = LandRequest {
+        repo: "nope".into(),
+        ..record_request(cs, "main", "r1")
+    };
+    let error = store
+        .write(|c| c.record_land(&Caller("t".into()), &request, Some(8)))
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::NotFound(ref m) if m == "repo \"nope\""),
+        "{error:?}"
+    );
+
+    // A changeset that does not exist in the repo.
+    let missing = scion_core::ChangesetId::from_bytes([7; 32]);
+    let error = store
+        .write(|c| {
+            c.record_land(
+                &Caller("t".into()),
+                &record_request(missing, "main", "r2"),
+                Some(8),
+            )
+        })
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::NotFound(ref m) if m == &format!("changeset {missing}")),
+        "{error:?}"
+    );
+
+    // A target ref that does not exist: the row records the rejection.
+    let (_, recorded) = store
+        .write(|c| {
+            c.record_land(
+                &Caller("t".into()),
+                &record_request(cs, "gone", "r3"),
+                Some(8),
+            )
+        })
+        .unwrap();
+    assert_eq!(recorded.state, LandState::Rejected, "{recorded:?}");
+    assert_eq!(recorded.detail, "ref \"gone\" does not exist");
+    assert_eq!(recorded.reject_reason, LandRejectReason::MissingRef);
+
+    // A principal at its cap: the same refusal, before any row.
+    let error = store
+        .write(|c| {
+            c.record_land(
+                &Caller("t".into()),
+                &record_request(cs, "main", "r4"),
+                Some(0),
+            )
+        })
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::ResourceExhausted(ref m)
+            if m == "principal \"t\" has its 0 lands pending \
+                 (--max-principal-pending-lands 0); wait for one to finish"),
+        "{error:?}"
+    );
+
+    // The twin: a second record with the same key answers the first's
+    // row, land id included.
+    let (first_repo, first) = store
+        .write(|c| {
+            c.record_land(
+                &Caller("t".into()),
+                &record_request(cs, "main", "twin"),
+                Some(8),
+            )
+        })
+        .unwrap();
+    let (second_repo, second) = store
+        .write(|c| {
+            c.record_land(
+                &Caller("t".into()),
+                &record_request(cs, "main", "twin"),
+                Some(8),
+            )
+        })
+        .unwrap();
+    assert_eq!(first_repo, second_repo);
+    assert_eq!(first.land_id, second.land_id);
+    assert_eq!(first.state, second.state);
+}
+
+/// The record's round trips, pinned alone. Without a pending limit:
+/// BEGIN and the lane's key in one open batch, the one precheck
+/// statement (the key lookup with the ref's existence riding it as a
+/// column), the insert, the expiry, COMMIT. With a limit, the quota
+/// column's answer rides the same statement and the count is the same.
+/// On main the ref read is its own statement, so this fails there by
+/// design.
+#[test]
+fn a_record_costs_five_statements() {
+    let _log = LOG_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (_dir, store) = store_with_root(&[]);
+    let repo = store.read(|c| c.repo_id(REPO)).unwrap();
+    let base = store
+        .read(|c| {
+            Ok(c.get_ref(repo, "main")?
+                .expect("the root ref exists")
+                .target)
+        })
+        .unwrap();
+    let cs = changeset_on(&store, base, &["p000.txt".into()]);
+    let request = LandRequest {
+        repo: REPO.into(),
+        changeset: cs,
+        target_ref: "main".into(),
+        request_key: "count".into(),
+        deadline: later(),
+    };
+    Backend::test_reset_statement_count();
+    let (_, recorded) = store
+        .write(|c| c.record_land(&Caller("t".into()), &request, None))
+        .unwrap();
+    assert_eq!(recorded.state, LandState::Pending, "{}", recorded.detail);
+    let count = Backend::test_statement_count();
+    let log = Backend::test_statement_log();
+    assert_eq!(
+        count, 5,
+        "a record cost {count} statements, not 5:\n{log:#?}"
+    );
+    // The fold: the ref answers inside the lookup, never its own
+    // statement.
+    assert_eq!(
+        log.iter()
+            .filter(|sql| sql.starts_with("SELECT target, version FROM refs"))
+            .count(),
+        0,
+        "the record read the ref in its own statement:\n{log:#?}"
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|sql| sql.starts_with("SELECT r.repo_id"))
+            .count(),
+        1,
+        "the record's lookup ran more than once:\n{log:#?}"
+    );
+    // With a pending limit the quota's answer rides the same statement:
+    // one statement more than the land's own shape would be if the
+    // column left, so the count must not grow.
+    let request = LandRequest {
+        request_key: "count2".into(),
+        ..request
+    };
+    Backend::test_reset_statement_count();
+    let (_, recorded) = store
+        .write(|c| c.record_land(&Caller("t".into()), &request, Some(8)))
+        .unwrap();
+    assert_eq!(recorded.state, LandState::Pending, "{}", recorded.detail);
+    let limited = Backend::test_statement_count();
+    assert_eq!(
+        limited, count,
+        "a limited record cost {limited} statements, the unlimited {count}"
+    );
+}
+
 #[test]
 fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound() {
     const BOUND: u64 = 36;
-    const EXACT: u64 = 24;
-    let _log = LOG_LOCK.lock().unwrap();
+    const EXACT: u64 = 23;
+    let _log = LOG_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Today's count, with slack for one more plan attempt: each fold of
     // the round-trip card lowers this number, and a change that raises
     // it must say why. Measured in CI (probe run 41899707438): main's
@@ -178,7 +369,13 @@ fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound()
     // the land costs 26. The next fold rides each writer transaction's
     // lane key into its open batch - BEGIN, the 60 s guard, and the
     // key's wait are one round trip, the guards keeping their order -
-    // and the land costs 24.
+    // and the land costs 24. The record's three prechecks then answer
+    // in one statement - the target ref's existence and the caller's
+    // pending count ride the key lookup as columns - and the land
+    // costs 23. The record with a pending limit pays one more for the
+    // quota column's answer; the land's own record passes none (measured
+    // with the named test binary on main c7b14fd + this fold; whoever
+    // merges later merges main and re-measures).
     //
     // This run has no rival writer, so the land settles in one attempt;
     // the log's one verdict UPDATE proves it. On that run the count is
@@ -241,7 +438,9 @@ fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound()
 /// derived row alone.
 #[test]
 fn a_land_whose_head_tree_is_missing_fills_before_the_write_transaction() {
-    let _log = LOG_LOCK.lock().unwrap();
+    let _log = LOG_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let paths: Vec<String> = (0..3).map(|i| format!("p{i:03}.txt")).collect();
     let (dir, store) = store_with_root(&paths.iter().take(1).cloned().collect::<Vec<_>>());
     let lands = Lands::default();
