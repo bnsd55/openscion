@@ -2036,3 +2036,85 @@ async fn a_principal_name_that_differs_by_case_is_another_principal() {
 
 #[path = "common/mod.rs"]
 mod common;
+
+/// The side channel the docs accept (architecture.md, the `Repo
+/// isolation` row): a partial reader can tell whether a changeset id it
+/// holds is in the repo. `GetRootTree` answers a view root for a real
+/// id and `NOT_FOUND` for one the repo does not have, and on
+/// `ReadFile` and `ListDir` the two answers carry different texts - a
+/// hidden path answers `path "x" not found`, an unknown id answers
+/// `changeset <id> not found`. One bit per id: no content and no path
+/// names. The test pins both answers, so a later change to either is
+/// seen and the row must move with it.
+/// The hex of 32 bytes, for an id's text in a reply message.
+fn const_hex(id: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for byte in id {
+        out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap());
+        out.push(char::from_digit(u32::from(byte & 0xf), 16).unwrap());
+    }
+    out
+}
+
+/// The id the tests name as unknown: 32 bytes of ones.
+const UNKNOWN_ID: [u8; 32] = [7; 32];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partial_reader_can_probe_a_changeset_ids_existence() {
+    let (dir, store, tip, _docs, _secret) = repo_with_docs_and_secret();
+    let (_stop, mut pat, mut objects) = server(&store, dir.path(), partial_access(), "pat").await;
+    let unknown_hex = const_hex(&UNKNOWN_ID);
+
+    // A real id with a hidden path: `path "x" not found` on the path
+    // reads, a view root on GetRootTree.
+    let hidden = pat
+        .read_file(req::read_file(tip.as_bytes(), b"secret/b"))
+        .await
+        .unwrap_err();
+    assert_eq!(hidden.code(), Code::NotFound, "{hidden:?}");
+    assert_eq!(
+        hidden.message(),
+        "path \"secret/b\" not found",
+        "{hidden:?}"
+    );
+    let listed = pat
+        .list_dir(req::list_dir_at(REPO, tip.as_bytes(), b"secret"))
+        .await
+        .unwrap_err();
+    assert_eq!(listed.code(), Code::NotFound, "{listed:?}");
+    assert!(listed.message().starts_with("path "), "{listed:?}");
+    let root = objects
+        .get_root_tree(req::get_root_tree(tip.as_bytes()))
+        .await
+        .unwrap_or_else(|s| panic!("a real id answers its view root: {s:?}"));
+    assert!(!root.get_ref().tree_id.is_empty(), "{root:?}");
+
+    // An id the repo does not have: the same code, the documented
+    // different text.
+    let unknown = UNKNOWN_ID;
+    let absent = pat
+        .read_file(req::read_file(&unknown, b"docs/a"))
+        .await
+        .unwrap_err();
+    assert_eq!(absent.code(), hidden.code(), "{absent:?}");
+    assert_eq!(
+        absent.message(),
+        format!("changeset {unknown_hex} not found"),
+        "{absent:?}"
+    );
+    let absent_dir = pat
+        .list_dir(req::list_dir_at(REPO, &unknown, b"docs"))
+        .await
+        .unwrap_err();
+    assert_eq!(absent_dir.code(), Code::NotFound, "{absent_dir:?}");
+    assert!(
+        absent_dir
+            .message()
+            .starts_with(&format!("changeset {unknown_hex} ")),
+        "{absent_dir:?}"
+    );
+    objects
+        .get_root_tree(req::get_root_tree(&unknown))
+        .await
+        .unwrap_err();
+}
