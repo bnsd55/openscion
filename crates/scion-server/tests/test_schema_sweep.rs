@@ -852,3 +852,48 @@ fn a_write_that_loses_the_lane_key_answers_busy_and_leaves_no_transaction_open()
         "the failed write left no transaction open"
     );
 }
+
+/// A holder that lives but does not move: another connection holds
+/// `CLEAN_LOCK` past the preparation's bound, and the open must fail in
+/// bounded time with `CLEAN_LOCK`'s name in the error, not hang (#965).
+/// A killed holder is not this case: Postgres drops a session advisory
+/// lock when its session ends, so a killed test releases the lock at
+/// once. The wait exists for the holder that outlives the bound - a
+/// maker stuck in an unbounded statement, a stalled connection.
+#[test]
+fn an_open_behind_a_held_cleanup_lock_fails_bounded_and_names_it() {
+    let _lock = locked();
+    let mut holder = connect();
+    holder
+        .batch_execute(&format!("SELECT pg_advisory_lock({CLEAN_LOCK})"))
+        .unwrap();
+    let dir = private_tempdir();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let started = std::time::Instant::now();
+    std::thread::spawn(move || {
+        let out = Backend::open_test(dir.path());
+        let _ = tx.send((started.elapsed(), out));
+        drop(dir);
+    });
+    let (took, out) = rx
+        .recv_timeout(std::time::Duration::from_secs(50))
+        .expect("the open hung past 50s behind a held CLEAN_LOCK instead of failing bounded");
+    {
+        let err = out
+            .err()
+            .expect("the open behind a held CLEAN_LOCK must fail");
+        assert!(
+            took >= std::time::Duration::from_secs(10),
+            "the open gave up before its bound: {took:?}"
+        );
+        assert!(
+            took < std::time::Duration::from_secs(45),
+            "the open was not bounded: {took:?}"
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("CLEAN_LOCK"),
+            "the error names the lock: {text}"
+        );
+    }
+}
