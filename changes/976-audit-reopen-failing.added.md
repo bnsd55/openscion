@@ -1,0 +1,1 @@
+`scion_audit_reopen_failing` gauge: what the audit's last reopen did - 1 after a refused one, 0 after a successful one - the state the `AuditReopenFailing` alert reads, so a failure that a later signal fixed clears and a month of earlier successes cannot silence the next failure (#976).
