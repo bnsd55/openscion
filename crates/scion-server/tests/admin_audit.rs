@@ -815,15 +815,13 @@ fn the_start_line_counts_the_access_file_s_tokens() {
     let audit = data.join("audit.log");
     let mut start = None;
     for _ in 0..200 {
-        if let Ok(text) = fs::read_to_string(&audit) {
-            if let Some(line) = text.lines().next() {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                    if v["what"] == "start" {
-                        start = Some(v);
-                        break;
-                    }
-                }
-            }
+        if let Ok(text) = fs::read_to_string(&audit)
+            && let Some(line) = text.lines().next()
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(line)
+            && v["what"] == "start"
+        {
+            start = Some(v);
+            break;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -834,9 +832,11 @@ fn the_start_line_counts_the_access_file_s_tokens() {
             let _ = stderr.read_to_string(&mut err);
         }
         child.kill().ok();
+        let _ = child.wait();
         panic!("the server wrote no audit start line; its stderr: {err}");
     };
     child.kill().ok();
+    let _ = child.wait();
     assert_eq!(start["event"], "admin");
     assert_eq!(
         start["access_tokens"], 2,
