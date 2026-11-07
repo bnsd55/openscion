@@ -2036,6 +2036,51 @@ pub fn test_history_pending_peak_bytes() -> usize {
     HISTORY_PENDING_PEAK.load(Ordering::Relaxed)
 }
 
+/// The deferred trim's shared statements: the ranking CTEs every trim
+/// rides, and the delete of the ranked rows. One builder, so the
+/// commit's standalone flush and the land's verdict fold cannot drift
+/// apart - a reword of one is a reword of both.
+const TRIM_DELETE: &str = "DELETE FROM derived WHERE ctid IN (SELECT ctid FROM v WHERE rn <= step)";
+
+/// The ranking CTEs of the deferred trim, against the derived table.
+/// The trim's three parameters are `$base`, `$base+1` and `$base+2`:
+/// the commit's flush runs the trim alone, its parameters first, and
+/// the land's verdict fold rides the trim after the verdict's own
+/// seven.
+fn trim_ctes(base: u32) -> String {
+    format!(
+        "WITH k AS (
+             SELECT kind, version, SUM(step) AS step
+             FROM unnest(${base}::text[], ${b1}::int8[], ${b2}::int8[]) \
+                 AS t(kind, version, step)
+             GROUP BY kind, version),
+         v AS (
+             SELECT d.ctid AS ctid, k.step AS step,
+                    row_number() OVER (PARTITION BY d.kind
+                                       ORDER BY d.version) AS rn
+             FROM derived d JOIN k ON d.kind = k.kind
+                                    AND d.version < k.version)",
+        base = base,
+        b1 = base + 1,
+        b2 = base + 2,
+    )
+}
+
+/// The land's verdict statement, verbatim in both shapes: alone, and as
+/// the `landed` CTE of the fold that rides the deferred trim with it.
+const LANDS_STATEMENT: &str = "UPDATE lands SET state = $3, result_cs = $4, detail = $5, \
+                 conflict_paths = $6, reject_reason = $7, finished_at = now_epoch() \
+             WHERE repo_id = $1 AND land_id = $2 AND state = 'pending'";
+
+/// Whether one kind appears twice in the transaction's deferred
+/// deletes. No caller reaches that today (#855); the flush's fold and
+/// the land's verdict fold both stay single-statement under the same
+/// check.
+fn deferral_repeats(deferred: &[(String, i64, i64)]) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    deferred.iter().any(|(k, _, _)| !seen.insert(k))
+}
+
 /// The length of the prefix of one kind's rows that the transaction's
 /// deletes take: each call, in call order, adds what its step leaves of
 /// the rows its version still sees, after the calls before it took
@@ -2134,24 +2179,14 @@ impl<'a> PgTx<'a> {
         // call and cuts at the step, as it has since the deferral. Only
         // a kind that repeats in the batch needs the fold, and no caller
         // reaches that today (#855); the lands' settle statement bound
-        // counts on this shape staying one statement.
-        let repeats = {
-            let mut seen = std::collections::HashSet::new();
-            kinds.iter().any(|k| !seen.insert(k))
-        };
+        // counts on this shape staying one statement. The trim's
+        // statements come from the one builder the land's verdict fold
+        // shares.
+        let repeats = deferral_repeats(&self.deferred_deletes);
         if !repeats {
+            let sql = format!("{}\n{TRIM_DELETE}", trim_ctes(1));
             let deleted = self.c.execute(
-                "WITH k AS (
-                     SELECT kind, version, SUM(step) AS step
-                     FROM unnest($1::text[], $2::int8[], $3::int8[]) AS t(kind, version, step)
-                     GROUP BY kind, version),
-                 v AS (
-                     SELECT d.ctid AS ctid, k.step AS step,
-                            row_number() OVER (PARTITION BY d.kind
-                                               ORDER BY d.version) AS rn
-                     FROM derived d JOIN k ON d.kind = k.kind
-                                                            AND d.version < k.version)
-                 DELETE FROM derived WHERE ctid IN (SELECT ctid FROM v WHERE rn <= step)",
+                &sql,
                 &[
                     P::text_array(kinds),
                     P::i64_array(versions),
@@ -5947,20 +5982,72 @@ impl MetaTx for PgTx<'_> {
         conflict_paths: Vec<RepoPath>,
         reject_reason: LandRejectReason,
     ) -> Result<LandOutcome> {
-        let updated = self.c.execute(
-            "UPDATE lands SET state = $3, result_cs = $4, detail = $5,
-                 conflict_paths = $6, reject_reason = $7, finished_at = now_epoch()
-             WHERE repo_id = $1 AND land_id = $2 AND state = 'pending'",
-            &[
-                P::i64(repo.0),
-                P::i64(land_id),
-                P::text(state.as_str()),
-                P::opt_bytes(result.as_ref().map(|id| id_bytes(id.as_bytes()))),
-                P::text(&detail),
-                P::bytes(&encode_paths(&conflict_paths)),
-                P::text(reject_reason.as_str()),
-            ],
-        )?;
+        // The land's trim rides the verdict: the deferred deletes the
+        // settle transaction collected run as data-modifying CTEs of
+        // the verdict's UPDATE - one round trip instead of two - and
+        // the flush at the commit finds nothing left. The trim is the
+        // same statement the commit's flush runs, from the one builder,
+        // and the whole statement rolls back with the transaction: a
+        // verdict that fails trims nothing. No deferral, or a repeated
+        // kind (#855, the flush's own fallback), keeps today's shape.
+        let updated = if self.defer_derived
+            && !self.deferred_deletes.is_empty()
+            && !deferral_repeats(&self.deferred_deletes)
+        {
+            let kinds: Vec<String> = self
+                .deferred_deletes
+                .iter()
+                .map(|(k, _, _)| k.clone())
+                .collect();
+            let versions: Vec<i64> = self.deferred_deletes.iter().map(|(_, v, _)| *v).collect();
+            let steps: Vec<i64> = self.deferred_deletes.iter().map(|(_, _, s)| *s).collect();
+            let sql = format!(
+                "{}, trim AS ({TRIM_DELETE} RETURNING 1), \
+                 landed AS ({LANDS_STATEMENT} RETURNING land_id) \
+                 SELECT (SELECT count(*) FROM landed)::bigint AS landed, \
+                        (SELECT count(*) FROM trim)::bigint AS trimmed",
+                trim_ctes(8)
+            );
+            let rows = self.c.query(
+                &sql,
+                &[
+                    P::i64(repo.0),
+                    P::i64(land_id),
+                    P::text(state.as_str()),
+                    P::opt_bytes(result.as_ref().map(|id| id_bytes(id.as_bytes()))),
+                    P::text(&detail),
+                    P::bytes(&encode_paths(&conflict_paths)),
+                    P::text(reject_reason.as_str()),
+                    P::text_array(kinds),
+                    P::i64_array(versions),
+                    P::i64_array(steps),
+                ],
+            )?;
+            self.deferred_deletes.clear();
+            let trimmed: i64 = rows[0]
+                .try_get(1)
+                .map_err(|error| Error::Corrupt(format!("the verdict's fold count: {error}")))?;
+            if trimmed > 0 {
+                tracing::debug!(trimmed, "the verdict's fold trimmed the deferred deletes");
+            }
+            let landed: i64 = rows[0]
+                .try_get(0)
+                .map_err(|error| Error::Corrupt(format!("the verdict's fold count: {error}")))?;
+            u64::try_from(landed).unwrap_or(0)
+        } else {
+            self.c.execute(
+                LANDS_STATEMENT,
+                &[
+                    P::i64(repo.0),
+                    P::i64(land_id),
+                    P::text(state.as_str()),
+                    P::opt_bytes(result.as_ref().map(|id| id_bytes(id.as_bytes()))),
+                    P::text(&detail),
+                    P::bytes(&encode_paths(&conflict_paths)),
+                    P::text(reject_reason.as_str()),
+                ],
+            )?
+        };
         if updated != 1 {
             return Err(Error::Corrupt(format!(
                 "land {land_id} is no longer pending"

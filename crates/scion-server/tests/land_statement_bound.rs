@@ -344,8 +344,8 @@ fn a_record_costs_five_statements() {
 
 #[test]
 fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound() {
-    const BOUND: u64 = 36;
-    const EXACT: u64 = 23;
+    const BOUND: u64 = 34;
+    const EXACT: u64 = 22;
     let _log = LOG_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -372,10 +372,15 @@ fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound()
     // and the land costs 24. The record's three prechecks then answer
     // in one statement - the target ref's existence and the caller's
     // pending count ride the key lookup as columns - and the land
-    // costs 23. The record with a pending limit pays one more for the
-    // quota column's answer; the land's own record passes none (measured
-    // with the named test binary on main c7b14fd + this fold; whoever
-    // merges later merges main and re-measures).
+    // costs 23. The next fold rides the settle's deferred trim into
+    // the verdict statement - the deferred deletes of the transaction
+    // run as data-modifying CTEs of the UPDATE lands, from the one
+    // trim builder the commit's standalone flush shares, and the
+    // flush at the commit finds nothing left - and the land costs 22.
+    // The record with a pending limit pays one more for the quota
+    // column's answer; the land's own record passes none (measured
+    // with the named test binary on main 506051c).
+
     //
     // This run has no rival writer, so the land settles in one attempt;
     // the log's one verdict UPDATE proves it. On that run the count is
@@ -384,9 +389,18 @@ fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound()
     let count = land_statement_count(3);
     {
         let log = Backend::test_statement_log();
+        // The verdict statement is the folded shape when the land
+        // carried deferred deletes: the trim rides inside it as the
+        // `landed` CTE, so the log line starts with the trim's WITH,
+        // and the statement log's 90-character cut hides the rest.
+        // The EXACT count below is the guard that the fold happened:
+        // with the trim as its own statement again, the land costs one
+        // more than EXACT, and that assert fails.
         let settles = log
             .iter()
-            .filter(|sql| sql.contains("UPDATE lands SET state = $3"))
+            .filter(|sql| {
+                sql.contains("UPDATE lands SET state = $3") || sql.contains("WITH k AS (")
+            })
             .count();
         assert_eq!(settles, 1, "the land settled more than once:\n{log:#?}");
         assert_eq!(
@@ -427,6 +441,111 @@ fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound()
         "a land over 100 paths cost {large} statements, over 10 cost {small}: \
          the difference {growth} grew with the paths"
     );
+}
+
+/// The deferred trim's old rows: one row of the kind the settle
+/// transaction's write defers a delete for (the root tree), at a kind
+/// version below the current one, on the changeset the land rebases
+/// on. The settle transaction collects that delete and the fold rides
+/// it into the verdict statement.
+fn seed_old_rows(url: &str, base: scion_core::ChangesetId) {
+    let mut c = postgres::Client::connect(url, postgres::NoTls).unwrap();
+    c.execute(
+        "INSERT INTO derived (kind, version, cs, value) VALUES ('root_tree', 0, $1, 'old')",
+        &[&base.as_bytes().to_vec()],
+    )
+    .unwrap();
+}
+
+/// The old rows still in the derived table.
+fn old_row_count(url: &str) -> i64 {
+    let mut c = postgres::Client::connect(url, postgres::NoTls).unwrap();
+    c.query_one("SELECT count(*) FROM derived WHERE version = 0", &[])
+        .unwrap()
+        .get(0)
+}
+
+#[test]
+fn the_lands_trim_runs_inside_the_verdicts_transaction() {
+    let _log = LOG_LOCK.lock().unwrap();
+    let paths: Vec<String> = (0..3).map(|i| format!("p{i:03}.txt")).collect();
+    let (dir, store) = store_with_root(&paths.iter().take(1).cloned().collect::<Vec<_>>());
+    let lands = Lands::default();
+    let base = store
+        .read(|c| {
+            let repo = c.repo_id(REPO)?;
+            Ok(c.get_ref(repo, "main")?
+                .expect("the root ref exists")
+                .target)
+        })
+        .unwrap();
+    let cs = changeset_on(&store, base, &paths);
+    let url = scion_server::Backend::test_postgres_url(dir.path()).unwrap();
+    seed_old_rows(&url, base);
+    assert_eq!(old_row_count(&url), 1, "the old row is there to trim");
+    // The trim rides the verdict: the land trims the old rows in the
+    // settle transaction, and the statement count stays one under the
+    // unfolded land - the extra flush statement coming back fails here.
+    Backend::test_reset_statement_count();
+    let outcome = land_once(&store, &lands, cs);
+    assert_eq!(outcome.state, LandState::Landed, "{}", outcome.detail);
+    let count = Backend::test_statement_count();
+    assert_eq!(
+        count,
+        22,
+        "a land cost {count} statements, not the folded 22:\n{:#?}",
+        Backend::test_statement_log()
+    );
+    assert_eq!(
+        old_row_count(&url),
+        0,
+        "the land's trim left the old rows behind"
+    );
+}
+
+#[test]
+fn a_failed_verdicts_transaction_leaves_the_old_rows() {
+    let _log = LOG_LOCK.lock().unwrap();
+    let paths: Vec<String> = (0..3).map(|i| format!("p{i:03}.txt")).collect();
+    let (dir, store) = store_with_root(&paths.iter().take(1).cloned().collect::<Vec<_>>());
+    let lands = Lands::default();
+    let base = store
+        .read(|c| {
+            let repo = c.repo_id(REPO)?;
+            Ok(c.get_ref(repo, "main")?
+                .expect("the root ref exists")
+                .target)
+        })
+        .unwrap();
+    let cs = changeset_on(&store, base, &paths);
+    let url = scion_server::Backend::test_postgres_url(dir.path()).unwrap();
+    seed_old_rows(&url, base);
+    // The settle transaction dies at its commit: the whole transaction,
+    // the trim inside it, rolls back - the old rows are still there,
+    // and the land is still pending. A trim that ran outside the
+    // transaction would have kept them deleted through this failure.
+    store.fail_next_commits(1);
+    let request = LandRequest {
+        repo: REPO.into(),
+        changeset: cs,
+        target_ref: "main".into(),
+        request_key: cs.to_string(),
+        deadline: later(),
+    };
+    let failed = lands.land(&store, &Caller("t".into()), &request);
+    assert!(
+        failed.is_err(),
+        "a land whose commit was made to fail must not report success"
+    );
+    assert_eq!(
+        old_row_count(&url),
+        1,
+        "the failed transaction's trim kept the old row deleted"
+    );
+    // The retry lands, and its trim takes the old rows with it.
+    let outcome = land_once(&store, &lands, cs);
+    assert_eq!(outcome.state, LandState::Landed, "{}", outcome.detail);
+    assert_eq!(old_row_count(&url), 0, "the retry's trim ran");
 }
 
 /// A head whose root tree row is missing (a version bump's leftover, or
