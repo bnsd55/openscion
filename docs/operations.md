@@ -34,12 +34,18 @@ not in argv: any user of the machine reads argv with `ps`.
 ```sh
 umask 077
 printf %s "$SCION_TOKEN" > /srv/scion-token
+printf 'postgres://user@dbhost/scion?sslmode=require&options=--search_path%3Dscion\n' > /srv/scion/db-url
+chmod 600 /srv/scion/db-url
 ./scion-server --data /srv/scion preflight \
-  --postgres-url-file /srv/scion-db-url --token-file /srv/scion-token
+  --postgres-url-file /srv/scion/db-url --token-file /srv/scion-token
 ```
 
-The `umask 077` and the printf make the token file private (0600). The
-preflight runs every check a first boot needs and prints one line per
+The `umask 077` and the printfs make the token file and the database
+URL file private (0600): any user of the machine reads argv with `ps`,
+and a URL file the group can read is refused. The URL file is the one
+every command's `--postgres-url-file` reads ('Metadata in Postgres',
+below, shows the flags); the preflight reads it before serve does. It
+runs every check a first boot needs and prints one line per
 check - `ok`, `warn` or `fail`, the fix named in the same words serve's
 refusals use - and exits 0 all pass, 1 one warns, 2 one fails. It
 writes nothing: no marker, no schema move, no lock. The checks are
