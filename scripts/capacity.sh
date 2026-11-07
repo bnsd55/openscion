@@ -146,20 +146,16 @@ pg_cpu_ms() {
   awk -v u="$usec" -v clk="$clk" 'BEGIN { printf "%d", u / 1000 }'
 }
 
-# bench_cpu_ms CLK: the bench client's CPU milliseconds, summed over
-# every scn bench process the runner's /proc names. One bench process
-# runs per repetition and lives the whole rep (its agents are
-# threads), so the sum loses only the exiting rep's last tick at a
-# rep boundary - at most one tick per rep, twice a cell, and the
-# rows that straddle a boundary are the cell's warm-up and cool-down.
+# bench_cpu_ms PID CLK: the bench client's CPU milliseconds. One bench
+# process runs per repetition and lives the whole rep (its agents are
+# threads), and its pid rides the cell's owned pidfile, so the sampler
+# reads the exact process - no cmdline pattern to miss. Across a cell
+# the pid changes at each rep boundary: the sampler reads the newest
+# owned file, and the rows that straddle a boundary are the cell's
+# warm-up and cool-down.
 bench_cpu_ms() {
-  local clk=$1 pid total=0 ticks
-  for pid in $(pgrep -f "$BIN/scn .* bench" 2> /dev/null); do
-    ticks=$(awk '{ sub(/^[^)]*\) /, ""); print $11 + $12 }' "/proc/$pid/stat" 2> /dev/null) || continue
-    [ -n "$ticks" ] || continue
-    total=$((total + ticks))
-  done
-  awk -v t="$total" -v clk="$clk" 'BEGIN { printf "%d", t * 1000 / clk }'
+  local pid=$1 clk=$2
+  cpu_ms "$pid" "$clk"
 }
 
 # disk_ms: the work disk's read and write milliseconds since boot, from
@@ -226,11 +222,12 @@ sample_cell() {
   pid_server=$(probe owned-server sed -n 's/^pid=//p' "$WORK/owned/server")
   pid_cache=$(probe owned-cache sed -n 's/^pid=//p' "$WORK/owned/cache")
   pid_daemon=$(probe owned-daemon sed -n 's/^pid=//p' "$WORK/owned/daemon")
+  pid_bench=$(probe owned-bench sh -c 'ls "$1"/owned/bench-* 2> /dev/null | sort -V | tail -n 1' _ "$WORK" | sed -n 's/^pid=//p' | head -n 1)
   prev_server=$(probe cpu-server cpu_ms "$pid_server" "$clk")
   prev_cache=$(probe cpu-cache cpu_ms "$pid_cache" "$clk")
   prev_daemon=$(probe cpu-daemon cpu_ms "$pid_daemon" "$clk")
   prev_pg=$(probe cpu-postgres pg_cpu_ms "$clk")
-  prev_bench=$(probe cpu-bench bench_cpu_ms "$clk")
+  prev_bench=$(probe cpu-bench bench_cpu_ms "$pid_bench" "$clk")
   disk_line=$(probe disk disk_ms)
   prev_disk_read=${disk_line%% *}
   prev_disk_write=${disk_line#* }
@@ -238,11 +235,14 @@ sample_cell() {
   while [ "$(date +%s)" -lt "$END" ]; do
     local tick cur
     tick=$(date +%s)
+    # The bench's pid is re-read each tick: it changes at a rep
+    # boundary, and the newest owned file always names the live one.
+    pid_bench=$(probe owned-bench sh -c 'ls "$1"/owned/bench-* 2> /dev/null | sort -V | tail -n 1' _ "$WORK" | sed -n 's/^pid=//p' | head -n 1)
     cur_server=$(probe cpu-server cpu_ms "$pid_server" "$clk")
     cur_cache=$(probe cpu-cache cpu_ms "$pid_cache" "$clk")
     cur_daemon=$(probe cpu-daemon cpu_ms "$pid_daemon" "$clk")
     cur_pg=$(probe cpu-postgres pg_cpu_ms "$clk")
-    cur_bench=$(probe cpu-bench bench_cpu_ms "$clk")
+    cur_bench=$(probe cpu-bench bench_cpu_ms "$pid_bench" "$clk")
     disk_line=$(probe disk disk_ms)
     cur_disk_read=${disk_line%% *}
     cur_disk_write=${disk_line#* }
@@ -397,10 +397,22 @@ for w in $WRITERS; do
     bench_fail=0
     while [ "$rep" -le "$REPS" ]; do
       # The writers land for this repetition; the server's own report
-      # carries the land percentiles.
+      # carries the land percentiles. The bench runs in the background
+      # under its own pidfile (the sampler reads the pid for its CPU
+      # column), and the rep waits for it exactly as a foreground run
+      # would.
       sleep 10 # the cell's warm start, before bench begins
-      if ! "$TIMEOUT" 600 "$BIN/scn" --server "$SERVER" bench --agents "$w" \
-        --lands "$LANDS" --json > "$WORK/bench-w$w-r$r-rep$rep.json" 2> "$WORK/bench-w$w-r$r-rep$rep.log"; then
+      ( "$TIMEOUT" 600 "$BIN/scn" --server "$SERVER" bench --agents "$w" \
+        --lands "$LANDS" --json > "$WORK/bench-w$w-r$r-rep$rep.json" \
+        2> "$WORK/bench-w$w-r$r-rep$rep.log" ) &
+      bench_pid=$!
+      {
+        echo "pid=$bench_pid"
+        echo "pgid="
+        echo "comm=scn"
+        echo "cmd=bench w$w r$r rep$rep"
+      } > "$WORK/owned/bench-$w-$r-rep$rep"
+      if ! wait "$bench_pid"; then
         # A bench that failed is the cell's data, not the run's
         # failure: the envelope's edge is where errors start. The row
         # records it and the grid goes on.
