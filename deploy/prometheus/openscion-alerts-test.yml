@@ -271,6 +271,28 @@ tests:
         alertname: FreeSpaceSampleStuck
         exp_alerts: []
 
+  # A10b's boot case: the series exists before any sample lands, and a
+  # rising age from boot (the first stat never answered) fires the
+  # same alert once it crosses the threshold and holds.
+  - interval: 1m
+    input_series:
+      - series: "scion_data_free_sample_age_seconds"
+        values: "0+30x20"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: FreeSpaceSampleStuck
+        exp_alerts:
+          - exp_labels:
+              severity: high
+            exp_annotations:
+              response: >-
+                The free-space poll's statvfs has not answered for three poll
+                periods (docs/operations.md#a-stuck-free-space-sample): the
+                disk and inode alerts are reading stale numbers. Check the
+                filesystem that holds the data directory (a lost network
+                mount, a suspended device) and restore it; the free values
+                resume when a sample lands.
+
   # A11 InodesLow: under 100,000 fires after its 15m for; just above
   # 100,000 does not.
   - interval: 1m
