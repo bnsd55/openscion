@@ -170,6 +170,12 @@ pub struct Metrics {
     /// (`blob_count_set` says whether any refresh ran).
     blob_count: AtomicU64,
     blob_count_set: std::sync::atomic::AtomicBool,
+    /// Seconds the latest blob-count refresh took, success or failure
+    /// (`blob_count_refresh_set` says whether any refresh ran). The
+    /// refresh spaces itself by its own cost, so this gauge is what an
+    /// operator reads to learn how stale the count may be.
+    blob_count_refresh: AtomicU64,
+    blob_count_refresh_set: std::sync::atomic::AtomicBool,
     /// The memory floor the server's budgets sum to, set at start
     /// (`memory_floor_set` says the start-up check ran).
     memory_floor_bytes: AtomicU64,
@@ -375,6 +381,14 @@ impl Metrics {
         self.blob_count_set.store(true, Ordering::Relaxed);
     }
 
+    /// Sets the seconds the latest blob-count refresh took, success or
+    /// failure: the refresh spaces itself by this, so a slow scan waits
+    /// proportionally longer before the next one.
+    pub fn set_blob_count_refresh_seconds(&self, seconds: u64) {
+        self.blob_count_refresh.store(seconds, Ordering::Relaxed);
+        self.blob_count_refresh_set.store(true, Ordering::Relaxed);
+    }
+
     /// Sets the memory floor the server's budgets sum to, at start.
     pub fn set_memory_floor_bytes(&self, bytes: u64) {
         self.memory_floor_bytes.store(bytes, Ordering::Relaxed);
@@ -565,6 +579,15 @@ impl Metrics {
                  scion_blob_ceiling_share {}",
                 count,
                 share_of_ceiling(count)
+            );
+        }
+        if self.blob_count_refresh_set.load(Ordering::Relaxed) {
+            let _ = writeln!(
+                text,
+                "# HELP scion_blob_count_refresh_seconds Seconds the latest blob-count refresh took, success or failure; the refresh waits at least 100x this before the next one, so a large store's count may be minutes stale.\n\
+                 # TYPE scion_blob_count_refresh_seconds gauge\n\
+                 scion_blob_count_refresh_seconds {}",
+                self.blob_count_refresh.load(Ordering::Relaxed)
             );
         }
         if self.memory_floor_set.load(Ordering::Relaxed) {

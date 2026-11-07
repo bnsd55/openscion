@@ -1347,11 +1347,17 @@ fires when it passes three poll periods (90 s). The disk and inode alerts
 then read stale numbers, so restore the filesystem first: the free values
 resume when a sample lands.
 
-- `scion_blob_count` — blobs the store's metadata names, refreshed every
-  60 s by one bounded count query over the blob rows (never a directory
-  walk, never per scrape). At 1,000,000 blobs the query itself costs
-  about 0.6 s of one pooled read connection ([run
-  42040632163](https://github.com/bnsd55/openscion/actions/runs/42040632163)).
+- `scion_blob_count` — blobs the store's metadata names, from one
+  bounded count query over the blob rows (never a directory walk,
+  never per scrape). The refresh spaces itself by its own cost: the
+  next refresh waits at least 100x the last scan's duration, so the
+  scan stays near 1% of one pooled read connection at any size — a
+  0.6 s scan at 1,000,000 blobs keeps the 60 s floor ([run
+  42040632163](https://github.com/bnsd55/openscion/actions/runs/42040632163));
+  a 3 s scan at 5,000,000 refreshes about every 5 min. A refresh that
+  fails or times out backs off the same way and keeps the last good
+  count. `scion_blob_count_refresh_seconds` reports the latest scan's
+  duration, success or failure — how stale the count may be.
 - `scion_blob_ceiling_share` — the blob count as a share of the 1,000,000
   blobs docs/support.md supports per data directory; the store alerts
   that watch fsck's future read this gauge, not the count.
