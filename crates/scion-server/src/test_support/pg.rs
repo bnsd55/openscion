@@ -31,7 +31,7 @@ const CLEAN_LOCK: i64 = 0x5343_494F_4E53_5445;
 /// so a killed holder releases; the wait exists for a holder that
 /// lives but does not move - a maker stuck in an unbounded statement -
 /// so an open cannot hang behind one. The red-proof test sets its own
-/// short bound through `SCION_TEST_CLEAN_LOCK_WAIT_SECS` so it stays
+/// short bound through `Backend::set_clean_lock_wait_secs` so it stays
 /// fast; it takes the sweep tests' pairwise lock first, so the
 /// override cannot leak into another test's wait.
 #[cfg(any(test, feature = "test-hooks"))]

@@ -28,7 +28,11 @@ fn connect() -> postgres::Client {
 /// while another test's sweep reads it makes that sweep see a database
 /// the test never shaped; the cap test's fifty rows would spend the
 /// sweep's whole cap before another test's younger schema came up. The
-/// lock releases when the client drops, a panic included.
+/// lock releases when the client drops, a panic included. EVERY test
+/// in this binary that opens a store must hold it for its whole body:
+/// the process-wide bound override (`set_clean_lock_wait_secs`) would
+/// otherwise reach an open of a test that runs beside its holder, and
+/// a 3 s bound would fail that open's normal wait.
 fn locked() -> postgres::Client {
     let mut client = connect();
     client
@@ -434,6 +438,7 @@ fn a_schema_the_comment_predates_drops_when_it_is_old_and_unused() {
 /// the same recorded directory, so a reopen never orphans a schema.
 #[test]
 fn the_recorded_directory_is_the_one_the_name_hashes() {
+    let _lock = locked();
     let dir = private_tempdir();
     let schema = Backend::test_schema(dir.path());
     {
