@@ -1761,10 +1761,10 @@ Push p99 is a writer's whole push - PutBlob, CreateChangeset, Land -
 the bench's end-to-end p99 from the run's `bench-*.json` artifacts
 (the last repetition, the rule the land p99 column follows).
 
-The land p99 fell at 50 and 200 writers because writers now queue in
-changeset creation, not in the land: a writer's whole push still takes
-about writers / lands-per-second, which the push p99 column carries.
-Read the land p99 as the Land RPC's wait, never as the push time.
+At 50 and 200 writers the queue is in changeset creation, not in the
+land, so the land p99 is small next to the push p99: a writer's whole
+push takes about writers / lands-per-second. Read the land p99 as the
+Land RPC's wait, never as the push time.
 
 Every cell runs on a store the cell's own import made: a database the
 cell dropped and recreated, so a cell's numbers are the store's at its
