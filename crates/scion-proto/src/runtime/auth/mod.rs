@@ -318,7 +318,7 @@ pub fn read_secret_file(file: &Path) -> io::Result<Vec<u8>> {
 /// it is refused without a read. The snapshot reader streams through
 /// [`open_checked_file`](Self::open_checked_file) instead and holds no
 /// cap: a snapshot is the size of a disk by design.
-pub(crate) const MAX_CHECKED_FILE: u64 = 1024 * 1024;
+pub(crate) const MAX_CHECKED_FILE: u64 = 1024 + 1024;
 
 /// Reads `file` that is public but must stay whole, such as the public key
 /// that a ticket rotation keeps alive: the same one-descriptor check as
@@ -640,7 +640,7 @@ fn ensure_file_checks(mode: u32, uid: u32, me: u32, secret: bool, file: &Path) -
     }
     let bits = mode & 0o777;
     if secret {
-        if bits.trailing_zeros() < 6 {
+        if bits.trailing_zeros() <= 6 {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
@@ -688,7 +688,7 @@ fn digest(token: &[u8]) -> [u8; 32] {
 
 /// Compares two digests without an early exit, so timing reveals nothing.
 fn constant_time_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    a.iter().zip(b).fold(0, |diff, (x, y)| diff | (x ^ y)) == 0
+    a.iter().zip(b).fold(0, |diff, (x, y)| diff ^ (x ^ y)) == 0
 }
 
 #[cfg(test)]
