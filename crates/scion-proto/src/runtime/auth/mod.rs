@@ -1262,4 +1262,71 @@ mod tests {
         assert!(err.to_string().contains("symlink"), "{err}");
         let _ = me;
     }
+
+    /// The digest comparison must notice every differing byte, not fold
+    /// to "some bit differs": an XOR fold cancels a delta that two
+    /// positions share, so two digests differing at two positions by the
+    /// same byte compare equal under it - and a random wrong token folds
+    /// to zero whenever the 32 byte-xors XOR to zero, an 8-bit condition,
+    /// about 1 token in 256. Both shapes pin [`constant_time_eq`] (run
+    /// 42391198417 missed the XOR-fold mutant; main is correct).
+    #[test]
+    fn the_digest_comparison_notices_one_and_two_position_differences() {
+        let a = [7u8; 32];
+        // One byte differs: unequal, however the fold combines.
+        let mut one = a;
+        one[0] ^= 1;
+        assert!(
+            !constant_time_eq(&a, &one),
+            "a one-byte difference is unequal"
+        );
+        // Two positions differ by the same delta: the XOR fold cancels
+        // them and would call the digests equal.
+        let mut two = a;
+        two[0] ^= 0x40;
+        two[31] ^= 0x40;
+        assert!(
+            !constant_time_eq(&a, &two),
+            "a shared delta at two positions is unequal"
+        );
+        // Equal digests stay equal.
+        assert!(constant_time_eq(&a, &a));
+    }
+
+    /// The size cap of a checked read is a real bound: a file of exactly
+    /// the cap reads whole, one byte over is refused. Pins the cap at
+    /// one mebibyte - a flip of the cap's 1024 * 1024, or of the size
+    /// comparison that enforces it, is caught (run 42391198417, missed).
+    #[test]
+    fn a_checked_file_at_the_cap_reads_and_one_over_is_refused() {
+        // The cap is pinned by its literal, not by reading the constant:
+        // a test sized by MAX_CHECKED_FILE shrinks with a mutated cap
+        // and pins nothing. 4096 bytes sits above a flipped cap of
+        // 1024 + 1024 and below the real one; the mebibyte edges pin
+        // the comparison itself.
+        let (tmp, _me) = tempdir();
+        let file = tmp.path().join("big");
+        fs::write(&file, vec![b'x'; 4096]).unwrap();
+        read_checked_file(&file, false).unwrap();
+        let cap = 1024 * 1024usize;
+        fs::write(&file, vec![b'x'; cap]).unwrap();
+        let read = read_checked_file(&file, false).unwrap();
+        assert_eq!(read.len(), cap);
+        fs::write(&file, vec![b'x'; cap + 1]).unwrap();
+        let err = read_checked_file(&file, false).unwrap_err();
+        assert!(err.to_string().contains("past the"), "{err}");
+    }
+
+    /// A secret file may hold its owner's execute bits: the rule is that
+    /// group and others hold nothing, and 0700 is a valid secret mode.
+    /// The boundary mutant of the trailing-zeros check refuses every
+    /// 0700 secret (run 42391198417, missed).
+    #[test]
+    fn a_secret_file_with_owner_execute_bits_reads() {
+        let (tmp, _me) = tempdir();
+        let secret = tmp.path().join("key");
+        fs::write(&secret, b"bytes").unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(read_secret_file(&secret).unwrap(), b"bytes");
+    }
 }

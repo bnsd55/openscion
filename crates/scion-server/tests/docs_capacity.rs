@@ -132,9 +132,9 @@ fn every_cell_of_the_grid_has_a_row_in_order() {
 #[test]
 fn numeric_columns_parse_and_dashes_say_what_failed() {
     let doc = std::fs::read_to_string(Path::new(DOC)).expect("docs/operations.md exists");
-    // Column indexes in the row: 3 land p99, 4 checkout p50, 5 checkout
-    // p99, 6 timeouts, 7 errors, 9 landed, 10 lands per second, 11 blob
-    // growth, 12 database growth.
+    // Column indexes in the row: 3 land p99, 4 push p99, 5 checkout
+    // p50, 6 checkout p99, 7 timeouts, 8 errors, 10 landed, 11 lands
+    // per second, 12 blob growth, 13 database growth.
     for row in table_rows(capacity_section(&doc)) {
         check_row(&row);
     }
@@ -147,19 +147,19 @@ fn check_row(row: &[String]) {
     if all_dash {
         return; // the skeleton: no run has filled this cell yet
     }
-    let timeouts: u64 = row[6]
+    let timeouts: u64 = row[7]
         .parse()
         .unwrap_or_else(|_| panic!("timeouts does not parse: {row:?}"));
-    let errors: u64 = row[7]
+    let errors: u64 = row[8]
         .parse()
         .unwrap_or_else(|_| panic!("errors does not parse: {row:?}"));
-    // The percentile group (land p99, checkout p50, checkout p99)
-    // stands together or parses together: a bench that died names
-    // none of them, a live one names all three, and a cell with no
-    // readers (r=0) names the land p99 and dashes both checkout
-    // columns. A dash in one and a number in another is otherwise a
-    // broken row, not a measurement.
-    let group = &row[3..6];
+    // The percentile group (land p99, push p99, checkout p50, checkout
+    // p99) stands together or parses together: a bench that died names
+    // none of them, a live one names all four, and a cell with no
+    // readers (r=0) names the land p99 and the push p99 and dashes
+    // both checkout columns. A dash in one and a number in another is
+    // otherwise a broken row, not a measurement.
+    let group = &row[3..7];
     let dashes = group.iter().filter(|c| c.as_str() == "-").count();
     match dashes {
         0 => {
@@ -169,17 +169,18 @@ fn check_row(row: &[String]) {
             }
         }
         // A no-reader cell: the writers ran, the readers never did.
-        2 if row[3] != "-" && row[4] == "-" && row[5] == "-" => {
-            row[3]
-                .parse::<f64>()
-                .unwrap_or_else(|_| panic!("the land p99 does not parse: {row:?}"));
+        2 if row[3] != "-" && row[4] != "-" && row[5] == "-" && row[6] == "-" => {
+            for cell in &row[3..5] {
+                cell.parse::<f64>()
+                    .unwrap_or_else(|_| panic!("the land and push p99 do not parse: {row:?}"));
+            }
         }
-        3 if errors + timeouts > 0 => {}
+        4 if errors + timeouts > 0 => {}
         _ => panic!("a half-reported percentile group must not publish: {row:?}"),
     }
     // The counters and the resources are always numbers: the run
     // knows them whatever the bench did.
-    for cell in &row[6..10] {
+    for cell in &row[7..11] {
         cell.parse::<f64>()
             .unwrap_or_else(|_| panic!("a number does not parse: {cell:?} in {row:?}"));
     }
@@ -187,12 +188,12 @@ fn check_row(row: &[String]) {
     // bench named no report. The growth columns parse as numbers, or
     // say why they do not: a "-" in a growth column is a
     // cell whose counter grew by no lands at all.
-    if row[10] != "-" {
-        row[10]
+    if row[11] != "-" {
+        row[11]
             .parse::<f64>()
             .unwrap_or_else(|_| panic!("lands per second does not parse: {row:?}"));
     }
-    for (cell, what) in row[11..].iter().zip(["blob growth", "database growth"]) {
+    for (cell, what) in row[12..].iter().zip(["blob growth", "database growth"]) {
         if cell != "-" {
             cell.parse::<f64>()
                 .unwrap_or_else(|_| panic!("{what} does not parse: {cell:?} in {row:?}"));
@@ -209,29 +210,31 @@ fn a_no_reader_row_names_the_land_and_dashes_the_reads() {
         // (cells after the cell name, does the rule accept it?)
         (
             &[
-                "63.1", "70", "115", "0", "0", "30376", "2000", "11.4", "1402",
+                "63.1", "91.4", "70", "115", "0", "0", "30376", "2000", "11.4", "1402",
             ],
             true,
         ), // a live cell: both growth columns
         (
             &[
-                "63.1", "-", "-", "0", "0", "30376", "2000", "155.4", "1106", "-",
+                "63.1", "91.4", "-", "-", "0", "0", "30376", "2000", "155.4", "1106", "-",
             ],
             true,
         ), // r=0: no readers ran
         (
-            &["-", "-", "-", "0", "2", "30376", "1800", "-", "990", "-"],
+            &[
+                "-", "-", "-", "-", "0", "2", "30376", "1800", "-", "990", "-",
+            ],
             true,
         ), // the bench died; the lands it got through still divide
         (
             &[
-                "63.1", "-", "115", "0", "0", "30376", "2000", "155.4", "1106", "-",
+                "63.1", "91.4", "-", "115", "0", "0", "30376", "2000", "155.4", "1106", "-",
             ],
             false,
         ), // half-filled: never
         (
             &[
-                "63.1", "70", "115", "0", "0", "30376", "2000", "11.4", "nonsense", "-",
+                "63.1", "91.4", "70", "115", "0", "0", "30376", "2000", "11.4", "nonsense", "-",
             ],
             false,
         ), // a growth column that is neither number nor "-": never
