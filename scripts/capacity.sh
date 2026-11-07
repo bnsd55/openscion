@@ -134,22 +134,32 @@ pg_cpu_ms() {
   if [ -z "${cgroup:-}" ]; then
     # The container's own scope, by id: docker sees it from the runner
     # (this script's home in CI), where the service's processes may
-    # not look like plain postgres to pgrep.
-    for cid in $(docker ps -q --filter "ancestor=postgres" 2> /dev/null |
-      head -n 1); do
-      cgroup="/system.slice/docker-$cid.scope"
+    # not look like plain postgres to pgrep. The name filter, not the
+    # ancestor one: the service's image is a digested ref, and the
+    # ancestor filter matches image ids, so it never matched. The
+    # scope carries the full 64-char id; docker ps -q gives the short
+    # one.
+    for cid in $(docker ps -q --filter "name=postgres" 2> /dev/null); do
+      full=$(docker inspect -f '{{.Id}}' "$cid" 2> /dev/null) || continue
+      cgroup="/system.slice/docker-$full.scope"
+      usec=$(awk '/^usage_usec / { print $2 }' \
+        "/sys/fs/cgroup$cgroup/cpu.stat" 2> /dev/null)
+      [ -n "$usec" ] && break
+      cgroup=""
     done
   fi
   [ -n "$cgroup" ] || return 0
   # The container's scope may name a level the mount does not carry a
-  # cpu.stat at; walk up until one has the file.
-  usec=""
-  local probe="$cgroup"
-  while [ -n "$probe" ] && [ "$probe" != "/" ]; do
-    usec=$(awk '/^usage_usec / { print $2 }' "/sys/fs/cgroup$probe/cpu.stat" 2> /dev/null)
-    [ -n "$usec" ] && break
-    probe=$(dirname "$probe")
-  done
+  # cpu.stat at; walk up until one has the file. The docker path above
+  # already read its own counter.
+  if [ -z "${usec:-}" ]; then
+    local probe="$cgroup"
+    while [ -n "$probe" ] && [ "$probe" != "/" ]; do
+      usec=$(awk '/^usage_usec / { print $2 }' "/sys/fs/cgroup$probe/cpu.stat" 2> /dev/null)
+      [ -n "$usec" ] && break
+      probe=$(dirname "$probe")
+    done
+  fi
   [ -n "$usec" ] || return 0
   awk -v u="$usec" -v clk="$clk" 'BEGIN { printf "%d", u / 1000 }'
 }
@@ -171,6 +181,13 @@ turn_on_wal_io_timing() {
     "ALTER SYSTEM SET track_wal_io_timing = on" \
     -c "SELECT pg_reload_conf()" \
     > /dev/null 2>&1 || true
+  # The reload took, in the run's log: a wal_sync_time that stays 0.000
+  # with the setting off would read as a fast disk, not a missing flag.
+  local took
+  took=$(PGPASSWORD=$pass PGGSSENCMODE=disable psql -h "${hostport%%:*}" \
+    -p "${hostport##*:}" -U "$userpass" -d postgres -Atqc \
+    "SHOW track_wal_io_timing" 2> /dev/null)
+  echo "track_wal_io_timing=$took"
 }
 
 # wal_fsync_ms: the WAL's own fsync milliseconds since the server's
@@ -200,15 +217,22 @@ wal_fsync_ms() {
 # owned file, and the rows that straddle a boundary are the cell's
 # warm-up and cool-down.
 bench_cpu_ms() {
-  local pid=$1 clk=$2 child grand
-  # The owned pid names the subshell; its child is the timeout, whose
-  # child is the scn the bench's CPU belongs to.
-  child=$(pgrep -P "$pid" 2> /dev/null | head -n 1)
-  if [ -n "$child" ]; then
-    grand=$(pgrep -P "$child" 2> /dev/null | head -n 1)
-    [ -n "$grand" ] && pid=$grand
-  fi
-  cpu_ms "$pid" "$clk"
+  local pid=$1 clk=$2 child grand total=0 ticks
+  # The owned pid names the subshell around the bench; bash may have
+  # exec'd the timeout in it, so the tree (the pid, its children, its
+  # grandchildren) holds the timeout and the scn, whichever way the
+  # shell went. Sum the tree: every process in it is the bench's, and
+  # the idle ones add no ticks.
+  for pid in "$pid" $(pgrep -P "$pid" 2> /dev/null) \
+    $(for child in $(pgrep -P "$pid" 2> /dev/null); do
+        pgrep -P "$child" 2> /dev/null
+      done); do
+    [ -n "$pid" ] || continue
+    ticks=$(awk '{ sub(/^[^)]*\) /, ""); print $11 + $12 }' "/proc/$pid/stat" 2> /dev/null) || continue
+    [ -n "$ticks" ] || continue
+    total=$((total + ticks))
+  done
+  awk -v t="$total" -v clk="$clk" 'BEGIN { printf "%d", t * 1000 / clk }'
 }
 
 # disk_ms: the work disk's read and write milliseconds since boot, from
