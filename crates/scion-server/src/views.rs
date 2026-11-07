@@ -1632,9 +1632,13 @@ mod tests {
 
     /// The part-bound guard restores the bound when it drops: a test that
     /// set a small bound leaves the default to the tests after it, or a
-    /// leaked bound changes every later derivation's part cadence.
+    /// leaked bound changes every later derivation's part cadence. The
+    /// test holds the part lock across the whole body: the bound is
+    /// process-wide, and a neighbour test deriving inside this one's
+    /// one-kilobyte window would see it, or drop it back mid-walk.
     #[test]
     fn the_part_bound_returns_when_the_guard_drops() {
+        let _lock = part_guard();
         {
             let _bound = test_set_view_part_bound(1 << 10);
             assert_eq!(view_part_bytes(), 1 << 10);
