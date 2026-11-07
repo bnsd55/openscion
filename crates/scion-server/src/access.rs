@@ -819,6 +819,17 @@ mod tests {
             (format!("{token}write\talice\tmain\ta\tb\n"), "expected"),
             (format!("{token}read\talice\t\n"), "repo"),
             (format!("token\tal ice\t{}\n", hex("a")), "bad principal"),
+            (
+                // 65 legal characters: over MAX_PRINCIPAL_BYTES by one. The
+                // length check must refuse it on its own: a name of legal
+                // characters but over-long is still a bad principal.
+                format!(
+                    "token\t{}\t{}\n",
+                    "a".repeat(MAX_PRINCIPAL_BYTES + 1),
+                    hex("a")
+                ),
+                "bad principal",
+            ),
             (format!("{token}delete\talice\tmain\n"), "expected"),
         ];
         for (text, fragment) in cases {
