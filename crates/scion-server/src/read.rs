@@ -105,7 +105,7 @@ pub fn file_blob_at(store: &Backend, root: TreeId, path: &RepoPath) -> Result<Bl
             None => Err(Error::InvalidArgument(format!("{path:?} is a submodule"))),
         },
         Some(Entry::Dir(_)) => Err(Error::InvalidArgument(format!("{path:?} is a directory"))),
-        None => Err(Error::NotFound(format!("path {path:?}"))),
+        None => Err(Error::NotFound(format!("no such path {path:?}"))),
     }
 }
 
