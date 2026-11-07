@@ -1630,6 +1630,77 @@ mod tests {
         );
     }
 
+    /// The part-bound guard restores the bound when it drops: a test that
+    /// set a small bound leaves the default to the tests after it, or a
+    /// leaked bound changes every later derivation's part cadence.
+    #[test]
+    fn the_part_bound_returns_when_the_guard_drops() {
+        {
+            let _bound = test_set_view_part_bound(1 << 10);
+            assert_eq!(view_part_bytes(), 1 << 10);
+        }
+        assert_eq!(view_part_bytes(), VIEW_PART_BYTES);
+    }
+
+    /// One part holds many long-named view trees at the pending bound:
+    /// the estimate of a tree's bytes grows with its entries' NAME bytes
+    /// added to the frame's share, not multiplied, so a view of folders
+    /// whose visible files carry long names still batches its parts. A
+    /// multiplied estimate inflates every tree past the bound and writes
+    /// a part per folder.
+    #[test]
+    fn a_part_holds_many_long_named_trees_at_the_pending_bound() {
+        let (dir, store) = store();
+        let dir = dir.path().to_owned();
+        let repo = store.write(|c| c.create_repo("r")).unwrap();
+        // Two hundred folders, each holding one visible file whose name
+        // is sixty bytes: one view tree per folder, whose estimate is
+        // name bytes plus the frame's share.
+        let root_id = store
+            .write(|c| {
+                let mut entries = std::collections::BTreeMap::new();
+                for i in 0..200 {
+                    let d = name(format!("d{i:03}").as_bytes());
+                    let inner = Tree::new(
+                        [(
+                            name(format!("s{i:059}").as_bytes()),
+                            file(&store, format!("body-{i}\n").as_bytes()),
+                        )]
+                        .into(),
+                    )
+                    .expect("tree fits the format");
+                    let id = c.put_tree(&inner)?;
+                    entries.insert(d, Entry::Dir(id));
+                }
+                let root = Tree::new(entries).expect("tree fits the format");
+                c.put_tree(&root)
+            })
+            .unwrap();
+        let ctx: Context = (0..200)
+            .map(|i| format!("d{i:03}/s{i:059}").into_bytes())
+            .collect();
+        let digest = [7; 32];
+        let before = store.commits();
+        let mut memo = Memo::default();
+        {
+            let _lock = part_guard();
+            let _bound = test_set_view_part_bound(4 << 10);
+            derive(&store, repo, &digest, root_id, ctx, &mut memo, &alive())
+                .unwrap()
+                .expect("every folder keeps its file");
+        }
+        let parts = store.commits() - before;
+        assert!(
+            (5..=40).contains(&parts),
+            "the parts ran at the pending bound, not one per folder: {parts} \
+             (walked {}, pending {}, rows {})",
+            memo.walked,
+            memo.pending,
+            memo.rows.len(),
+        );
+        let _ = dir;
+    }
+
     /// A cold view whose part write waits on the write lane answers even
     /// when the lane stays held past the read transaction's idle bound:
     /// the walk ends its read transaction before the part write, so the
