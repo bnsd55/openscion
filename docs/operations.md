@@ -637,6 +637,7 @@ server reopens the path on `SIGHUP`.
   compress
   delaycompress
   missingok
+  nocreate
   notifempty
   postrotate
     systemctl kill -s HUP --kill-who=main scion
@@ -646,7 +647,10 @@ server reopens the path on `SIGHUP`.
 
 The rename moves the file under the server's open file handle: lines
 written between the rename and the signal land in the renamed file,
-so nothing is lost and nothing is duplicated. The server checks the
+so nothing is lost and nothing is duplicated. The stanza's `nocreate`
+keeps logrotate from making the fresh file itself: the server's
+reopen creates it with its own checks (0600, no symlink, private
+parent). The server checks the
 signal between batches, so every batch is whole in one file. A reopen
 that fails (a symlink at the path, an unwritable directory, a full
 disk) keeps the old file recording - no line is dropped - logs an
