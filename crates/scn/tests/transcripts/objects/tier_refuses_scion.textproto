@@ -1,0 +1,12 @@
+# A tier serves the Objects calls only: a Scion call at a tier's port
+# answers UNIMPLEMENTED, while the same call at the server answers.
+since: v0.1
+method: Scion/GetChangeset
+fixture: landed
+tiers: refuse
+tiers: fresh
+
+request.repo: r
+request.changeset_id: $cs
+
+status: ok
