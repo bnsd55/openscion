@@ -1,0 +1,9 @@
+# A start changeset nothing has is NOT_FOUND.
+since: v0.1
+method: Scion/Log
+fixture: landed
+
+request.repo: r
+request.changeset_id: $missing
+
+status: not_found

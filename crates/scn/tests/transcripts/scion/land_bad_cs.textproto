@@ -1,0 +1,11 @@
+# A changeset ID that is not 32 bytes is malformed: the call owes no
+# intent for a request that names nothing to land.
+since: v0.1
+method: Scion/Land
+fixture: landed
+
+request.repo: r
+request.changeset_id: aabb
+request.target_ref: main
+
+status: invalid_argument

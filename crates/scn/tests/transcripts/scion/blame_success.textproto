@@ -1,0 +1,12 @@
+# Blame on the file the chain changes twice answers the two changesets
+# that last changed its lines.
+since: v0.1
+method: Scion/Blame
+fixture: landed
+
+request.repo: r
+request.changeset_id: $cs
+request.path: src/main.rs
+
+status: ok
+entries: 2

@@ -786,6 +786,9 @@ out=$(cd "$ROOT" && PREV_BIN="$PREV_BIN" PREV_REF="$ref" \
   SCION_TEST_POSTGRES_URL="$SCION_TEST_POSTGRES_URL" \
   cargo test --locked -p open-scion --test transcripts \
   the_n1_side_answers_as_its_files_say -- --exact --nocapture 2>&1) || {
+  # The leg's id diagnostics (N1 ...) name the inputs a red file saw:
+  # they go out whole, whatever tail the panic line needs.
+  echo "$out" | grep "^N1 " >&2
   echo "$out" | tail -n 25 >&2
   die "leg 7 (corpus N-1 legs): the runner failed"
 }

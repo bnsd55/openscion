@@ -1,0 +1,12 @@
+# A land to a ref that does not exist records the rejection: the call
+# answers ok, the state carries it.
+since: v0.1
+method: Scion/Land
+fixture: landed
+
+request.repo: r
+request.changeset_id: $cs
+request.target_ref: no-such-ref
+
+status: ok
+reply.state: LAND_STATE_REJECTED

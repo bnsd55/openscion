@@ -1,0 +1,12 @@
+# The head lands on feature: the service records, plans and settles
+# inside the call, so the reply answers landed.
+since: v0.1
+method: Scion/Land
+fixture: landed
+
+request.repo: r
+request.changeset_id: $cs
+request.target_ref: feature
+
+status: ok
+reply.state: LAND_STATE_LANDED

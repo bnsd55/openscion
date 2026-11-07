@@ -31,10 +31,11 @@ use std::path::Path;
 use scion_core::{BlobId, ChangesetId, FileState, Tree};
 use scion_proto::runtime::auth::Bearer;
 use scion_proto::v1::{
-    Encoding, GetObjectsRequest, GetRootTreeRequest, ObjectKind, ObjectPart, ObjectRef,
-    ResolveRefRequest, scion_client::ScionClient,
+    Encoding, GetChangesetRequest, GetObjectsRequest, GetRootTreeRequest, ObjectKind, ObjectPart,
+    ObjectRef, ResolveRefRequest, scion_client::ScionClient,
 };
 use scion_server::Backend;
+use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use tonic::Code;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Channel, Endpoint};
@@ -150,6 +151,13 @@ struct Fixture {
     content: Vec<u8>,
     tree: [u8; 32],
     cs: ChangesetId,
+    /// The chain the read files replay against: the root changeset and
+    /// the middle one, whose tree still holds the old src/main.rs.
+    root_cs: ChangesetId,
+    mid_cs: ChangesetId,
+    /// The root changeset's own tree: a CAS object, which `GetObjects`
+    /// serves. The head's root tree is derived and lives elsewhere.
+    root_tree: [u8; 32],
     /// A well-formed ID nothing has, for not-found.
     missing: [u8; 32],
     /// A read ticket for the fixture's root tree: the permission that
@@ -161,15 +169,19 @@ struct Fixture {
     unsigned: Vec<u8>,
 }
 
-/// Builds the one fixture the corpus uses: the conformance test's landed
-/// repo - one changeset whose tree holds one file of one blob.
+/// Builds the one fixture the corpus uses: the conformance test's
+/// landed repo grown into a first-parent chain - the root changeset
+/// creates src/main.rs, the middle changeset changes it, the head adds
+/// src/lib.rs - and a `feature` ref parked at the middle changeset,
+/// which the Land files move. The head answers the read files as before;
+/// the chain gives Log its three entries and Blame its two.
 fn landed() -> (Tiers, Fixture) {
     let data = common::private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
     let content = b"pub fn main() {}\n".to_vec();
     let blob = BlobId::of(&content);
     store.blobs().put(&content).unwrap();
-    let cs = common::changeset(
+    let root = common::changeset(
         None,
         &[(
             "src/main.rs",
@@ -179,16 +191,61 @@ fn landed() -> (Tiers, Fixture) {
             },
         )],
     );
-    let id = common::land(&store, &cs);
+    let root_id = common::land(&store, &root);
+    // One line survives from the root and one is new: Blame's two
+    // changesets.
+    let edited = b"pub fn main() {}\npub fn extra() {}\n".to_vec();
+    let edited_blob = BlobId::of(&edited);
+    store.blobs().put(&edited).unwrap();
+    let mid = common::changeset(
+        Some(root_id),
+        &[(
+            "src/main.rs",
+            FileState::Regular {
+                content: edited_blob,
+                executable: false,
+            },
+        )],
+    );
+    let mid_id = common::land(&store, &mid);
+    let lib = b"pub const X: u8 = 7;\n".to_vec();
+    let lib_blob = BlobId::of(&lib);
+    store.blobs().put(&lib).unwrap();
+    let head = common::changeset(
+        Some(mid_id),
+        &[(
+            "src/lib.rs",
+            FileState::Regular {
+                content: lib_blob,
+                executable: false,
+            },
+        )],
+    );
+    let id = common::land(&store, &head);
+    store
+        .write(|c| {
+            let repo = c.repo_id(common::REPO)?;
+            assert!(c.cas_ref(repo, "feature", None, mid_id)?);
+            Ok(())
+        })
+        .unwrap();
     let tiers = Tiers::start(data, store);
     let runtime_entered = tiers.runtime.enter();
     let (ticket, tree) = mint(&tiers, id);
+    let root_tree = {
+        let (_, root_tree) = mint(&tiers, root_id);
+        root_tree
+    };
     drop(runtime_entered);
     let fixture = Fixture {
         blob,
         content,
         tree,
         cs: id,
+        root_cs: root_id,
+        mid_cs: mid_id,
+        root_tree,
+
         missing: missing_id(0xab),
         unsigned: unsigned_of(&ticket),
         ticket,
@@ -247,8 +304,11 @@ fn resolve(value: &str, f: &Fixture) -> String {
     value
         .replace("$blob_bytes", &hex(&f.content))
         .replace("$blob", &hex(f.blob.as_bytes()))
+        .replace("$tree_root", &hex(&f.root_tree))
         .replace("$tree", &hex(&f.tree))
         .replace("$cs", &hex(f.cs.as_bytes()))
+        .replace("$cs_root", &hex(f.root_cs.as_bytes()))
+        .replace("$cs_mid", &hex(f.mid_cs.as_bytes()))
         .replace("$missing", &hex(&f.missing))
         .replace("$unsigned", &hex(&f.unsigned))
         .replace("$ticket", &hex(&f.ticket))
@@ -557,8 +617,8 @@ fn the_corpus_answers_as_its_files_say() {
     files.sort();
     assert_eq!(
         files.len(),
-        25,
-        "the corpus pins 25 behaviours; a file added or removed must update this count"
+        34,
+        "the corpus pins 34 behaviours; a file added or removed must update this count"
     );
     // One store and one set of tiers for the whole run: the fixture is
     // the expensive part. Each file still mints its own ticket, right
@@ -575,7 +635,7 @@ fn the_corpus_answers_as_its_files_say() {
             t.method
         );
         let minted_at = std::time::Instant::now();
-        let (ticket, _) = mint(&tiers, base.cs);
+        let (ticket, _) = mint(&tiers, base.root_cs);
         let f = Fixture {
             unsigned: unsigned_of(&ticket),
             ticket,
@@ -704,28 +764,12 @@ fn guard_cs_refusals(qualifying: &mut [(PathBuf, Transcript)]) {
 /// file, the side and both answers. Skipped green when `PREV_BIN` is
 /// unset: the legs belong to the version-matrix job, which builds N-1
 /// and points `PREV_BIN` at it.
-#[test]
-fn the_n1_side_answers_as_its_files_say() {
-    let Ok(prev_bin) = std::env::var("PREV_BIN") else {
-        eprintln!("PREV_BIN unset: the N-1 legs run in the version-matrix job");
-        return;
-    };
-    let prev_bin = PathBuf::from(prev_bin);
-
-    // The logs must outlive a red run: the version-matrix job uploads
-    // /tmp/scion-matrix*/, so the work dir sits there, named for this
-    // run, and only a green run removes it.
-    let dir = std::env::temp_dir().join(format!("scion-matrix-n1-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("the work dir is made");
-    make_private(&dir);
-    eprintln!("the N-1 work dir: {}", dir.display());
-
-    // The N-1 version decides which files qualify: a file's `since`
-    // must be at or under it. `PREV_REF` names the ref the
-    // version-matrix job tested; a `v`-prefixed release ref carries
-    // the version itself, a stand-in commit carries none and so every
-    // file qualifies against it.
+/// The files the N-1 side runs: a file's `since` must be at or under
+/// the version `PREV_REF` names. `PREV_REF` names the ref the
+/// version-matrix job tested; a `v`-prefixed release ref carries the
+/// version itself, a stand-in commit carries none and so every file
+/// qualifies against it.
+fn n1_qualifying() -> Vec<(PathBuf, Transcript)> {
     let ref_name = std::env::var("PREV_REF").unwrap_or_else(|_| "unset".to_owned());
     let (prev, printed) = match ref_version(&ref_name) {
         Some(v) => (v, format!("N-1 {ref_name}")),
@@ -751,6 +795,110 @@ fn the_n1_side_answers_as_its_files_say() {
         "the N-1 legs have nothing to prove: the corpus's oldest since is {oldest_printed}, the N-1 side is {prev:?} ({printed})"
     );
     guard_cs_refusals(&mut qualifying);
+    qualifying
+}
+
+/// The N-1 database's rows for `id`: the tree body's byte length (none
+/// when the table holds no row) and whether a derived value names it.
+fn n1_store_rows(pg: &str, id: &str, cs: &str) -> String {
+    let sql = format!(
+        "SELECT (SELECT length(body) FROM trees WHERE id = decode('{id}','hex')) \
+         AS tree_body, \
+         (SELECT count(*) FROM derived WHERE value = decode('{id}','hex')) \
+         AS derived_rows, \
+         (SELECT count(*) FROM derived WHERE cs = decode('{cs}','hex')) \
+         AS derived_cs",
+    );
+    let out = std::process::Command::new("psql")
+        .args(["-t", "-A", "-F", " ", "-c", &sql, pg])
+        .output()
+        .expect("psql runs");
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// Prints the N-1 server's ids for the chain's ends: the head's and the
+/// root changeset's, with the trees `GetRootTree` names for each.
+fn n1_print_ids(
+    runtime: &tokio::runtime::Runtime,
+    server: &str,
+    base: &Fixture,
+) -> (String, String) {
+    let root_tree_of = |cs: &scion_core::ChangesetId| -> String {
+        runtime.block_on(async {
+            let mut client = connect(server).await;
+            client
+                .get_root_tree(scion_proto::v1::GetRootTreeRequest {
+                    repo: common::REPO.into(),
+                    changeset_id: cs.as_bytes().to_vec(),
+                })
+                .await
+                .expect("the N-1 server mints")
+                .into_inner()
+                .tree_id
+                .try_into()
+                .map(|t: [u8; 32]| hex(t.as_slice()))
+                .expect("the tree id is 32 bytes")
+        })
+    };
+    let head_tree = root_tree_of(&base.cs);
+    let root_tree = root_tree_of(&base.root_cs);
+    eprintln!(
+        "N1 IDS head={} head_tree={} root_cs={} root_tree={}",
+        hex(base.cs.as_bytes()),
+        head_tree,
+        hex(base.root_cs.as_bytes()),
+        root_tree,
+    );
+    (head_tree, root_tree)
+}
+
+/// The store's rows for the two trees, on the N-1 database.
+fn n1_print_store(pg: &str, base: &Fixture, head_tree: &str, root_tree: &str) {
+    eprintln!(
+        "N1 STORE head_tree={head_tree} [{}] root_tree={root_tree} [{}]",
+        n1_store_rows(pg, head_tree, &hex(base.cs.as_bytes())),
+        n1_store_rows(pg, root_tree, &hex(base.root_cs.as_bytes())),
+    );
+}
+
+/// Prints one `GetObjects` file's inputs: the ticket's own root tree and
+/// the refs after substitution, so a red run names the id that disagrees.
+fn n1_print_file(file: &std::path::Path, t: &Transcript, base: &Fixture, ticket: &[u8]) {
+    let scope = scion_proto::ticket::parse_unverified(ticket, scion_proto::ticket::now())
+        .map(|t| hex(t.root_tree.as_slice()))
+        .map_err(|e| e.to_string());
+    let refs: Vec<String> = t
+        .request
+        .iter()
+        .filter(|(k, _)| k == "refs")
+        .map(|(_, v)| resolve(v, base))
+        .collect();
+    eprintln!(
+        "N1 {} ticket_root={scope:?} refs={refs:?} root_cs={} blob={}",
+        file.display(),
+        hex(base.root_cs.as_bytes()),
+        hex(base.blob.as_bytes()),
+    );
+}
+
+#[test]
+fn the_n1_side_answers_as_its_files_say() {
+    let Ok(prev_bin) = std::env::var("PREV_BIN") else {
+        eprintln!("PREV_BIN unset: the N-1 legs run in the version-matrix job");
+        return;
+    };
+    let prev_bin = PathBuf::from(prev_bin);
+
+    // The logs must outlive a red run: the version-matrix job uploads
+    // /tmp/scion-matrix*/, so the work dir sits there, named for this
+    // run, and only a green run removes it.
+    let dir = std::env::temp_dir().join(format!("scion-matrix-n1-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("the work dir is made");
+    make_private(&dir);
+    eprintln!("the N-1 work dir: {}", dir.display());
+
+    let qualifying = n1_qualifying();
 
     // Leg 1: the qualifying files against the N-1 server and its tiers.
     let (db_guard, pg) = n1_database();
@@ -759,8 +907,17 @@ fn the_n1_side_answers_as_its_files_say() {
     let _entered = runtime.enter();
     let base = n1_fixture(&runtime, &stack.server);
     let mut ran = 0usize;
+    // What the N-1 server answers for the chain's ends: the ids a
+    // GetObjects file's refs name must be these.
+    let (head_tree, root_tree) = n1_print_ids(&runtime, &stack.server, &base);
+    n1_print_store(&pg, &base, &head_tree, &root_tree);
     for (file, t) in &qualifying {
-        let ticket = n1_mint(&runtime, &stack.server, &base.cs);
+        // The GetObjects file's refs name the root changeset's tree and
+        // blob: the ticket must be that tree's, as the corpus's is.
+        let ticket = n1_mint(&runtime, &stack.server, &base.root_cs);
+        if t.method == "Objects/GetObjects" {
+            n1_print_file(file, t, &base, &ticket);
+        }
         let f = Fixture {
             unsigned: unsigned_of(&ticket),
             ticket,
@@ -802,7 +959,9 @@ fn the_n1_side_answers_as_its_files_say() {
             // the corpus test's every PR. Leg 2 is Objects only.
             continue;
         }
-        let (ticket, _) = mint(&tiers, base2.cs);
+        // The GetObjects file's refs name the root changeset's tree and
+        // blob: the ticket must be that tree's, as leg 1's is.
+        let (ticket, _) = mint(&tiers, base2.root_cs);
         let f = Fixture {
             unsigned: unsigned_of(&ticket),
             ticket,
@@ -1166,6 +1325,20 @@ fn n1_repo(dir: &Path) -> PathBuf {
     fs::write(src.join("src/main.rs"), b"pub fn main() {}\n").expect("the file writes");
     git(&["-C", &src.display().to_string(), "add", "-A"]);
     git(&["-C", &src.display().to_string(), "commit", "-qam", "first"]);
+    // The chain the Log, Blame and Land files replay: one line added to
+    // src/main.rs, then src/lib.rs, with the feature branch parked at
+    // the middle commit - the Land files' target.
+    fs::write(
+        src.join("src/main.rs"),
+        b"pub fn main() {}\npub fn extra() {}\n",
+    )
+    .expect("the file writes");
+    git(&["-C", &src.display().to_string(), "add", "-A"]);
+    git(&["-C", &src.display().to_string(), "commit", "-qam", "second"]);
+    git(&["-C", &src.display().to_string(), "branch", "feature"]);
+    fs::write(src.join("src/lib.rs"), b"pub const X: u8 = 7;\n").expect("the file writes");
+    git(&["-C", &src.display().to_string(), "add", "-A"]);
+    git(&["-C", &src.display().to_string(), "commit", "-qam", "third"]);
     src
 }
 
@@ -1239,6 +1412,33 @@ impl Drop for N1Db {
     }
 }
 
+/// Starts the imported N-1 server on a free port and answers its URL.
+fn start_n1_server(
+    scion: &Path,
+    server_dir: &Path,
+    key: &Path,
+    pg: &str,
+    dir: &Path,
+) -> (Child, String) {
+    let log = dir.join("server.log");
+    let mut server = spawn_logged(
+        scion.to_path_buf(),
+        [
+            "--data",
+            &server_dir.display().to_string(),
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--ticket-key",
+            &key.display().to_string(),
+        ],
+        &[("SCION_POSTGRES_URL", pg), ("SCION_TOKEN", common::TOKEN)],
+        &log,
+    );
+    let port = serving_port(&mut server, &log);
+    (server, format!("http://127.0.0.1:{port}"))
+}
+
 fn start_n1_stack(prev_bin: &Path, dir: &Path, pg: &str) -> N1Stack {
     let src = n1_repo(dir);
 
@@ -1246,18 +1446,25 @@ fn start_n1_stack(prev_bin: &Path, dir: &Path, pg: &str) -> N1Stack {
     fs::create_dir_all(&server_dir).expect("the data dir is made");
     make_private(&server_dir);
     let scion = prev_bin.join("scion-server");
-    run_to_end(
-        &scion,
-        &[
-            "--data",
-            &server_dir.display().to_string(),
-            "import",
-            "--repo",
-            common::REPO,
-            &src.display().to_string(),
-        ],
-        &[("SCION_POSTGRES_URL", pg)],
-    );
+    let data = server_dir.display().to_string();
+    for (rev, target) in [("HEAD", "main"), ("feature", "feature")] {
+        run_to_end(
+            &scion,
+            &[
+                "--data",
+                &data,
+                "import",
+                "--repo",
+                common::REPO,
+                "--rev",
+                rev,
+                "--ref",
+                target,
+                &src.display().to_string(),
+            ],
+            &[("SCION_POSTGRES_URL", pg)],
+        );
+    }
     let key = dir.join("ticket.key");
     let key_out = Command::new(&scion)
         .args([
@@ -1277,23 +1484,7 @@ fn start_n1_stack(prev_bin: &Path, dir: &Path, pg: &str) -> N1Stack {
     );
     let pub_hex = String::from_utf8_lossy(&key_out.stdout).trim().to_owned();
 
-    let server_log = dir.join("server.log");
-    let mut server = spawn_logged(
-        scion.clone(),
-        [
-            "--data",
-            &server_dir.display().to_string(),
-            "serve",
-            "--listen",
-            "127.0.0.1:0",
-            "--ticket-key",
-            &key.display().to_string(),
-        ],
-        &[("SCION_POSTGRES_URL", pg), ("SCION_TOKEN", common::TOKEN)],
-        &server_log,
-    );
-    let sport = serving_port(&mut server, &server_log);
-    let server_url = format!("http://127.0.0.1:{sport}");
+    let (server, server_url) = start_n1_server(&scion, &server_dir, &key, pg, dir);
 
     let cache_log = dir.join("cache.log");
     let mut cache = spawn_logged(
@@ -1366,6 +1557,29 @@ fn n1_mint(
 /// The N-1 side's fixture: the ref's changeset, then the root tree and
 /// the ticket it names, resolved from the N-1 server like the client
 /// does. The blob's bytes are the corpus's, so its names resolve.
+/// The first parent of the changeset `id` names, streamed by
+/// `GetChangeset` and decoded: the chain walk steps on it.
+async fn parent_changeset(client: &mut ScionClientOf, id: ChangesetId) -> ChangesetId {
+    let req = GetChangesetRequest {
+        repo: common::REPO.into(),
+        changeset_id: id.as_bytes().to_vec(),
+    };
+    let mut stream = client
+        .get_changeset(req)
+        .await
+        .expect("the changeset answers")
+        .into_inner();
+    let mut parts = Vec::new();
+    while let Some(part) = stream.message().await.expect("the part answers") {
+        parts.extend_from_slice(&part.changeset);
+    }
+    *scion_core::Changeset::decode(&parts)
+        .expect("the changeset decodes")
+        .parents()
+        .first()
+        .expect("the changeset names its parent")
+}
+
 fn n1_fixture(runtime: &tokio::runtime::Runtime, server: &str) -> Fixture {
     runtime.block_on(async {
         let mut client = connect(server).await;
@@ -1392,15 +1606,35 @@ fn n1_fixture(runtime: &tokio::runtime::Runtime, server: &str) -> Fixture {
             .expect("the root tree answers")
             .into_inner();
         let tree = tree_reply.tree_id.try_into().expect("the tree is 32 bytes");
+        // The chain rides GetChangeset: the head's bytes name the middle
+        // changeset, the middle's bytes name the root. The walk awaits
+        // like every call here: this closure runs on the runtime, and a
+        // block_on inside it would start a runtime from within it.
+        let mut scion = scion_client(server).await;
+        let mid_cs = parent_changeset(&mut scion, cs).await;
+        let root_cs = parent_changeset(&mut scion, mid_cs).await;
+        let root_reply = client
+            .get_root_tree(GetRootTreeRequest {
+                repo: common::REPO.into(),
+                changeset_id: root_cs.as_bytes().to_vec(),
+            })
+            .await
+            .expect("the root tree answers")
+            .into_inner();
+        let root_ticket = root_reply.ticket;
+        let root_tree = root_reply.tree_id.try_into().expect("the tree is 32 bytes");
         let content = b"pub fn main() {}\n".to_vec();
         Fixture {
             blob: BlobId::of(&content),
             content,
             tree,
             cs,
+            root_cs,
+            mid_cs,
+            root_tree,
             missing: missing_id(0xab),
-            unsigned: unsigned_of(&tree_reply.ticket),
-            ticket: tree_reply.ticket,
+            unsigned: unsigned_of(&root_ticket),
+            ticket: root_ticket,
         }
     })
 }
@@ -1764,7 +1998,10 @@ async fn run_list_dir(
 
 async fn run_log(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> Result<(), String> {
     for (k, _) in &t.request {
-        if !matches!(k.as_str(), "repo" | "changeset_id" | "path" | "cursor") {
+        if !matches!(
+            k.as_str(),
+            "repo" | "changeset_id" | "path" | "cursor" | "limit"
+        ) {
             return Err(unknown_field("Log", k));
         }
     }
