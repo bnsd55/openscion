@@ -60,6 +60,8 @@ tokio-postgres-rustls = "0.14"
 test-hooks = []
 
 [dev-dependencies]
+# The auth walk reads the descriptor set through the test-hooks seam.
+open-scion-proto = { workspace = true, features = ["test-hooks"] }
 # The h2-level proof of the reply-memory budget's release on a reset:
 # only a raw HTTP/2 client can open a call and reset it unread.
 h2 = "0.4"
@@ -68,6 +70,9 @@ open-scion-server = { path = ".", features = ["test-hooks"] }
 sha2 = "0.11.1"
 proptest.workspace = true
 tempfile.workspace = true
+# The auth walk decodes the descriptor set the build compiled (through
+# scion_proto::descriptor_set, a test-hooks seam).
+prost-types = "0.14"
 tonic-health.workspace = true
 # A test runs code while a commit is visible and its COMMIT still runs.
 # Tests of the reply timeouts run on a paused clock.

@@ -52,6 +52,20 @@ pub mod ticket;
 /// buffer.
 pub use prost::bytes::Bytes;
 
+/// The descriptor set of `proto/scion.proto` that this build compiled, as
+/// the compiler saw it. A test that walks every RPC reads this, not a hand
+/// parse of the proto text: a method the compiler knows is in here, and a
+/// method it does not know is not.
+///
+/// Test seam, behind the test-hooks feature; not API, and not covered by a
+/// stability promise. Decode with `prost_types::FileDescriptorSet`.
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-hooks"))]
+#[must_use]
+pub fn descriptor_set() -> &'static [u8] {
+    include_bytes!(concat!(env!("OUT_DIR"), "/scion_descriptor.bin"))
+}
+
 /// Largest single gRPC message either side sends or accepts. A message of an
 /// `Objects` reply is smaller (see [`MAX_PART_MESSAGE_BYTES`]).
 pub const MAX_MESSAGE_BYTES: usize = 64 << 20;

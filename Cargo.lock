@@ -2585,6 +2585,7 @@ dependencies = [
  "postgres",
  "proptest",
  "prost",
+ "prost-types",
  "rustix",
  "serde_json",
  "sha2",
