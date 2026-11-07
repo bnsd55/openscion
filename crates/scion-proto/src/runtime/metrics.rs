@@ -204,6 +204,10 @@ pub struct Metrics {
     /// directory), counted by the audit writer and sampled into
     /// [`Self::audit_reopens_failed`], as `scion_audit_reopens_failed_total`.
     audit_reopens_failed: AtomicU64,
+    /// Audit reopens that succeeded, sampled into
+    /// [`Self::audit_reopens_ok`], as `scion_audit_reopens_ok_total`:
+    /// the clearing signal of the failed-reopen alert.
+    audit_reopens_ok: AtomicU64,
     /// Bytes that stalled replies of live connections hold, as one
     /// [`crate::STALLED_REPLY_BYTES`]-sized estimate per stalled reply,
     /// counted by [`crate::runtime::listen::Stalled`] and given back when
@@ -490,6 +494,12 @@ impl Metrics {
     /// the audit's own counter.
     pub fn audit_reopens_failed(&self, failed: u64) {
         self.audit_reopens_failed.store(failed, Ordering::Relaxed);
+    }
+
+    /// Sets the total of audit reopens that succeeded, sampled from the
+    /// audit's own counter.
+    pub fn audit_reopens_ok(&self, ok: u64) {
+        self.audit_reopens_ok.store(ok, Ordering::Relaxed);
     }
 
     /// Sets the gauge of the age of the oldest open read transaction.
@@ -893,6 +903,15 @@ impl Metrics {
             text,
             "scion_audit_reopens_failed_total {}",
             self.audit_reopens_failed.load(Ordering::Relaxed)
+        );
+        text.push_str(
+            "# HELP scion_audit_reopens_ok_total Audit reopens that succeeded after a refusal; the clearing signal of the failed-reopen alert.\n",
+        );
+        text.push_str("# TYPE scion_audit_reopens_ok_total counter\n");
+        let _ = writeln!(
+            text,
+            "scion_audit_reopens_ok_total {}",
+            self.audit_reopens_ok.load(Ordering::Relaxed)
         );
     }
 

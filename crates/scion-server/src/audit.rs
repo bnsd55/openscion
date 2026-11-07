@@ -105,6 +105,11 @@ pub struct Audit {
     /// How many reopens were refused: the serve path's sampler reads
     /// it into `scion_audit_reopens_failed_total`.
     reopens_failed: Arc<AtomicU64>,
+    /// How many reopens succeeded since the audit opened. The alert
+    /// joins this against the failed counter: a failure whose later
+    /// signal reopened fine must clear, so "rose and never succeeded
+    /// after" needs both directions (`scion_audit_reopens_ok_total`).
+    reopens_ok: Arc<AtomicU64>,
     /// The readiness sender of the off handle, held so its watch never
     /// closes: a closed watch would flip readiness at once.
     _ready_tx: Option<watch::Sender<bool>>,
@@ -134,11 +139,24 @@ impl Audit {
         let faults = Arc::new(AtomicU64::new(0));
         let reopen = Arc::new(AtomicBool::new(false));
         let reopens_failed = Arc::new(AtomicU64::new(0));
+        let reopens_ok = Arc::new(AtomicU64::new(0));
         std::thread::Builder::new().name("audit".into()).spawn({
             let faults = Arc::clone(&faults);
             let reopen = Arc::clone(&reopen);
             let reopens_failed = Arc::clone(&reopens_failed);
-            move || writer(rx, file, path, ready_tx, faults, reopen, reopens_failed)
+            let reopens_ok = Arc::clone(&reopens_ok);
+            move || {
+                writer(
+                    rx,
+                    file,
+                    path,
+                    ready_tx,
+                    faults,
+                    reopen,
+                    reopens_failed,
+                    reopens_ok,
+                );
+            }
         })?;
         Ok(Self {
             tx: Some(tx),
@@ -147,6 +165,7 @@ impl Audit {
             dir_fsyncs,
             reopen,
             reopens_failed,
+            reopens_ok,
             _ready_tx: None,
         })
     }
@@ -172,6 +191,7 @@ impl Audit {
             dir_fsyncs: Arc::new(AtomicU64::new(0)),
             reopen: Arc::new(AtomicBool::new(false)),
             reopens_failed: Arc::new(AtomicU64::new(0)),
+            reopens_ok: Arc::new(AtomicU64::new(0)),
             _ready_tx: Some(ready_tx),
         }
     }
@@ -192,6 +212,13 @@ impl Audit {
     #[must_use]
     pub fn reopens_failed(&self) -> u64 {
         self.reopens_failed.load(Ordering::Relaxed)
+    }
+
+    /// How many reopens succeeded since the audit opened. The serve
+    /// path's sampler reads it into `scion_audit_reopens_ok_total`.
+    #[must_use]
+    pub fn reopens_ok(&self) -> u64 {
+        self.reopens_ok.load(Ordering::Relaxed)
     }
 
     /// Makes the next `n` appends of THIS audit fail, as an EIO or an
@@ -340,7 +367,11 @@ fn glue_torn_line(file: &mut std::fs::File) -> io::Result<()> {
 
 /// The writer thread: one owner of the file. It takes its file, path,
 /// readiness and faults by value because it is the only owner there is.
+/// The reopen flag and the two counters ride along because the writer is
+/// their only writer; eight parameters, all owned, no struct to build for
+/// one call site.
 #[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::too_many_arguments)]
 fn writer(
     #[allow(clippy::needless_pass_by_value)] // the thread owns them
     mut rx: mpsc::Receiver<Msg>,
@@ -353,6 +384,7 @@ fn writer(
     #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))] faults: Arc<AtomicU64>,
     reopen: Arc<AtomicBool>,
     reopens_failed: Arc<AtomicU64>,
+    reopens_ok: Arc<AtomicU64>,
 ) {
     while let Some(first) = rx.blocking_recv() {
         let mut batch = Vec::with_capacity(16);
@@ -371,7 +403,13 @@ fn writer(
                 glue_torn_line(&mut fresh)?;
                 Ok(fresh)
             }) {
-                Ok(fresh) => file = fresh,
+                Ok(fresh) => {
+                    file = fresh;
+                    // The success is the alert's clearing signal: a failure
+                    // whose later signal reopened fine must not stay
+                    // alerting.
+                    reopens_ok.fetch_add(1, Ordering::Relaxed);
+                }
                 Err(why) => {
                     reopens_failed.fetch_add(1, Ordering::Relaxed);
                     // The old file stays open: the lines go on where

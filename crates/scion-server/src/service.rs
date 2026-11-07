@@ -487,6 +487,7 @@ pub async fn serve(
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
             loop {
                 metrics.audit_reopens_failed(audit.reopens_failed());
+                metrics.audit_reopens_ok(audit.reopens_ok());
                 tokio::select! {
                     _ = tick.tick() => {}
                     _ = stop.changed() => break,

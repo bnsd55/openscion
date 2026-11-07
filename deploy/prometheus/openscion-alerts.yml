@@ -258,6 +258,19 @@ groups:
             The store holds more blobs than docs/support.md supports.
             The walk is seconds today and grows past them; give new
             repos a second store now (docs/operations.md section 6).
+      - alert: AuditReopenFailing
+        expr: scion_audit_reopens_failed_total > scion_audit_reopens_ok_total
+        for: 15m
+        labels:
+          severity: high
+        annotations:
+          response: >-
+            A SIGHUP's reopen of the audit file was refused and no later
+            signal has succeeded: the rotation silently stopped and the
+            renamed file grows. Fix what the reopen's error names (a
+            symlink at the path, an unwritable directory, a full disk)
+            and signal again (docs/operations.md section 5, the audit
+            log's rotation).
   - name: gc
     rules:
       - alert: GcStale
