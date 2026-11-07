@@ -105,11 +105,11 @@ pub struct Audit {
     /// How many reopens were refused: the serve path's sampler reads
     /// it into `scion_audit_reopens_failed_total`.
     reopens_failed: Arc<AtomicU64>,
-    /// How many reopens succeeded since the audit opened. The alert
-    /// joins this against the failed counter: a failure whose later
-    /// signal reopened fine must clear, so "rose and never succeeded
-    /// after" needs both directions (`scion_audit_reopens_ok_total`).
-    reopens_ok: Arc<AtomicU64>,
+    /// What the LAST reopen did: 1 after a refused reopen, 0 after a
+    /// successful one. The alert reads the state
+    /// (`scion_audit_reopen_failing`), not a ratio of totals - a month
+    /// of successes must not silence the next failure.
+    reopen_failing: Arc<AtomicU64>,
     /// The readiness sender of the off handle, held so its watch never
     /// closes: a closed watch would flip readiness at once.
     _ready_tx: Option<watch::Sender<bool>>,
@@ -139,12 +139,12 @@ impl Audit {
         let faults = Arc::new(AtomicU64::new(0));
         let reopen = Arc::new(AtomicBool::new(false));
         let reopens_failed = Arc::new(AtomicU64::new(0));
-        let reopens_ok = Arc::new(AtomicU64::new(0));
+        let reopen_failing = Arc::new(AtomicU64::new(0));
         std::thread::Builder::new().name("audit".into()).spawn({
             let faults = Arc::clone(&faults);
             let reopen = Arc::clone(&reopen);
             let reopens_failed = Arc::clone(&reopens_failed);
-            let reopens_ok = Arc::clone(&reopens_ok);
+            let reopen_failing = Arc::clone(&reopen_failing);
             move || {
                 writer(
                     rx,
@@ -154,7 +154,7 @@ impl Audit {
                     faults,
                     reopen,
                     reopens_failed,
-                    reopens_ok,
+                    reopen_failing,
                 );
             }
         })?;
@@ -165,7 +165,7 @@ impl Audit {
             dir_fsyncs,
             reopen,
             reopens_failed,
-            reopens_ok,
+            reopen_failing,
             _ready_tx: None,
         })
     }
@@ -191,7 +191,7 @@ impl Audit {
             dir_fsyncs: Arc::new(AtomicU64::new(0)),
             reopen: Arc::new(AtomicBool::new(false)),
             reopens_failed: Arc::new(AtomicU64::new(0)),
-            reopens_ok: Arc::new(AtomicU64::new(0)),
+            reopen_failing: Arc::new(AtomicU64::new(0)),
             _ready_tx: Some(ready_tx),
         }
     }
@@ -214,11 +214,11 @@ impl Audit {
         self.reopens_failed.load(Ordering::Relaxed)
     }
 
-    /// How many reopens succeeded since the audit opened. The serve
-    /// path's sampler reads it into `scion_audit_reopens_ok_total`.
+    /// What the last reopen did: 1 failing, 0 fine. The serve path's
+    /// sampler reads it into `scion_audit_reopen_failing`.
     #[must_use]
-    pub fn reopens_ok(&self) -> u64 {
-        self.reopens_ok.load(Ordering::Relaxed)
+    pub fn reopen_failing(&self) -> u64 {
+        self.reopen_failing.load(Ordering::Relaxed)
     }
 
     /// Makes the next `n` appends of THIS audit fail, as an EIO or an
@@ -384,7 +384,7 @@ fn writer(
     #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))] faults: Arc<AtomicU64>,
     reopen: Arc<AtomicBool>,
     reopens_failed: Arc<AtomicU64>,
-    reopens_ok: Arc<AtomicU64>,
+    reopen_failing: Arc<AtomicU64>,
 ) {
     while let Some(first) = rx.blocking_recv() {
         let mut batch = Vec::with_capacity(16);
@@ -405,13 +405,14 @@ fn writer(
             }) {
                 Ok(fresh) => {
                     file = fresh;
-                    // The success is the alert's clearing signal: a failure
-                    // whose later signal reopened fine must not stay
-                    // alerting.
-                    reopens_ok.fetch_add(1, Ordering::Relaxed);
+                    // The state flips to fine: the alert reads what
+                    // the LAST reopen did, so a failure whose later
+                    // signal reopened fine clears.
+                    reopen_failing.store(0, Ordering::Relaxed);
                 }
                 Err(why) => {
                     reopens_failed.fetch_add(1, Ordering::Relaxed);
+                    reopen_failing.store(1, Ordering::Relaxed);
                     // The old file stays open: the lines go on where
                     // they are, nothing is dropped, and the next
                     // signal retries the reopen.

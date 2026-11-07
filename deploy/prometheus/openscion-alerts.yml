@@ -259,7 +259,7 @@ groups:
             The walk is seconds today and grows past them; give new
             repos a second store now (docs/operations.md section 6).
       - alert: AuditReopenFailing
-        expr: scion_audit_reopens_failed_total > scion_audit_reopens_ok_total
+        expr: scion_audit_reopen_failing == 1
         for: 15m
         labels:
           severity: high

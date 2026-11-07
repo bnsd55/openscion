@@ -701,21 +701,21 @@ tests:
                 them; give new repos a second store now
                 (docs/operations.md section 6).
 
-  # A4 AuditReopenFailing: the failed counter rises at 5m and no
-  # success follows - the last reopen is a failure, fires after 15m
-  # more (the counters are cumulative, so "failed > ok" is exactly
-  # "the last reopen failed").
+  # A4 AuditReopenFailing: a month of successful rotations, then the
+  # gauge flips to 1 at 20m and stays - fires after 15m more. The case
+  # that catches a ratio-of-totals rule: the counters alone would never
+  # fire after earlier successes.
   - interval: 1m
     input_series:
       - series: 'scion_audit_reopens_failed_total'
-        values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
-      - series: 'scion_audit_reopens_ok_total'
-        values: "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+        values: "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'scion_audit_reopen_failing'
+        values: "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
     alert_rule_test:
-      - eval_time: 10m
+      - eval_time: 22m
         alertname: AuditReopenFailing
         exp_alerts: []
-      - eval_time: 21m
+      - eval_time: 38m
         alertname: AuditReopenFailing
         exp_alerts:
           - exp_labels:
@@ -731,14 +731,11 @@ tests:
                 rotation).
 
   # A5 AuditReopenFailing: a failure at 5m that the next signal fixed
-  # at 8m - the ok counter catches up, "failed > ok" stops holding,
-  # the alert never fires.
+  # at 8m - the gauge flips back to 0, the alert never fires.
   - interval: 1m
     input_series:
-      - series: 'scion_audit_reopens_failed_total'
-        values: "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
-      - series: 'scion_audit_reopens_ok_total'
-        values: "0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'scion_audit_reopen_failing'
+        values: "0 0 0 0 0 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0"
     alert_rule_test:
       - eval_time: 8m
         alertname: AuditReopenFailing
@@ -750,9 +747,7 @@ tests:
   # A6 AuditReopenFailing: no failure at all - never fires.
   - interval: 1m
     input_series:
-      - series: 'scion_audit_reopens_failed_total'
-        values: "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
-      - series: 'scion_audit_reopens_ok_total'
+      - series: 'scion_audit_reopen_failing'
         values: "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
     alert_rule_test:
       - eval_time: 21m

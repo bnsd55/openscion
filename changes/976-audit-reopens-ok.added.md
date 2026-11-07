@@ -1,1 +1,0 @@
-`scion_audit_reopens_ok_total` counter: audit reopens that succeeded after a refusal, the clearing signal of the `AuditReopenFailing` alert (the last reopen failed exactly when the failed counter sits above the ok one).

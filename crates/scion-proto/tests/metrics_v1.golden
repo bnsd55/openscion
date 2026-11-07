@@ -341,9 +341,9 @@ scion_pg_tx_age_seconds
 # HELP scion_audit_reopens_failed_total Audit reopens the server refused: a rename-and-signal rotation whose fresh open failed, with the old file still recording.
 # TYPE scion_audit_reopens_failed_total counter
 scion_audit_reopens_failed_total
-# HELP scion_audit_reopens_ok_total Audit reopens that succeeded after a refusal; the clearing signal of the failed-reopen alert.
-# TYPE scion_audit_reopens_ok_total counter
-scion_audit_reopens_ok_total
+# HELP scion_audit_reopen_failing What the audit's last reopen did: 1 after a refused one, 0 after a successful one; the state the failed-reopen alert reads.
+# TYPE scion_audit_reopen_failing gauge
+scion_audit_reopen_failing
 # HELP scion_connections_refused_total Connections the server closed because no place freed within its wait at the connection cap; a client that left while it waited counts here too.
 # TYPE scion_connections_refused_total counter
 scion_connections_refused_total

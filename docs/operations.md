@@ -1448,10 +1448,11 @@ the process, scraped from there. The names:
   a rename-and-signal rotation whose fresh open failed (a symlink at the
   path, an unwritable directory). The old file still records, so no line
   is lost; a value that stays put after a SIGHUP retry is a path the
-  operator has to fix. The alert on it is `AuditReopenFailing`: it fires
-  while the last reopen is a failure — the failed counter sits above its
-  clearing partner `scion_audit_reopens_ok_total` — and clears when a
-  later signal reopens fine.
+  operator has to fix. The alert on it is `AuditReopenFailing`: it reads
+  the state gauge `scion_audit_reopen_failing` (1 after a refused
+  reopen, 0 after a successful one), so it fires while the last reopen
+  is a failure and clears when a later signal reopens fine — earlier
+  successes never silence a fresh failure.
 
 ### A stuck free space sample
 
