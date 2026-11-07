@@ -443,6 +443,14 @@ fn store_changeset_impl(
     derived::remove_old::<RootTree>(c)?;
     derived::on_write_into::<CommitGraph>(&mut rows, c, id, cs, lens)?;
     derived::on_write_into::<PathHistory>(&mut rows, c, id, cs, lens)?;
+    // The write path trims older versions of every kind it writes, not
+    // only the root tree's: after a version bump, the old rows clear as
+    // the store is written, not only when a fill step or a backfill
+    // walks their changesets (#949). The calls ride the deferral this
+    // transaction turned on (tree.rs above the preload), so the commit's
+    // one-statement flush carries them and no round trip moves.
+    derived::remove_old::<CommitGraph>(c)?;
+    derived::remove_old::<PathHistory>(c)?;
     derived::put_all(c, rows)?;
     Ok((id, tree))
 }
