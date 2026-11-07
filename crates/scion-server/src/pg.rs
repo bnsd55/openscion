@@ -950,6 +950,22 @@ const LOCK_TIMEOUT_FOR_WRITERS: &str = "5s";
 /// queue drains as fast as the writers commit.
 const LOCK_TIMEOUT_FOR_KEY: &str = "60s";
 
+/// The write lane's key statement, riding its transaction's open batch
+/// (one round trip instead of two). The batch runs the simple query
+/// protocol, which takes no parameters; this statement carries none
+/// either - `current_schema()` is read server side - so nothing is
+/// formatted into it but its own fixed text. The guards keep their
+/// order: the open batch's `SET LOCAL lock_timeout` is its own
+/// statement, in force before the key's wait begins (`lock_timeout` is
+/// read when the wait starts), and the key's statement - the OFFSET 0
+/// data dependency and the 5 s restore - is byte-identical to the
+/// two-statement shape (`tests/pg_guard_timeouts.rs` pins the plan and
+/// the timing). A wait the batch loses arrives as one error from
+/// `open_transaction`, whose ROLLBACK leaves no transaction behind.
+const LANE_KEY_STATEMENT: &str = "SELECT set_config('lock_timeout', '5s', true) \
+     FROM (SELECT pg_advisory_xact_lock(hashtext(current_schema() || ':gc')) \
+           OFFSET 0) AS held";
+
 /// The one decision an open and a preflight both need, made here so
 /// the two cannot drift.
 pub(crate) enum Pairing {
@@ -1514,6 +1530,9 @@ impl Pg {
         let mut derived = DerivedPending::default();
         let mut preload = std::collections::HashMap::new();
         let mut history = HistoryPending::default();
+        // The wait inside the open batch is the lane key's wait: the
+        // clock covers the batch, whose bulk is the lock.
+        let key_started = std::time::Instant::now();
         let mut tx = PgTx::begin(
             &mut writer,
             &mut pending,
@@ -1521,7 +1540,13 @@ impl Pg {
             &mut preload,
             &mut history,
             Some(LOCK_TIMEOUT_FOR_KEY),
+            Some(LANE_KEY_STATEMENT),
         )?;
+        if let Some(metrics) = self.inner.metrics.get() {
+            metrics.collector_key_wait(
+                u64::try_from(key_started.elapsed().as_micros()).unwrap_or(u64::MAX),
+            );
+        }
         // Every writer and the collector's batches of one schema order on
         // one advisory key, held to the end of the transaction: the
         // store's write transactions serialize on it.
@@ -1547,11 +1572,12 @@ impl Pg {
         // meets later still answer Busy at 5 s (SET LOCAL lasts to the
         // end of the transaction).
         // The 60 s guard is in force before the statement that takes
-        // the key: the transaction's open batch carries it (BEGIN and
-        // the SET LOCAL in one round trip). `lock_timeout` is read when
-        // the lock wait begins (the timer starts in the lock's sleep),
-        // so the guard cannot ride the same statement as the key: it
-        // stays its own statement, before the key's - inside the open.
+        // the key: both ride the transaction's open batch (BEGIN, the
+        // SET LOCAL, and the key - one round trip). `lock_timeout` is
+        // read when the lock wait begins (the timer starts in the
+        // lock's sleep), so the guard cannot ride the same statement as
+        // the key: it stays its own statement, before the key's, inside
+        // the batch.
         //
         // The restore is a data dependency, not a target-list neighbor:
         // it reads FROM the subquery that takes the key, so it cannot
@@ -1559,20 +1585,6 @@ impl Pg {
         // the 60 s. OFFSET 0 keeps the planner from flattening the
         // subquery into one target list (tests/pg_guard_timeouts.rs
         // checks the plan's shape and times the wait).
-        let key_started = std::time::Instant::now();
-        tx.c.query_opt(
-            &format!(
-                "SELECT set_config('lock_timeout', '{LOCK_TIMEOUT_FOR_WRITERS}', true) \
-                 FROM (SELECT pg_advisory_xact_lock(hashtext(current_schema() || ':gc')) \
-                       OFFSET 0) AS held"
-            ),
-            &[],
-        )?;
-        if let Some(metrics) = self.inner.metrics.get() {
-            metrics.collector_key_wait(
-                u64::try_from(key_started.elapsed().as_micros()).unwrap_or(u64::MAX),
-            );
-        }
         match f(&mut tx) {
             Ok(value) => {
                 let unflushed = tx.cs_pending.as_deref().is_some_and(|p| !p.is_empty())
@@ -2244,14 +2256,16 @@ impl<'a> PgTx<'a> {
         preload: &'a mut DerivedPreload,
         history: &'a mut HistoryPending,
         lock_timeout: Option<&str>,
+        lane_key: Option<&str>,
     ) -> Result<PgTx<'a>> {
-        open_transaction(
-            c,
-            &match lock_timeout {
-                Some(v) => format!("BEGIN; SET LOCAL lock_timeout = '{v}';"),
-                None => "BEGIN;".to_owned(),
-            },
-        )?;
+        let mut open = match lock_timeout {
+            Some(v) => format!("BEGIN; SET LOCAL lock_timeout = '{v}';"),
+            None => "BEGIN;".to_owned(),
+        };
+        if let Some(key) = lane_key {
+            open.push_str(key);
+        }
+        open_transaction(c, &open)?;
         Ok(Self {
             c,
             gen_cache: std::collections::HashMap::new(),
@@ -4071,6 +4085,7 @@ fn run_one_migration(client: &mut PgClient, from_version: u32, n: u32, sql: &str
         &mut derived,
         &mut preload,
         &mut history,
+        None,
         None,
     )
     .map_err(|e| named_step("the migration's begin", "BEGIN", e))?;
@@ -6745,6 +6760,22 @@ mod tests {
         assert!(
             text.contains("scion_pg_collector_key_wait_seconds_count 1\n"),
             "{text}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod lane_key_tests {
+    use super::{LANE_KEY_STATEMENT, LOCK_TIMEOUT_FOR_WRITERS};
+
+    /// The key statement spells the writers' clock as a literal (the
+    /// simple query protocol takes no parameters). This pin fails if
+    /// the literal and `LOCK_TIMEOUT_FOR_WRITERS` ever drift (#917).
+    #[test]
+    fn the_lane_key_names_the_writers_clock_from_the_constant() {
+        assert!(
+            LANE_KEY_STATEMENT.contains(&format!("'{LOCK_TIMEOUT_FOR_WRITERS}'")),
+            "the lane key's restore spells the writers' clock: {LANE_KEY_STATEMENT}"
         );
     }
 }

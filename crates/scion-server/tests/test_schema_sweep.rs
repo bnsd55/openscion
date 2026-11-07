@@ -11,8 +11,8 @@
 
 use std::path::Path;
 
-use scion_server::Backend;
 use scion_server::test_support::private_tempdir;
+use scion_server::{Backend, Error};
 
 /// The database's URL, and a client that reaches it. Every test here
 /// needs no store of its own, only the registry and the catalog.
@@ -731,4 +731,124 @@ fn an_open_keeps_no_lock_on_the_bare_migration_key() {
         "the writer keeps no lock on the bare migration key, holds: {leaked:?}"
     );
     drop(store);
+}
+
+/// The lane key's holder row, polled until it appears; a poll that
+/// gives up prints every granted advisory row beside the split the
+/// confirm computed, so a red names the two numbers.
+fn lane_key_holder(schema: &str) -> Vec<postgres::Row> {
+    let confirm = "SELECT 1 FROM pg_locks WHERE locktype = 'advisory'
+                 AND classid = ((hashtext($1::text || ':gc')::bigint >> 32)
+                                & 4294967295)
+                 AND objid = (hashtext($1::text || ':gc') & 4294967295)
+                 AND granted";
+    let mut held = Vec::new();
+    for _ in 0..250 {
+        held = connect().query(confirm, &[&schema]).unwrap();
+        if !held.is_empty() {
+            return held;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let seen = connect()
+        .query(
+            "SELECT classid, objid, objsubid, mode FROM pg_locks
+             WHERE locktype = 'advisory' AND granted",
+            &[],
+        )
+        .unwrap();
+    for row in &seen {
+        eprintln!(
+            "DEBUG the lane key's holder: classid {} objid {} objsubid {} mode {}",
+            row.get::<_, u32>(0),
+            row.get::<_, u32>(1),
+            row.get::<_, u32>(2),
+            row.get::<_, String>(3),
+        );
+    }
+    let want = connect()
+        .query(
+            "SELECT ((hashtext($1::text || ':gc')::bigint >> 32) & 4294967295),
+                    (hashtext($1::text || ':gc') & 4294967295)",
+            &[&schema],
+        )
+        .unwrap();
+    eprintln!(
+        "DEBUG the confirm wants: classid {} objid {}",
+        want[0].get::<_, u32>(0),
+        want[0].get::<_, u32>(1)
+    );
+    held
+}
+
+/// A write that loses the lane key answers the same busy as before the
+/// key rode the open batch, and the transaction the batch opened is
+/// rolled back: the writer's session holds no transaction when the
+/// error lands (#782).
+#[test]
+fn a_write_that_loses_the_lane_key_answers_busy_and_leaves_no_transaction_open() {
+    use scion_server::test_support::meta::Meta as _;
+    let _lock = locked();
+    let dir = private_tempdir();
+    let store = Backend::open_test(dir.path()).unwrap();
+    // The lane key of the store's schema, held in a transaction past
+    // the writer's 5 s clock, as a rival writer would.
+    let schema = Backend::test_schema(dir.path());
+    let escaped = schema.replace('\'', "''");
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let mut client = connect();
+        client
+            .batch_execute(&format!(
+                "BEGIN; SELECT pg_advisory_xact_lock(hashtext('{escaped}' || ':gc'));"
+            ))
+            .unwrap();
+        let _ = released.recv();
+        client
+            .batch_execute("ROLLBACK")
+            .expect("the holder's transaction ends");
+    });
+    // The hold is seen in pg_locks before the write runs: hashtext is a
+    // signed 32-bit value, and its bigint promotion splits into the
+    // lock table's two ints, so the confirm computes the split it
+    // expects and a poll that gives up prints the row beside it.
+    let held = lane_key_holder(&schema);
+    assert_eq!(held.len(), 1, "the rival writer holds the lane key");
+    let error = store
+        .write(|_c| Ok(()))
+        .expect_err("the write loses the lane key");
+    drop(release);
+    holder.join().unwrap();
+    assert!(
+        matches!(
+            &error,
+            Error::Storage(storage)
+                if storage.class() == scion_server::StorageClass::Busy
+        ),
+        "the write answers busy: {error:?}"
+    );
+    // The batch's ROLLBACK ran: the writer's session - the one on the
+    // one-server key - holds no transaction.
+    let server_key = Backend::test_server_lock(dir.path()).unwrap();
+    let rows = connect()
+        .query(
+            &format!(
+                "SELECT a.state FROM pg_locks l
+                 JOIN pg_stat_activity a ON a.pid = l.pid
+                 WHERE l.locktype = 'advisory'
+                   AND l.classid = {}
+                   AND l.objid = {}
+                   AND l.granted",
+                server_key >> 32,
+                server_key & 0xFFFF_FFFF
+            ),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1, "the writer's session is found");
+    let state: String = rows[0].get(0);
+    assert_ne!(
+        state, "idle in transaction",
+        "the failed write left no transaction open"
+    );
 }
