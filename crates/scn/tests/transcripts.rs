@@ -66,6 +66,9 @@ struct Transcript {
     /// The changeset the file's ticket is minted for, when the file
     /// reaches past the root changeset (`big_cs` and friends).
     ticket_for: Option<String>,
+    /// The bearer token the file's calls carry, when the file pins an
+    /// auth refusal; every other file carries the one valid token.
+    token: Option<String>,
     /// The `request.` lines, path and value, in file order.
     request: Vec<(String, String)>,
     /// The expectation lines, key and value, in file order.
@@ -79,6 +82,7 @@ fn parse(at: &Path, text: &str) -> Transcript {
     let mut method = None;
     let mut fixture = None;
     let mut ticket_for = None;
+    let mut token = None;
     let mut request = Vec::new();
     let mut expect = Vec::new();
     for (n, line) in text.lines().enumerate() {
@@ -105,6 +109,7 @@ fn parse(at: &Path, text: &str) -> Transcript {
             "method" => method = Some(value.to_owned()),
             "fixture" => fixture = Some(value.to_owned()),
             "ticket_for" => ticket_for = Some(value.to_owned()),
+            "token" => token = Some(value.to_owned()),
             "status" | "end" | "resume_status" | "objects" | "entries" | "next"
             | "next_nonempty" | "cursor_from" | "objects_parts" => {
                 expect.push((key.to_owned(), value.to_owned()));
@@ -137,6 +142,7 @@ fn parse(at: &Path, text: &str) -> Transcript {
         method: method.unwrap_or_else(|| panic!("{} names no method", at.display())),
         fixture: fixture.unwrap_or_else(|| panic!("{} names no fixture", at.display())),
         ticket_for,
+        token,
         request,
         expect,
     }
@@ -972,8 +978,8 @@ fn the_corpus_answers_as_its_files_say() {
     files.sort();
     assert_eq!(
         files.len(),
-        54,
-        "the corpus pins 54 behaviours; a file added or removed must update this count"
+        55,
+        "the corpus pins 55 behaviours; a file added or removed must update this count"
     );
     check_cursor_sources(&files).unwrap_or_else(|e| panic!("{e}"));
     // One store and one set of tiers for the whole run: the fixture is
@@ -2295,6 +2301,12 @@ type ScionClientOf = ScionClient<InterceptedService<Channel, Bearer>>;
 
 /// A `Scion` client with the token, as the Objects one is built.
 async fn scion_client(url: &str) -> ScionClientOf {
+    scion_client_as(url, TOKEN).await
+}
+
+/// A `Scion` client whose bearer is `token`, so a file can pin what a
+/// wrong token answers.
+async fn scion_client_as(url: &str, token: &str) -> ScionClientOf {
     let channel = Endpoint::from_shared(url.to_owned())
         .unwrap()
         .connect_timeout(std::time::Duration::from_secs(5))
@@ -2302,7 +2314,7 @@ async fn scion_client(url: &str) -> ScionClientOf {
         .connect()
         .await
         .unwrap();
-    ScionClient::with_interceptor(channel, Bearer::new(TOKEN).unwrap())
+    ScionClient::with_interceptor(channel, Bearer::new(token).unwrap())
 }
 
 /// Runs one `Objects` transcript against one tier URL.
@@ -2316,9 +2328,10 @@ async fn run_objects(t: &Transcript, url: &str, f: &Fixture) -> Result<(), Strin
     }
 }
 
-/// Runs one `Scion` transcript against the server.
+/// Runs one `Scion` transcript against the server, as the file's own
+/// token: the one valid token, unless the file pins an auth refusal.
 async fn run_scion(t: &Transcript, url: &str, f: &Fixture) -> Result<(), String> {
-    let mut client = scion_client(url).await;
+    let mut client = scion_client_as(url, t.token.as_deref().unwrap_or(TOKEN)).await;
     match t.method.as_str() {
         "Scion/PutBlob" => run_put_blob(t, &mut client, f).await,
         "Scion/CreateChangeset" => run_create_changeset(t, &mut client, f).await,
