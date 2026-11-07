@@ -297,7 +297,7 @@ pub fn fill_root_tree_by(
     cs: ChangesetId,
     deadline: &Deadline,
 ) -> Result<TreeId> {
-    derived::fill_by::<RootTree>(store, repo, cs, deadline)
+    derived::fill_by::<RootTree>(store, repo, cs, deadline, None)
 }
 
 /// Derives the root tree of `cs` inside the caller's transaction, as the
