@@ -334,10 +334,11 @@ fi
 : > "$WORK/capacity.csv"
 echo "cell_start,reps,landed" > /dev/null
 
-# The summary's numbers live in one CSV row per repetition:
-# backend,writers,readers,land_p99_ms,checkout_p50_ms,checkout_p99_ms,
-# reader_timeouts,errors,rss_end_kib,landed,blob_growth_kib_per_1k_lands,
-# db_growth_kib_per_1k_lands
+# The summary's numbers live in one CSV row per cell (the cell's last
+# repetition for the percentiles):
+# backend,writers,readers,land_p99_ms,push_p99_ms,checkout_p50_ms,
+# checkout_p99_ms,reader_timeouts,errors,rss_end_kib,landed,
+# lands_per_second,blob_growth_kib_per_1k_lands,db_growth_kib_per_1k_lands
 
 [ -n "${SCION_PG_URL:-}" ] || {
   note "no SCION_PG_URL: the cells are not run"
@@ -538,12 +539,18 @@ for w in $WRITERS; do
     if [ "$bench_fail" -eq 0 ] && [ -f "$last_rep_json" ]; then
       # The last rep's percentiles stand in the table (rep 1 warms the
       # cell, rep 2 is the steady state); the throughput sums every
-      # rep the cell ran.
+      # rep the cell ran. The push p99 rides the same rep: a writer's
+      # whole push (PutBlob, CreateChangeset, Land), the bench's
+      # end-to-end p99 - so the docs table's push column reads from
+      # this CSV, the artifact the table cites, and not from the bench
+      # JSONs a reader would have to fetch separately (#995 F1).
       land_p99=$(jq -r '.land_ms.p99' "$last_rep_json")
+      push_p99=$(jq -r '.end_to_end_ms.p99' "$last_rep_json")
     else
-      # No bench report, no land percentiles: the cell says so in the
-      # errors column, and the land p99 column stays empty.
+      # No bench report, no percentiles: the cell says so in the
+      # errors column, and the percentile columns stay empty.
       land_p99="-"
+      push_p99="-"
     fi
     lands_per_sec=$(cell_throughput "$WORK"/bench-w$w-r$r-rep*.json)
     p50=$(pct "$WORK/read-times.csv" 0.50)
@@ -559,7 +566,7 @@ for w in $WRITERS; do
     db_end_kib=$(psql "$admin_url" -X -A -t \
       -c "SELECT pg_database_size('$pg_db')" | awk '{ print int(($1 + 1023) / 1024) }')
     db_growth=$(kib_per_1k "$db_start_kib" "$db_end_kib" "$lands_landed")
-    echo "postgres,$w,$r,$land_p99,$p50,$p99,$reader_timeouts,$errors,$rss_end,$lands_landed,$lands_per_sec,$blob_growth,$db_growth" \
+    echo "postgres,$w,$r,$land_p99,$push_p99,$p50,$p99,$reader_timeouts,$errors,$rss_end,$lands_landed,$lands_per_sec,$blob_growth,$db_growth" \
       >> "$WORK/capacity.csv"
     if [ "$((errors + reader_timeouts))" -gt 0 ]; then
       note "cell w$w r$r: $reader_timeouts timeouts, $errors errors (readers $reader_failures, bench $bench_fail) - recorded, next cell"
