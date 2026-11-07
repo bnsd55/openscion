@@ -2801,7 +2801,14 @@ fn run_with_retry(
     }
     let Ok(fresh) = reconnect(client, conn) else {
         // The connection stays dead; the original error stands, and the
-        // next job reconnects.
+        // next job reconnects. A transaction in progress was lost with
+        // the connection either way: record it now, so the loss is
+        // consumed by this transaction's own next statement - a retry,
+        // or the ROLLBACK its guard sends - instead of riding a stale
+        // `InTx` into some later caller's first job.
+        if tx.in_progress() {
+            *tx = TxState::Lost;
+        }
         return out;
     };
     *setup = fresh;
@@ -6476,7 +6483,10 @@ impl Meta for Pg {
 
 #[cfg(test)]
 mod tests {
-    use super::{Client, NoTls, delete_prefixes, merged_options};
+    use super::{
+        Client, Conn, Job, Kind, NoTls, Setup, TxState, connect_on, delete_prefixes,
+        merged_options, run_with_retry,
+    };
     use crate::pg::{Pairing, Pg, pairing_decision};
     use std::sync::Arc;
 
@@ -6761,6 +6771,116 @@ mod tests {
             text.contains("scion_pg_collector_key_wait_seconds_count 1\n"),
             "{text}"
         );
+    }
+
+    /// A transaction in progress whose reconnect fails is recorded as
+    /// lost at the failure, not carried as a stale `InTx` into some
+    /// later caller's first job: the transaction is gone with the
+    /// connection whatever a reconnect does next (#942). The red proof
+    /// on main read `InTx` here.
+    #[test]
+    fn a_failed_reconnect_records_a_transaction_in_progress_as_lost() {
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let mut client = connect_on(&url, None, "").unwrap();
+        let mut setup = Setup::new(None, false, &mut client);
+        assert!(setup.ok());
+        let mut tx = TxState::InTx;
+
+        // The statement's own backend dies under it, and the reconnect
+        // dials a port nothing answers: the reconnect fails, and the
+        // original error stands.
+        let pid: i32 = client
+            .query_one("SELECT pg_backend_pid()", &[])
+            .unwrap()
+            .get(0);
+        let mut killer = postgres::Client::connect(&url, NoTls).unwrap();
+        killer
+            .execute("SELECT pg_terminate_backend($1)", &[&pid])
+            .unwrap();
+        drop(killer);
+
+        let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
+        let job = Job {
+            sql: "SELECT 1".to_owned(),
+            params: Vec::new(),
+            kind: Kind::Count,
+            reply: reply_tx,
+            raw: None,
+        };
+        let dead = Conn {
+            url: "postgres://127.0.0.1:1/scion".to_owned(),
+            ca: None,
+            options: String::new(),
+            schema: None,
+            exclusive: false,
+        };
+        let out = run_with_retry(&mut client, &mut setup, &dead, &job, &mut tx, false, None);
+        assert!(out.is_err());
+        assert!(matches!(tx, TxState::Lost));
+    }
+
+    /// The consumption path the recording relies on: the lost
+    /// transaction's own next statement - the ROLLBACK its guard sends
+    /// when the connection has recovered - answers the loss and resets
+    /// the state, so the next caller's first `BEGIN` opens a fresh
+    /// transaction instead of meeting one that is gone.
+    #[test]
+    fn a_lost_transactions_own_rollback_consumes_the_loss_and_the_next_begin_starts_clean() {
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let mut client = connect_on(&url, None, "").unwrap();
+        let mut setup = Setup::new(None, false, &mut client);
+        assert!(setup.ok());
+        let mut tx = TxState::Lost;
+        let conn = Conn {
+            url: url.clone(),
+            ca: None,
+            options: String::new(),
+            schema: None,
+            exclusive: false,
+        };
+        let job_of = |sql: &str| {
+            let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
+            Job {
+                sql: sql.to_owned(),
+                params: Vec::new(),
+                kind: Kind::Count,
+                reply: reply_tx,
+                raw: None,
+            }
+        };
+
+        // The client is fresh here, so the ROLLBACK runs on a live
+        // session: the loop's gate answers the loss (Lost fails every
+        // non-ROLLBACK, non-BEGIN job), the ROLLBACK itself passes, and
+        // the state resets to Idle the way the worker folds `after`.
+        let out = run_with_retry(
+            &mut client,
+            &mut setup,
+            &conn,
+            &job_of("ROLLBACK"),
+            &mut tx,
+            false,
+            None,
+        );
+        assert!(out.is_ok());
+        tx = tx.after("ROLLBACK", out.is_ok());
+        assert!(matches!(tx, TxState::Idle));
+
+        // The next caller's first BEGIN opens a real transaction: it
+        // meets no loss recorded from a caller it never knew.
+        let out = run_with_retry(
+            &mut client,
+            &mut setup,
+            &conn,
+            &job_of("BEGIN"),
+            &mut tx,
+            false,
+            None,
+        );
+        assert!(out.is_ok());
+        tx = tx.after("BEGIN", out.is_ok());
+        assert!(matches!(tx, TxState::InTx));
+        let _ = client.execute("ROLLBACK", &[]);
     }
 }
 
