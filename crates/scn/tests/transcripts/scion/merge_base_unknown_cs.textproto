@@ -1,5 +1,5 @@
 # A changeset the repo does not have is NOT_FOUND.
-since: v0.7
+since: v0.1
 method: Scion/MergeBase
 fixture: landed
 

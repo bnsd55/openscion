@@ -121,6 +121,43 @@ async fn pg_tx_age_sample(store: Backend, metrics: Arc<Metrics>, mut stop: watch
 /// gauge. The latest poll is the value; a failed stat keeps the last
 /// good value and logs once a poll. The poll stops when the server
 /// does.
+/// The wait one free-space sample may take: a statvfs that hangs (a
+/// lost network mount) must not stop the poll or stack parked threads.
+/// Test-only override, the rename-cache override's shape.
+fn free_space_stat_bound() -> Duration {
+    #[cfg(test)]
+    {
+        let small = FREE_SPACE_STAT_BOUND_OVERRIDE.load(Ordering::Relaxed);
+        if small > 0 {
+            return Duration::from_millis(small);
+        }
+    }
+    FREE_SPACE_STAT_BOUND
+}
+
+#[cfg(test)]
+static FREE_SPACE_STAT_BOUND_OVERRIDE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// The poll's period, with the test override the small clocks need.
+fn free_space_poll_period() -> Duration {
+    #[cfg(test)]
+    {
+        let small = FREE_SPACE_POLL_OVERRIDE.load(Ordering::Relaxed);
+        if small > 0 {
+            return Duration::from_millis(small);
+        }
+    }
+    FREE_SPACE_POLL
+}
+
+#[cfg(test)]
+static FREE_SPACE_POLL_OVERRIDE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// One free-space sample: both reads, as the blocking job answers them.
+type FreeSample = (std::io::Result<u64>, std::io::Result<Option<u64>>);
+
 fn spawn_free_space_poll(
     data: std::path::PathBuf,
     metrics: Arc<Metrics>,
@@ -128,16 +165,29 @@ fn spawn_free_space_poll(
 ) {
     tokio::spawn(async move {
         let mut stop = stop;
+        // One sample in flight at a time: a statvfs that hangs holds
+        // its blocking thread, and the poll waits it out instead of
+        // parking a new thread per tick.
+        let mut in_flight: Option<tokio::task::JoinHandle<FreeSample>> = None;
+        // When the last good sample landed. The first good sample arms
+        // the age gauge; every tick refreshes it, so a stuck sample
+        // grows the age while the free values hold.
+        let mut last_good: Option<std::time::Instant> = None;
         loop {
-            let data = data.clone();
-            let free = tokio::task::spawn_blocking(move || {
-                (
-                    crate::store::free_bytes(&data),
-                    crate::store::free_inodes(&data),
-                )
-            });
-            match free.await {
-                Ok((bytes, inodes)) => {
+            if in_flight.is_none() {
+                let data = data.clone();
+                in_flight = Some(tokio::task::spawn_blocking(move || {
+                    (
+                        crate::store::free_bytes(&data),
+                        crate::store::free_inodes(&data),
+                    )
+                }));
+            }
+            let sample = in_flight.as_mut().expect("the sample was just set");
+            match tokio::time::timeout(free_space_stat_bound(), sample).await {
+                Ok(Ok((bytes, inodes))) => {
+                    in_flight = None;
+                    last_good = Some(std::time::Instant::now());
                     // The bytes value stands on its own: an inode failure
                     // must not drop it (the same one-failure-per-gauge
                     // policy both gauges share).
@@ -157,10 +207,23 @@ fn spawn_free_space_poll(
                         }
                     }
                 }
-                Err(e) => tracing::warn!(error = %e, "the free-space poll failed"),
+                Ok(Err(e)) => {
+                    in_flight = None;
+                    tracing::warn!(error = %e, "the free-space poll failed");
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        bound_secs = free_space_stat_bound().as_secs(),
+                        "the free-space sample is stuck; keeping the last values"
+                    );
+                }
+            }
+            if let Some(at) = last_good {
+                let age = at.elapsed().as_secs();
+                metrics.data_free_sample_age(age);
             }
             tokio::select! {
-                () = tokio::time::sleep(FREE_SPACE_POLL) => {}
+                () = tokio::time::sleep(free_space_poll_period()) => {}
                 _ = stop.changed() => break,
             }
         }
@@ -259,6 +322,11 @@ const _: () = assert!(READ_BUDGET_BYTES <= u32::MAX as usize);
 
 /// How often the free-space gauge of the data directory is refreshed.
 const FREE_SPACE_POLL: Duration = Duration::from_secs(30);
+
+/// The wait one free-space sample may take: a fifth of the poll's
+/// period, so a stuck sample warns once before the next tick and the
+/// poll still runs. A real statvfs answers in microseconds.
+const FREE_SPACE_STAT_BOUND: Duration = Duration::from_secs(6);
 
 /// How often the blob-count gauge is refreshed from the metadata: one
 /// bounded query per tick, never a scrape-time walk, and never a
@@ -2373,12 +2441,77 @@ mod tests {
     use crate::backend::Backend;
     use crate::meta::testing;
     use scion_proto::v1::objects_server::Objects as _;
+    use std::sync::atomic::Ordering;
     use std::time::Instant;
 
     use scion_core::{Changeset, FileState, IdentityTime};
     use tonic::Code;
 
     use super::*;
+
+    /// A statvfs that never answers does not stop the poll: the stuck
+    /// sample warns, the age gauge counts from the last good sample on
+    /// every tick, and the next sample still lands once the stat
+    /// answers. The park is the statvfs's test hook.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stuck_free_space_sample_does_not_stop_the_poll() {
+        const PERIOD: u64 = 50;
+        let dir = crate::test_support::private_tempdir();
+        let metrics = Arc::new(Metrics::default());
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(());
+        FREE_SPACE_POLL_OVERRIDE.store(PERIOD, Ordering::Relaxed);
+        FREE_SPACE_STAT_BOUND_OVERRIDE.store(2 * PERIOD, Ordering::Relaxed);
+        spawn_free_space_poll(
+            std::path::PathBuf::from(dir.path()),
+            Arc::clone(&metrics),
+            stop_rx,
+        );
+        // The first sample lands, and arms the age gauge at 0.
+        let mut spins = 0;
+        let mut text = metrics.render();
+        while !text.contains("scion_data_free_sample_age_seconds 0") {
+            spins += 1;
+            assert!(spins < 10_000, "the first sample never landed");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            text = metrics.render();
+        }
+        // The stat parks: the samples stop, the poll does not. The
+        // stuck window runs whole seconds, because the age gauge
+        // counts seconds and a stuck poll must show in it.
+        let park = crate::store::ParkFreeStat::now(dir.path().to_path_buf());
+        tokio::time::sleep(Duration::from_millis(PERIOD * 44)).await;
+        // The age counts from the last good sample, on the poll's own
+        // ticks, while nothing new lands: about two seconds here.
+        let stuck = metrics
+            .render()
+            .lines()
+            .find(|line| line.starts_with("scion_data_free_sample_age_seconds "))
+            .unwrap()
+            .to_owned();
+        let stuck_age: u64 = stuck
+            .rsplit(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .expect("the age gauge renders a number");
+        assert!(
+            stuck_age >= 2,
+            "the age gauge froze while the sample was stuck: {stuck}"
+        );
+        // The stat answers again: the next sample lands, so the poll
+        // was alive the whole time, and the age resets to 0.
+        drop(park);
+        let mut spins = 0;
+        loop {
+            tokio::time::sleep(Duration::from_millis(PERIOD)).await;
+            let text = metrics.render();
+            if text.contains("scion_data_free_sample_age_seconds 0\n") {
+                break;
+            }
+            spins += 1;
+            assert!(spins < 100, "the poll never took another sample");
+        }
+    }
 
     /// Receives one step's go signal, or panics naming the step: a
     /// release that never comes fails the test in seconds, not the

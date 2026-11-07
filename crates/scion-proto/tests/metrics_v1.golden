@@ -300,6 +300,9 @@ scion_data_free_bytes
 # HELP scion_data_free_inodes Free inodes of the filesystem that holds the data directory; one blob costs one inode (docs/operations.md, The inode budget).
 # TYPE scion_data_free_inodes gauge
 scion_data_free_inodes
+# HELP scion_data_free_sample_age_seconds Seconds since the free-space poll's last good sample; a growing age says the poll's statvfs is stuck.
+# TYPE scion_data_free_sample_age_seconds gauge
+scion_data_free_sample_age_seconds
 # HELP scion_blob_count Blobs the metadata names; docs/support.md supports 1,000,000 per data directory.
 # TYPE scion_blob_count gauge
 scion_blob_count
