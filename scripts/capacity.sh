@@ -185,6 +185,24 @@ pg_waits() {
 # Postgres's wait-event counts, the work disk's read and write
 # milliseconds in the past second. A tier that died mid-cell carries
 # empty CPU fields from then on: a gap is data, not a crash.
+# probe PROBE CMD...: runs one of the sampler's probes and prints its
+# output; a probe that fails prints an empty line and warns ONCE per
+# cell, naming the probe - the row's field goes empty either way. The
+# once-per-cell warning rides a file the cell deletes at its end.
+probe() {
+  local name=$1 out
+  shift
+  out=$("$@" 2> /dev/null)
+  if [ -n "$out" ]; then
+    printf '%s' "$out"
+  else
+    if [ ! -e "$WORK/.sampler-warned-$SAMPLER_CELL" ]; then
+      touch "$WORK/.sampler-warned-$SAMPLER_CELL"
+      echo "the sampler's probe $name failed; its field is empty for this cell" >&2
+    fi
+  fi
+}
+
 sample_cell() {
   # The sampler is a best-effort observer and runs its own shell: the
   # probes are best-effort too, so their failures are gaps (empty
@@ -192,29 +210,30 @@ sample_cell() {
   # in here; a probe that fails leaves the row's field empty.
   set +euo pipefail
   local w=$1 r=$2 out="$WORK/samples-w$w-r$r.csv"
+  SAMPLER_CELL=$w-$r
   local clk
   clk=$(getconf CLK_TCK)
-  pid_server=$(sed -n 's/^pid=//p' "$WORK/owned/server" | head -n 1)
-  pid_cache=$(sed -n 's/^pid=//p' "$WORK/owned/cache" | head -n 1)
-  pid_daemon=$(sed -n 's/^pid=//p' "$WORK/owned/daemon" | head -n 1)
-  prev_server=$(cpu_ms "$pid_server" "$clk")
-  prev_cache=$(cpu_ms "$pid_cache" "$clk")
-  prev_daemon=$(cpu_ms "$pid_daemon" "$clk")
-  prev_pg=$(pg_cpu_ms "$clk")
-  prev_bench=$(bench_cpu_ms "$clk")
-  disk_line=$(disk_ms)
+  pid_server=$(probe owned-server sed -n 's/^pid=//p' "$WORK/owned/server")
+  pid_cache=$(probe owned-cache sed -n 's/^pid=//p' "$WORK/owned/cache")
+  pid_daemon=$(probe owned-daemon sed -n 's/^pid=//p' "$WORK/owned/daemon")
+  prev_server=$(probe cpu-server cpu_ms "$pid_server" "$clk")
+  prev_cache=$(probe cpu-cache cpu_ms "$pid_cache" "$clk")
+  prev_daemon=$(probe cpu-daemon cpu_ms "$pid_daemon" "$clk")
+  prev_pg=$(probe cpu-postgres pg_cpu_ms "$clk")
+  prev_bench=$(probe cpu-bench bench_cpu_ms "$clk")
+  disk_line=$(probe disk disk_ms)
   prev_disk_read=${disk_line%% *}
   prev_disk_write=${disk_line#* }
   echo "tick,cpu_server_ms,cpu_postgres_ms,cpu_cache_ms,cpu_daemon_ms,cpu_bench_ms,load1,pg_waits,disk_read_ms,disk_write_ms" > "$out"
   while [ "$(date +%s)" -lt "$END" ]; do
     local tick cur
     tick=$(date +%s)
-    cur_server=$(cpu_ms "$pid_server" "$clk")
-    cur_cache=$(cpu_ms "$pid_cache" "$clk")
-    cur_daemon=$(cpu_ms "$pid_daemon" "$clk")
-    cur_pg=$(pg_cpu_ms "$clk")
-    cur_bench=$(bench_cpu_ms "$clk")
-    disk_line=$(disk_ms)
+    cur_server=$(probe cpu-server cpu_ms "$pid_server" "$clk")
+    cur_cache=$(probe cpu-cache cpu_ms "$pid_cache" "$clk")
+    cur_daemon=$(probe cpu-daemon cpu_ms "$pid_daemon" "$clk")
+    cur_pg=$(probe cpu-postgres pg_cpu_ms "$clk")
+    cur_bench=$(probe cpu-bench bench_cpu_ms "$clk")
+    disk_line=$(probe disk disk_ms)
     cur_disk_read=${disk_line%% *}
     cur_disk_write=${disk_line#* }
     load1=$(cut -d ' ' -f 1 /proc/loadavg)
@@ -226,7 +245,7 @@ sample_cell() {
       "$(awk -v a="$cur_daemon" -v b="$prev_daemon" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
       "$(awk -v a="$cur_bench" -v b="$prev_bench" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
       "$load1" \
-      "$(pg_waits)" \
+      "$(probe pg-waits pg_waits)" \
       "$(awk -v a="$cur_disk_read" -v b="$prev_disk_read" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
       "$(awk -v a="$cur_disk_write" -v b="$prev_disk_write" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
       >> "$out"
@@ -411,6 +430,20 @@ for w in $WRITERS; do
     note "cell w$w r$r: $lands_landed lands landed (the plan named $((LANDS * REPS)))"
     kill "$SAMPLER_PID" 2> /dev/null || true
     wait "$SAMPLER_PID" 2> /dev/null || true
+    # The observer must not fail silently: a cell whose samples CSV
+    # holds fewer rows than half its seconds prints a workflow warning
+    # (the run log's ::warning::), with the row count and the seconds
+    # named. The file may be whole; then the check says nothing.
+    if [ -f "$WORK/samples-w$w-r$r.csv" ]; then
+      rows=$(( $(wc -l < "$WORK/samples-w$w-r$r.csv") - 1 ))
+    else
+      rows=0
+    fi
+    floor=$(( (READ_SECONDS * REPS) / 2 ))
+    if [ "$rows" -lt "$floor" ]; then
+      echo "::warning::cell w$w r$r: the sampler wrote $rows rows; the cell ran $((READ_SECONDS * REPS)) s"
+    fi
+    rm -f "$WORK/.sampler-warned-$w-$r"
     reader_failures=0
     reader_log="$WORK/reads-w$w-r$r.log"
     [ -f "$reader_log" ] || { touch "$reader_log"; }
