@@ -292,6 +292,14 @@ pub trait MetaTx {
     /// Whether `repo` may see changeset `id`.
     fn has_changeset(&mut self, repo: RepoId, id: ChangesetId) -> Result<bool>;
 
+    /// The repo a name names, and whether each of `ids` is in it, one
+    /// statement. [`None`] when no repo carries the name.
+    fn repo_and_membership(
+        &mut self,
+        name: &str,
+        ids: &[ChangesetId],
+    ) -> Result<Option<(RepoId, Vec<bool>)>>;
+
     /// The generation of a changeset that `repo` may see.
     fn generation(&mut self, repo: RepoId, id: ChangesetId) -> Result<i64>;
 
@@ -436,6 +444,12 @@ pub trait MetaTx {
         cs: ChangesetId,
         value: &[u8],
     ) -> Result<()>;
+
+    /// Records derived values, one statement for the whole batch. The
+    /// callers write rows of changesets this transaction just stored, so
+    /// a conflicting stored row is corrupt state, not a legal second
+    /// write: the batch refuses on any conflict.
+    fn put_derived_all(&mut self, rows: &[(String, u32, ChangesetId, Vec<u8>)]) -> Result<()>;
 
     /// Deletes up to `limit` derived values of `kind` below `version`.
     fn delete_derived_below(&mut self, kind: &str, version: u32, limit: usize) -> Result<usize>;
