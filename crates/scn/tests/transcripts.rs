@@ -1426,6 +1426,29 @@ fn n1_mint(
 /// The N-1 side's fixture: the ref's changeset, then the root tree and
 /// the ticket it names, resolved from the N-1 server like the client
 /// does. The blob's bytes are the corpus's, so its names resolve.
+/// The first parent of the changeset `id` names, streamed by
+/// `GetChangeset` and decoded: the chain walk steps on it.
+async fn parent_changeset(client: &mut ScionClientOf, id: ChangesetId) -> ChangesetId {
+    let req = GetChangesetRequest {
+        repo: common::REPO.into(),
+        changeset_id: id.as_bytes().to_vec(),
+    };
+    let mut stream = client
+        .get_changeset(req)
+        .await
+        .expect("the changeset answers")
+        .into_inner();
+    let mut parts = Vec::new();
+    while let Some(part) = stream.message().await.expect("the part answers") {
+        parts.extend_from_slice(&part.changeset);
+    }
+    *scion_core::Changeset::decode(&parts)
+        .expect("the changeset decodes")
+        .parents()
+        .first()
+        .expect("the changeset names its parent")
+}
+
 fn n1_fixture(runtime: &tokio::runtime::Runtime, server: &str) -> Fixture {
     runtime.block_on(async {
         let mut client = connect(server).await;
@@ -1453,47 +1476,22 @@ fn n1_fixture(runtime: &tokio::runtime::Runtime, server: &str) -> Fixture {
             .into_inner();
         let tree = tree_reply.tree_id.try_into().expect("the tree is 32 bytes");
         // The chain rides GetChangeset: the head's bytes name the middle
-        // changeset, the middle's bytes name the root.
-        let parent = |client: &mut ScionClientOf, id: ChangesetId| {
-            let req = GetChangesetRequest {
-                repo: common::REPO.into(),
-                changeset_id: id.as_bytes().to_vec(),
-            };
-            let parts = runtime.block_on(async {
-                let mut stream = client
-                    .get_changeset(req)
-                    .await
-                    .expect("the changeset answers")
-                    .into_inner();
-                let mut parts = Vec::new();
-                while let Some(part) = stream.message().await.expect("the part answers") {
-                    parts.extend_from_slice(&part.changeset);
-                }
-                parts
-            });
-            scion_core::Changeset::decode(&parts)
-                .expect("the changeset decodes")
-                .parents()
-                .first()
-                .copied()
-                .expect("the changeset names its parent")
-        };
+        // changeset, the middle's bytes name the root. The walk awaits
+        // like every call here: this closure runs on the runtime, and a
+        // block_on inside it would start a runtime from within it.
         let mut scion = scion_client(server).await;
-        let mid_cs = parent(&mut scion, cs);
-        let root_cs = parent(&mut scion, mid_cs);
-        let (root_ticket, root_tree) = {
-            let reply = runtime
-                .block_on(client.get_root_tree(GetRootTreeRequest {
-                    repo: common::REPO.into(),
-                    changeset_id: root_cs.as_bytes().to_vec(),
-                }))
-                .expect("the root tree answers")
-                .into_inner();
-            (
-                reply.ticket,
-                reply.tree_id.try_into().expect("the tree is 32 bytes"),
-            )
-        };
+        let mid_cs = parent_changeset(&mut scion, cs).await;
+        let root_cs = parent_changeset(&mut scion, mid_cs).await;
+        let root_reply = client
+            .get_root_tree(GetRootTreeRequest {
+                repo: common::REPO.into(),
+                changeset_id: root_cs.as_bytes().to_vec(),
+            })
+            .await
+            .expect("the root tree answers")
+            .into_inner();
+        let root_ticket = root_reply.ticket;
+        let root_tree = root_reply.tree_id.try_into().expect("the tree is 32 bytes");
         let content = b"pub fn main() {}\n".to_vec();
         Fixture {
             blob: BlobId::of(&content),
