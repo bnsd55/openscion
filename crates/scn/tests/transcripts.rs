@@ -972,8 +972,8 @@ fn the_corpus_answers_as_its_files_say() {
     files.sort();
     assert_eq!(
         files.len(),
-        53,
-        "the corpus pins 53 behaviours; a file added or removed must update this count"
+        54,
+        "the corpus pins 54 behaviours; a file added or removed must update this count"
     );
     check_cursor_sources(&files).unwrap_or_else(|e| panic!("{e}"));
     // One store and one set of tiers for the whole run: the fixture is
