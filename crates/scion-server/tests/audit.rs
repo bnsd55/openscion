@@ -435,8 +435,6 @@ async fn a_write_changeset_and_land_record_intent_and_result_pairs() {
     assert!(!text.contains(&blob_hex), "no blob digest in the audit");
 }
 
-/// A write whose audit intent was not made durable does not happen:
-/// the upload is refused, and the store holds no new blob.
 /// Bounds one await of the drain test. The #965 hang was an await
 /// that never returned, and it showed only when the whole binary ran
 /// (0 in 400 solo reps). Without a deadline the job times out at 25
@@ -457,6 +455,8 @@ where
     }
 }
 
+/// A write whose audit intent was not made durable does not happen:
+/// the upload is refused, and the store holds no new blob.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_write_whose_intent_fails_is_refused() {
     use scion_proto::v1::{PutBlobRequest, ResolveRefRequest};
