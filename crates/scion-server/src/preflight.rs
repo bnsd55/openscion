@@ -245,16 +245,20 @@ fn finish(answers: Vec<(&'static str, Answer)>) -> Report {
 /// flag, or `SCION_POSTGRES_URL`.
 fn postgres_url(opts: &PreflightOptions) -> Result<String> {
     if let Some(file) = &opts.postgres_url_file {
-        return checked_text(file, true);
+        let url = checked_text(file, true)?;
+        crate::check_db_url(&url, &format!("--postgres-url-file {}", file.display()))?;
+        return Ok(url);
     }
-    std::env::var("SCION_POSTGRES_URL")
+    let url = std::env::var("SCION_POSTGRES_URL")
         .ok()
         .filter(|url| !url.is_empty())
         .ok_or_else(|| {
             crate::Error::InvalidArgument(
                 "no Postgres URL: give --postgres-url-file or SCION_POSTGRES_URL".into(),
             )
-        })
+        })?;
+    crate::check_db_url(&url, "SCION_POSTGRES_URL")?;
+    Ok(url)
 }
 
 /// A file's trimmed text, read the way `serve` reads its secrets: the

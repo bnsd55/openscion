@@ -1550,16 +1550,18 @@ fn preflight_options(cli: &Cli, args: &ServeArgs) -> scion_server::preflight::Pr
 /// The fields come in one at a time, because a caller that matched its
 /// command out of `Cli` holds a partially moved value.
 fn postgres_url_of(url_file: Option<&PathBuf>) -> anyhow::Result<String> {
-    let url = if let Some(file) = url_file {
-        secret_file(file)?
-    } else if let Some(url) = std::env::var("SCION_POSTGRES_URL")
+    if let Some(file) = url_file {
+        let url = secret_file(file)?;
+        scion_server::check_db_url(&url, &format!("--postgres-url-file {}", file.display()))?;
+        return Ok(url);
+    }
+    let url = std::env::var("SCION_POSTGRES_URL")
         .ok()
         .filter(|u| !u.is_empty())
-    {
-        url
-    } else {
-        anyhow::bail!("no Postgres URL: give --postgres-url-file or SCION_POSTGRES_URL");
-    };
+        .ok_or_else(|| {
+            anyhow::anyhow!("no Postgres URL: give --postgres-url-file or SCION_POSTGRES_URL")
+        })?;
+    scion_server::check_db_url(&url, "SCION_POSTGRES_URL")?;
     Ok(url)
 }
 
