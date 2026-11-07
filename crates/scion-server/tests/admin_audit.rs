@@ -771,3 +771,75 @@ fn base64_of(bytes: &[u8]) -> String {
     }
     out
 }
+
+/// The server's audit start line counts the tokens of the access file:
+/// `access_tokens` is how an operator matches a config to a log, so it
+/// must be the real count - two tokens in, two on the line, not zero or
+/// one.
+#[test]
+fn the_start_line_counts_the_access_file_s_tokens() {
+    let dir = scion_server::test_support::private_tempdir();
+    let data = dir.path().join("data");
+    // The store opens once, so the schema exists before serve.
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
+    let store = scion_server::Backend::open(&data, &url_of(&data), None).unwrap();
+    drop(store);
+    // Two tokens, one access file.
+    let digest = |t: &str| blake3::Hash::from(scion_proto::runtime::auth::token_digest(t));
+    let access = dir.path().join("access");
+    fs::write(
+        &access,
+        format!(
+            "token\tone\t{}\ntoken\ttwo\t{}\nread\tone\tr\nwrite\tone\tr\nread\ttwo\tr\n",
+            digest("one").to_hex(),
+            digest("two").to_hex()
+        ),
+    )
+    .unwrap();
+    // A secrets file is private: the server refuses one group or others
+    // can read.
+    fs::set_permissions(&access, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scion-server"))
+        .arg("--data")
+        .arg(&data)
+        .args(["serve", "--listen", "127.0.0.1:0"])
+        .arg("--access")
+        .arg(&access)
+        .env("SCION_POSTGRES_URL", url_of(&data))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The start line is the audit log's first line, written before the
+    // server serves. Wait for it, then read it.
+    let audit = data.join("audit.log");
+    let mut start = None;
+    for _ in 0..200 {
+        if let Ok(text) = fs::read_to_string(&audit) {
+            if let Some(line) = text.lines().next() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                    if v["what"] == "start" {
+                        start = Some(v);
+                        break;
+                    }
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let Some(start) = start else {
+        let mut err = String::new();
+        if let Some(mut stderr) = child.stderr.take() {
+            use std::io::Read as _;
+            let _ = stderr.read_to_string(&mut err);
+        }
+        child.kill().ok();
+        panic!("the server wrote no audit start line; its stderr: {err}");
+    };
+    child.kill().ok();
+    assert_eq!(start["event"], "admin");
+    assert_eq!(
+        start["access_tokens"], 2,
+        "the start line counts the access file's tokens"
+    );
+}
