@@ -31,10 +31,11 @@ use std::path::Path;
 use scion_core::{BlobId, ChangesetId, FileState, Tree};
 use scion_proto::runtime::auth::Bearer;
 use scion_proto::v1::{
-    Encoding, GetObjectsRequest, GetRootTreeRequest, ObjectKind, ObjectPart, ObjectRef,
-    ResolveRefRequest, scion_client::ScionClient,
+    Encoding, GetChangesetRequest, GetObjectsRequest, GetRootTreeRequest, ObjectKind, ObjectPart,
+    ObjectRef, ResolveRefRequest, scion_client::ScionClient,
 };
 use scion_server::Backend;
+use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use tonic::Code;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Channel, Endpoint};
@@ -150,6 +151,13 @@ struct Fixture {
     content: Vec<u8>,
     tree: [u8; 32],
     cs: ChangesetId,
+    /// The chain the read files replay against: the root changeset and
+    /// the middle one, whose tree still holds the old src/main.rs.
+    root_cs: ChangesetId,
+    mid_cs: ChangesetId,
+    /// The root changeset's own tree: a CAS object, which GetObjects
+    /// serves. The head's root tree is derived and lives elsewhere.
+    root_tree: [u8; 32],
     /// A well-formed ID nothing has, for not-found.
     missing: [u8; 32],
     /// A read ticket for the fixture's root tree: the permission that
@@ -161,15 +169,19 @@ struct Fixture {
     unsigned: Vec<u8>,
 }
 
-/// Builds the one fixture the corpus uses: the conformance test's landed
-/// repo - one changeset whose tree holds one file of one blob.
+/// Builds the one fixture the corpus uses: the conformance test's
+/// landed repo grown into a first-parent chain - the root changeset
+/// creates src/main.rs, the middle changeset changes it, the head adds
+/// src/lib.rs - and a `feature` ref parked at the middle changeset,
+/// which the Land files move. The head answers the read files as before;
+/// the chain gives Log its three entries and Blame its two.
 fn landed() -> (Tiers, Fixture) {
     let data = common::private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
     let content = b"pub fn main() {}\n".to_vec();
     let blob = BlobId::of(&content);
     store.blobs().put(&content).unwrap();
-    let cs = common::changeset(
+    let root = common::changeset(
         None,
         &[(
             "src/main.rs",
@@ -179,16 +191,61 @@ fn landed() -> (Tiers, Fixture) {
             },
         )],
     );
-    let id = common::land(&store, &cs);
+    let root_id = common::land(&store, &root);
+    // One line survives from the root and one is new: Blame's two
+    // changesets.
+    let edited = b"pub fn main() {}\npub fn extra() {}\n".to_vec();
+    let edited_blob = BlobId::of(&edited);
+    store.blobs().put(&edited).unwrap();
+    let mid = common::changeset(
+        Some(root_id),
+        &[(
+            "src/main.rs",
+            FileState::Regular {
+                content: edited_blob,
+                executable: false,
+            },
+        )],
+    );
+    let mid_id = common::land(&store, &mid);
+    let lib = b"pub const X: u8 = 7;\n".to_vec();
+    let lib_blob = BlobId::of(&lib);
+    store.blobs().put(&lib).unwrap();
+    let head = common::changeset(
+        Some(mid_id),
+        &[(
+            "src/lib.rs",
+            FileState::Regular {
+                content: lib_blob,
+                executable: false,
+            },
+        )],
+    );
+    let id = common::land(&store, &head);
+    store
+        .write(|c| {
+            let repo = c.repo_id(common::REPO)?;
+            assert!(c.cas_ref(repo, "feature", None, mid_id)?);
+            Ok(())
+        })
+        .unwrap();
     let tiers = Tiers::start(data, store);
     let runtime_entered = tiers.runtime.enter();
     let (ticket, tree) = mint(&tiers, id);
+    let root_tree = {
+        let (_, root_tree) = mint(&tiers, root_id);
+        root_tree
+    };
     drop(runtime_entered);
     let fixture = Fixture {
         blob,
         content,
         tree,
         cs: id,
+        root_cs: root_id,
+        mid_cs: mid_id,
+        root_tree,
+
         missing: missing_id(0xab),
         unsigned: unsigned_of(&ticket),
         ticket,
@@ -247,8 +304,11 @@ fn resolve(value: &str, f: &Fixture) -> String {
     value
         .replace("$blob_bytes", &hex(&f.content))
         .replace("$blob", &hex(f.blob.as_bytes()))
+        .replace("$tree_root", &hex(&f.root_tree))
         .replace("$tree", &hex(&f.tree))
         .replace("$cs", &hex(f.cs.as_bytes()))
+        .replace("$cs_root", &hex(f.root_cs.as_bytes()))
+        .replace("$cs_mid", &hex(f.mid_cs.as_bytes()))
         .replace("$missing", &hex(&f.missing))
         .replace("$unsigned", &hex(&f.unsigned))
         .replace("$ticket", &hex(&f.ticket))
@@ -557,8 +617,8 @@ fn the_corpus_answers_as_its_files_say() {
     files.sort();
     assert_eq!(
         files.len(),
-        25,
-        "the corpus pins 25 behaviours; a file added or removed must update this count"
+        34,
+        "the corpus pins 34 behaviours; a file added or removed must update this count"
     );
     // One store and one set of tiers for the whole run: the fixture is
     // the expensive part. Each file still mints its own ticket, right
@@ -575,7 +635,7 @@ fn the_corpus_answers_as_its_files_say() {
             t.method
         );
         let minted_at = std::time::Instant::now();
-        let (ticket, _) = mint(&tiers, base.cs);
+        let (ticket, _) = mint(&tiers, base.root_cs);
         let f = Fixture {
             unsigned: unsigned_of(&ticket),
             ticket,
@@ -1392,15 +1452,60 @@ fn n1_fixture(runtime: &tokio::runtime::Runtime, server: &str) -> Fixture {
             .expect("the root tree answers")
             .into_inner();
         let tree = tree_reply.tree_id.try_into().expect("the tree is 32 bytes");
+        // The chain rides GetChangeset: the head's bytes name the middle
+        // changeset, the middle's bytes name the root.
+        let parent = |client: &mut ScionClientOf, id: ChangesetId| {
+            let req = GetChangesetRequest {
+                repo: common::REPO.into(),
+                changeset_id: id.as_bytes().to_vec(),
+            };
+            let parts = runtime.block_on(async {
+                let mut stream = client
+                    .get_changeset(req)
+                    .await
+                    .expect("the changeset answers")
+                    .into_inner();
+                let mut parts = Vec::new();
+                while let Some(part) = stream.message().await.expect("the part answers") {
+                    parts.extend_from_slice(&part.changeset);
+                }
+                parts
+            });
+            scion_core::Changeset::decode(&parts)
+                .expect("the changeset decodes")
+                .parents()
+                .first()
+                .copied()
+                .expect("the changeset names its parent")
+        };
+        let mut scion = scion_client(server).await;
+        let mid_cs = parent(&mut scion, cs);
+        let root_cs = parent(&mut scion, mid_cs);
+        let (root_ticket, root_tree) = {
+            let reply = runtime
+                .block_on(client.get_root_tree(GetRootTreeRequest {
+                    repo: common::REPO.into(),
+                    changeset_id: root_cs.as_bytes().to_vec(),
+                }))
+                .expect("the root tree answers")
+                .into_inner();
+            (
+                reply.ticket,
+                reply.tree_id.try_into().expect("the tree is 32 bytes"),
+            )
+        };
         let content = b"pub fn main() {}\n".to_vec();
         Fixture {
             blob: BlobId::of(&content),
             content,
             tree,
             cs,
+            root_cs,
+            mid_cs,
+            root_tree,
             missing: missing_id(0xab),
-            unsigned: unsigned_of(&tree_reply.ticket),
-            ticket: tree_reply.ticket,
+            unsigned: unsigned_of(&root_ticket),
+            ticket: root_ticket,
         }
     })
 }
@@ -1764,7 +1869,7 @@ async fn run_list_dir(
 
 async fn run_log(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> Result<(), String> {
     for (k, _) in &t.request {
-        if !matches!(k.as_str(), "repo" | "changeset_id" | "path" | "cursor") {
+        if !matches!(k.as_str(), "repo" | "changeset_id" | "path" | "cursor" | "limit") {
             return Err(unknown_field("Log", k));
         }
     }

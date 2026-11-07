@@ -1,0 +1,12 @@
+# Log walks the first-parent chain newest first: the fixture's three
+# changesets, no path filter.
+since: v0.1
+method: Scion/Log
+fixture: landed
+
+request.repo: r
+request.changeset_id: $cs
+request.limit: 10
+
+status: ok
+entries: 3

@@ -1,0 +1,10 @@
+# A changeset nothing has is NOT_FOUND.
+since: v0.1
+method: Scion/Blame
+fixture: landed
+
+request.repo: r
+request.changeset_id: $missing
+request.path: src/main.rs
+
+status: not_found

@@ -1,13 +1,14 @@
-# The tree and the blob of the fixture, in request order, whole.
+# The root changeset's tree and the blob it holds, in request order,
+# whole: both are objects the store keeps.
 since: v0.1
 method: Objects/GetObjects
 fixture: landed
 
 request.ticket: $ticket
-request.refs: kind=tree id=$tree
+request.refs: kind=tree id=$tree_root
 request.refs: kind=blob id=$blob path=src/main.rs
 
 status: ok
-objects: kind=tree id=$tree
+objects: kind=tree id=$tree_root
 objects: kind=blob id=$blob
 end: none

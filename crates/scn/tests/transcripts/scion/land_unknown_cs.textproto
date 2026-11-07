@@ -1,0 +1,10 @@
+# A changeset the repo does not hold is NOT_FOUND before any land row.
+since: v0.1
+method: Scion/Land
+fixture: landed
+
+request.repo: r
+request.changeset_id: $missing
+request.target_ref: main
+
+status: not_found
