@@ -108,7 +108,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-          -c track_wal_io_timing=on
     steps:
       # The full history: the run's footer names its commit, and the
       # doc test verifies a named commit exists in a full clone.

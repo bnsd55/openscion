@@ -154,6 +154,24 @@ pg_cpu_ms() {
   awk -v u="$usec" -v clk="$clk" 'BEGIN { printf "%d", u / 1000 }'
 }
 
+# turn_on_wal_io_timing: pg_stat_wal's wal_sync_time only accumulates
+# with track_wal_io_timing=on (SIGHUP-reloadable, superuser). The
+# service's docker options cannot carry postgres flags (docker reads
+# -c as --cpu-shares), so the script turns it on itself, once, before
+# the cells.
+turn_on_wal_io_timing() {
+  local url=${SCION_TEST_POSTGRES_URL:-}
+  [ -n "$url" ] || return 0
+  local cred=${url#postgres://}
+  cred=${cred%%@*}
+  local userpass=${cred%%:*} pass=${cred#*:}
+  local hostport=${url#*@}; hostport=${hostport%%/*}
+  PGPASSWORD=$pass PGGSSENCMODE=disable psql -h "${hostport%%:*}" \
+    -p "${hostport##*:}" -U "$userpass" -d postgres -Atqc \
+    "ALTER SYSTEM SET track_wal_io_timing = on; SELECT pg_reload_conf()" \
+    > /dev/null 2>&1 || true
+}
+
 # wal_fsync_ms: the WAL's own fsync milliseconds since the server's
 # start, from pg_stat_wal.wal_sync_time - the mechanism behind a slow
 # land, measured directly (Postgres needs track_wal_io_timing=on,
@@ -302,6 +320,8 @@ sample_cell() {
     sleep 1
   done
 }
+
+turn_on_wal_io_timing
 
 note "capacity: building"
 if [ -n "${SCION_BIN:-}" ]; then
