@@ -959,7 +959,9 @@ fn the_n1_side_answers_as_its_files_say() {
             // the corpus test's every PR. Leg 2 is Objects only.
             continue;
         }
-        let (ticket, _) = mint(&tiers, base2.cs);
+        // The GetObjects file's refs name the root changeset's tree and
+        // blob: the ticket must be that tree's, as leg 1's is.
+        let (ticket, _) = mint(&tiers, base2.root_cs);
         let f = Fixture {
             unsigned: unsigned_of(&ticket),
             ticket,
