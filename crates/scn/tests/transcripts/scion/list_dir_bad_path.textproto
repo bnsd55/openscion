@@ -1,0 +1,11 @@
+# A path that cannot parse: the read answers invalid-argument before
+# it looks.
+since: v0.1
+method: Scion/ListDir
+fixture: landed
+
+request.repo: r
+request.changeset_id: $cs
+request.path: //bad//path
+
+status: invalid_argument

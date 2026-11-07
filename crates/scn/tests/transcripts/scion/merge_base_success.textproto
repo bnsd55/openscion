@@ -1,0 +1,12 @@
+# The chain's best common ancestor: the head and the root share the
+# root, which is its own ancestor.
+since: v0.1
+method: Scion/MergeBase
+fixture: landed
+
+request.repo: r
+request.a_changeset_id: id=$cs
+request.b_changeset_id: id=$cs_root
+
+status: ok
+reply.changeset_ids: $cs_root

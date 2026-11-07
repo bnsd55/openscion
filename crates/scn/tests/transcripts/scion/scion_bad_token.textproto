@@ -1,0 +1,11 @@
+# A call that carries a wrong bearer token is refused before any
+# handler runs: the answer is unauthenticated.
+since: v0.1
+method: Scion/GetChangeset
+fixture: landed
+token: wrong
+
+request.repo: r
+request.changeset_id: $cs
+
+status: unauthenticated

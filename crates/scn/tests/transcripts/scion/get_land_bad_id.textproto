@@ -1,0 +1,9 @@
+# A land id that is no number: the read answers invalid-argument.
+since: v0.1
+method: Scion/GetLand
+fixture: landed
+
+request.repo: r
+request.land_id: not-a-number
+
+status: invalid_argument

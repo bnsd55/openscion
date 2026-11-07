@@ -1,0 +1,14 @@
+# A diff past 1,000 entries truncates rather than refuses: the page
+# holds MAX_DIFF_ENTRIES (read.rs:463) and `next_after` names the path
+# the next page resumes at.
+since: v0.1
+method: Scion/Diff
+fixture: landed
+
+request.repo: r
+request.old_changeset_id: id=$cs
+request.new_changeset_id: id=$big_cs
+
+status: ok
+entries: 1000
+next_nonempty: true

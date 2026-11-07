@@ -1,0 +1,11 @@
+# A changeset whose parent the repo does not hold: the creation
+# answers invalid_argument, the client's bytes name a parent that is
+# not there.
+since: v0.1
+method: Scion/CreateChangeset
+fixture: landed
+
+request.repo: r
+request.changeset: $encoded_orphan
+
+status: invalid_argument

@@ -1,0 +1,11 @@
+# The root-to-middle edit: src/main.rs is the one path that differs.
+since: v0.1
+method: Scion/Diff
+fixture: landed
+
+request.repo: r
+request.old_changeset_id: id=$cs_root
+request.new_changeset_id: id=$cs_mid
+
+status: ok
+entries: 1
