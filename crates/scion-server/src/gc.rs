@@ -337,6 +337,8 @@ fn prune_rows(
         let mut seen = live.seen.get(&repo).cloned().unwrap_or_default();
         for chunk in dead.chunks(PRUNE_BATCH) {
             let started = std::time::Instant::now();
+            let _customer = crate::land_profile::lane_customer(crate::land_profile::Phase::GcSweep);
+            let _customer = crate::land_profile::lane_customer(crate::land_profile::Phase::GcSweep);
             store.write(|c| {
                 // The changesets this repo gained since the snapshot walk:
                 // their IDs, collected under the write lock the deletes
@@ -895,7 +897,10 @@ mod tests {
             request_key: "late".into(),
             deadline: Deadline::new(Instant::now()),
         };
-        let err = lands.land(&store, &Caller("t".into()), &req).unwrap_err();
+        let err = lands
+            .land(&store, &Caller("t".into()), &req, std::time::Duration::ZERO)
+            .0
+            .unwrap_err();
         assert!(matches!(err, crate::Error::DeadlineExceeded(_)), "{err:?}");
         // Every stored blob is old, and nothing new is orphaned.
         let report = collect(&store, Duration::ZERO, &mut |_| {});

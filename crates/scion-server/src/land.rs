@@ -44,7 +44,14 @@ use crate::derived;
 use crate::error::{Error, Result};
 use crate::graph::{self, CommitGraph};
 use crate::history::{self, PathHistory};
+use crate::land_profile::{self as profile, Phase};
 use crate::meta::Meta as _;
+
+/// The profile log's land id: the recorded land's id, or -1 when the
+/// record itself failed.
+pub(crate) fn recorded_land_id(outcome: &Result<LandOutcome>) -> i64 {
+    outcome.as_ref().map_or(-1, |o| o.land_id)
+}
 use crate::meta::StaleLand;
 use crate::meta::{MetaTx, RefState, RepoId};
 use crate::tree;
@@ -403,12 +410,24 @@ impl Lands {
     /// the request's deadline, or [`Error::Cancelled`] if the call went.
     /// The land then stays pending, and a retry with the same request key
     /// resumes it. Store errors otherwise.
-    pub fn land(&self, store: &Backend, caller: &Caller, req: &LandRequest) -> Result<LandOutcome> {
-        let outcome = self.land_committed(store, caller, req);
-        // An index can hold up to the whole budget, and freeing it takes a
-        // while, so it happens here, outside every lock.
-        let evicted = mem::take(&mut *self.evicted.lock().unwrap_or_else(PoisonError::into_inner));
-        drop(evicted);
+    pub fn land(
+        &self,
+        store: &Backend,
+        caller: &Caller,
+        req: &LandRequest,
+        pre: std::time::Duration,
+    ) -> (Result<LandOutcome>, crate::land_profile::Trace) {
+        crate::land_profile::seed_pre(pre);
+        let (outcome, trace) =
+            crate::land_profile::Trace::measure(|| self.land_committed(store, caller, req));
+        // The caller logs: its Post phase and the whole-handler total
+        // close after this function returns.
+        let outcome = {
+            let evicted =
+                mem::take(&mut *self.evicted.lock().unwrap_or_else(PoisonError::into_inner));
+            drop(evicted);
+            outcome
+        };
         if let Ok(outcome) = &outcome
             && let Some(metrics) = &self.metrics
         {
@@ -425,8 +444,11 @@ impl Lands {
         // the flush, the error replies included: a reply that says the land
         // stays pending rests on the row the land recorded, and that row
         // must be durable before the reply goes out.
-        store.flush()?;
-        outcome
+        let landed = match store.flush() {
+            Ok(()) => outcome,
+            Err(e) => Err(e),
+        };
+        (landed, trace)
     }
 
     /// [`Lands::land`], up to commits that are not durable yet. Its reads do
@@ -447,7 +469,10 @@ impl Lands {
         // already settled this land, and what the land must do now, is
         // one read that `finish` runs on the row. The record's answer is
         // the state of the row it saw, never a second read of it.
-        let (repo, recorded) = store.commit(|c| c.record_land(caller, req, self.pending_limit))?;
+        let (repo, recorded) = {
+            let _guard = profile::Guard::enter(Phase::Record);
+            store.commit(|c| c.record_land(caller, req, self.pending_limit))?
+        };
         if recorded.state != LandState::Pending {
             return Ok(recorded);
         }
@@ -460,7 +485,10 @@ impl Lands {
         // The head whose history this call derived.
         let mut derived = None;
         loop {
-            let mut index = Self::lock_slot(repo, &req.target_ref, &slot);
+            let mut index = {
+                let _guard = profile::Guard::enter(Phase::SlotWait);
+                Self::lock_slot(repo, &req.target_ref, &slot)
+            };
             // The outcome check rides the plan's read transaction: a call
             // with the same key may have finished the land while this one
             // waited for the lock, and the plan must not run for a land
@@ -749,6 +777,7 @@ fn derive_history(
     deadline: &Deadline,
 ) -> Result<()> {
     tracing::info!(%head, "deriving the history of the head for a land on an old base");
+    let _customer = profile::lane_customer(profile::Phase::DeriveSteps);
     derived::fill_by::<CommitGraph>(store, repo, head, deadline)?;
     derived::fill_by::<PathHistory>(store, repo, head, deadline)?;
     Ok(())
@@ -781,14 +810,21 @@ fn finish(
         // `set_land_state`'s pending guard, which answers "no longer
         // pending" instead of moving the ref twice - the guard is the
         // backstop there, not the read.
-        let planned = store.read_latest(|c| {
-            let (row, head, head_tree) =
-                c.land_outcome(repo, caller, land_id, Some(&req.target_ref))?;
-            if row.state != LandState::Pending {
-                return Ok(Planned::Settled(row));
-            }
-            plan(lands, c, repo, req, head, head_tree, index).map(Planned::Do)
-        })?;
+        let planned = {
+            let _guard = profile::Guard::enter(Phase::Outcome);
+            store.read_latest(|c| {
+                let (row, head, head_tree) =
+                    c.land_outcome(repo, caller, land_id, Some(&req.target_ref))?;
+                if row.state != LandState::Pending {
+                    return Ok(Planned::Settled(row));
+                }
+                let plan = {
+                    let _guard = profile::Guard::enter(Phase::Plan);
+                    plan(lands, c, repo, req, head, head_tree, index)?
+                };
+                Ok(Planned::Do(plan))
+            })?
+        };
         #[cfg(test)]
         let step = lands
             .before_settle
@@ -812,13 +848,13 @@ fn finish(
                 if let Some(metrics) = &lands.metrics {
                     metrics.land_replan();
                 }
+                profile::attempt_done();
                 attempt += 1;
             }
             outcome => return outcome,
         }
     }
 }
-
 /// Step 4: decides the land against the ref's current head.
 fn plan(
     lands: &Lands,
@@ -895,6 +931,9 @@ fn plan(
 /// guard the land's own move has in its CAS. An import that moved the
 /// ref in the window aborts the verdict, and `finish` replans against
 /// the head the import made.
+// The phase guards' nesting makes the function long; the profile is a
+// branch-only instrument.
+#[allow(clippy::too_many_lines)]
 fn settle(
     lands: &Lands,
     store: &Backend,
@@ -942,38 +981,60 @@ fn settle(
     // one derives before the write transaction - never inside it, where
     // the derive would run unbounded and hold the write connection.
     if !head_tree_stored {
+        let _guard = profile::Guard::enter(Phase::FillRoot);
         tree::fill_root_tree_by(store, repo, head.target, deadline)?;
     }
     // The blob lengths the tree build needs, read before the write
     // transaction, so the write connection does no file I/O.
-    let lens = tree::lens_of_puts(store, crate::meta::puts(&rebased).map(|(_, blob)| blob))?;
-    let landed = store.write_slot_holder(|c| {
-        let (id, _) =
-            tree::store_changeset_within(c, repo, &rebased, &mut tree::lens_from(&lens), deadline)?;
-        if !c.cas_ref(repo, target, Some(head.version), id)? {
-            // The error rolls back the transaction, rebased changeset included.
-            return Err(Error::Aborted(format!(
-                "ref {target:?} moved during the land; retry with the same request key"
-            )));
-        }
-        let generation = c.generation(repo, id)?;
-        let mut outcome = c.set_land_state(
-            repo,
-            land_id,
-            LandState::Landed,
-            Some(id),
-            String::new(),
-            vec![],
-            LandRejectReason::Unspecified,
-        )?;
-        // The move's CAS pins the version the plan read, so
-        // `head.target` is the target this move replaced: the audit's
-        // old value, set here where the move happens, under the ref's
-        // lock, and not stored.
-        outcome.moved = true;
-        outcome.previous = Some(head.target);
-        Ok((outcome, generation))
-    });
+    let lens = {
+        let _guard = profile::Guard::enter(Phase::Lens);
+        tree::lens_of_puts(store, crate::meta::puts(&rebased).map(|(_, blob)| blob))?
+    };
+    let landed = {
+        let _guard = profile::Guard::enter(Phase::Settle);
+        store.write_slot_holder(|c| {
+            let (id, _) = {
+                let _guard = profile::Guard::enter(Phase::Build);
+                tree::store_changeset_within(
+                    c,
+                    repo,
+                    &rebased,
+                    &mut tree::lens_from(&lens),
+                    deadline,
+                )?
+            };
+            let changed = {
+                let _guard = profile::Guard::enter(Phase::Cas);
+                c.cas_ref(repo, target, Some(head.version), id)?
+            };
+            if !changed {
+                // The error rolls back the transaction, rebased changeset included.
+                return Err(Error::Aborted(format!(
+                    "ref {target:?} moved during the land; retry with the same request key"
+                )));
+            }
+            let generation = c.generation(repo, id)?;
+            let mut outcome = {
+                let _guard = profile::Guard::enter(Phase::SetState);
+                c.set_land_state(
+                    repo,
+                    land_id,
+                    LandState::Landed,
+                    Some(id),
+                    String::new(),
+                    vec![],
+                    LandRejectReason::Unspecified,
+                )?
+            };
+            // The move's CAS pins the version the plan read, so
+            // `head.target` is the target this move replaced: the audit's
+            // old value, set here where the move happens, under the ref's
+            // lock, and not stored.
+            outcome.moved = true;
+            outcome.previous = Some(head.target);
+            Ok((outcome, generation))
+        })
+    };
     match landed {
         Ok((outcome, generation)) => {
             if let (Some(index), Some(id)) = (index.as_mut(), outcome.result) {
@@ -1707,7 +1768,14 @@ mod tests {
         }
 
         fn try_land(&self, cs: ChangesetId, key: &str) -> Result<LandOutcome> {
-            self.lands.land(&self.store, &caller(), &req(cs, key))
+            self.lands
+                .land(
+                    &self.store,
+                    &caller(),
+                    &req(cs, key),
+                    std::time::Duration::ZERO,
+                )
+                .0
         }
 
         fn landed_count(&self) -> i64 {
@@ -1805,7 +1873,10 @@ mod tests {
                 target_ref: name.into(),
                 ..req(cs, key)
             };
-            self.lands.land(&self.store, &caller(), &req).unwrap()
+            self.lands
+                .land(&self.store, &caller(), &req, std::time::Duration::ZERO)
+                .0
+                .unwrap()
         }
     }
 
@@ -1875,7 +1946,9 @@ mod tests {
                     request_key: "knorepo".into(),
                     deadline: Deadline::new(Instant::now() + std::time::Duration::from_secs(600)),
                 },
+                std::time::Duration::ZERO,
             )
+            .0
             .unwrap_err();
         assert!(matches!(err, Error::NotFound(_)), "{err:?}");
         assert!(err.to_string().contains("nope"), "{err}");
@@ -1900,7 +1973,9 @@ mod tests {
                     request_key: "knone".into(),
                     deadline: Deadline::new(Instant::now() + std::time::Duration::from_secs(600)),
                 },
+                std::time::Duration::ZERO,
             )
+            .0
             .unwrap();
         assert_eq!(out.state, LandState::Rejected, "{}", out.detail);
         assert_eq!(out.reject_reason, LandRejectReason::MissingRef);
@@ -2045,7 +2120,11 @@ mod tests {
         };
         drop(guard);
         let commits_before = f.store.commits();
-        let err = f.lands.land(&f.store, &caller(), &gone).unwrap_err();
+        let err = f
+            .lands
+            .land(&f.store, &caller(), &gone, std::time::Duration::ZERO)
+            .0
+            .unwrap_err();
         // The reply says the land stays pending, and a retry with the
         // same request key resumes it.
         assert!(
@@ -2125,7 +2204,11 @@ mod tests {
         // before its first step, so only the record commits. This is
         // the early release the permit and the ref's slot lock ride.
         let commits = f.store.commits();
-        let outcome = f.lands.land(&f.store, &caller(), &request).unwrap_err();
+        let outcome = f
+            .lands
+            .land(&f.store, &caller(), &request, std::time::Duration::ZERO)
+            .0
+            .unwrap_err();
         assert!(
             matches!(outcome, Error::DeadlineExceeded(_)),
             "the fill's deadline stops the land: {outcome:?}"
@@ -2138,7 +2221,13 @@ mod tests {
         // The land stayed pending: the same key retries.
         let retry = f
             .lands
-            .land(&f.store, &caller(), &req(cs, "fills"))
+            .land(
+                &f.store,
+                &caller(),
+                &req(cs, "fills"),
+                std::time::Duration::ZERO,
+            )
+            .0
             .unwrap();
         assert_eq!(retry.state, LandState::Landed);
     }
@@ -2211,7 +2300,11 @@ mod tests {
         let cs = f.commit(f.root, &[put("a/x", "new")]);
         let mut r = req(cs, "k");
         r.target_ref = String::new();
-        match f.lands.land(&f.store, &caller(), &r) {
+        match f
+            .lands
+            .land(&f.store, &caller(), &r, std::time::Duration::ZERO)
+            .0
+        {
             Err(Error::InvalidArgument(why)) => {
                 assert!(why.contains("must be 1 to"), "{why}");
             }
@@ -2219,7 +2312,11 @@ mod tests {
         }
         let mut r = req(cs, "k");
         r.request_key = String::new();
-        match f.lands.land(&f.store, &caller(), &r) {
+        match f
+            .lands
+            .land(&f.store, &caller(), &r, std::time::Duration::ZERO)
+            .0
+        {
             Err(Error::InvalidArgument(why)) => {
                 assert!(why.contains("must be 1 to"), "{why}");
             }
@@ -2247,10 +2344,18 @@ mod tests {
         r.target_ref = "m".repeat(MAX_NAME_BYTES);
         // No ref carries that name, so a name that passes the limit
         // answers Rejected - the state proves the check passed it.
-        let out = f.lands.land(&f.store, &caller(), &r).unwrap();
+        let out = f
+            .lands
+            .land(&f.store, &caller(), &r, std::time::Duration::ZERO)
+            .0
+            .unwrap();
         assert_eq!(out.state, LandState::Rejected, "{}", out.detail);
         r.target_ref = "m".repeat(MAX_NAME_BYTES + 1);
-        match f.lands.land(&f.store, &caller(), &r) {
+        match f
+            .lands
+            .land(&f.store, &caller(), &r, std::time::Duration::ZERO)
+            .0
+        {
             Err(Error::InvalidArgument(why)) => {
                 assert!(why.contains("must be 1 to"), "{why}");
             }
@@ -2325,7 +2430,12 @@ mod tests {
             f.repo,
             Arc::new(Mutex::new(imports.clone())),
         );
-        let out = lands.land(&f.store, &caller(), &req(cs, "hook"));
+        let (out, _) = lands.land(
+            &f.store,
+            &caller(),
+            &req(cs, "hook"),
+            std::time::Duration::ZERO,
+        );
         match out {
             Err(Error::Aborted(detail)) => {
                 assert!(!detail.is_empty(), "the abort says why");
@@ -2390,7 +2500,15 @@ mod tests {
             assert!(moved, "the import's move lost a race it cannot lose");
         }));
 
-        let out = lands.land(&f.store, &caller(), &req(cs, "hook")).unwrap();
+        let out = lands
+            .land(
+                &f.store,
+                &caller(),
+                &req(cs, "hook"),
+                std::time::Duration::ZERO,
+            )
+            .0
+            .unwrap();
         assert_eq!(out.state, LandState::Landed, "{}", out.detail);
         let landed = out.result.expect("landed");
         // The landed changeset sits on top of the import: the land
@@ -2402,7 +2520,15 @@ mod tests {
         assert_eq!(parents, vec![import], "the land rebased onto the import");
         assert_eq!(metrics.land_replans(), 1, "the replan counted once");
         // A retry with the same key returns the same outcome.
-        let again = lands.land(&f.store, &caller(), &req(cs, "hook")).unwrap();
+        let again = lands
+            .land(
+                &f.store,
+                &caller(),
+                &req(cs, "hook"),
+                std::time::Duration::ZERO,
+            )
+            .0
+            .unwrap();
         assert_eq!(stored(&again), stored(&out));
     }
 
@@ -2438,7 +2564,15 @@ mod tests {
             assert!(moved, "the import's move lost a race it cannot lose");
         }));
 
-        let out = lands.land(&f.store, &caller(), &req(cs, "hook")).unwrap();
+        let out = lands
+            .land(
+                &f.store,
+                &caller(),
+                &req(cs, "hook"),
+                std::time::Duration::ZERO,
+            )
+            .0
+            .unwrap();
         assert_eq!(out.state, LandState::Conflict, "{}", out.detail);
         // The verdict is the plan's answer to the head the import made:
         // it names `c`, which only that head changed. The stale verdict
@@ -2454,7 +2588,15 @@ mod tests {
             "the stale verdict replanned against the head the import made"
         );
         // A retry with the same key returns the same verdict.
-        let again = lands.land(&f.store, &caller(), &req(cs, "hook")).unwrap();
+        let again = lands
+            .land(
+                &f.store,
+                &caller(),
+                &req(cs, "hook"),
+                std::time::Duration::ZERO,
+            )
+            .0
+            .unwrap();
         assert_eq!(stored(&again), stored(&out));
     }
 
@@ -2508,7 +2650,10 @@ mod tests {
             // A new process retries with the same key.
             let before = f.main();
             let fresh = Lands::default();
-            let out = fresh.land(&f.store, &caller(), &req).unwrap();
+            let out = fresh
+                .land(&f.store, &caller(), &req, std::time::Duration::ZERO)
+                .0
+                .unwrap();
             assert_eq!(out.land_id, recorded.land_id, "{crash:?}: a stable land id");
             assert_eq!(out.state, LandState::Landed, "{crash:?}: {}", out.detail);
             let after = f.main();
@@ -2516,7 +2661,10 @@ mod tests {
             assert_eq!(Some(after.target), out.result);
             let landed = f.store.read(|c| c.get_changeset(repo, after.target));
             assert_eq!(landed.unwrap().parents(), [before.target], "{crash:?}");
-            let replay = fresh.land(&f.store, &caller(), &req).unwrap();
+            let replay = fresh
+                .land(&f.store, &caller(), &req, std::time::Duration::ZERO)
+                .0
+                .unwrap();
             assert_eq!(stored(&replay), stored(&out));
             assert!(!replay.moved, "{crash:?}: the replay moved nothing");
             assert_eq!(f.landed_count(), 1, "{crash:?}");
@@ -2564,10 +2712,20 @@ mod tests {
             target_ref: "nope".into(),
             ..req(side, "n")
         };
-        let out = f.lands.land(&f.store, &caller(), &missing).unwrap();
+        let out = f
+            .lands
+            .land(&f.store, &caller(), &missing, std::time::Duration::ZERO)
+            .0
+            .unwrap();
         assert_eq!(out.state, LandState::Rejected);
         assert_eq!(out.reject_reason, LandRejectReason::MissingRef);
-        assert_eq!(f.lands.land(&f.store, &caller(), &missing).unwrap(), out);
+        assert_eq!(
+            f.lands
+                .land(&f.store, &caller(), &missing, std::time::Duration::ZERO)
+                .0
+                .unwrap(),
+            out
+        );
         let slots = f.lands.refs.lock().unwrap();
         let keys: Vec<_> = slots.iter().map(|(key, _)| key).collect();
         assert_eq!(keys, [&(f.repo, "main".into())]);
@@ -2747,7 +2905,11 @@ mod tests {
                 deadline: Deadline::new(Instant::now()),
                 ..req(cs, key)
             };
-            let err = f.lands.land(&f.store, &caller(), &late).unwrap_err();
+            let err = f
+                .lands
+                .land(&f.store, &caller(), &late, std::time::Duration::ZERO)
+                .0
+                .unwrap_err();
             assert!(matches!(err, Error::DeadlineExceeded(_)), "{key}: {err}");
             assert_eq!(f.main(), before, "{key}");
             let row = damage::land_state_by_key(&f.store, key).unwrap();
@@ -2791,7 +2953,11 @@ mod tests {
                 ..req(cs, key)
             };
             drop(guard);
-            let err = f.lands.land(&f.store, &caller(), &gone).unwrap_err();
+            let err = f
+                .lands
+                .land(&f.store, &caller(), &gone, std::time::Duration::ZERO)
+                .0
+                .unwrap_err();
             assert!(
                 matches!(&err, Error::Cancelled(why) if why.contains("its call has gone")),
                 "{key}: {err}"
@@ -2854,7 +3020,11 @@ mod tests {
             deadline: Deadline::new(Instant::now()),
             ..req(f.commit(f.root, &[put("c1", "late")]), "late")
         };
-        let err = f.lands.land(&f.store, &caller(), &late).unwrap_err();
+        let err = f
+            .lands
+            .land(&f.store, &caller(), &late, std::time::Duration::ZERO)
+            .0
+            .unwrap_err();
         assert!(matches!(err, Error::DeadlineExceeded(_)), "{err}");
         assert!(!stored(head));
 
@@ -3624,7 +3794,11 @@ mod tests {
             target_ref: "nope".into(),
             ..req(f.root, "rejected")
         };
-        let rejected = f.lands.land(&f.store, &caller(), &missing).unwrap();
+        let rejected = f
+            .lands
+            .land(&f.store, &caller(), &missing, std::time::Duration::ZERO)
+            .0
+            .unwrap();
         let states = [landed.state, conflict.state, rejected.state];
         assert_eq!(states, [Landed, Conflict, Rejected]);
         // All three expired; landed is the oldest, rejected the newest.
@@ -3892,7 +4066,13 @@ mod tests {
         let head = f.main().target;
         let b_cs = f.commit(head, &[put("b/y", "b")]);
         let b_out = Lands::default()
-            .land(&f.store, &Caller("b".into()), &req(b_cs, "shared"))
+            .land(
+                &f.store,
+                &Caller("b".into()),
+                &req(b_cs, "shared"),
+                std::time::Duration::ZERO,
+            )
+            .0
             .unwrap();
         assert_eq!(b_out.state, LandState::Landed, "{}", b_out.detail);
         assert_ne!(b_out.land_id, a_land.land_id, "two rows, one per caller");

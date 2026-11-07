@@ -890,8 +890,12 @@ impl PgClient {
                 raw: None,
             })
             .map_err(|_| Error::Internal(WORKER_STOPPED.into()))?;
-        rx.recv()
-            .map_err(|_| Error::Internal(WORKER_STOPPED.into()))?
+        let started = std::time::Instant::now();
+        let reply = rx
+            .recv()
+            .map_err(|_| Error::Internal(WORKER_STOPPED.into()))?;
+        crate::land_profile::stmt_done(started.elapsed());
+        reply
     }
 
     /// The rows of one query.
@@ -1541,7 +1545,16 @@ impl Pg {
         slot_holder: bool,
     ) -> Result<T> {
         self.check_fenced()?;
+        let queued_started = std::time::Instant::now();
         let (mut writer, _waiting) = self.lock_writer(slot_holder);
+        // Branch-only instrument for the write lane's breakdown: the
+        // queue is this transaction's wait for the connection; the hold
+        // is the rest, until the lane releases at this function's end.
+        crate::land_profile::lane_queued(queued_started.elapsed());
+        let held_started = std::time::Instant::now();
+        // The writer lock is held to this function's end: the open-span
+        // count tracks it, and its max proves the one-writer invariant.
+        crate::land_profile::lane_open();
         // A write transaction runs at READ COMMITTED, the Postgres
         // default: every change of the caller checks the newest state of
         // the row it touches (the CAS predicates).
@@ -1604,7 +1617,8 @@ impl Pg {
         // the 60 s. OFFSET 0 keeps the planner from flattening the
         // subquery into one target list (tests/pg_guard_timeouts.rs
         // checks the plan's shape and times the wait).
-        match f(&mut tx) {
+        let out = f(&mut tx);
+        let result = match out {
             Ok(value) => {
                 let unflushed = tx.cs_pending.as_deref().is_some_and(|p| !p.is_empty())
                     || tx.derived_pending.as_deref().is_some_and(|p| !p.is_empty());
@@ -1660,7 +1674,12 @@ impl Pg {
                 let _ = tx.rollback();
                 Err(error)
             }
-        }
+        };
+        // The lane's whole hold ends here, at the writer lock's own
+        // release: the body's statements and the commit's round trips.
+        crate::land_profile::lane_held(held_started.elapsed());
+        crate::land_profile::lane_close();
+        result
     }
 
     /// [`Pg::commit`]: on this backend, durable on return.
@@ -2660,8 +2679,10 @@ impl<'a> PgTx<'a> {
     /// Commits the transaction. The client runs again afterwards.
     fn commit(&mut self) -> Result<()> {
         self.ended = true;
-        self.c.execute("COMMIT", &[])?;
-        Ok(())
+        let started = std::time::Instant::now();
+        let out = self.c.execute("COMMIT", &[]);
+        crate::land_profile::lane_commit(started.elapsed());
+        out.map(|_| ())
     }
 
     /// Rolls the transaction back. The client runs again afterwards.

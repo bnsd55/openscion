@@ -120,7 +120,15 @@ fn land_once(
         request_key: cs.to_string(),
         deadline: later(),
     };
-    match lands.land(store, &Caller("t".into()), &request) {
+    match lands
+        .land(
+            store,
+            &Caller("t".into()),
+            &request,
+            std::time::Duration::ZERO,
+        )
+        .0
+    {
         Ok(outcome) => outcome,
         Err(Error::Aborted(detail)) => panic!("the land aborted once: {detail}"),
         Err(error) => panic!("the land failed: {error}"),
@@ -534,7 +542,14 @@ fn a_failed_verdicts_transaction_leaves_the_old_rows() {
         request_key: cs.to_string(),
         deadline: later(),
     };
-    let failed = lands.land(&store, &Caller("t".into()), &request);
+    let failed = lands
+        .land(
+            &store,
+            &Caller("t".into()),
+            &request,
+            std::time::Duration::ZERO,
+        )
+        .0;
     assert!(
         failed.is_err(),
         "a land whose commit was made to fail must not report success"

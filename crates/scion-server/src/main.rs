@@ -1464,6 +1464,8 @@ async fn serve(
         config.drain_timeout,
         Arc::clone(&metrics),
     );
+    // The branch-only lane gauges ride the metrics endpoint.
+    scion_proto::runtime::metrics::install_extra_render(scion_server::land_profile::render_lane);
     if let Some(metrics_listen) = config.metrics_listen {
         let address = metrics_listen.to_string();
         let metrics_listener = tokio::net::TcpListener::bind(metrics_listen)

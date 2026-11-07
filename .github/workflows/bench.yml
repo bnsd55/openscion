@@ -14,6 +14,10 @@ on:
       blob_counts:
         description: blob counts to measure (space-separated); set to run the blob-count job
         default: ""
+      profile:
+        description: "Profile a whole push (PutBlob, CreateChangeset, Land) instead of the envelope jobs."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -27,7 +31,7 @@ env:
 
 jobs:
   checkout:
-    if: github.event.inputs.blob_counts == ''
+    if: ${{ !inputs.profile && github.event.inputs.blob_counts == '' }}
     name: checkout vs git clone
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -90,7 +94,7 @@ jobs:
   # Postgres cells need SCION_PG_URL, which the service container
   # below provides.
   capacity:
-    if: github.event.inputs.blob_counts == ''
+    if: ${{ !inputs.profile && github.event.inputs.blob_counts == '' }}
     name: capacity envelope
     runs-on: ubuntu-24.04
     timeout-minutes: 240
@@ -192,3 +196,63 @@ jobs:
           name: blob-count-output
           path: ${{ runner.temp }}/blob-count-output.txt
           if-no-files-found: error
+
+  push-profile:
+    name: push profile
+    if: ${{ inputs.profile }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      # pg_stat_statements needs a shared preload, so this job is not
+      # the envelope's services block: a service's options are docker
+      # flags, and the preload is a server argument. The job runs its
+      # own postgres, with the preload on the server command line.
+      - name: the profile's postgres, with the preload on the command line
+        run: |
+          set -euo pipefail
+          docker run -d --name profile-pg -p 5432:5432 \
+            -e POSTGRES_PASSWORD=scion -e POSTGRES_DB=scion_capacity_profile \
+            postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe \
+            postgres -c shared_preload_libraries=pg_stat_statements -c track_wal_io_timing=on
+          for i in $(seq 1 60); do
+            if docker exec profile-pg pg_isready -U postgres > /dev/null 2>&1; then
+              echo "postgres is ready" && exit 0
+            fi
+            sleep 2
+          done
+          docker logs profile-pg || true
+          echo "postgres did not get ready" >&2 && exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
+        with:
+          tool: protoc
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: the harness needs jq
+        run: |
+          set -euo pipefail
+          command -v jq > /dev/null || sudo apt-get install -y -qq jq
+      - name: the postgres is still up from the harness's side
+        run: |
+          set -euo pipefail
+          docker ps --filter name=profile-pg
+          docker exec profile-pg pg_isready -U postgres
+          (cat < /dev/null > /dev/tcp/127.0.0.1/5432) && echo "the host port answers"
+      - name: profile one push per phase
+        env:
+          # The harness drops and creates its database, so it runs
+          # only on a scion_capacity_* database.
+          SCION_PG_URL: postgres://postgres:scion@127.0.0.1:5432/scion_capacity_profile
+          CAPACITY_MACHINE: "GitHub ubuntu-24.04 hosted runner: 4 vCPU, 16 GiB RAM, ~144 GiB SSD"
+        run: scripts/push-profile.sh
+      - name: upload the profile's artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: push-profile-output
+          path: ${{ runner.temp }}/push-profile-artifacts/
+          if-no-files-found: warn

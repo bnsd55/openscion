@@ -99,7 +99,9 @@ fn catch_up_statements(n: usize) -> u64 {
                 request_key: "base".into(),
                 deadline: Deadline::new(Instant::now() + Duration::from_secs(600)),
             },
+            std::time::Duration::ZERO,
         )
+        .0
         .unwrap();
     assert_eq!(out.state, LandState::Landed, "{}", out.detail);
     // The ref moves `n` times; the index does not follow (only lands
@@ -127,7 +129,9 @@ fn catch_up_statements(n: usize) -> u64 {
                 request_key: "end".into(),
                 deadline: Deadline::new(Instant::now() + Duration::from_secs(600)),
             },
+            std::time::Duration::ZERO,
         )
+        .0
         .unwrap();
     assert_eq!(
         out.state,
