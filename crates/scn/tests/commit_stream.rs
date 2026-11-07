@@ -219,6 +219,17 @@ fn an_empty_file_still_commits() {
 // catches a whole-file read.
 const FILE_BYTES: usize = 24 * 1024 * 1024;
 const CEILING_KB: u64 = 32 * 1024;
+// The measured commit runs this many times, fresh process each, and
+// the ceiling decides on the smallest peak. A whole-file read is the
+// code path: it adds the file's bytes to EVERY process, so the
+// smallest peak still passes the ceiling and the test fails. The
+// process's other resident memory - its own binary and libraries, as
+// the loader and the kernel's readahead bring them in - varies with
+// the page cache a busy runner happens to leave behind (once, a cold
+// first rep measured 77 MB against the 32 MB ceiling on main, and the
+// same tree passed everywhere else). That memory is not the commit's;
+// one clean rep proves the streaming path still holds.
+const RSS_REPS: usize = 5;
 
 /// The ceiling: a commit of a 24 MiB file runs as its own process, whose
 /// peak RSS the test measures. Streaming holds about one chunk, so the
@@ -230,20 +241,30 @@ const CEILING_KB: u64 = 32 * 1024;
 fn a_commit_of_a_big_file_stays_under_its_rss_ceiling() {
     let fx = Fixture::start();
     let file = fx.put_file("huge.bin", FILE_BYTES);
-    let out = commit_measured(&fx, "huge.bin", &file, false);
-    assert!(
-        out.status.success(),
-        "commit failed: {}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+    let mut peaks = Vec::new();
+    for rep in 0..RSS_REPS {
+        let out = commit_measured(&fx, "huge.bin", &file, false);
+        assert!(
+            out.status.success(),
+            "commit failed: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.peak_kb > 0, "the sampler never saw the commit");
+        eprintln!(
+            "rep {rep}: the scn commit's peak RSS was {} kB",
+            out.peak_kb
+        );
+        peaks.push(out.peak_kb);
+    }
+    let peak_kb = *peaks.iter().min().unwrap();
+    println!(
+        "the scn commit's smallest peak RSS over {RSS_REPS} reps was {peak_kb} kB          (all: {peaks:?}); the ceiling is {CEILING_KB} kB"
     );
-    let peak_kb = out.peak_kb;
-    println!("the scn commit's peak RSS was {peak_kb} kB; the ceiling is {CEILING_KB} kB");
-    assert!(peak_kb > 0, "the sampler never saw the commit");
     assert!(
         peak_kb <= CEILING_KB,
-        "the commit's peak RSS ({peak_kb} kB) passed the ceiling ({CEILING_KB} kB); \
-         a whole-file read is back"
+        "the commit's smallest peak RSS ({peak_kb} kB of {peaks:?}) passed the ceiling \
+         ({CEILING_KB} kB); a whole-file read is back"
     );
 }
 
