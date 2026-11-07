@@ -3842,6 +3842,11 @@ pub(crate) fn pending_migration_message(db: u32, build: u32) -> String {
 /// `postgres_url_of` and preflight's `postgres_url`) call this before
 /// any connect, so serve, migrate and preflight answer the same words.
 /// #963.
+///
+/// # Errors
+///
+/// An [`Error::InvalidArgument`] naming the parse error and
+/// `read_from`, when the URL does not parse.
 pub fn check_db_url(url: &str, read_from: &str) -> Result<()> {
     let _ = url.parse::<postgres::Config>().map_err(|e| {
         Error::InvalidArgument(format!(
