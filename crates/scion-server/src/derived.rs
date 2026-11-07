@@ -468,7 +468,7 @@ fn in_one_walk<K: Kind>(
             // The walk's permit: walks beyond the cap only repeat work,
             // and starve the writes. Wait for one until the deadline.
             let _permit = take_walk_permit(walks, deadline)?;
-            return fill_until::<K>(store, repo, cs, deadline).map(|(value, _)| value);
+            return fill_until::<K>(store, repo, cs, deadline, None).map(|(value, _)| value);
         }
         let before = *flight.walks.lock().unwrap_or_else(PoisonError::into_inner);
         if !waited(&flight, before, deadline) {
@@ -507,7 +507,7 @@ fn in_one_walk<K: Kind>(
 /// [`Error::NotFound`] if `repo` does not have `cs`. Errors of
 /// [`Kind::derive`].
 pub(crate) fn fill<K: Kind>(store: &Backend, repo: RepoId, cs: ChangesetId) -> Result<K::Value> {
-    Ok(fill_until::<K>(store, repo, cs, None)?.0)
+    Ok(fill_until::<K>(store, repo, cs, None, None)?.0)
 }
 
 /// [`fill`], but it stops between steps once `deadline` has passed. The
@@ -521,8 +521,9 @@ pub(crate) fn fill_by<K: Kind>(
     repo: RepoId,
     cs: ChangesetId,
     deadline: &Deadline,
+    #[cfg_attr(not(any(test, feature = "test-hooks")), allow(unused_variables))] gate: Option<&str>,
 ) -> Result<K::Value> {
-    Ok(fill_until::<K>(store, repo, cs, Some(deadline))?.0)
+    Ok(fill_until::<K>(store, repo, cs, Some(deadline), gate)?.0)
 }
 
 fn fill_until<K: Kind>(
@@ -530,6 +531,7 @@ fn fill_until<K: Kind>(
     repo: RepoId,
     cs: ChangesetId,
     deadline: Option<&Deadline>,
+    #[cfg_attr(not(any(test, feature = "test-hooks")), allow(unused_variables))] gate: Option<&str>,
 ) -> Result<(K::Value, usize)> {
     let check = || deadline.map_or(Ok(()), Deadline::check);
     // A walk that answers a request holds its frontier inside the store's
@@ -544,7 +546,7 @@ fn fill_until<K: Kind>(
     };
     // The walk's frontier stays in memory through the derives, so its
     // bytes stay taken until they are done.
-    let filled = derive_steps::<K>(store, repo, &pending, deadline, check)?;
+    let filled = derive_steps::<K>(store, repo, &pending, deadline, check, gate)?;
     drop(held);
     filled.ok_or_else(|| Error::NotFound(format!("changeset {cs}")))
 }
@@ -576,7 +578,7 @@ pub(crate) fn backfill<K: Kind>(
     cs: ChangesetId,
 ) -> Result<DeriveReport> {
     let repo = store.read(|c| c.repo_id(repo))?;
-    let (_value, written) = fill_until::<K>(store, repo, cs, None)?;
+    let (_value, written) = fill_until::<K>(store, repo, cs, None, None)?;
     // Every step removes at most a step's worth, and a short step means
     // that no older row is left; the sum is what the run removed.
     let mut removed = 0usize;
@@ -913,6 +915,7 @@ fn derive_steps<K: Kind>(
     pending: &[ChangesetId],
     deadline: Option<&Deadline>,
     check: impl Fn() -> Result<()>,
+    #[cfg_attr(not(any(test, feature = "test-hooks")), allow(unused_variables))] gate: Option<&str>,
 ) -> Result<Option<(K::Value, usize)>> {
     let mut value = None;
     let mut written = 0usize;
@@ -956,6 +959,15 @@ fn derive_steps<K: Kind>(
         // bounded ([`Pg::wait_for_writers`]), so a load that never stops
         // delays a step, it does not stop the walk.
         store.wait_for_writers(deadline)?;
+        // The land's gate between the walk's steps: a park here sits
+        // between two of the walk's committed steps, the class a kill in
+        // the derive walk must survive. The gate holds nothing: the
+        // step's transaction is closed and the walk's frontier is the
+        // caller's memory.
+        #[cfg(any(test, feature = "test-hooks"))]
+        if let Some(key) = gate {
+            crate::land_gates::hit(crate::land_gates::Gate::FinishStep, key);
+        }
         // The command callers (no deadline) log each step, so an
         // operator can tell a slow run from a stuck one; a request's
         // fill stays quiet.
@@ -1831,7 +1843,8 @@ mod tests {
         );
         assert_eq!(DERIVES.get(), 5);
 
-        let late = derive_steps::<ChangedPathsV1>(&store, repo, &pending, None, || Ok(())).unwrap();
+        let late =
+            derive_steps::<ChangedPathsV1>(&store, repo, &pending, None, || Ok(()), None).unwrap();
         assert_eq!(late.map(|(value, _written)| value), Some(5));
         assert_eq!(DERIVES.get(), 5, "the late steps derive nothing again");
     }
@@ -1850,7 +1863,7 @@ mod tests {
                 matches!(late, Err(Error::DeadlineExceeded(_))),
                 "{n}: {late:?}"
             );
-            let late = fill_by::<ChangedPathsV1>(&store, repo, tip, &past);
+            let late = fill_by::<ChangedPathsV1>(&store, repo, tip, &past, None);
             assert!(
                 matches!(late, Err(Error::DeadlineExceeded(_))),
                 "{n}: {late:?}"
