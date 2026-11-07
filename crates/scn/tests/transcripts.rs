@@ -100,7 +100,8 @@ fn parse(at: &Path, text: &str) -> Transcript {
             "since" => since = Some(value.to_owned()),
             "method" => method = Some(value.to_owned()),
             "fixture" => fixture = Some(value.to_owned()),
-            "status" | "end" | "resume_status" => {
+            "status" | "end" | "resume_status" | "objects" | "entries" | "next"
+            | "next_nonempty" | "cursor_from" => {
                 expect.push((key.to_owned(), value.to_owned()));
             }
             "tiers" if value == "refuse" || value == "fresh" => {
@@ -119,7 +120,6 @@ fn parse(at: &Path, text: &str) -> Transcript {
                 at.display(),
                 n + 1
             ),
-            "objects" | "entries" => expect.push((key.to_owned(), value.to_owned())),
             other => panic!("{}:{} names unknown key {other}", at.display(), n + 1),
         }
     }
@@ -155,6 +155,8 @@ struct Fixture {
     /// the middle one, whose tree still holds the old src/main.rs.
     root_cs: ChangesetId,
     mid_cs: ChangesetId,
+    /// The head of the blame chain: src/lines.txt at its 100th version.
+    blame_head: ChangesetId,
     /// The root changeset's own tree: a CAS object, which `GetObjects`
     /// serves. The head's root tree is derived and lives elsewhere.
     root_tree: [u8; 32],
@@ -222,6 +224,28 @@ fn landed() -> (Tiers, Fixture) {
         )],
     );
     let id = common::land(&store, &head);
+    // The blame chain: src/lines.txt gains one line per changeset, 101
+    // versions on a side branch off the middle, so the blame call stops
+    // at its 100-version bound with one line left and answers a cursor.
+    // Main keeps its three-commit shape, so the other files' pins hold.
+    let mut lines: Vec<u8> = Vec::new();
+    let mut blame_parent = mid_id;
+    for k in 0..101 {
+        lines.extend_from_slice(format!("line {k}\n").as_bytes());
+        let line_blob = BlobId::of(&lines);
+        store.blobs().put(&lines).unwrap();
+        let version = common::changeset(
+            Some(blame_parent),
+            &[(
+                "src/lines.txt",
+                FileState::Regular {
+                    content: line_blob,
+                    executable: false,
+                },
+            )],
+        );
+        blame_parent = common::land_ref(&store, &version, "blame");
+    }
     store
         .write(|c| {
             let repo = c.repo_id(common::REPO)?;
@@ -245,6 +269,7 @@ fn landed() -> (Tiers, Fixture) {
         root_cs: root_id,
         mid_cs: mid_id,
         root_tree,
+        blame_head: blame_parent,
 
         missing: missing_id(0xab),
         unsigned: unsigned_of(&ticket),
@@ -306,12 +331,48 @@ fn resolve(value: &str, f: &Fixture) -> String {
         .replace("$blob", &hex(f.blob.as_bytes()))
         .replace("$tree_root", &hex(&f.root_tree))
         .replace("$tree", &hex(&f.tree))
-        .replace("$cs", &hex(f.cs.as_bytes()))
         .replace("$cs_root", &hex(f.root_cs.as_bytes()))
         .replace("$cs_mid", &hex(f.mid_cs.as_bytes()))
+        .replace("$blame_head", &hex(f.blame_head.as_bytes()))
+        .replace("$cs", &hex(f.cs.as_bytes()))
         .replace("$missing", &hex(&f.missing))
         .replace("$unsigned", &hex(&f.unsigned))
         .replace("$ticket", &hex(&f.ticket))
+}
+
+/// The last cursor each streamed reply answered, by the file's name: a
+/// continuation file names the file whose cursor it sends back, and the
+/// runner feeds it here. The corpus's order is the sorted names, so the
+/// source file always runs first.
+static CURSORS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn remember_cursor(t: &Transcript, cursor: Vec<u8>) {
+    let name = std::path::Path::new(&t.path)
+        .file_name()
+        .expect("the file has a name")
+        .to_string_lossy()
+        .to_string();
+    CURSORS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(name, cursor);
+}
+
+/// The cursor a `cursor_from` file sends: the reply of the file it
+/// names. Empty when that file has not run - a wiring mistake.
+fn cursor_of(t: &Transcript, source: &str) -> Vec<u8> {
+    let name = std::path::Path::new(source)
+        .file_name()
+        .expect("the source has a name")
+        .to_string_lossy()
+        .to_string();
+    CURSORS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&name)
+        .cloned()
+        .unwrap_or_else(|| panic!("{} resumes {} before it ran", t.path, source))
 }
 
 /// A parsed `kind=... id=...` item of a stream.
@@ -617,8 +678,8 @@ fn the_corpus_answers_as_its_files_say() {
     files.sort();
     assert_eq!(
         files.len(),
-        34,
-        "the corpus pins 34 behaviours; a file added or removed must update this count"
+        39,
+        "the corpus pins 39 behaviours; a file added or removed must update this count"
     );
     // One store and one set of tiers for the whole run: the fixture is
     // the expensive part. Each file still mints its own ticket, right
@@ -1339,6 +1400,29 @@ fn n1_repo(dir: &Path) -> PathBuf {
     fs::write(src.join("src/lib.rs"), b"pub const X: u8 = 7;\n").expect("the file writes");
     git(&["-C", &src.display().to_string(), "add", "-A"]);
     git(&["-C", &src.display().to_string(), "commit", "-qam", "third"]);
+    // The blame branch: src/lines.txt gains one line per commit, 101
+    // commits off the middle, so the blame call stops at its bound.
+    git(&[
+        "-C",
+        &src.display().to_string(),
+        "checkout",
+        "-q",
+        "feature",
+    ]);
+    for k in 0..101 {
+        let text = format!("pub fn main() {{}}\npub fn extra() {{}}\nline {k}\n");
+        fs::write(src.join("src/lines.txt"), text.as_bytes()).expect("the file writes");
+        git(&["-C", &src.display().to_string(), "add", "-A"]);
+        git(&[
+            "-C",
+            &src.display().to_string(),
+            "commit",
+            "-qam",
+            &format!("line {k}"),
+        ]);
+    }
+    git(&["-C", &src.display().to_string(), "branch", "blame"]);
+    git(&["-C", &src.display().to_string(), "checkout", "-q", "main"]);
     src
 }
 
@@ -1447,7 +1531,7 @@ fn start_n1_stack(prev_bin: &Path, dir: &Path, pg: &str) -> N1Stack {
     make_private(&server_dir);
     let scion = prev_bin.join("scion-server");
     let data = server_dir.display().to_string();
-    for (rev, target) in [("HEAD", "main"), ("feature", "feature")] {
+    for (rev, target) in [("HEAD", "main"), ("feature", "feature"), ("blame", "blame")] {
         run_to_end(
             &scion,
             &[
@@ -1613,6 +1697,20 @@ fn n1_fixture(runtime: &tokio::runtime::Runtime, server: &str) -> Fixture {
         let mut scion = scion_client(server).await;
         let mid_cs = parent_changeset(&mut scion, cs).await;
         let root_cs = parent_changeset(&mut scion, mid_cs).await;
+        let blame_reply = client
+            .resolve_ref(scion_proto::v1::ResolveRefRequest {
+                repo: common::REPO.into(),
+                name: "blame".into(),
+            })
+            .await
+            .expect("the blame ref resolves")
+            .into_inner();
+        let blame_head = scion_core::ChangesetId::from_bytes(
+            blame_reply
+                .changeset_id
+                .try_into()
+                .expect("the cs is 32 bytes"),
+        );
         let root_reply = client
             .get_root_tree(GetRootTreeRequest {
                 repo: common::REPO.into(),
@@ -1632,6 +1730,7 @@ fn n1_fixture(runtime: &tokio::runtime::Runtime, server: &str) -> Fixture {
             root_cs,
             mid_cs,
             root_tree,
+            blame_head,
             missing: missing_id(0xab),
             unsigned: unsigned_of(&root_ticket),
             ticket: root_ticket,
@@ -1996,6 +2095,42 @@ async fn run_list_dir(
     }
 }
 
+/// The `next` pin: the cursor the reply ended with, resolved against
+/// the fixture (an empty value pins the last page's empty cursor).
+/// `next_nonempty: true` pins that a cursor came at all.
+fn check_next(t: &Transcript, f: &Fixture) -> Result<(), String> {
+    let name = std::path::Path::new(&t.path)
+        .file_name()
+        .expect("the file has a name")
+        .to_string_lossy()
+        .to_string();
+    let got = CURSORS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&name)
+        .cloned()
+        .unwrap_or_default();
+    if let Some((_, v)) = t.expect.iter().find(|(k, _)| k == "next") {
+        let want = resolve(v, f);
+        if hex(&got) != want {
+            return Err(format!(
+                "the reply's cursor is {}, the file says {want}",
+                hex(&got)
+            ));
+        }
+    }
+    if let Some((_, v)) = t.expect.iter().find(|(k, _)| k == "next_nonempty") {
+        let want = v == "true";
+        if got.is_empty() == want {
+            return Err(format!(
+                "the reply's cursor is {} bytes, the file says nonempty={want}",
+                got.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn run_log(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> Result<(), String> {
     for (k, _) in &t.request {
         if !matches!(
@@ -2016,9 +2151,12 @@ async fn run_log(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> Res
             let mut stream = reply.into_inner();
             check_status(t, Code::Ok)?;
             let mut count = 0usize;
+            let mut last = Vec::new();
             while let Some(item) = read_bounded(&mut stream).await? {
                 count += item.entries.len();
+                last = item.next_changeset_id;
             }
+            remember_cursor(t, last);
             if let Some((_, v)) = t.expect.iter().find(|(k, _)| k == "entries") {
                 let want: usize = v.parse().unwrap_or(0);
                 if count != want {
@@ -2027,6 +2165,7 @@ async fn run_log(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> Res
                     ));
                 }
             }
+            check_next(t, f)?;
             Ok(())
         }
         Err(status) => {
@@ -2041,20 +2180,27 @@ async fn run_blame(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> R
             return Err(unknown_field("Blame", k));
         }
     }
+    let cursor = match t.expect.iter().find(|(k, _)| k == "cursor_from") {
+        Some((_, source)) => cursor_of(t, source),
+        None => field(t, "cursor").unwrap_or_default().into_bytes(),
+    };
     let req = scion_proto::v1::BlameRequest {
         repo: resolve(&field(t, "repo").unwrap_or_else(|| "r".to_owned()), f),
         changeset_id: unhex(&resolve(&field(t, "changeset_id").unwrap_or_default(), f)),
         path: field(t, "path").unwrap_or_default().into_bytes(),
-        cursor: field(t, "cursor").unwrap_or_default().into_bytes(),
+        cursor,
     };
     match client.blame(req).await {
         Ok(reply) => {
             let mut stream = reply.into_inner();
             check_status(t, Code::Ok)?;
             let mut count = 0usize;
+            let mut last = Vec::new();
             while let Some(item) = read_bounded(&mut stream).await? {
                 count += item.changesets.len();
+                last = item.next_cursor;
             }
+            remember_cursor(t, last);
             if let Some((_, v)) = t.expect.iter().find(|(k, _)| k == "entries") {
                 let want: usize = v.parse().unwrap_or(0);
                 if count != want {
@@ -2063,6 +2209,7 @@ async fn run_blame(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> R
                     ));
                 }
             }
+            check_next(t, f)?;
             Ok(())
         }
         Err(status) => {

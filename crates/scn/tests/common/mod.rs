@@ -355,12 +355,17 @@ pub(crate) fn changeset(parent: Option<ChangesetId>, files: &[(&str, FileState)]
 
 /// Stores `cs` in the repo and points `main` at it.
 pub(crate) fn land(store: &Backend, cs: &Changeset) -> ChangesetId {
+    land_ref(store, cs, "main")
+}
+
+/// Stores `cs` in the repo and points `ref_name` at it.
+pub(crate) fn land_ref(store: &Backend, cs: &Changeset, ref_name: &str) -> ChangesetId {
     store
         .write(|c| {
             let repo = c.create_repo(REPO)?;
             let (id, _) = tree::store_changeset(c, repo, cs, &mut tree::lens_of(store))?;
-            let version = c.get_ref(repo, "main")?.map(|r| r.version);
-            assert!(c.cas_ref(repo, "main", version, id)?);
+            let version = c.get_ref(repo, ref_name)?.map(|r| r.version);
+            assert!(c.cas_ref(repo, ref_name, version, id)?);
             Ok(id)
         })
         .unwrap()

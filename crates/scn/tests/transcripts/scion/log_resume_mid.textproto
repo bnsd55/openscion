@@ -1,0 +1,13 @@
+# The walk's middle page: the cursor's changeset is where this call
+# starts, and the cursor moves on to the root.
+since: v0.1
+method: Scion/Log
+fixture: landed
+
+request.repo: r
+request.changeset_id: $cs_mid
+request.limit: 1
+
+status: ok
+entries: 1
+next: $cs_root

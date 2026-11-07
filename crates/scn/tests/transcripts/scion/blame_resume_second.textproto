@@ -1,0 +1,14 @@
+# The continuation: the first reply's cursor sent back unchanged names
+# the rest of the lines, and the walk ends with an empty cursor.
+since: v0.1
+method: Scion/Blame
+fixture: landed
+
+request.repo: r
+request.changeset_id: $blame_head
+request.path: src/lines.txt
+cursor_from: crates/scn/tests/transcripts/scion/blame_resume.textproto
+
+status: ok
+entries: 1
+next:
