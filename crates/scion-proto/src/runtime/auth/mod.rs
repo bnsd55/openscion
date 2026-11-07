@@ -26,6 +26,8 @@ use tonic::metadata::{Ascii, MetadataValue};
 use tonic::service::Interceptor;
 use tonic::{Request, Status};
 
+use super::listen::Stalled;
+
 /// Who made a request: the principal of its token. Added to request
 /// extensions by [`Auth`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -34,6 +36,14 @@ pub struct Caller(pub String);
 /// The principal of the one token that [`Auth::new`] accepts.
 pub const DEFAULT_PRINCIPAL: &str = "default";
 
+/// What a refused authentication calls with the peer it came from, if
+/// the transport knows it. The server installs one sink on its [`Auth`],
+/// so every refusal path records - the interceptor's and
+/// [`Auth::caller_of`]'s alike - and a new service that checks tokens
+/// through this set records its refusals by construction, in the one
+/// place the server chose.
+pub type RefusalSink = Arc<dyn Fn(Option<std::net::SocketAddr>) + Send + Sync>;
+
 /// Accepts requests that carry `authorization: Bearer <token>` with a known
 /// token, and tags each with the token's principal.
 #[derive(Clone)]
@@ -41,6 +51,9 @@ pub struct Auth {
     /// The BLAKE3 digest of each token, and its principal. A presented token
     /// is hashed, so every comparison has the same length.
     tokens: Arc<[([u8; 32], Caller)]>,
+    /// What a refusal calls, if the server installed one. `None` on a bare
+    /// `Auth`: the check answers the same, only the recording is absent.
+    refusals: Option<RefusalSink>,
 }
 
 impl Auth {
@@ -56,7 +69,37 @@ impl Auth {
     pub fn digests(tokens: impl IntoIterator<Item = ([u8; 32], Caller)>) -> Self {
         Self {
             tokens: tokens.into_iter().collect(),
+            refusals: None,
         }
+    }
+
+    /// Records refused authentication through `sink`: the peer the
+    /// transport named, if any, and one warning line per refusal. One
+    /// `Auth` serves every service and every checker - the interceptor's
+    /// refusals and `caller_of`'s record alike.
+    #[must_use]
+    pub fn on_refusal(mut self, sink: RefusalSink) -> Self {
+        self.refusals = Some(sink);
+        self
+    }
+
+    /// The one refusal path: the sink counts the peer, the warning names
+    /// the reason and nothing else - never the token, not even its
+    /// digest - and the status leaves.
+    fn refuse<T>(&self, request: &Request<T>) -> Status {
+        if let Some(sink) = &self.refusals {
+            sink(
+                request
+                    .extensions()
+                    .get::<Stalled>()
+                    .and_then(Stalled::peer),
+            );
+        }
+        tracing::warn!(
+            reason = "missing or wrong token",
+            "the call is unauthenticated"
+        );
+        Status::unauthenticated("missing or wrong token")
     }
 
     /// The caller of `request`, from its `authorization` header. Every
@@ -67,13 +110,16 @@ impl Auth {
     ///
     /// [`Status::unauthenticated`] without a `Bearer` token of this set.
     pub fn caller_of<T>(&self, request: &Request<T>) -> Result<Caller, Status> {
-        request
+        match request
             .metadata()
             .get("authorization")
             .and_then(|value| value.as_bytes().strip_prefix(b"Bearer "))
             .and_then(|token| self.principal(token))
             .cloned()
-            .ok_or_else(|| Status::unauthenticated("missing or wrong token"))
+        {
+            Some(caller) => Ok(caller),
+            None => Err(self.refuse(request)),
+        }
     }
 
     /// The principal of `token`, if any. Compares its digest with every
@@ -99,15 +145,7 @@ impl Interceptor for Auth {
             .and_then(|value| value.as_bytes().strip_prefix(b"Bearer "))
             .and_then(|token| self.principal(token))
             .cloned()
-            .ok_or_else(|| {
-                // One line for the refusal. The span's fields name the RPC
-                // and the peer. Never the token, not even its digest.
-                tracing::warn!(
-                    reason = "missing or wrong token",
-                    "the call is unauthenticated"
-                );
-                Status::unauthenticated("missing or wrong token")
-            })?;
+            .ok_or_else(|| self.refuse(&request))?;
         request.extensions_mut().insert(caller);
         Ok(request)
     }

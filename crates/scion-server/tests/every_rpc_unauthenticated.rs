@@ -102,8 +102,9 @@ async fn store() -> (tempfile::TempDir, Backend, scion_core::ChangesetId) {
     (dir, store, root)
 }
 
-/// The server of `store` behind `access`, as a `http://` URL. Hold the
-/// stop signal, or the server shuts down when it drops.
+/// The server of `store` behind `access`, as a `http://` URL, with a real
+/// audit file so the refused calls' recording is checked. Hold the stop
+/// signal, or the server shuts down when it drops.
 async fn serve(
     store: &Backend,
     dir: &std::path::Path,
@@ -118,7 +119,7 @@ async fn serve(
         access,
         service::ServeOptions {
             data: dir.to_path_buf(),
-            audit: scion_server::test_support::audit::Audit::off(),
+            audit: scion_server::test_support::audit::Audit::open(&dir.join("audit.log")).unwrap(),
             limits: Limits::default(),
             quotas: scion_server::Quotas::off(),
             pending_lands: None,
@@ -548,16 +549,19 @@ async fn every_rpc_answers_unauthenticated_without_a_valid_token() {
     let before = state_of(&store, dir.path()).await;
 
     for row in &rows {
+        let ticket_only = ticket_rpcs
+            .iter()
+            .any(|(service, rpc)| service == row.service && rpc == row.rpc);
+        let want = if ticket_only {
+            Code::PermissionDenied
+        } else {
+            Code::Unauthenticated
+        };
         for (who, pair) in [("no token", &none), ("wrong token", &wrong)] {
             let reply = (row.call)(pair, &payload).await;
             let status = match reply {
                 Ok(()) => panic!("{}.{}, {who}: the call went through", row.service, row.rpc),
                 Err(status) => status,
-            };
-            let want = if row.rpc == "GetObjects" {
-                Code::PermissionDenied
-            } else {
-                Code::Unauthenticated
             };
             assert_eq!(
                 status.code(),
@@ -569,6 +573,20 @@ async fn every_rpc_answers_unauthenticated_without_a_valid_token() {
             );
         }
     }
+    // The refusals the meter must have counted: two per row that answers
+    // UNAUTHENTICATED (no token, wrong token). A ticket-only method's
+    // refusal is the ticket's, and the meter counts token refusals.
+    // The recording check at the end holds the count against the audit
+    // file, so a method whose refusal skips the recording fails here -
+    // the row check alone cannot see it.
+    let refused_auth = 2 * rows
+        .iter()
+        .filter(|row| {
+            !ticket_rpcs
+                .iter()
+                .any(|(service, rpc)| service == row.service && rpc == row.rpc)
+        })
+        .count();
     // The ticket-bearing methods: a real ticket minted through the right
     // token, then the same request with one signature byte flipped and no
     // token at all (the ticket is the only permission). A damaged ticket
@@ -681,7 +699,45 @@ async fn every_rpc_answers_unauthenticated_without_a_valid_token() {
         }
     }
 
+    // The recording: the stop flushes the refusal meter, and the audit
+    // file must hold one counted line per peer, with every refused call
+    // on it. A method that answers UNAUTHENTICATED without recording -
+    // a new service that checks tokens outside the server's one auth -
+    // leaves the count short, and this fails.
     stop.send(()).ok();
+    let audit_path = dir.path().join("audit.log");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let lines = loop {
+        let text = std::fs::read_to_string(&audit_path).unwrap_or_default();
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        if lines
+            .iter()
+            .any(|line| line["event"] == "auth" && line["outcome"] == "refused")
+            || std::time::Instant::now() > deadline
+        {
+            break lines;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    let refusals: Vec<_> = lines
+        .iter()
+        .filter(|line| line["event"] == "auth" && line["outcome"] == "refused")
+        .collect();
+    assert_eq!(
+        refusals.len(),
+        1,
+        "one counted refusal line per peer, got {lines:?}"
+    );
+    assert_eq!(
+        refusals[0]["count"], refused_auth,
+        "every refused call is counted on the one line"
+    );
+    assert_eq!(refusals[0]["peer"], "127.0.0.1");
+    let text = std::fs::read_to_string(&audit_path).unwrap();
+    assert!(!text.contains("wrong"), "the refused token never appears");
 }
 
 #[path = "common/mod.rs"]
