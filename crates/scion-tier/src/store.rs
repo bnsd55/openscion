@@ -39,6 +39,14 @@ pub trait Store: Send + Sync + 'static {
     /// I/O errors.
     fn size(&self, key: Key) -> io::Result<Option<usize>>;
 
+    /// The sizes of `keys`, each as [`Store::size`] answers it. One call,
+    /// so a caller that checks a window pays one round trip to the store,
+    /// not one per key. The default asks [`Store::size`] for each key; a
+    /// store whose sizes share one lookup overrides it.
+    fn sizes(&self, keys: &[Key]) -> Vec<io::Result<Option<usize>>> {
+        keys.iter().map(|key| self.size(*key)).collect()
+    }
+
     /// The stored form of an object whose size [`Store::size`] gave as
     /// `size`. Returns at most `size` bytes. `None` if it is not stored, or
     /// if the stored copy is bad (it is then dropped).
@@ -605,6 +613,74 @@ impl Disk {
         self.newest.insert(key, Some((used_at, size)));
         self.push(Op::Use, key, size, used_at);
         Ok(Some(size))
+    }
+
+    /// The sizes of `keys`, as `touch` would answer each: the batch's
+    /// `newest` first, the settled rest with one query, and every key that
+    /// answers a size marked just used, in the order of `keys`.
+    fn sizes(&mut self, keys: &[Key]) -> io::Result<Vec<Option<usize>>> {
+        // One query for the settled keys, in chunks under SQLite's
+        // parameter limit: two parameters per row value.
+        const CHUNK: usize = 500;
+        let mut answers = vec![None; keys.len()];
+        let mut misses: Vec<(usize, Key)> = Vec::new();
+        for (i, key) in keys.iter().enumerate() {
+            match self.newest.get(key).copied() {
+                Some(Some((_, size))) => answers[i] = Some(size),
+                Some(None) => {}
+                None => misses.push((i, *key)),
+            }
+        }
+        for chunk in misses.chunks(CHUNK) {
+            let values = chunk
+                .iter()
+                .map(|_| "(?,?)")
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT kind, id, size FROM objects WHERE (kind, id) IN (VALUES {values})"
+            );
+            let params = chunk.iter().flat_map(|(_, key)| {
+                let kind = kind_of(*key);
+                let id = key.id();
+                [rusqlite::types::Value::Integer(kind), rusqlite::types::Value::Blob(id.to_vec())]
+            });
+            let found: std::collections::HashMap<(i64, [u8; 32]), usize> = self
+                .conn
+                .prepare(&sql)
+                .and_then(|mut stmt| {
+                    stmt.query_map(rusqlite::params_from_iter(params), |row| {
+                        let kind: i64 = row.get(0)?;
+                        let id: Vec<u8> = row.get(1)?;
+                        let size: i64 = row.get(2)?;
+                        Ok((kind, id, size))
+                    })?
+                    .filter_map(|row| {
+                        let (kind, id, size) = row.ok()?;
+                        let id: [u8; 32] = id.try_into().ok()?;
+                        let size = usize::try_from(size).unwrap_or(0);
+                        Some(Ok(((kind, id), size)))
+                    })
+                    .collect::<Result<std::collections::HashMap<(i64, [u8; 32]), usize>, _>>()
+                })
+                .map_err(index_error)?;
+            for (i, key) in chunk {
+                if let Some(size) = found.get(&(kind_of(*key), key.id())) {
+                    answers[*i] = Some(*size);
+                }
+            }
+        }
+        // Every answered key is just used, in the order of `keys`: the
+        // same `Use` ops one `touch` per key would push, one batch.
+        for (i, size) in answers.iter().enumerate() {
+            let Some(size) = size else { continue };
+            let key = keys[i];
+            let used_at = self.next_used;
+            self.next_used += 1;
+            self.newest.insert(key, Some((used_at, *size)));
+            self.push(Op::Use, key, *size, used_at);
+        }
+        Ok(answers)
     }
 
     /// The state of `key`: its size, or gone. The batch has the last word;
@@ -1739,6 +1815,17 @@ impl Store for DiskStore {
         let size = lock(&self.disk).touch(key)?;
         self.flush();
         Ok(size)
+    }
+
+    fn sizes(&self, keys: &[Key]) -> Vec<io::Result<Option<usize>>> {
+        let answers = lock(&self.disk).sizes(keys);
+        self.flush();
+        match answers {
+            Ok(answers) => answers.into_iter().map(Ok).collect(),
+            Err(error) => (0..keys.len())
+                .map(|_| Err(io::Error::new(error.kind(), error.to_string())))
+                .collect(),
+        }
     }
 
     fn get(&self, key: Key, size: usize) -> io::Result<Option<Bytes>> {
