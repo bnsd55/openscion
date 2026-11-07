@@ -168,7 +168,8 @@ turn_on_wal_io_timing() {
   local hostport=${url#*@}; hostport=${hostport%%/*}
   PGPASSWORD=$pass PGGSSENCMODE=disable psql -h "${hostport%%:*}" \
     -p "${hostport##*:}" -U "$userpass" -d postgres -Atqc \
-    "ALTER SYSTEM SET track_wal_io_timing = on; SELECT pg_reload_conf()" \
+    "ALTER SYSTEM SET track_wal_io_timing = on" \
+    -c "SELECT pg_reload_conf()" \
     > /dev/null 2>&1 || true
 }
 
