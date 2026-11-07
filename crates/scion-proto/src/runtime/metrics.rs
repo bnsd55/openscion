@@ -199,6 +199,11 @@ pub struct Metrics {
     pg_pool_wait: [AtomicU64; BUCKETS.len() + 2],
     pg_readers_busy: AtomicU64,
     pg_tx_age: AtomicU64,
+    /// Audit reopens the server refused: a rename-plus-signal rotation
+    /// whose fresh open failed (a symlink at the path, an unwritable
+    /// directory), counted by the audit writer and sampled into
+    /// [`Self::audit_reopens_failed`], as `scion_audit_reopens_failed_total`.
+    audit_reopens_failed: AtomicU64,
     /// Bytes that stalled replies of live connections hold, as one
     /// [`crate::STALLED_REPLY_BYTES`]-sized estimate per stalled reply,
     /// counted by [`crate::runtime::listen::Stalled`] and given back when
@@ -479,6 +484,12 @@ impl Metrics {
     /// pool.
     pub fn pg_readers_busy(&self, busy: u64) {
         self.pg_readers_busy.store(busy, Ordering::Relaxed);
+    }
+
+    /// Sets the total of audit reopens the server refused, sampled from
+    /// the audit's own counter.
+    pub fn audit_reopens_failed(&self, failed: u64) {
+        self.audit_reopens_failed.store(failed, Ordering::Relaxed);
     }
 
     /// Sets the gauge of the age of the oldest open read transaction.
@@ -873,6 +884,15 @@ impl Metrics {
             text,
             "scion_pg_tx_age_seconds {}",
             seconds(self.pg_tx_age.load(Ordering::Relaxed))
+        );
+        text.push_str(
+            "# HELP scion_audit_reopens_failed_total Audit reopens the server refused: a rename-and-signal rotation whose fresh open failed, with the old file still recording.\n",
+        );
+        text.push_str("# TYPE scion_audit_reopens_failed_total counter\n");
+        let _ = writeln!(
+            text,
+            "scion_audit_reopens_failed_total {}",
+            self.audit_reopens_failed.load(Ordering::Relaxed)
         );
     }
 

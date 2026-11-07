@@ -476,6 +476,45 @@ pub async fn serve(
         Arc::clone(&metrics),
         stop_rx.clone(),
     ));
+    // The audit's failed-reopen count, into
+    // `scion_audit_reopens_failed_total`: a failed reopen is rare, so a
+    // slow sample is enough to see it move.
+    tokio::spawn({
+        let audit = audit.clone();
+        let metrics = Arc::clone(&metrics);
+        let mut stop = stop_rx.clone();
+        async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                metrics.audit_reopens_failed(audit.reopens_failed());
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    _ = stop.changed() => break,
+                }
+            }
+        }
+    });
+    // SIGHUP asks the audit to reopen its file: the operator's
+    // logrotate renamed it, the rotation is rename-then-signal, and a
+    // refused reopen keeps the old file recording (#970).
+    #[cfg(unix)]
+    tokio::spawn({
+        let audit = audit.clone();
+        async move {
+            let mut hangup = match tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::hangup(),
+            ) {
+                Ok(hangup) => hangup,
+                Err(why) => {
+                    tracing::warn!(reason = %why, "no SIGHUP handler: the audit file cannot be rotated by signal");
+                    return;
+                }
+            };
+            while hangup.recv().await.is_some() {
+                audit.request_reopen();
+            }
+        }
+    });
     spawn_blob_count_poll(worker.store(), Arc::clone(&metrics), stop_rx.clone());
     let shutdown = {
         let mut stopped = stop_rx.clone();

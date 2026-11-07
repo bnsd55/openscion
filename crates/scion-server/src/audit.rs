@@ -351,10 +351,8 @@ fn writer(
     // ENOSPC would, without touching the file. Read only by the
     // test-hooks seam.
     #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))] faults: Arc<AtomicU64>,
-    // The reopen request and the refusal count: inert until the
-    // writer checks the flag between batches (#970).
-    #[allow(dead_code, unused_variables)] reopen: Arc<AtomicBool>,
-    #[allow(dead_code, unused_variables)] reopens_failed: Arc<AtomicU64>,
+    reopen: Arc<AtomicBool>,
+    reopens_failed: Arc<AtomicU64>,
 ) {
     while let Some(first) = rx.blocking_recv() {
         let mut batch = Vec::with_capacity(16);
@@ -363,6 +361,28 @@ fn writer(
             match rx.try_recv() {
                 Ok(msg) => batch.push(msg),
                 Err(_) => break,
+            }
+        }
+        // The reopen request is checked between batches only: a batch
+        // is always whole in one file, so a rotation never splits or
+        // duplicates a line.
+        if reopen.swap(false, Ordering::AcqRel) {
+            match checked_open(&path, None).and_then(|mut fresh| {
+                glue_torn_line(&mut fresh)?;
+                Ok(fresh)
+            }) {
+                Ok(fresh) => file = fresh,
+                Err(why) => {
+                    reopens_failed.fetch_add(1, Ordering::Relaxed);
+                    // The old file stays open: the lines go on where
+                    // they are, nothing is dropped, and the next
+                    // signal retries the reopen.
+                    tracing::error!(
+                        path = %path.display(),
+                        reason = %why,
+                        "the audit file did not reopen; recording on in the renamed file"
+                    );
+                }
             }
         }
         match append(&mut file, &batch, &faults) {

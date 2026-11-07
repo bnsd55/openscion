@@ -614,6 +614,50 @@ changes it cannot account for, and flips readiness until a restart. The
 file is mode 0600, never a symlink, in a directory only the server's
 user may write.
 
+The audit log grows with the server's work, and the guide gives the
+numbers so a disk budget can be picked from them. One JSON line plus
+its newline, measured (the shapes are in `audit_v1.golden`): a blob
+upload writes two lines, about 340 bytes; a changeset create, two
+lines, about 414; a land, three lines (its intent, its ok, the ref it
+moved), about 879. One thousand lands a day is under a mebibyte; a
+busy server at ten thousand lands and a hundred thousand uploads and
+creates a day writes about 84 MiB. Refused authentication is one line
+per peer per 10 s (the meter folds a flood into one counted line), so
+it cannot outgrow the writes' share.
+
+The file is rotated the way an append-only file that must not lose a
+line is rotated: the operator's logrotate renames it and signals, the
+server reopens the path on `SIGHUP`.
+
+```sh
+# /etc/logrotate.d/scion-audit
+/srv/scion/audit.log {
+  daily
+  rotate 30
+  compress
+  delaycompress
+  missingok
+  notifempty
+  postrotate
+    systemctl kill -s HUP --kill-who=main scion
+  endscript
+}
+```
+
+The rename moves the file under the server's open file handle: lines
+written between the rename and the signal land in the renamed file,
+so nothing is lost and nothing is duplicated. The server checks the
+signal between batches, so every batch is whole in one file. A reopen
+that fails (a symlink at the path, an unwritable directory, a full
+disk) keeps the old file recording - no line is dropped - logs an
+error that names the path and the cause, counts in
+`scion_audit_reopens_failed_total`, and retries on the next `SIGHUP`.
+An auditor joins an intent to its result across the rotated set by
+`request_id` (every line carries one, and a change's lines share it),
+ordered by each line's `ts`: a rotation may put the intent in
+`audit.log.1` and the result in the fresh `audit.log`, and the pair is
+still complete.
+
 The lines of concurrent changes can appear in a different order than the
 changes themselves: each job records its result after its change. Each
 ref line names its old and new head, so a ref's history is rebuilt by
@@ -1396,6 +1440,11 @@ the process, scraped from there. The names:
   snapshot, which keeps the database from cleaning old rows; find the
   client behind it (`pg_stat_activity`), and if walks like that are
   common, raise the pool size.
+- `scion_audit_reopens_failed_total` — audit reopens the server refused:
+  a rename-and-signal rotation whose fresh open failed (a symlink at the
+  path, an unwritable directory). The old file still records, so no line
+  is lost; a value that stays put after a SIGHUP retry is a path the
+  operator has to fix.
 
 ### A stuck free space sample
 
