@@ -1,0 +1,10 @@
+# A changeset id that is not 32 bytes: the read answers
+# invalid-argument before it looks.
+since: v0.1
+method: Scion/GetChangeset
+fixture: landed
+
+request.repo: r
+request.changeset_id: 0102
+
+status: invalid_argument

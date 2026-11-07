@@ -1,0 +1,11 @@
+# The head's next changeset, created by its bytes: the reply's id is
+# the bytes' own hash, the same on every side.
+since: v0.1
+method: Scion/CreateChangeset
+fixture: landed
+
+request.repo: r
+request.changeset: $encoded_next
+
+status: ok
+reply.changeset_id: $next_cs

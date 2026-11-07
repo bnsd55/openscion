@@ -168,6 +168,19 @@ struct Fixture {
     big_cs: ChangesetId,
     /// The seeded content of big/seeded.txt, 1.5 MiB.
     big_content: Vec<u8>,
+    /// The `ChangesetV1` bytes of the head's next changeset, and the id
+    /// they hash to: the `CreateChangeset` files' bytes and pin.
+    encoded_next: Vec<u8>,
+    next_cs: ChangesetId,
+    /// The `ChangesetV1` bytes of a changeset whose parent no store
+    /// names: the unknown-parent file's bytes.
+    encoded_orphan: Vec<u8>,
+    /// The `ChangesetV1` bytes of the head's scratch changeset, created
+    /// and landed through the server: the `GetLand` file's subject.
+    encoded_scratch: Vec<u8>,
+    /// The id of the land the fixture itself made, as a string: the
+    /// `GetLand` file's request.
+    land_id: String,
     /// The root changeset's own tree: a CAS object, which `GetObjects`
     /// serves. The head's root tree is derived and lives elsewhere.
     root_tree: [u8; 32],
@@ -180,6 +193,33 @@ struct Fixture {
     /// server's keys do not sign it, and a daemon that checks no ticket
     /// still serves what its store holds.
     unsigned: Vec<u8>,
+}
+
+/// The blame chain: src/lines.txt gains one line per changeset, 101
+/// versions on a side branch off the middle, so the blame call stops
+/// at its 100-version bound with one line left and answers a cursor.
+/// Main keeps its three-commit shape, so the other files' pins hold.
+/// Answers the branch head.
+fn blame_chain(store: &Backend, mid_id: ChangesetId) -> ChangesetId {
+    let mut lines: Vec<u8> = Vec::new();
+    let mut blame_parent = mid_id;
+    for k in 0..101 {
+        lines.extend_from_slice(format!("line {k}\n").as_bytes());
+        let line_blob = BlobId::of(&lines);
+        store.blobs().put(&lines).unwrap();
+        let version = common::changeset(
+            Some(blame_parent),
+            &[(
+                "src/lines.txt",
+                FileState::Regular {
+                    content: line_blob,
+                    executable: false,
+                },
+            )],
+        );
+        blame_parent = common::land_ref(store, &version, "blame");
+    }
+    blame_parent
 }
 
 /// The big commit's message: the seeded bytes plus the one trailing
@@ -221,6 +261,135 @@ fn big_branch(store: &Backend, parent: ChangesetId) -> (ChangesetId, Vec<u8>) {
     let big_cs = common::changeset_msg(Some(parent), &big_changes, &big_message());
     let big_id = common::land_ref(store, &big_cs, "big");
     (big_id, big_content)
+}
+
+/// The scratch ref, the next and orphan repo blobs, and the three
+/// encodings: the store-side preconditions the create files' calls
+/// must pass before the server walks the changeset at all. Answers
+/// the four pins' values.
+fn encodings(
+    store: &Backend,
+    head: &scion_core::Changeset,
+    id: &ChangesetId,
+) -> (Vec<u8>, ChangesetId, Vec<u8>, Vec<u8>) {
+    // The scratch ref exists before the land: a land to a ref that
+    // does not exist is rejected. Its tip is the head, the scratch
+    // changeset's parent, so the land is a fast-forward.
+    common::land_ref(store, head, "scratch");
+    // The next and orphan blobs join the repo first: a
+    // CreateChangeset whose blobs the repo does not hold answers the
+    // precondition, "upload it with PutBlob".
+    let next_blob = BlobId::of(b"pub fn next() {}\n");
+    let orphan_blob = BlobId::of(b"pub fn orphan() {}\n");
+    store
+        .blobs()
+        .put(b"pub fn next() {}\n")
+        .expect("the next blob stores");
+    store
+        .blobs()
+        .put(b"pub fn orphan() {}\n")
+        .expect("the orphan blob stores");
+    store
+        .write(|c| {
+            let repo = c.repo_id(common::REPO)?;
+            c.add_repo_blobs(repo, &[next_blob, orphan_blob])
+        })
+        .unwrap();
+    let (encoded_next, next_id) = encoded_next(id);
+    let encoded_orphan = encoded_orphan();
+    let encoded_scratch = encoded_scratch(id);
+    (encoded_next, next_id, encoded_orphan, encoded_scratch)
+}
+
+/// The head's next changeset: its `ChangesetV1` bytes and the id they
+/// hash to. The `CreateChangeset` files' bytes and pin.
+fn encoded_next(parent: &ChangesetId) -> (Vec<u8>, ChangesetId) {
+    let next = common::changeset(
+        Some(*parent),
+        &[(
+            "src/next.rs",
+            FileState::Regular {
+                content: BlobId::of(b"pub fn next() {}\n"),
+                executable: false,
+            },
+        )],
+    );
+    next.encode_with_id()
+}
+
+/// A changeset whose parent no store names: the unknown-parent file's
+/// `ChangesetV1` bytes.
+fn encoded_orphan() -> Vec<u8> {
+    common::changeset(
+        Some(ChangesetId::from_bytes(missing_id(0xab))),
+        &[(
+            "src/orphan.rs",
+            FileState::Regular {
+                content: BlobId::of(b"pub fn orphan() {}\n"),
+                executable: false,
+            },
+        )],
+    )
+    .encode()
+}
+
+/// The head's scratch changeset: its `ChangesetV1` bytes, created and
+/// landed through the server for the `GetLand` file.
+fn encoded_scratch(parent: &ChangesetId) -> Vec<u8> {
+    common::changeset(
+        Some(*parent),
+        &[(
+            "src/scratch.rs",
+            FileState::Regular {
+                content: BlobId::of(b"pub fn scratch() {}\n"),
+                executable: false,
+            },
+        )],
+    )
+    .encode()
+}
+
+/// The fixture's own land: the scratch bytes created through the
+/// server, then landed on the scratch ref, so main keeps its tip and
+/// the `GetLand` file has an id to read. Answers the land reply's id.
+fn fixture_land(tiers: &Tiers, encoded: &[u8]) -> String {
+    let runtime = &tiers.runtime;
+    let mut client = runtime.block_on(scion_client(&tiers.server));
+    // The blob rides first: a CreateChangeset whose blobs the store
+    // lacks answers not-found's precondition, "upload it with PutBlob".
+    let _ = runtime
+        .block_on(
+            client.put_blob(tokio_stream::iter([scion_proto::v1::PutBlobRequest {
+                repo: common::REPO.into(),
+                data: b"pub fn scratch() {}\n".to_vec(),
+            }])),
+        )
+        .expect("the scratch blob uploads");
+    let created = runtime
+        .block_on(
+            client.create_changeset(scion_proto::v1::CreateChangesetRequest {
+                repo: common::REPO.into(),
+                changeset: encoded.to_vec(),
+            }),
+        )
+        .expect("the scratch changeset is created")
+        .into_inner();
+    let reply = runtime
+        .block_on(client.land(scion_proto::v1::LandRequest {
+            repo: common::REPO.into(),
+            changeset_id: created.changeset_id,
+            target_ref: "scratch".into(),
+            request_key: "fixture-land".into(),
+        }))
+        .expect("the fixture's land answers")
+        .into_inner();
+    assert_eq!(
+        reply.state,
+        scion_proto::v1::LandState::Landed as i32,
+        "the fixture's land must land; the server says: {}",
+        reply.detail
+    );
+    reply.land_id
 }
 
 /// Builds the one fixture the corpus uses: the conformance test's
@@ -276,28 +445,7 @@ fn landed() -> (Tiers, Fixture) {
         )],
     );
     let id = common::land(&store, &head);
-    // The blame chain: src/lines.txt gains one line per changeset, 101
-    // versions on a side branch off the middle, so the blame call stops
-    // at its 100-version bound with one line left and answers a cursor.
-    // Main keeps its three-commit shape, so the other files' pins hold.
-    let mut lines: Vec<u8> = Vec::new();
-    let mut blame_parent = mid_id;
-    for k in 0..101 {
-        lines.extend_from_slice(format!("line {k}\n").as_bytes());
-        let line_blob = BlobId::of(&lines);
-        store.blobs().put(&lines).unwrap();
-        let version = common::changeset(
-            Some(blame_parent),
-            &[(
-                "src/lines.txt",
-                FileState::Regular {
-                    content: line_blob,
-                    executable: false,
-                },
-            )],
-        );
-        blame_parent = common::land_ref(&store, &version, "blame");
-    }
+    let blame_parent = blame_chain(&store, mid_id);
     // The big side branch: one commit off the head that carries the
     // seeded 1.5 MiB blob, the seeded 1.2 MiB message, and 14,000
     // one-entry files whose directory tree passes 1 MiB. The parts
@@ -310,6 +458,7 @@ fn landed() -> (Tiers, Fixture) {
             Ok(())
         })
         .unwrap();
+    let (encoded_next, next_id, encoded_orphan, encoded_scratch) = encodings(&store, &head, &id);
     let tiers = Tiers::start(data, store);
     let runtime_entered = tiers.runtime.enter();
     let (ticket, tree) = mint(&tiers, id);
@@ -317,6 +466,10 @@ fn landed() -> (Tiers, Fixture) {
         let (_, root_tree) = mint(&tiers, root_id);
         root_tree
     };
+    // The fixture's own land: the head's child lands on the scratch
+    // ref, so main keeps its tip and the GetLand file has an id to
+    // read. The land id comes from the land reply, as a client sees it.
+    let land_id = fixture_land(&tiers, &encoded_scratch);
     drop(runtime_entered);
     let fixture = Fixture {
         blob,
@@ -329,6 +482,11 @@ fn landed() -> (Tiers, Fixture) {
         blame_head: blame_parent,
         big_cs: big_id,
         big_content,
+        encoded_next,
+        next_cs: next_id,
+        encoded_orphan,
+        encoded_scratch,
+        land_id,
 
         missing: missing_id(0xab),
         unsigned: unsigned_of(&ticket),
@@ -399,6 +557,11 @@ fn resolve(value: &str, f: &Fixture) -> String {
             &hex(blake3::hash(&f.big_content).as_bytes().as_slice()),
         )
         .replace("$big_blob", &hex(BlobId::of(&f.big_content).as_bytes()))
+        .replace("$encoded_next", &hex(&f.encoded_next))
+        .replace("$next_cs", &hex(f.next_cs.as_bytes()))
+        .replace("$encoded_orphan", &hex(&f.encoded_orphan))
+        .replace("$encoded_scratch", &hex(&f.encoded_scratch))
+        .replace("$land_id", &f.land_id)
         .replace("$cs", &hex(f.cs.as_bytes()))
         .replace("$missing", &hex(&f.missing))
         .replace("$unsigned", &hex(&f.unsigned))
@@ -809,8 +972,8 @@ fn the_corpus_answers_as_its_files_say() {
     files.sort();
     assert_eq!(
         files.len(),
-        43,
-        "the corpus pins 43 behaviours; a file added or removed must update this count"
+        53,
+        "the corpus pins 53 behaviours; a file added or removed must update this count"
     );
     check_cursor_sources(&files).unwrap_or_else(|e| panic!("{e}"));
     // One store and one set of tiers for the whole run: the fixture is
@@ -1835,6 +1998,7 @@ fn start_n1_stack(prev_bin: &Path, dir: &Path, pg: &str) -> N1Stack {
         ("feature", "feature"),
         ("blame", "blame"),
         ("big", "big"),
+        ("HEAD", "scratch"),
     ] {
         run_to_end(
             &scion,
@@ -1968,6 +2132,78 @@ async fn parent_changeset(client: &mut ScionClientOf, id: ChangesetId) -> Change
         .expect("the changeset names its parent")
 }
 
+/// The N-1 chain's ends and the fixture's own land, walked on the N-1
+/// server: the middle and root changesets by `GetChangeset`, the blame
+/// head by its ref, and the scratch changeset created and landed for
+/// the `GetLand` file.
+async fn n1_chain_ends(
+    scion: &mut ScionClientOf,
+    client: &mut ObjectsClientOf,
+    server: &str,
+    cs: ChangesetId,
+) -> (ChangesetId, ChangesetId, ChangesetId, String) {
+    let mid_cs = parent_changeset(scion, cs).await;
+    let root_cs = parent_changeset(scion, mid_cs).await;
+    let blame_reply = client
+        .resolve_ref(scion_proto::v1::ResolveRefRequest {
+            repo: common::REPO.into(),
+            name: "blame".into(),
+        })
+        .await
+        .expect("the blame ref resolves")
+        .into_inner();
+    let blame_head = scion_core::ChangesetId::from_bytes(
+        blame_reply
+            .changeset_id
+            .try_into()
+            .expect("the cs is 32 bytes"),
+    );
+    // The fixture's own land: the same scratch bytes created through
+    // the N-1 server, then landed; the land id comes from the reply.
+    let mut land_client = scion_client(server).await;
+    let scratch = common::changeset(
+        Some(cs),
+        &[(
+            "src/scratch.rs",
+            scion_core::FileState::Regular {
+                content: scion_core::BlobId::of(b"pub fn scratch() {}\n"),
+                executable: false,
+            },
+        )],
+    );
+    let created = land_client
+        .create_changeset(scion_proto::v1::CreateChangesetRequest {
+            repo: common::REPO.into(),
+            changeset: scratch.encode(),
+        })
+        .await
+        .expect("the N-1 scratch changeset is created")
+        .into_inner();
+    // The next and orphan blobs ride the N-1 store first, as the
+    // corpus's fixture does for its own.
+    let blobs: [&[u8]; 2] = [b"pub fn next() {}\n", b"pub fn orphan() {}\n"];
+    for data in blobs {
+        let _ = land_client
+            .put_blob(tokio_stream::iter([scion_proto::v1::PutBlobRequest {
+                repo: common::REPO.into(),
+                data: (*data).to_vec(),
+            }]))
+            .await
+            .expect("the N-1 blob uploads");
+    }
+    let land_reply = land_client
+        .land(scion_proto::v1::LandRequest {
+            repo: common::REPO.into(),
+            changeset_id: created.changeset_id,
+            target_ref: "scratch".into(),
+            request_key: "n1-fixture-land".into(),
+        })
+        .await
+        .expect("the N-1 fixture's land answers")
+        .into_inner();
+    (mid_cs, root_cs, blame_head, land_reply.land_id)
+}
+
 fn n1_fixture(runtime: &tokio::runtime::Runtime, server: &str) -> Fixture {
     runtime.block_on(async {
         let mut client = connect(server).await;
@@ -1994,27 +2230,9 @@ fn n1_fixture(runtime: &tokio::runtime::Runtime, server: &str) -> Fixture {
             .expect("the root tree answers")
             .into_inner();
         let tree = tree_reply.tree_id.try_into().expect("the tree is 32 bytes");
-        // The chain rides GetChangeset: the head's bytes name the middle
-        // changeset, the middle's bytes name the root. The walk awaits
-        // like every call here: this closure runs on the runtime, and a
-        // block_on inside it would start a runtime from within it.
+        // The chain's ends, the scratch land, and the encodings: the
+        // helper below walks the N-1 server for each.
         let mut scion = scion_client(server).await;
-        let mid_cs = parent_changeset(&mut scion, cs).await;
-        let root_cs = parent_changeset(&mut scion, mid_cs).await;
-        let blame_reply = client
-            .resolve_ref(scion_proto::v1::ResolveRefRequest {
-                repo: common::REPO.into(),
-                name: "blame".into(),
-            })
-            .await
-            .expect("the blame ref resolves")
-            .into_inner();
-        let blame_head = scion_core::ChangesetId::from_bytes(
-            blame_reply
-                .changeset_id
-                .try_into()
-                .expect("the cs is 32 bytes"),
-        );
         let big_reply = client
             .resolve_ref(scion_proto::v1::ResolveRefRequest {
                 repo: common::REPO.into(),
@@ -2029,6 +2247,8 @@ fn n1_fixture(runtime: &tokio::runtime::Runtime, server: &str) -> Fixture {
                 .try_into()
                 .expect("the cs is 32 bytes"),
         );
+        let (mid_cs, root_cs, blame_head, land_id) =
+            n1_chain_ends(&mut scion, &mut client, server, cs).await;
         let root_reply = client
             .get_root_tree(GetRootTreeRequest {
                 repo: common::REPO.into(),
@@ -2051,6 +2271,11 @@ fn n1_fixture(runtime: &tokio::runtime::Runtime, server: &str) -> Fixture {
             blame_head,
             big_cs,
             big_content: seeded(1_572_864),
+            encoded_next: encoded_next(&cs).0,
+            next_cs: encoded_next(&cs).1,
+            encoded_orphan: encoded_orphan(),
+            encoded_scratch: encoded_scratch(&cs),
+            land_id,
             missing: missing_id(0xab),
             unsigned: unsigned_of(&root_ticket),
             ticket: root_ticket,
@@ -2662,7 +2887,7 @@ async fn run_diff(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> Re
     for (k, _) in &t.request {
         if !matches!(
             k.as_str(),
-            "repo" | "old_changeset_id" | "new_changeset_id" | "path"
+            "repo" | "old_changeset_id" | "new_changeset_id" | "path" | "after_from"
         ) {
             return Err(unknown_field("Diff", k));
         }
@@ -2680,12 +2905,20 @@ async fn run_diff(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> Re
             f,
         )),
         path: field(t, "path").unwrap_or_default().into_bytes(),
-        after: Vec::new(),
+        after: match t.expect.iter().find(|(k, _)| k == "after_from") {
+            Some((_, source)) => {
+                String::from_utf8(cursor_of(source)?).expect("the diff's cursor is a path")
+            }
+            None => field(t, "after").unwrap_or_default(),
+        }
+        .into_bytes(),
     };
     match client.diff(req).await {
         Ok(reply) => {
             check_status(t, Code::Ok)?;
-            let entries = reply.into_inner().entries.len();
+            let reply = reply.into_inner();
+            let entries = reply.entries.len();
+            remember_cursor(t, reply.next_after.clone());
             if let Some((_, v)) = t.expect.iter().find(|(k, _)| k == "entries") {
                 let want: usize = v.parse().unwrap_or(0);
                 if entries != want {
@@ -2694,6 +2927,7 @@ async fn run_diff(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> Re
                     ));
                 }
             }
+            check_next(t, f)?;
             Ok(())
         }
         Err(status) => {

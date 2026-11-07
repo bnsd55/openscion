@@ -1,0 +1,10 @@
+# The fixture's own land, read by its id: the state stays LANDED.
+since: v0.1
+method: Scion/GetLand
+fixture: landed
+
+request.repo: r
+request.land_id: $land_id
+
+status: ok
+reply.state: LAND_STATE_LANDED

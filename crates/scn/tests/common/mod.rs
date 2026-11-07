@@ -333,10 +333,33 @@ pub(crate) fn noise(len: usize) -> Vec<u8> {
 }
 
 /// A changeset on `parent` that puts `files` (raw path and state).
+/// No committer: only git import sets one, and the server refuses a
+/// client-created changeset that carries it.
 pub(crate) fn changeset(parent: Option<ChangesetId>, files: &[(&str, FileState)]) -> Changeset {
-    changeset_msg(parent, files, b"tiers\n")
+    Changeset::new(
+        parent.into_iter().collect(),
+        IdentityTime::new(
+            b"Ada".to_vec(),
+            b"ada@example.com".to_vec(),
+            1_700_000_000,
+            0,
+        )
+        .expect("identity fits the format"),
+        None,
+        b"tiers\n".to_vec(),
+        files
+            .iter()
+            .map(|(path, state)| (RepoPath::new(*path).unwrap(), Some(*state)))
+            .collect(),
+    )
+    .expect("changeset fits the format")
 }
 
+/// A changeset on `parent` that puts `files` and carries `message`, as
+/// git import would write it: committer n1 at the fixed epoch, so a
+/// changeset the corpus builds for the import's replay and one the
+/// same commit's import builds encode to the same length. Only the big
+/// fixture rides this: its bytes replay an import, never a create.
 /// A changeset on `parent` that puts `files` and carries `message`, as
 /// git import would write it: author Ada, committer n1, both at the
 /// fixed epoch, so a changeset the corpus builds and one the same

@@ -1,0 +1,10 @@
+# The deprecated Scion route still answers what Objects' does.
+since: v0.1
+method: Scion/ResolveRef
+fixture: landed
+
+request.repo: r
+request.name: main
+
+status: ok
+reply.changeset_id: $cs
