@@ -588,6 +588,12 @@ async fn every_rpc_answers_unauthenticated_without_a_valid_token() {
     let mut flipped = minted.clone();
     let last = flipped.len() - 1;
     flipped[last] ^= 0x01; // The signature is the ticket's last 64 bytes.
+    assert!(
+        ticket_rpcs
+            .iter()
+            .any(|(service, rpc)| service == "scion.v1.Objects" && rpc == "GetObjects"),
+        "the discovery found no ticket-bearing method: the walk would run zero bad-ticket calls"
+    );
     for (service, rpc) in &ticket_rpcs {
         let reply = match (service.as_str(), rpc.as_str()) {
             ("scion.v1.Objects", "GetObjects") => {
