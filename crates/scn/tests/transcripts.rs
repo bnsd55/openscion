@@ -3037,7 +3037,7 @@ fn check_status(t: &Transcript, got: Code) -> Result<(), String> {
 /// optional `message:` text, matched exactly against the status's
 /// message after placeholder resolution - the documented text
 /// distinctions (a hidden path and a missing changeset answer the same
-/// NOT_FOUND with different texts) cannot drift silently (#988).
+/// `NOT_FOUND` with different texts) cannot drift silently (#988).
 fn check_refusal(t: &Transcript, status: &tonic::Status, f: &Fixture) -> Result<(), String> {
     check_status(t, status.code())?;
     let Some((_, want)) = t.expect.iter().find(|(k, _)| k == "message") else {
