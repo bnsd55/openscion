@@ -44,9 +44,9 @@ struct Stats {
     landed: Vec<ChangesetId>,
     conflicts: usize,
     rejected: usize,
-    /// Time of the upload's PutBlob alone.
+    /// Time of the upload's `PutBlob` alone.
     put: Vec<Duration>,
-    /// Time of the CreateChangeset RPC alone.
+    /// Time of the `CreateChangeset` RPC alone.
     create: Vec<Duration>,
     /// Time of the Land RPC alone.
     land: Vec<Duration>,
