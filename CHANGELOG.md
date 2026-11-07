@@ -53,12 +53,12 @@ are omitted.
   a missing head tree only, and before the write transaction (#802,
   #915, #928, #841, #892, #871).
 - The write lane's statement count came down in five folds: a land
-  costs 22 statements and a create 20 (was 26 and 25), from the open
-  batch that carries the lane key (#917), the record's prechecks in one
-  statement (#934, #869, #852, #876), a create's derived rows in one
-  INSERT with its checks in one read (#935, #899, #903), the verdict
-  statement riding the old-row trim (#946), and transactions that open
-  in one round trip (#864).
+  costs 22 statements and a create 20, each pinned exactly by a test,
+  from the open batch that carries the lane key (#917), the record's
+  prechecks in one statement (#934, #869, #852, #876), a create's
+  derived rows in one INSERT with its checks in one read (#935, #899,
+  #903), the old-row trim riding the verdict statement (#946), and
+  transactions that open in one round trip (#864).
 - The tier's claim window scan asks the store once instead of once per
   key, and the preflight's missing-schema condition answers once, as a
   failure (#943).
