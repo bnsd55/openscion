@@ -101,6 +101,122 @@ pct() {
   sort -n "$1" | awk -v p="$2" '{ a[NR] = $1 } END { if (NR) print a[int(NR * p + 0.5)] }'
 }
 
+# cpu_ms PID CLK: the process's own CPU time (utime + stime from
+# /proc/<pid>/stat) in milliseconds since the process started. A pid
+# that is gone, or whose stat cannot be read, is an empty field - the
+# sampler's gap is data, not a crash.
+cpu_ms() {
+  local pid=$1 clk=$2 stat
+  [ -n "$pid" ] || return 0
+  stat=$(cut -d ' ' -f 14,15 "/proc/$pid/stat" 2> /dev/null) || return 0
+  [ -n "$stat" ] || return 0
+  awk -v u="${stat%% *}" -v s="${stat#* }" -v clk="$clk" \
+    'BEGIN { printf "%d", (u + s) * 1000 / clk }'
+}
+
+# pg_cpu_ms CLK: the postmaster's tree's CPU milliseconds, summed over
+# every postgres process the runner's /proc names (the service
+# container shares the runner's kernel, so they are all here).
+pg_cpu_ms() {
+  local clk=$1 pid total=0 stat
+  for pid in $(pgrep -x postgres 2> /dev/null); do
+    stat=$(cut -d ' ' -f 14,15 "/proc/$pid/stat" 2> /dev/null) || continue
+    [ -n "$stat" ] || continue
+    total=$((total + ${stat%% *} + ${stat#* }))
+  done
+  awk -v t="$total" -v clk="$clk" 'BEGIN { printf "%d", t * 1000 / clk }'
+}
+
+# bench_cpu_ms CLK: the bench clients' CPU milliseconds, summed over
+# every scn bench process the runner's /proc names.
+bench_cpu_ms() {
+  local clk=$1 pid total=0 stat
+  for pid in $(pgrep -f "$BIN/scn .* bench" 2> /dev/null); do
+    stat=$(cut -d ' ' -f 14,15 "/proc/$pid/stat" 2> /dev/null) || continue
+    [ -n "$stat" ] || continue
+    total=$((total + ${stat%% *} + ${stat#* }))
+  done
+  awk -v t="$total" -v clk="$clk" 'BEGIN { printf "%d", t * 1000 / clk }'
+}
+
+# disk_ms: the work disk's read and write milliseconds since boot, from
+# /proc/diskstats (the device that holds $WORK, field 7 and 11).
+disk_ms() {
+  local dev maj min
+  dev=$(df "$WORK" | awk 'NR == 2 { print $1 }')
+  maj=${dev%/*}; maj=${maj#/dev/}; min=${dev#*/dev/}
+  maj=${maj%%[0-9]}; [ -n "$maj" ] || return 0
+  grep "^ $maj $min " /proc/diskstats 2> /dev/null |
+    awk '{ print $7, $11 }'
+}
+
+# pg_waits: the Postgres's wait-event counts, one `type:count` group
+# per wait type plus `NONE` for the sessions that run, from one
+# pg_stat_activity read. Sessions without a database (the auth and
+# setup backends) ride in too: a sampler that hides them hides the
+# queue.
+pg_waits() {
+  psql "$admin_url" -X -A -t -F '|' \
+    -c "SELECT coalesce(wait_event_type, 'NONE'), count(*)
+        FROM pg_stat_activity GROUP BY 1 ORDER BY 1" 2> /dev/null |
+    awk -F '|' 'NF >= 2 { gsub(/^ +| +$/, "", $1); gsub(/^ +| +$/, "", $2);
+                 printf "%s:%s", $1, $2; if (NR) printf "|" }'
+}
+
+# sample_cell W R: one CSV row per second until the cell's END. The
+# row: the tick, each tier's CPU milliseconds in the past second (the
+# deltas of /proc/<pid>/stat's utime+stime; postgres and the bench are
+# sums over their processes), the runner's 1-minute load, the
+# Postgres's wait-event counts, the work disk's read and write
+# milliseconds in the past second. A tier that died mid-cell carries
+# empty CPU fields from then on: a gap is data, not a crash.
+sample_cell() {
+  local w=$1 r=$2 out="$WORK/samples-w$w-r$r.csv"
+  local clk
+  clk=$(getconf CLK_TCK)
+  pid_server=$(sed -n 's/^pid=//p' "$WORK/owned/server" | head -n 1)
+  pid_cache=$(sed -n 's/^pid=//p' "$WORK/owned/cache" | head -n 1)
+  pid_daemon=$(sed -n 's/^pid=//p' "$WORK/owned/daemon" | head -n 1)
+  prev_server=$(cpu_ms "$pid_server" "$clk")
+  prev_cache=$(cpu_ms "$pid_cache" "$clk")
+  prev_daemon=$(cpu_ms "$pid_daemon" "$clk")
+  prev_pg=$(pg_cpu_ms "$clk")
+  prev_bench=$(bench_cpu_ms "$clk")
+  disk_line=$(disk_ms)
+  prev_disk_read=${disk_line%% *}
+  prev_disk_write=${disk_line#* }
+  echo "tick,cpu_server_ms,cpu_postgres_ms,cpu_cache_ms,cpu_daemon_ms,cpu_bench_ms,load1,pg_waits,disk_read_ms,disk_write_ms" > "$out"
+  while [ "$(date +%s)" -lt "$END" ]; do
+    local tick cur
+    tick=$(date +%s)
+    cur_server=$(cpu_ms "$pid_server" "$clk")
+    cur_cache=$(cpu_ms "$pid_cache" "$clk")
+    cur_daemon=$(cpu_ms "$pid_daemon" "$clk")
+    cur_pg=$(pg_cpu_ms "$clk")
+    cur_bench=$(bench_cpu_ms "$clk")
+    disk_line=$(disk_ms)
+    cur_disk_read=${disk_line%% *}
+    cur_disk_write=${disk_line#* }
+    load1=$(cut -d ' ' -f 1 /proc/loadavg)
+    printf '%s,%s,%s,%s,%s,%s,%s,"%s",%s,%s\n' \
+      "$tick" \
+      "$(awk -v a="$cur_server" -v b="$prev_server" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
+      "$(awk -v a="$cur_pg" -v b="$prev_pg" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
+      "$(awk -v a="$cur_cache" -v b="$prev_cache" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
+      "$(awk -v a="$cur_daemon" -v b="$prev_daemon" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
+      "$(awk -v a="$cur_bench" -v b="$prev_bench" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
+      "$load1" \
+      "$(pg_waits)" \
+      "$(awk -v a="$cur_disk_read" -v b="$prev_disk_read" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
+      "$(awk -v a="$cur_disk_write" -v b="$prev_disk_write" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
+      >> "$out"
+    prev_server=$cur_server; prev_pg=$cur_pg; prev_cache=$cur_cache
+    prev_daemon=$cur_daemon; prev_bench=$cur_bench
+    prev_disk_read=$cur_disk_read; prev_disk_write=$cur_disk_write
+    sleep 1
+  done
+}
+
 note "capacity: building"
 if [ -n "${SCION_BIN:-}" ]; then
   BIN=$SCION_BIN
@@ -170,6 +286,12 @@ for w in $WRITERS; do
     }
     server_pid
     END=$(($(date +%s) + READ_SECONDS * REPS + 60))
+    # The cell's sampler runs beside the work, one row a second, and
+    # the cell's end (below) stops it: the splits the CSV cannot name
+    # - the runner's CPU, Postgres's waits, the disk's milliseconds -
+    # name themselves here.
+    sample_cell "$w" "$r" &
+    SAMPLER_PID=$!
     T0=$(date +%s)
     readers() {
       local n=0 rc t0 t1
@@ -267,6 +389,8 @@ for w in $WRITERS; do
     stop_scion
     lands_landed=$((lands_end - lands_before))
     note "cell w$w r$r: $lands_landed lands landed (the plan named $((LANDS * REPS)))"
+    kill "$SAMPLER_PID" 2> /dev/null || true
+    wait "$SAMPLER_PID" 2> /dev/null || true
     reader_failures=0
     reader_log="$WORK/reads-w$w-r$r.log"
     [ -f "$reader_log" ] || { touch "$reader_log"; }
@@ -338,6 +462,7 @@ fi
 cp "$WORK/capacity.csv" "${RUNNER_TEMP:-/tmp}/capacity-artifacts/" 2> /dev/null || true
 cp "$WORK"/*.log "${RUNNER_TEMP:-/tmp}/capacity-artifacts/" 2> /dev/null || true
 cp "$WORK"/bench-*.json "${RUNNER_TEMP:-/tmp}/capacity-artifacts/" 2> /dev/null || true
+cp "$WORK"/samples-*.csv "${RUNNER_TEMP:-/tmp}/capacity-artifacts/" 2> /dev/null || true
 
 row() { printf '%-46s %s\n' "$1" "$2"; }
 echo "capacity envelope: machine $CAPACITY_MACHINE, commit $HEAD_HEX"
