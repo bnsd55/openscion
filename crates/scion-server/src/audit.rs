@@ -105,6 +105,11 @@ pub struct Audit {
     /// How many reopens were refused: the serve path's sampler reads
     /// it into `scion_audit_reopens_failed_total`.
     reopens_failed: Arc<AtomicU64>,
+    /// What the LAST reopen did: 1 after a refused reopen, 0 after a
+    /// successful one. The alert reads the state
+    /// (`scion_audit_reopen_failing`), not a ratio of totals - a month
+    /// of successes must not silence the next failure.
+    reopen_failing: Arc<AtomicU64>,
     /// The readiness sender of the off handle, held so its watch never
     /// closes: a closed watch would flip readiness at once.
     _ready_tx: Option<watch::Sender<bool>>,
@@ -134,11 +139,25 @@ impl Audit {
         let faults = Arc::new(AtomicU64::new(0));
         let reopen = Arc::new(AtomicBool::new(false));
         let reopens_failed = Arc::new(AtomicU64::new(0));
+        let reopen_failing = Arc::new(AtomicU64::new(0));
         std::thread::Builder::new().name("audit".into()).spawn({
             let faults = Arc::clone(&faults);
             let reopen = Arc::clone(&reopen);
             let reopens_failed = Arc::clone(&reopens_failed);
-            move || writer(rx, file, path, ready_tx, faults, reopen, reopens_failed)
+            let reopen_failing = Arc::clone(&reopen_failing);
+            #[allow(clippy::too_many_arguments)]
+            move || {
+                writer(
+                    rx,
+                    file,
+                    path,
+                    ready_tx,
+                    faults,
+                    reopen,
+                    reopens_failed,
+                    reopen_failing,
+                );
+            }
         })?;
         Ok(Self {
             tx: Some(tx),
@@ -147,6 +166,7 @@ impl Audit {
             dir_fsyncs,
             reopen,
             reopens_failed,
+            reopen_failing,
             _ready_tx: None,
         })
     }
@@ -172,6 +192,7 @@ impl Audit {
             dir_fsyncs: Arc::new(AtomicU64::new(0)),
             reopen: Arc::new(AtomicBool::new(false)),
             reopens_failed: Arc::new(AtomicU64::new(0)),
+            reopen_failing: Arc::new(AtomicU64::new(0)),
             _ready_tx: Some(ready_tx),
         }
     }
@@ -192,6 +213,13 @@ impl Audit {
     #[must_use]
     pub fn reopens_failed(&self) -> u64 {
         self.reopens_failed.load(Ordering::Relaxed)
+    }
+
+    /// What the last reopen did: 1 failing, 0 fine. The serve path's
+    /// sampler reads it into `scion_audit_reopen_failing`.
+    #[must_use]
+    pub fn reopen_failing(&self) -> u64 {
+        self.reopen_failing.load(Ordering::Relaxed)
     }
 
     /// Makes the next `n` appends of THIS audit fail, as an EIO or an
@@ -340,7 +368,7 @@ fn glue_torn_line(file: &mut std::fs::File) -> io::Result<()> {
 
 /// The writer thread: one owner of the file. It takes its file, path,
 /// readiness and faults by value because it is the only owner there is.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 fn writer(
     #[allow(clippy::needless_pass_by_value)] // the thread owns them
     mut rx: mpsc::Receiver<Msg>,
@@ -353,6 +381,7 @@ fn writer(
     #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))] faults: Arc<AtomicU64>,
     reopen: Arc<AtomicBool>,
     reopens_failed: Arc<AtomicU64>,
+    reopen_failing: Arc<AtomicU64>,
 ) {
     while let Some(first) = rx.blocking_recv() {
         let mut batch = Vec::with_capacity(16);
@@ -371,9 +400,16 @@ fn writer(
                 glue_torn_line(&mut fresh)?;
                 Ok(fresh)
             }) {
-                Ok(fresh) => file = fresh,
+                Ok(fresh) => {
+                    file = fresh;
+                    // The state flips to fine: the alert reads what
+                    // the LAST reopen did, so a failure whose later
+                    // signal reopened fine clears.
+                    reopen_failing.store(0, Ordering::Relaxed);
+                }
                 Err(why) => {
                     reopens_failed.fetch_add(1, Ordering::Relaxed);
+                    reopen_failing.store(1, Ordering::Relaxed);
                     // The old file stays open: the lines go on where
                     // they are, nothing is dropped, and the next
                     // signal retries the reopen.
@@ -618,6 +654,32 @@ mod tests {
         assert_eq!(old[0]["outcome"], "intent");
         assert_eq!(old[1]["outcome"], "ok");
         assert_eq!(audit.reopens_failed(), 1, "the refusal is counted");
+        assert_eq!(
+            audit.reopen_failing(),
+            1,
+            "the gauge holds the state the alert reads: the last reopen failed"
+        );
+        // The cause is removed and the next signal succeeds: the gauge
+        // flips back to 0 - the alert clears - and the line lands in
+        // the fresh file.
+        std::fs::remove_file(&path).unwrap();
+        audit.request_reopen();
+        audit
+            .record(Event::new("admin", "ok", json!({"what": "u"})))
+            .await
+            .unwrap();
+        assert_eq!(
+            audit.reopen_failing(),
+            0,
+            "the gauge reads 0 once a reopen succeeds"
+        );
+        let fresh = read_lines(&path);
+        assert_eq!(
+            fresh.len(),
+            1,
+            "the line after the good reopen is in the fresh file: {fresh:?}"
+        );
+        assert_eq!(fresh[0]["outcome"], "ok");
     }
 
     #[tokio::test]
