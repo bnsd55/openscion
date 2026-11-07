@@ -798,9 +798,31 @@ fn n1_qualifying() -> Vec<(PathBuf, Transcript)> {
     qualifying
 }
 
+/// The N-1 database's rows for `id`: the tree body's byte length (none
+/// when the table holds no row) and whether a derived value names it.
+fn n1_store_rows(pg: &str, id: &str, cs: &str) -> String {
+    let sql = format!(
+        "SELECT (SELECT length(body) FROM trees WHERE id = decode('{id}','hex')) \
+         AS tree_body, \
+         (SELECT count(*) FROM derived WHERE value = decode('{id}','hex')) \
+         AS derived_rows, \
+         (SELECT count(*) FROM derived WHERE cs = decode('{cs}','hex')) \
+         AS derived_cs",
+    );
+    let out = std::process::Command::new("psql")
+        .args(["-t", "-A", "-F", " ", "-c", &sql, pg])
+        .output()
+        .expect("psql runs");
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
 /// Prints the N-1 server's ids for the chain's ends: the head's and the
 /// root changeset's, with the trees `GetRootTree` names for each.
-fn n1_print_ids(runtime: &tokio::runtime::Runtime, server: &str, base: &Fixture) {
+fn n1_print_ids(
+    runtime: &tokio::runtime::Runtime,
+    server: &str,
+    base: &Fixture,
+) -> (String, String) {
     let root_tree_of = |cs: &scion_core::ChangesetId| -> String {
         runtime.block_on(async {
             let mut client = connect(server).await;
@@ -818,12 +840,24 @@ fn n1_print_ids(runtime: &tokio::runtime::Runtime, server: &str, base: &Fixture)
                 .expect("the tree id is 32 bytes")
         })
     };
+    let head_tree = root_tree_of(&base.cs);
+    let root_tree = root_tree_of(&base.root_cs);
     eprintln!(
         "N1 IDS head={} head_tree={} root_cs={} root_tree={}",
         hex(base.cs.as_bytes()),
-        root_tree_of(&base.cs),
+        head_tree,
         hex(base.root_cs.as_bytes()),
-        root_tree_of(&base.root_cs),
+        root_tree,
+    );
+    (head_tree, root_tree)
+}
+
+/// The store's rows for the two trees, on the N-1 database.
+fn n1_print_store(pg: &str, base: &Fixture, head_tree: &str, root_tree: &str) {
+    eprintln!(
+        "N1 STORE head_tree={head_tree} [{}] root_tree={root_tree} [{}]",
+        n1_store_rows(pg, head_tree, &hex(base.cs.as_bytes())),
+        n1_store_rows(pg, root_tree, &hex(base.root_cs.as_bytes())),
     );
 }
 
@@ -875,7 +909,8 @@ fn the_n1_side_answers_as_its_files_say() {
     let mut ran = 0usize;
     // What the N-1 server answers for the chain's ends: the ids a
     // GetObjects file's refs name must be these.
-    n1_print_ids(&runtime, &stack.server, &base);
+    let (head_tree, root_tree) = n1_print_ids(&runtime, &stack.server, &base);
+    n1_print_store(&pg, &base, &head_tree, &root_tree);
     for (file, t) in &qualifying {
         // The GetObjects file's refs name the root changeset's tree and
         // blob: the ticket must be that tree's, as the corpus's is.
