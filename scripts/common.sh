@@ -508,16 +508,19 @@ batch() {
   local name=$1 jobs=$2 cmd=$3
   export BIN DAEMON SPARSE_DIR
   mkdir "$WORK/$name"
-  # Each job starts 10 ms after the one before it, round-robin over 20
-  # steps. All jobs starting at once can overflow a server's accept
-  # queue: git daemon listens with a backlog of 5 (daemon.c:
-  # listen(sockfd, 5)), and a connection that completes its handshake
-  # onto a full queue is refused - with tcp_abort_on_overflow=0 the
-  # kernel drops the final ACK and the client's reset comes when it
-  # sends its first bytes, which is why the failure landed mid-run as
-  # "read error: Connection reset by peer". A start every 10 ms keeps
-  # the queue near empty; the half second it adds to a 50-job batch is
-  # inside the noise, and both tools pay it alike. nstat's
+  # Each job starts 10 ms after the one before it, one slot per job.
+  # All jobs starting at once can overflow a server's accept queue:
+  # git daemon listens with a backlog of 5 (daemon.c: listen(sockfd,
+  # 5)), and a connection that completes its handshake onto a full
+  # queue is refused - with tcp_abort_on_overflow=0 the kernel drops
+  # the final ACK and the client's reset comes when it sends its first
+  # bytes, which is why the failure lands mid-run as "read error:
+  # Connection reset by peer". The slots used to round-robin over 20
+  # steps, so a 50-job batch started 2-3 clones in the same 10 ms; on
+  # a slow runner those starts bunch, the queue overflows (24 drops in
+  # one batch), and the batch dies. One slot per job paces the starts
+  # singly; the half second it adds to a 50-job batch is inside the
+  # noise, and both tools pay it alike. nstat's
   # TcpExtListenOverflows and TcpExtListenDrops, taken around every
   # batch, say whether the queue ever overflowed.
   # SHORTCUT: stagger the starts because git daemon's backlog is 5 and
@@ -530,7 +533,7 @@ batch() {
   # path that the command's own "$1" reads.
   local rc=0
   seq 1 "$jobs" | /usr/bin/time -p xargs -P "$jobs" -I{} sh -c \
-    'sleep "$(printf "0.%02ds" $(( ($3 - 1) % 20 )))"; eval "$2"' \
+    'sleep "$(printf "0.%02ds" $(( ($3 - 1) % $jobs )))"; eval "$2"' \
     sh "$WORK/$name/{}" "$cmd" {} \
     > "$WORK/$name.log" 2>&1 || rc=$?
   # The counters land even when the batch failed: an overflow during a
