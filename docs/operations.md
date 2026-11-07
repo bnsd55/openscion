@@ -1331,22 +1331,12 @@ the process, scraped from there. The names:
   one sample at a time, so a hung filesystem pins one thread, not one
   per poll.
 - `scion_data_free_sample_age_seconds` — seconds since the free-space
-  poll's last good sample, set on every poll tick. It grows while the
-  statvfs is stuck and resets when a sample lands. An age above three
-  poll periods (90 s) says the sample is stuck; see
+  poll's last good sample, set on every poll tick. Before the first
+  good sample it counts from the poll's start, so a server whose first
+  stat never answered grows it from boot. It grows while the statvfs
+  is stuck and resets when a sample lands. An age above three poll
+  periods (90 s) says the sample is stuck; see
   [A stuck free space sample](#a-stuck-free-space-sample).
-### A stuck free space sample
-
-Each free-space sample waits at most 6 s for its stat. A filesystem that
-hangs (a lost network mount, a suspended device) drops its sample with a
-warning per poll, the free values keep their last good readings, and the
-poll keeps going — one sample at a time, so a hung filesystem pins one
-thread, not one per poll. `scion_data_free_sample_age_seconds` counts the
-seconds since the last good sample; the `FreeSpaceSampleStuck` alert
-fires when it passes three poll periods (90 s). The disk and inode alerts
-then read stale numbers, so restore the filesystem first: the free values
-resume when a sample lands.
-
 - `scion_blob_count` — blobs the store's metadata names, from one
   bounded count query over the blob rows (never a directory walk,
   never per scrape). The refresh spaces itself by its own cost: the
@@ -1382,6 +1372,21 @@ resume when a sample lands.
   snapshot, which keeps the database from cleaning old rows; find the
   client behind it (`pg_stat_activity`), and if walks like that are
   common, raise the pool size.
+
+### A stuck free space sample
+
+Each free-space sample waits at most 6 s for its stat. A filesystem that
+hangs (a lost network mount, a suspended device) drops its sample with a
+warning per poll, the free values keep their last good readings, and the
+poll keeps going — one sample at a time, so a hung filesystem pins one
+thread, not one per poll. `scion_data_free_sample_age_seconds` counts the
+seconds since the last good sample, and since the poll's start before the
+first good sample — so a fresh server showing 95 s has a statvfs that has
+never answered, not a stale reading. The `FreeSpaceSampleStuck` alert
+fires when the age passes three poll periods (90 s). The disk and inode
+alerts then read stale numbers (or export nothing before a first
+sample), so restore the filesystem first: the free values resume when a
+sample lands.
 
 **Health.** The server, cache and daemon answer standard gRPC health checks
 (`grpc.health.v1.Check` and `Watch`) on their serving port, without a

@@ -169,9 +169,11 @@ fn spawn_free_space_poll(
         // its blocking thread, and the poll waits it out instead of
         // parking a new thread per tick.
         let mut in_flight: Option<tokio::task::JoinHandle<FreeSample>> = None;
-        // When the last good sample landed. The first good sample arms
-        // the age gauge; every tick refreshes it, so a stuck sample
-        // grows the age while the free values hold.
+        // When the last good sample landed. Before it, the age counts
+        // from the poll's own start, so the gauge arms on the first
+        // tick and a statvfs that never lands a first sample still
+        // grows the age — the never-landed case the alert exists for.
+        let armed_at = std::time::Instant::now();
         let mut last_good: Option<std::time::Instant> = None;
         loop {
             if in_flight.is_none() {
@@ -218,10 +220,9 @@ fn spawn_free_space_poll(
                     );
                 }
             }
-            if let Some(at) = last_good {
-                let age = at.elapsed().as_secs();
-                metrics.data_free_sample_age(age);
-            }
+            let at = last_good.unwrap_or(armed_at);
+            let age = at.elapsed().as_secs();
+            metrics.data_free_sample_age(age);
             tokio::select! {
                 () = tokio::time::sleep(free_space_poll_period()) => {}
                 _ = stop.changed() => break,
@@ -252,7 +253,11 @@ fn spawn_blob_count_poll(
             // or failing refresh backs off the same way, and the gauge
             // keeps its last good value meanwhile.
             let took = started.elapsed();
-            metrics.set_blob_count_refresh_seconds(took.as_secs());
+            // u128 -> u64: a refresh that runs past 584 million years
+            // has bigger problems than its gauge.
+            #[allow(clippy::cast_possible_truncation)]
+            let took_ms = took.as_millis() as u64;
+            metrics.set_blob_count_refresh_ms(took_ms);
             match counted {
                 Ok(Ok(blobs)) => metrics.set_blob_count(blobs),
                 Ok(Err(e)) => {
@@ -2473,6 +2478,22 @@ mod tests {
 
     use super::*;
 
+    /// The free-space tests' shared slot: both tests drive the one
+    /// process-global park (`TEST_FREE_STAT_PARKED` holds a single
+    /// directory) and the one pair of poll overrides, so a second
+    /// test's park steals the first's — its statvfs answers, its
+    /// samples land, and its age freezes at 0, which is the red the
+    /// CI's one-process run caught. Each test holds the slot for its
+    /// whole body; tests in separate processes share nothing. The
+    /// tokio mutex, not a std one: the async tests hold the guard
+    /// across awaits, which a std guard forbids.
+    static FREE_SPACE_POLL_SLOT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Takes the free-space tests' slot for the caller's whole body.
+    async fn free_space_poll_slot() -> tokio::sync::MutexGuard<'static, ()> {
+        FREE_SPACE_POLL_SLOT.lock().await
+    }
+
     /// A statvfs that never answers does not stop the poll: the stuck
     /// sample warns, the age gauge counts from the last good sample on
     /// every tick, and the next sample still lands once the stat
@@ -2480,6 +2501,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_stuck_free_space_sample_does_not_stop_the_poll() {
         const PERIOD: u64 = 50;
+        let _slot = free_space_poll_slot().await;
         let dir = crate::test_support::private_tempdir();
         let metrics = Arc::new(Metrics::default());
         let (_stop_tx, stop_rx) = tokio::sync::watch::channel(());
@@ -2537,6 +2559,73 @@ mod tests {
         }
     }
 
+    /// The age gauge exists before any sample lands: a statvfs that
+    /// hangs from the poll's first tick grows the age from the poll's
+    /// start while the free gauges stay absent, so the stuck alert can
+    /// fire in the never-landed case. Before the boot-arming, the gauge
+    /// armed only with the first good sample and this read had no
+    /// series — the red proof on main.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_age_gauge_counts_from_boot_while_no_sample_lands() {
+        const PERIOD: u64 = 50;
+        let _slot = free_space_poll_slot().await;
+        let dir = crate::test_support::private_tempdir();
+        let metrics = Arc::new(Metrics::default());
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(());
+        FREE_SPACE_POLL_OVERRIDE.store(PERIOD, Ordering::Relaxed);
+        FREE_SPACE_STAT_BOUND_OVERRIDE.store(2 * PERIOD, Ordering::Relaxed);
+        // The statvfs hangs before the poll's first sample: the park is
+        // armed before the poll starts.
+        let park = crate::store::ParkFreeStat::now(dir.path().to_path_buf());
+        spawn_free_space_poll(
+            std::path::PathBuf::from(dir.path()),
+            Arc::clone(&metrics),
+            stop_rx,
+        );
+        let mut spins = 0;
+        let mut first: Option<u64> = None;
+        loop {
+            tokio::time::sleep(Duration::from_millis(PERIOD)).await;
+            let text = metrics.render();
+            let line = text
+                .lines()
+                .find(|l| l.starts_with("scion_data_free_sample_age_seconds "));
+            let Some(line) = line else {
+                spins += 1;
+                assert!(
+                    spins < 100,
+                    "the age gauge never armed before a sample landed"
+                );
+                continue;
+            };
+            let age: u64 = line
+                .rsplit(' ')
+                .next()
+                .unwrap()
+                .parse()
+                .expect("the age gauge renders a number");
+            let Some(before) = first else {
+                assert!(
+                    !text.contains("scion_data_free_bytes "),
+                    "no sample landed, so the free gauge must be absent: {text}"
+                );
+                first = Some(age);
+                continue;
+            };
+            if age > before {
+                break;
+            }
+            // The gauge counts whole seconds: a tick at the same second
+            // reads equal, so the wait runs a few real seconds.
+            spins += 1;
+            assert!(
+                spins < 300,
+                "the age froze while nothing landed: {before} -> {age}"
+            );
+        }
+        drop(park);
+    }
+
     /// The blob-count refresh spaces itself by its own cost: the wait
     /// before the next refresh is the poll's floor, or 100x the last
     /// scan's duration, whichever is longer. The floor keeps a small
@@ -2551,7 +2640,7 @@ mod tests {
             blob_count_next_wait(Duration::from_millis(600)),
             BLOB_COUNT_POLL
         );
-        // The space: an expensive scan waits 100x, well past the floor.
+        // The curve: an expensive scan waits 100x.
         assert_eq!(
             blob_count_next_wait(Duration::from_secs(3)),
             Duration::from_secs(300)
@@ -2563,10 +2652,9 @@ mod tests {
         );
     }
 
-    /// The refresh reports its own duration: the gauge exists after the
-    /// poll's first refresh, success or failure. On main the poll
-    /// exported no such gauge, so this read had no series - the red
-    /// proof on main.
+    /// The refresh reports its own duration: the gauge renders after
+    /// one refresh. On main the poll exported no duration, so this
+    /// read had no series - the red proof on main.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_blob_count_refresh_reports_its_own_duration() {
         let dir = crate::test_support::private_tempdir();
