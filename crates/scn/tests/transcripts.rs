@@ -182,6 +182,14 @@ struct Fixture {
     unsigned: Vec<u8>,
 }
 
+/// The big commit's message: the seeded bytes plus the one trailing
+/// newline git's cleanup leaves, so both sides encode to one length.
+fn big_message() -> Vec<u8> {
+    let mut msg = seeded(1_258_291);
+    msg.push(b'\n');
+    msg
+}
+
 /// The big side branch: one commit off `parent` carrying the seeded
 /// 1.5 MiB blob, the seeded 1.2 MiB message, and 14,000 one-entry files
 /// whose directory tree passes 1 MiB. Answers the branch head and the
@@ -210,7 +218,7 @@ fn big_branch(store: &Backend, parent: ChangesetId) -> (ChangesetId, Vec<u8>) {
     }
     let big_changes: Vec<(&str, FileState)> =
         big_files.iter().map(|(p, st)| (p.as_str(), *st)).collect();
-    let big_cs = common::changeset_msg(Some(parent), &big_changes, &seeded(1_258_291));
+    let big_cs = common::changeset_msg(Some(parent), &big_changes, &big_message());
     let big_id = common::land_ref(store, &big_cs, "big");
     (big_id, big_content)
 }
@@ -1060,6 +1068,109 @@ fn n1_print_file(file: &std::path::Path, t: &Transcript, base: &Fixture, ticket:
     );
 }
 
+/// The blame diagnostics, before the leg's files run: the store's
+/// counts, and the N-1's own answer for the blame head (the parts'
+/// ranges and changesets, and the cursor's length).
+fn n1_blame_probe(runtime: &tokio::runtime::Runtime, pg: &str, server: &str, base: &Fixture) {
+    let blame = hex(base.blame_head.as_bytes());
+    let sql = "SELECT (SELECT count(*) FROM changesets) AS cs, (SELECT count(*) FROM derived WHERE kind = 'path_history') AS ph, (SELECT count(*) FROM repo_blobs) AS blobs";
+    let out = std::process::Command::new("psql")
+        .args(["-t", "-A", "-c", sql, pg])
+        .output()
+        .expect("psql runs");
+    eprintln!(
+        "N1 BLAME head={blame} store={}",
+        String::from_utf8_lossy(&out.stdout).trim()
+    );
+    runtime
+        .block_on(async {
+            let mut client = scion_client(server).await;
+            let reply = client
+                .blame(scion_proto::v1::BlameRequest {
+                    repo: common::REPO.into(),
+                    changeset_id: base.blame_head.as_bytes().to_vec(),
+                    path: b"src/lines.txt".to_vec(),
+                    cursor: Vec::new(),
+                })
+                .await;
+            match reply {
+                Ok(reply) => {
+                    let mut stream = reply.into_inner();
+                    let mut n = 0usize;
+                    while let Some(item) = read_bounded(&mut stream).await? {
+                        n += 1;
+                        eprintln!(
+                            "N1 BLAME part {n}: ranges={} changesets={} cursor_len={}",
+                            item.ranges.len(),
+                            item.changesets.len(),
+                            item.next_cursor.len()
+                        );
+                    }
+                }
+                Err(status) => eprintln!("N1 BLAME probe status={status:?}"),
+            }
+            Ok::<(), String>(())
+        })
+        .unwrap_or_else(|e| eprintln!("N1 BLAME probe error: {e}"));
+}
+
+/// The objects diagnostics, before the leg's files run: the N-1's own
+/// answer for the big blob through a ticket minted for its changeset.
+fn n1_objects_probe(runtime: &tokio::runtime::Runtime, server: &str, base: &Fixture) {
+    runtime
+        .block_on(async {
+            let mut client = connect(server).await;
+            let reply = client
+                .get_root_tree(GetRootTreeRequest {
+                    repo: common::REPO.into(),
+                    changeset_id: base.big_cs.as_bytes().to_vec(),
+                })
+                .await
+                .expect("the big root tree answers")
+                .into_inner();
+            eprintln!("N1 OBJECTS big_root_tree={}", hex(reply.tree_id.as_slice()));
+            let mut client = connect(server).await;
+            let req = GetObjectsRequest {
+                ticket: reply.ticket,
+                refs: vec![ObjectRef {
+                    kind: ObjectKind::Blob as i32,
+                    id: BlobId::of(&base.big_content).as_bytes().to_vec(),
+                    path: b"big/seeded.txt".to_vec(),
+                }],
+                accept: vec![Encoding::Raw as i32],
+            };
+            let mut stream = match client.get_objects(req).await {
+                Ok(stream) => stream.into_inner(),
+                Err(status) => {
+                    eprintln!("N1 OBJECTS probe status={status:?}");
+                    return Ok::<(), String>(());
+                }
+            };
+            let mut n = 0usize;
+            loop {
+                let item = match read_bounded(&mut stream).await {
+                    Ok(Some(item)) => item,
+                    Ok(None) => break,
+                    Err(e) => {
+                        eprintln!("N1 OBJECTS probe read: {e}");
+                        break;
+                    }
+                };
+                n += 1;
+                eprintln!(
+                    "N1 OBJECTS part {n}: id={} kind={} size={} data_len={}",
+                    hex(item.id.as_slice()),
+                    item.kind,
+                    item.size,
+                    item.data.len()
+                );
+            }
+            eprintln!("N1 OBJECTS parts={n}");
+            Ok::<(), String>(())
+        })
+        .unwrap_or_else(|e| eprintln!("N1 OBJECTS probe error: {e}"));
+}
+
 #[test]
 fn the_n1_side_answers_as_its_files_say() {
     let Ok(prev_bin) = std::env::var("PREV_BIN") else {
@@ -1090,10 +1201,16 @@ fn the_n1_side_answers_as_its_files_say() {
     // GetObjects file's refs name must be these.
     let (head_tree, root_tree) = n1_print_ids(&runtime, &stack.server, &base);
     n1_print_store(&pg, &base, &head_tree, &root_tree);
+    // The blame chain's shape on this side, and the N-1's own answer
+    // for the blame head, before the files run.
+    n1_blame_probe(&runtime, &pg, &stack.server, &base);
+    n1_objects_probe(&runtime, &stack.server, &base);
     for (file, t) in &qualifying {
         // The GetObjects file's refs name the root changeset's tree and
-        // blob: the ticket must be that tree's, as the corpus's is.
-        let ticket = n1_mint(&runtime, &stack.server, &base.root_cs);
+        // blob, unless the file names another changeset: the ticket
+        // must be that tree's, as the corpus's is.
+        let ticket_cs = ticket_changeset(t, &base, base.root_cs);
+        let ticket = n1_mint(&runtime, &stack.server, &ticket_cs);
         if t.method == "Objects/GetObjects" {
             n1_print_file(file, t, &base, &ticket);
         }
@@ -1440,7 +1557,14 @@ fn make_private(dir: &Path) {
 
 /// Runs one git command, failing the test on a non-zero exit.
 fn git(args: &[&str]) {
-    let out = Command::new("git").args(args).output().expect("git runs");
+    let out = Command::new("git")
+        .args(args)
+        .env("GIT_AUTHOR_DATE", "1700000000 +0000")
+        .env("GIT_COMMITTER_DATE", "1700000000 +0000")
+        .env("GIT_COMMITTER_NAME", "n1")
+        .env("GIT_COMMITTER_EMAIL", "n1@localhost")
+        .output()
+        .expect("git runs");
     assert!(
         out.status.success(),
         "git {:?}: {}",
@@ -1571,12 +1695,19 @@ fn n1_repo(dir: &Path) -> PathBuf {
         .expect("the entry writes");
     }
     git(&["-C", &src.display().to_string(), "add", "-A"]);
-    let msg = seeded(1_258_291);
+    let msg = big_message();
     let msg_path = dir.join("big-message.txt");
     fs::write(&msg_path, &msg).expect("the message writes");
+    // The commit's author, committer and times are fixed, so the
+    // imported changeset encodes to the length the corpus's own
+    // changeset encodes to; only the parent id differs per store.
     git(&[
         "-C",
         &src.display().to_string(),
+        "-c",
+        "user.name=Ada",
+        "-c",
+        "user.email=ada@example.com",
         "commit",
         "-q",
         "-F",
