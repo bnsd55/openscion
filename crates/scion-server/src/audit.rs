@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -99,6 +99,12 @@ pub struct Audit {
     /// test that proves the create path does it.
     #[cfg_attr(not(test), allow(dead_code))]
     dir_fsyncs: Arc<AtomicU64>,
+    /// The reopen request: SIGHUP sets it, the writer thread checks it
+    /// between batches and reopens the path (#970).
+    reopen: Arc<AtomicBool>,
+    /// How many reopens were refused: the serve path's sampler reads
+    /// it into `scion_audit_reopens_failed_total`.
+    reopens_failed: Arc<AtomicU64>,
     /// The readiness sender of the off handle, held so its watch never
     /// closes: a closed watch would flip readiness at once.
     _ready_tx: Option<watch::Sender<bool>>,
@@ -126,15 +132,21 @@ impl Audit {
         let (ready_tx, ready_rx) = watch::channel(true);
         let path = path.to_path_buf();
         let faults = Arc::new(AtomicU64::new(0));
+        let reopen = Arc::new(AtomicBool::new(false));
+        let reopens_failed = Arc::new(AtomicU64::new(0));
         std::thread::Builder::new().name("audit".into()).spawn({
             let faults = Arc::clone(&faults);
-            move || writer(rx, file, path, ready_tx, faults)
+            let reopen = Arc::clone(&reopen);
+            let reopens_failed = Arc::clone(&reopens_failed);
+            move || writer(rx, file, path, ready_tx, faults, reopen, reopens_failed)
         })?;
         Ok(Self {
             tx: Some(tx),
             ready: ready_rx,
             faults,
             dir_fsyncs,
+            reopen,
+            reopens_failed,
             _ready_tx: None,
         })
     }
@@ -158,8 +170,28 @@ impl Audit {
             ready,
             faults: Arc::new(AtomicU64::new(0)),
             dir_fsyncs: Arc::new(AtomicU64::new(0)),
+            reopen: Arc::new(AtomicBool::new(false)),
+            reopens_failed: Arc::new(AtomicU64::new(0)),
             _ready_tx: Some(ready_tx),
         }
+    }
+
+    /// Asks the writer to close the current file and open the path
+    /// again: the operator's logrotate renamed the file, and the signal
+    /// (SIGHUP) is the reopen's trigger. The writer checks the request
+    /// between batches, so a batch is always whole in one file; a
+    /// refused reopen keeps the old file and the lines go on there.
+    /// Returns once the request is recorded, not once it ran.
+    pub fn request_reopen(&self) {
+        self.reopen.store(true, Ordering::Release);
+    }
+
+    /// How many reopens were refused since the audit opened. The
+    /// serve path's sampler reads it into
+    /// `scion_audit_reopens_failed_total`.
+    #[must_use]
+    pub fn reopens_failed(&self) -> u64 {
+        self.reopens_failed.load(Ordering::Relaxed)
     }
 
     /// Makes the next `n` appends of THIS audit fail, as an EIO or an
@@ -319,6 +351,8 @@ fn writer(
     // ENOSPC would, without touching the file. Read only by the
     // test-hooks seam.
     #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))] faults: Arc<AtomicU64>,
+    reopen: Arc<AtomicBool>,
+    reopens_failed: Arc<AtomicU64>,
 ) {
     while let Some(first) = rx.blocking_recv() {
         let mut batch = Vec::with_capacity(16);
@@ -327,6 +361,28 @@ fn writer(
             match rx.try_recv() {
                 Ok(msg) => batch.push(msg),
                 Err(_) => break,
+            }
+        }
+        // The reopen request is checked between batches only: a batch
+        // is always whole in one file, so a rotation never splits or
+        // duplicates a line.
+        if reopen.swap(false, Ordering::AcqRel) {
+            match checked_open(&path, None).and_then(|mut fresh| {
+                glue_torn_line(&mut fresh)?;
+                Ok(fresh)
+            }) {
+                Ok(fresh) => file = fresh,
+                Err(why) => {
+                    reopens_failed.fetch_add(1, Ordering::Relaxed);
+                    // The old file stays open: the lines go on where
+                    // they are, nothing is dropped, and the next
+                    // signal retries the reopen.
+                    tracing::error!(
+                        path = %path.display(),
+                        reason = %why,
+                        "the audit file did not reopen; recording on in the renamed file"
+                    );
+                }
             }
         }
         match append(&mut file, &batch, &faults) {
@@ -497,6 +553,71 @@ mod tests {
             .unwrap()
             .parse::<Timestamp>()
             .expect("the timestamp is RFC 3339");
+    }
+
+    /// A rotation while the audit records: the operator renames the
+    /// file and signals, and every line lands whole in exactly one of
+    /// the two files - the intent in the renamed file, the result in
+    /// the fresh one. Nothing is lost and nothing is duplicated
+    /// (#970). The refused-reopen twin (a symlink at the fresh path)
+    /// keeps every line in the old file, and counts the refusal.
+    #[tokio::test]
+    async fn a_reopened_audit_loses_no_line_across_the_two_files() {
+        let dir = crate::test_support::private_tempdir();
+        let path = dir.path().join("audit.log");
+        let audit = Audit::open(&path).unwrap();
+        audit
+            .record(Event::new("admin", "intent", json!({"what": "t"})))
+            .await
+            .unwrap();
+        let rotated = dir.path().join("audit.log.1");
+        std::fs::rename(&path, &rotated).unwrap();
+        audit.request_reopen();
+        audit
+            .record(Event::new("admin", "ok", json!({"what": "t"})))
+            .await
+            .unwrap();
+        let old = read_lines(&rotated);
+        let fresh = read_lines(&path);
+        assert_eq!(
+            old.len(),
+            1,
+            "the intent stays whole in the renamed file: {old:?}"
+        );
+        assert_eq!(old[0]["outcome"], "intent");
+        assert_eq!(
+            fresh.len(),
+            1,
+            "the result belongs in the fresh file, exactly once: {fresh:?}"
+        );
+        assert_eq!(fresh[0]["outcome"], "ok");
+        assert_eq!(audit.reopens_failed(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_refused_reopen_keeps_every_line_and_names_its_cause() {
+        let dir = crate::test_support::private_tempdir();
+        let path = dir.path().join("audit.log");
+        let audit = Audit::open(&path).unwrap();
+        audit
+            .record(Event::new("admin", "intent", json!({"what": "t"})))
+            .await
+            .unwrap();
+        let rotated = dir.path().join("audit.log.1");
+        std::fs::rename(&path, &rotated).unwrap();
+        // A symlink at the fresh path: the reopen must refuse it and
+        // go on recording into the old (renamed) file.
+        std::os::unix::fs::symlink(&rotated, &path).unwrap();
+        audit.request_reopen();
+        audit
+            .record(Event::new("admin", "ok", json!({"what": "t"})))
+            .await
+            .unwrap();
+        let old = read_lines(&rotated);
+        assert_eq!(old.len(), 2, "every line lands in the old file: {old:?}");
+        assert_eq!(old[0]["outcome"], "intent");
+        assert_eq!(old[1]["outcome"], "ok");
+        assert_eq!(audit.reopens_failed(), 1, "the refusal is counted");
     }
 
     #[tokio::test]
