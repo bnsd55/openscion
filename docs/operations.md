@@ -718,6 +718,19 @@ serves cannot verify it. The swap on live clients is the recorded drill
 (docs/drills/, template there), not a CI test: no test can hold the
 clients' files of a running fleet.
 
+The v1 trust model is short-lived certificates from the operator's own
+CA, issued automatically, with the lifetime the operator chooses and
+bounds: the guide picks no hours or days. The server and the tiers pick
+up a new certificate the way this section rotates it — replace the
+files and restart before the current leaf expires. The server exports
+no certificate-expiry metric, so expiry watch is the operator's own
+monitoring. No CRL or OCSP check, no key pinning, and no proxy
+integration are part of v1, so a stolen leaf stays valid until it
+expires: there is no active revocation. The restart that rotation costs
+is a brief interruption, and it can tempt an operator toward longer
+lifetimes, which widens the window a stolen certificate covers — the
+lifetime the operator picks holds both ends.
+
 Proof: crates/scn/tests/tls.rs::a_rotated_server_certificate_needs_no_client_change (behaviour, no command: the section's steps are openssl and flag changes, not scion commands; the test holds the behaviour - an old certificate keeps working until the rotation lands, and a rotated one needs no client change)
 
 ### In containers

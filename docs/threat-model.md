@@ -106,7 +106,11 @@ Out of profile. Any of these voids the model:
    start, before the data directory opens
    (`scion-server/tests/serve_flags.rs::a_non_loopback_listen_is_refused_before_the_data_directory_opens`).
    There are no public TLS roots: a client trusts a CA only when the
-   operator names one.
+   operator names one. A leaf that CA signed is trusted until it
+   expires: v1 has no active revocation, and the server exports no
+   certificate-expiry metric, so expiry watch and the replace-and-
+   restart rotation are the operator's
+   (docs/operations.md, "Rotating the server's certificate").
 2. **The RPC auth step.** Every call but `GetObjects` presents a token;
    the server maps the token's BLAKE3 digest to a principal and its
    rules before any data moves
