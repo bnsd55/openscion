@@ -933,6 +933,67 @@ fn run_objects_across_tiers(
     }
 }
 
+/// Every file's headers are ones its method's runner reads. A header
+/// the parse accepts but the runner never reads would sit in the file,
+/// say something, and do nothing - a silent lie. The families split
+/// the way the run splits: objects-dir files cross the tiers (their
+/// headers may name them), scion-dir files run at the server.
+fn check_headers(files: &[PathBuf]) -> Result<(), String> {
+    const OBJECTS_HEADERS: &[&str] = &[
+        "status",
+        "end",
+        "resume_status",
+        "ticket_for",
+        "tiers",
+        "daemon_warm",
+        "objects",
+        "objects_parts",
+    ];
+    const SCION_HEADERS: &[&str] = &[
+        "status",
+        "end",
+        "resume_status",
+        "ticket_for",
+        "token",
+        "entries",
+        "next",
+        "next_nonempty",
+        "cursor_from",
+    ];
+    for file in files {
+        let text = fs::read_to_string(file).expect("the transcript opens");
+        let t = parse(file, &text);
+        let objects_family = file.parent().is_some_and(|dir| dir.ends_with("objects"));
+        let allowed = if objects_family {
+            OBJECTS_HEADERS
+        } else {
+            SCION_HEADERS
+        };
+        for (k, _) in &t.expect {
+            if k.starts_with("request.") || k.starts_with("reply.") {
+                continue;
+            }
+            if !allowed.contains(&k.as_str()) {
+                return Err(format!(
+                    "{}, header {k} is not read by {}'s runner",
+                    file.display(),
+                    t.method
+                ));
+            }
+        }
+        // `token` rides the Transcript itself, not the expect list, and
+        // only the Scion runner reads it.
+        if t.token.is_some() && objects_family {
+            return Err(format!(
+                "{}, header token is not read by {}'s runner",
+                file.display(),
+                t.method
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Every `cursor_from` names a file in the corpus whose since is the
 /// same or older, so the source runs (or skips) beside its dependent in
 /// every pass, never leaves it without a cursor.
@@ -984,12 +1045,15 @@ fn the_corpus_answers_as_its_files_say() {
     let mut files = Vec::new();
     walk(&corpus, &mut files).expect("the corpus holds only transcripts");
     files.sort();
+    // The wiring checks run before the count: a bad header or a bad
+    // cursor source must name itself, not hide behind the count.
+    check_cursor_sources(&files).unwrap_or_else(|e| panic!("{e}"));
+    check_headers(&files).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(
         files.len(),
         56,
         "the corpus pins 56 behaviours; a file added or removed must update this count"
     );
-    check_cursor_sources(&files).unwrap_or_else(|e| panic!("{e}"));
     // One store and one set of tiers for the whole run: the fixture is
     // the expensive part. Each file still mints its own ticket, right
     // before its calls, so a ticket at a call is always seconds old.
