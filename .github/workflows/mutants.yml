@@ -1,0 +1,135 @@
+# Mutation runs for the security boundary, on CI runners: a dispatch
+# names the files, the run flips one comparison or guard at a time
+# (cargo-mutants), and the outcome lists upload as an artifact. A run
+# never fills a developer's disk - the two local runs that caused disk
+# emergencies are why this file exists (docs/production-audit.md 10,
+# #961).
+#
+# No pull_request trigger on purpose: a mutation run is minutes-per-mutant
+# by design, and no PR lane should pay for one. The same reason coverage,
+# bench and soak are their own files.
+#
+# The timeout per mutant bounds a stuck mutant the way the runs in the
+# audit's table were bounded; the outcomes land as an artifact either way,
+# so a verdict session reads the lists without re-running anything.
+
+name: mutants
+
+on:
+  workflow_dispatch:
+    inputs:
+      files:
+        description: >-
+          space-separated files to mutate, repo-relative, for example
+          crates/scion-server/src/access.rs crates/scion-server/src/views.rs
+        required: true
+        type: string
+      timeout_per_mutant:
+        description: seconds one mutant's test run may take
+        required: false
+        default: "120"
+        type: string
+      job_timeout_minutes:
+        description: minutes the whole run may take
+        required: false
+        default: "120"
+        type: string
+      test_binary:
+        description: which test binary the mutants run against
+        required: false
+        default: "--all-targets"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'push' }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # The mutants' builds keep only line tables in their debug info: the
+  # run builds the workspace once per worker, and lean debug info keeps
+  # the runner's disk inside its budget (ci.yml's env does the same).
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
+jobs:
+  mutants:
+    name: mutants
+    runs-on: ubuntu-24.04
+    # The dispatch's number, fromJSON'd: timeout-minutes needs a number
+    # and every input arrives a string.
+    timeout-minutes: ${{ fromJSON(inputs.job_timeout_minutes || '120') }}
+    services:
+      # The auth and read-rule files' tests open the test database: the
+      # backend the suites choose is Postgres, and the URL names the
+      # database this service runs.
+      postgres:
+        image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        env:
+          POSTGRES_PASSWORD: scion
+          POSTGRES_DB: scion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
+        with:
+          tool: protoc
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
+        with:
+          tool: cargo-mutants
+      # The workspace's generated gRPC code builds only with protoc; the
+      # fuzz workflow installs it for the same reason.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: the mutation run
+        env:
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+          FILES: ${{ inputs.files }}
+          MUTANT_TIMEOUT: ${{ inputs.timeout_per_mutant }}
+          TEST_ARGS: ${{ inputs.test_binary }}
+        run: |
+          # The dispatch names files, one per -f: cargo-mutants examines
+          # only those files' functions. Every name must be a file in the
+          # tree, so a typo fails the run instead of mutating nothing.
+          set -eu
+          file_args=""
+          # shellcheck disable=SC2086
+          for f in $FILES; do
+            [ -f "$f" ] || { echo "not a file: $f"; exit 2; }
+            file_args="$file_args -f $f"
+          done
+          df -h /
+          # shellcheck disable=SC2086
+          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $file_args -- $TEST_ARGS
+          df -h /
+      - name: the outcome lists
+        if: always()
+        run: |
+          # The three lists a verdict session reads: missed (a gap or an
+          # equivalent mutant), caught (a test killed it), timeout.
+          mkdir -p mutants-out
+          printf 'missed:\n' > mutants-out/summary.txt
+          cat mutants-out/missed.txt 2>/dev/null || echo "(none)" >> mutants-out/summary.txt
+          printf '\ntimeout:\n' >> mutants-out/summary.txt
+          cat mutants-out/timeout.txt 2>/dev/null || echo "(none)" >> mutants-out/summary.txt
+          printf '\ncaught: ' >> mutants-out/summary.txt
+          wc -l < mutants-out/caught.txt 2>/dev/null || echo 0 >> mutants-out/summary.txt
+          cat mutants-out/summary.txt
+      - name: upload the outcome lists
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants-out-${{ github.run_id }}
+          path: mutants-out/
+          if-no-files-found: error
