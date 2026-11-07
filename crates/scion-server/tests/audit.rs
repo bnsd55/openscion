@@ -435,6 +435,26 @@ async fn a_write_changeset_and_land_record_intent_and_result_pairs() {
     assert!(!text.contains(&blob_hex), "no blob digest in the audit");
 }
 
+/// Bounds one await of the drain test. The #965 hang was an await
+/// that never returned, and it showed only when the whole binary ran
+/// (0 in 400 solo reps). Without a deadline the job times out at 25
+/// minutes with no data; with one, the test fails in seconds and the
+/// panic names the call, the bound, and the elapsed time, so the log
+/// says which await hung.
+async fn bound<F, T>(secs: u64, what: &'static str, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    let started = std::time::Instant::now();
+    match tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await {
+        Ok(value) => value,
+        Err(tokio::time::error::Elapsed { .. }) => panic!(
+            "{what} was still pending after {secs}s (elapsed {:?}) - the #965 hang trap",
+            started.elapsed()
+        ),
+    }
+}
+
 /// A write whose audit intent was not made durable does not happen:
 /// the upload is refused, and the store holds no new blob.
 #[tokio::test(flavor = "multi_thread")]
@@ -447,16 +467,23 @@ async fn a_write_whose_intent_fails_is_refused() {
     let audit_path = dir.path().join("audit.log");
     let audit = Audit::open(&audit_path).unwrap();
     audit.fail_next_appends(1).unwrap();
-    let (stop, url) = serve_with_audit(&store, dir.path(), write_access(), audit).await;
-    let mut ci = writer(&url, "t-fail").await;
+    let (stop, url) = bound(
+        30,
+        "the server's readiness",
+        serve_with_audit(&store, dir.path(), write_access(), audit),
+    )
+    .await;
+    let mut ci = bound(10, "the writer's connect", writer(&url, "t-fail")).await;
 
-    let status = ci
-        .put_blob(once(PutBlobRequest {
+    let status = bound(30, "put_blob (the refused write)", async {
+        ci.put_blob(once(PutBlobRequest {
             repo: REPO.into(),
             data: b"never lands\n".to_vec(),
         }))
         .await
-        .unwrap_err();
+    })
+    .await
+    .unwrap_err();
     assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
 
     // The blob is not in the store: resolve it? An upload names no
@@ -474,12 +501,15 @@ async fn a_write_whose_intent_fails_is_refused() {
     // poll with a deadline instead of racing the drain once.
     let mut drained = false;
     for _ in 0..100 {
-        let later = ci
-            .resolve_ref(ResolveRefRequest {
+        let later = bound(
+            5,
+            "resolve_ref (the drain poll)",
+            ci.resolve_ref(ResolveRefRequest {
                 repo: REPO.into(),
                 name: "main".into(),
-            })
-            .await;
+            }),
+        )
+        .await;
         if later.is_err() {
             drained = true;
             break;
