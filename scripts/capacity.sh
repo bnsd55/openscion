@@ -120,14 +120,26 @@ cpu_ms() {
 # it keeps the CPU of backends that exited between samples - a sum of
 # /proc/<pid>/stat over the live processes does not (the sampler's own
 # psql opens and closes a backend every second, and every exit would
-# vanish from the next sum, dragging the delta low or negative). The
-# cgroup path rides any live postgres pid's /proc/<pid>/cgroup; no
-# live postgres, no row.
+# vanish from the next sum, dragging the delta low or negative).
+# Paths, in order: any live postgres pid's /proc/<pid>/cgroup; then
+# the container's scope by its docker id (docker runs on the runner in
+# CI, where this script's cells live). No path names a cpu.stat, no
+# row.
 pg_cpu_ms() {
-  local clk=$1 pid cgroup usec
+  local clk=$1 pid cgroup usec cid
   pid=$(pgrep -x postgres 2> /dev/null | head -n 1)
-  [ -n "$pid" ] || return 0
-  cgroup=$(awk '/^0::/ { print $2 }' "/proc/$pid/cgroup" 2> /dev/null)
+  if [ -n "$pid" ]; then
+    cgroup=$(awk '/^0::/ { print $2 }' "/proc/$pid/cgroup" 2> /dev/null)
+  fi
+  if [ -z "${cgroup:-}" ]; then
+    # The container's own scope, by id: docker sees it from the runner
+    # (this script's home in CI), where the service's processes may
+    # not look like plain postgres to pgrep.
+    for cid in $(docker ps -q --filter "ancestor=postgres" 2> /dev/null |
+      head -n 1); do
+      cgroup="/system.slice/docker-$cid.scope"
+    done
+  fi
   [ -n "$cgroup" ] || return 0
   usec=$(awk '/^usage_usec / { print $2 }' "/sys/fs/cgroup$cgroup/cpu.stat" 2> /dev/null)
   [ -n "$usec" ] || return 0
@@ -151,18 +163,16 @@ bench_cpu_ms() {
 }
 
 # disk_ms: the work disk's read and write milliseconds since boot, from
-# /proc/diskstats (the device that holds $WORK, field 7 and 11). The
-# device rides the directory's st_dev (stat -c %d splits into major and
-# minor), not df's name: the runner's work directory sits on an overlay
-# whose df name is not a diskstats row, and a grep on it would never
-# match - the sampler's first death, silently, under set -e.
+# /proc/diskstats, summed over the runner's physical devices (sd, nvme,
+# vd, hd, xvd - loop, ram, dm and optical rows are other machinery).
+# The sum, not one device: the work directory sits on an overlay whose
+# st_dev is virtual and whose df name matches no row, and a hosted
+# runner's disk has no second tenant - the sum IS the disk this cell
+# reads and writes.
 disk_ms() {
-  local d maj min line
-  d=$(stat -c %d "$WORK" 2> /dev/null) || return 0
-  [ -n "$d" ] || return 0
-  maj=$((d >> 8)); min=$((d & 0xff))
-  line=$(grep "^ $maj $min " /proc/diskstats 2> /dev/null) || return 0
-  awk '{ print $7, $11 }' <<< "$line"
+  awk '$3 ~ /^(sd|nvme|vd|hd|xvd)/ {
+         read += $7; write += $11
+       } END { if (read || write) print read + 0, write + 0 }' /proc/diskstats 2> /dev/null
 }
 
 # pg_waits: the Postgres's wait-event counts, one `type:count` group
