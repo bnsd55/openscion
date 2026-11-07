@@ -34,10 +34,12 @@ on:
         required: false
         default: "120"
         type: string
-      test_binary:
-        description: which test binary the mutants run against
+      test_args:
+        description: >-
+          args for cargo test after --, e.g. "--test access --test every_rpc_unauthenticated";
+          default: the mutated package's whole test suite
         required: false
-        default: "--all-targets"
+        default: ""
         type: string
 
 permissions:
@@ -86,7 +88,7 @@ jobs:
           tool: protoc
       - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
         with:
-          tool: cargo-mutants
+          tool: cargo-mutants@27.1.0
       # The workspace's generated gRPC code builds only with protoc; the
       # fuzz workflow installs it for the same reason.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -97,7 +99,7 @@ jobs:
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           FILES: ${{ inputs.files }}
           MUTANT_TIMEOUT: ${{ inputs.timeout_per_mutant }}
-          TEST_ARGS: ${{ inputs.test_binary }}
+          TEST_ARGS: ${{ inputs.test_args }}
         run: |
           # The dispatch names files, one per -f: cargo-mutants examines
           # only those files' functions. Every name must be a file in the
@@ -116,15 +118,26 @@ jobs:
       - name: the outcome lists
         if: always()
         run: |
-          # The three lists a verdict session reads: missed (a gap or an
-          # equivalent mutant), caught (a test killed it), timeout.
-          mkdir -p mutants-out
-          printf 'missed:\n' > mutants-out/summary.txt
-          cat mutants-out/missed.txt 2>/dev/null || echo "(none)" >> mutants-out/summary.txt
-          printf '\ntimeout:\n' >> mutants-out/summary.txt
-          cat mutants-out/timeout.txt 2>/dev/null || echo "(none)" >> mutants-out/summary.txt
-          printf '\ncaught: ' >> mutants-out/summary.txt
-          wc -l < mutants-out/caught.txt 2>/dev/null || echo 0 >> mutants-out/summary.txt
+          # The lists a verdict session reads, under the run's own
+          # mutants.out: missed (a gap or an equivalent mutant), timeout,
+          # caught. cargo-mutants --output DIR creates DIR/mutants.out,
+          # so the real paths carry the extra level. A run that got past
+          # the build always wrote them; their absence is a bug and
+          # fails here instead of reading as "(none) missed".
+          set -eu
+          lists=mutants-out/mutants.out
+          for list in missed.txt caught.txt timeout.txt outcomes.json; do
+            [ -f "$lists/$list" ] || {
+              echo "the run wrote no $lists/$list"; ls -la "$lists" || true; exit 2;
+            }
+          done
+          {
+            printf 'missed: %s\n' "$(grep -c '^' "$lists/missed.txt")"
+            printf 'timeout: %s\n' "$(grep -c '^' "$lists/timeout.txt")"
+            printf 'caught: %s\n' "$(grep -c '^' "$lists/caught.txt")"
+            printf '\nmissed mutants:\n'
+            cat "$lists/missed.txt"
+          } > mutants-out/summary.txt
           cat mutants-out/summary.txt
       - name: upload the outcome lists
         if: always()
