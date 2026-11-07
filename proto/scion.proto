@@ -70,6 +70,8 @@ service Scion {
   // the call's deadline with DEADLINE_EXCEEDED, or with CANCELLED when the
   // client drops the call.
   rpc IsAncestor(IsAncestorRequest) returns (IsAncestorResponse);
+  rpc
+    Dummy(GetLandRequest) returns (LandResponse);
   // The paths whose file state differs between the snapshots of two
   // changesets. Compares file states, not lines. Finds renames as `git diff`
   // does by default.

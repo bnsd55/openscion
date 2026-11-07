@@ -2345,6 +2345,13 @@ impl Scion for ScionService {
         })))
     }
 
+    async fn dummy(
+        &self,
+        _request: Request<GetLandRequest>,
+    ) -> Result<Response<LandResponse>, Status> {
+        Err(Status::unauthenticated("the red branch's stub"))
+    }
+
     async fn diff(&self, request: Request<DiffRequest>) -> Result<Response<DiffResponse>, Status> {
         let caller = caller(&request)?;
         let _call = self.quotas.enter(&caller).map_err(Status::from)?;

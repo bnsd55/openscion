@@ -285,6 +285,13 @@ fn dead<T>() -> tokio_stream::wrappers::ReceiverStream<T> {
 
 #[tonic::async_trait]
 impl scion_proto::v1::scion_server::Scion for Huge {
+    async fn dummy(
+        &self,
+        _: Request<scion_proto::v1::GetLandRequest>,
+    ) -> Result<Response<scion_proto::v1::LandResponse>, Status> {
+        Err(Status::unimplemented("test stub"))
+    }
+
     async fn put_blob(
         &self,
         _: Request<tonic::Streaming<scion_proto::v1::PutBlobRequest>>,
