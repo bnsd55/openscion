@@ -2160,7 +2160,24 @@ async fn n1_chain_ends(
     );
     // The fixture's own land: the same scratch bytes created through
     // the N-1 server, then landed; the land id comes from the reply.
+    // The scratch, next and orphan blobs ride the N-1 store first: a
+    // CreateChangeset whose blobs the repo does not hold answers the
+    // precondition, "upload it with PutBlob".
     let mut land_client = scion_client(server).await;
+    let blobs: [&[u8]; 3] = [
+        b"pub fn scratch() {}\n",
+        b"pub fn next() {}\n",
+        b"pub fn orphan() {}\n",
+    ];
+    for data in blobs {
+        let _ = land_client
+            .put_blob(tokio_stream::iter([scion_proto::v1::PutBlobRequest {
+                repo: common::REPO.into(),
+                data: (*data).to_vec(),
+            }]))
+            .await
+            .expect("the N-1 blob uploads");
+    }
     let scratch = common::changeset(
         Some(cs),
         &[(
@@ -2179,18 +2196,6 @@ async fn n1_chain_ends(
         .await
         .expect("the N-1 scratch changeset is created")
         .into_inner();
-    // The next and orphan blobs ride the N-1 store first, as the
-    // corpus's fixture does for its own.
-    let blobs: [&[u8]; 2] = [b"pub fn next() {}\n", b"pub fn orphan() {}\n"];
-    for data in blobs {
-        let _ = land_client
-            .put_blob(tokio_stream::iter([scion_proto::v1::PutBlobRequest {
-                repo: common::REPO.into(),
-                data: (*data).to_vec(),
-            }]))
-            .await
-            .expect("the N-1 blob uploads");
-    }
     let land_reply = land_client
         .land(scion_proto::v1::LandRequest {
             repo: common::REPO.into(),
