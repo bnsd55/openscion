@@ -154,7 +154,14 @@ pg_cpu_ms() {
 # owned file, and the rows that straddle a boundary are the cell's
 # warm-up and cool-down.
 bench_cpu_ms() {
-  local pid=$1 clk=$2
+  local pid=$1 clk=$2 child grand
+  # The owned pid names the subshell; its child is the timeout, whose
+  # child is the scn the bench's CPU belongs to.
+  child=$(pgrep -P "$pid" 2> /dev/null | head -n 1)
+  if [ -n "$child" ]; then
+    grand=$(pgrep -P "$child" 2> /dev/null | head -n 1)
+    [ -n "$grand" ] && pid=$grand
+  fi
   cpu_ms "$pid" "$clk"
 }
 
@@ -166,7 +173,7 @@ bench_cpu_ms() {
 # runner's disk has no second tenant - the sum IS the disk this cell
 # reads and writes.
 disk_ms() {
-  awk '$3 ~ /^(sd|nvme|vd|hd|xvd)/ {
+  awk '$3 ~ /^(sd[a-z]+|nvme[0-9]+n[0-9]+|vd[a-z]+|hd[a-z]+|xvd[a-z]+)$/ {
          read += $7; write += $11
        } END { if (read || write) print read + 0, write + 0 }' /proc/diskstats 2> /dev/null
 }
