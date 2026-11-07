@@ -944,6 +944,7 @@ fn settle(
     index: &mut Option<PathIndex>,
 ) -> Result<Finished> {
     let target = req.target_ref.as_str();
+    let deadline = &req.deadline;
     let (rebased, head, head_tree_stored) = match plan {
         Plan::Derive(head) => return Ok(Finished::Derive(head)),
         Plan::Reject { reason, detail } => {
@@ -994,7 +995,13 @@ fn settle(
         store.write_slot_holder(|c| {
             let (id, _) = {
                 let _guard = profile::Guard::enter(Phase::Build);
-                tree::store_changeset_within(c, repo, &rebased, &mut tree::lens_from(&lens), deadline)?
+                tree::store_changeset_within(
+                    c,
+                    repo,
+                    &rebased,
+                    &mut tree::lens_from(&lens),
+                    deadline,
+                )?
             };
             let changed = {
                 let _guard = profile::Guard::enter(Phase::Cas);
