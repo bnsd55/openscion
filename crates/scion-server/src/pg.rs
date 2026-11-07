@@ -3835,6 +3835,22 @@ pub(crate) fn pending_migration_message(db: u32, build: u32) -> String {
 /// schema's shared lock both stay untouched. The session is read-only
 /// at the database itself (`default_transaction_read_only=on`), so a
 /// check cannot write even by accident.
+/// A URL that does not parse, refused where it was read: the message
+/// names the parse error and `read_from` (the file's path or the
+/// environment variable), never the URL's own text, whose password
+/// must not reach a log or a fail line. The read sites (the CLI's
+/// `postgres_url_of` and preflight's `postgres_url`) call this before
+/// any connect, so serve, migrate and preflight answer the same words.
+/// #963.
+pub fn check_db_url(url: &str, read_from: &str) -> Result<()> {
+    let _ = url.parse::<postgres::Config>().map_err(|e| {
+        Error::InvalidArgument(format!(
+            "cannot parse the database URL from {read_from}: {e}",
+        ))
+    })?;
+    Ok(())
+}
+
 pub(crate) fn preflight_client(url: &str, ca: Option<&Path>) -> Result<Client> {
     connect_on(
         url,

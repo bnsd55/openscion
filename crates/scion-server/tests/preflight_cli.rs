@@ -80,6 +80,45 @@ fn a_ready_store_passes_the_binary_preflight() {
     assert!(!url.is_empty(), "the URL is not for the assert to keep");
 }
 
+/// A URL that does not parse fails naming the parse error and where
+/// the URL was read from, never the URL's text: the operator can tell
+/// a typo in the URL from a database that is down, and the file may
+/// hold a password. (#963)
+#[test]
+fn a_malformed_postgres_url_names_the_parse_error_and_the_source() {
+    let dir = private_tempdir();
+    let store = scion_server::Backend::open_test(dir.path()).unwrap();
+    drop(store);
+    let url_file = secret(
+        dir.path(),
+        "postgres-url",
+        "postgres://user:secret-password@dbhost:notaport/scion",
+    );
+    let token_file = secret(dir.path(), "token", &"t".repeat(32));
+    let out = preflight(
+        dir.path(),
+        &[
+            format!("--postgres-url-file={}", url_file.display()),
+            format!("--token-file={}", token_file.display()),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2), "exit {:?}", out.status.code());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("fail database"), "{text}");
+    assert!(
+        text.contains("cannot parse the database URL"),
+        "the parse error is not named: {text}"
+    );
+    assert!(
+        text.contains("postgres-url"),
+        "the file the URL was read from is not named: {text}"
+    );
+    assert!(
+        !text.contains("secret-password") && !text.contains("dbhost"),
+        "the URL's own text leaked into the answer: {text}"
+    );
+}
+
 /// A directory that holds a sqlite store fails with exit 2, the
 /// open's refusal's words on its line.
 #[test]
