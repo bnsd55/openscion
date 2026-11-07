@@ -1,0 +1,15 @@
+# A blob of more than one part size, through the ticket: the reply
+# streams the object's bytes in parts, RAW as the file asks. The
+# harness builds the blob from a seed; the object's id pins its bytes.
+since: v0.1
+method: Objects/GetObjects
+fixture: landed
+ticket_for: $big_cs
+
+request.ticket: $ticket
+request.refs: kind=blob id=$big_blob path=big/seeded.txt
+request.accept: raw
+
+status: ok
+objects: kind=blob id=$big_blob
+objects_parts: 2

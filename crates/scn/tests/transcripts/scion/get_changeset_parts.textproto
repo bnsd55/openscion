@@ -1,0 +1,15 @@
+# A changeset whose message passes one part size: the reply streams the
+# ChangesetV1 bytes in parts. The harness builds the message from a
+# seed; the transcript pins the joined length, hash and part count.
+since: v0.1
+method: Scion/GetChangeset
+fixture: landed
+ticket_for: $big_cs
+
+request.repo: r
+request.changeset_id: $big_cs
+
+status: ok
+reply.changeset_len: 2518427
+reply.changeset_blake3: 15b5fdb94d18bf71bd8b53154e0fc3b19e20bc53f3a7718062ab68b71a6bfab7
+reply.changeset_parts: 3

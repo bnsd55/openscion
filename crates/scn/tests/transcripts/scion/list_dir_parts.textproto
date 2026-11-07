@@ -1,0 +1,16 @@
+# A directory whose tree passes one part size: the reply streams the
+# TreeV1 bytes in parts. The harness builds the 14,000 entries from a
+# seed; the transcript pins the joined length, hash and part count.
+since: v0.1
+method: Scion/ListDir
+fixture: landed
+ticket_for: $big_cs
+
+request.repo: r
+request.changeset_id: $big_cs
+request.path: wide
+
+status: ok
+reply.tree_len: 1302005
+reply.tree_blake3: a1e9e4db85cd63fb4be31847f7eb77aeffd3951cee05b2795749fe39f3ddf991
+reply.tree_parts: 2
