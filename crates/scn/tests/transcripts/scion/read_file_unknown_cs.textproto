@@ -1,0 +1,13 @@
+# A well-formed changeset ID the repo does not have is NOT_FOUND with
+# the documented changeset text - the second of the two NOT_FOUND
+# answers a partial reader sees (#955).
+since: v0.1
+method: Scion/ReadFile
+fixture: landed
+
+request.repo: r
+request.changeset_id: $missing
+request.path: docs/a.md
+
+status: not_found
+message: changeset $missing not found
