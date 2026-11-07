@@ -1757,6 +1757,11 @@ checking out through a cache and a daemon beside it.
 | postgres | 200 | 5 | 3326.3 | 207 | 255 | 0 | 0 | 44 | 2000 | 13.5 | 5668 | 62284 |
 | postgres | 200 | 20 | 4765.6 | 791 | 1062 | 0 | 0 | 46 | 2000 | 8.6 | 5668 | 62374 |
 
+The land p99 fell at 50 and 200 writers because writers now queue in
+changeset creation, not in the land: a writer's whole push still takes
+about writers / lands-per-second, which the bench's end-to-end column
+carries. Read 1.4 s as the Land RPC's wait, never as the push time.
+
 Every cell runs on a store the cell's own import made: a database the
 cell dropped and recreated, so a cell's numbers are the store's at its
 own size, and
