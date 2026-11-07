@@ -743,6 +743,14 @@ fn walk(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
 async fn assert_tier_refuses(url: &str, t: &Transcript, file: &Path) {
     let mut client = connect(url).await;
     let refused = match t.method.as_str() {
+        "Scion/GetChangeset" => {
+            let mut scion = scion_client(url).await;
+            scion
+                .get_changeset(GetChangesetRequest::default())
+                .await
+                .err()
+                .map(|s| s.code())
+        }
         "Objects/ResolveRef" => client
             .resolve_ref(ResolveRefRequest::default())
             .await
@@ -978,8 +986,8 @@ fn the_corpus_answers_as_its_files_say() {
     files.sort();
     assert_eq!(
         files.len(),
-        55,
-        "the corpus pins 55 behaviours; a file added or removed must update this count"
+        56,
+        "the corpus pins 56 behaviours; a file added or removed must update this count"
     );
     check_cursor_sources(&files).unwrap_or_else(|e| panic!("{e}"));
     // One store and one set of tiers for the whole run: the fixture is
@@ -1006,7 +1014,9 @@ fn the_corpus_answers_as_its_files_say() {
         };
         let mint_age = minted_at.elapsed().as_secs_f64();
         let started_at = std::time::Instant::now();
-        if t.method.starts_with("Objects/") {
+        let across_tiers = t.method.starts_with("Objects/")
+            || file.parent().is_some_and(|dir| dir.ends_with("objects"));
+        if across_tiers {
             let fresh = || {
                 // The same file again on a cache and daemon no earlier
                 // file touched: the same server and keys, so the file's
@@ -2319,6 +2329,12 @@ async fn scion_client_as(url: &str, token: &str) -> ScionClientOf {
 
 /// Runs one `Objects` transcript against one tier URL.
 async fn run_objects(t: &Transcript, url: &str, f: &Fixture) -> Result<(), String> {
+    // A Scion-method file in the objects dir runs its call at the
+    // server (the first url) and rides the tier refusals past it; its
+    // expectations name the server's answer.
+    if t.method.starts_with("Scion/") {
+        return run_scion(t, url, f).await;
+    }
     let mut client = connect(url).await;
     match t.method.as_str() {
         "Objects/ResolveRef" => run_resolve_ref(t, &mut client, f).await,
