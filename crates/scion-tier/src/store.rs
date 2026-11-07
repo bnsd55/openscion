@@ -646,22 +646,37 @@ impl Disk {
             let found: std::collections::HashMap<(i64, [u8; 32]), usize> = self
                 .conn
                 .prepare(&sql)
+                .map_err(index_error)
                 .and_then(|mut stmt| {
-                    stmt.query_map(rusqlite::params_from_iter(params), |row| {
-                        let kind: i64 = row.get(0)?;
-                        let id: Vec<u8> = row.get(1)?;
-                        let size: i64 = row.get(2)?;
-                        Ok((kind, id, size))
-                    })?
-                    .filter_map(|row| {
-                        let (kind, id, size) = row.ok()?;
-                        let id: [u8; 32] = id.try_into().ok()?;
+                    let rows = stmt
+                        .query_map(rusqlite::params_from_iter(params), |row| {
+                            let kind: i64 = row.get(0)?;
+                            let id: Vec<u8> = row.get(1)?;
+                            let size: i64 = row.get(2)?;
+                            Ok((kind, id, size))
+                        })
+                        .map_err(index_error)?;
+                    rows.map(|row| {
+                        let (kind, id, size) = row.map_err(index_error)?;
+                        // A settled row whose id is not 32 bytes is as
+                        // corrupt as one whose read failed: name the kind
+                        // and refuse the call, the way a single key's
+                        // settled_size would.
+                        let len = id.len();
+                        let id: [u8; 32] = id.try_into().map_err(|_| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!(
+                                    "the index names {} object with a {len}-byte id",
+                                    if kind == 0 { "tree" } else { "blob" },
+                                ),
+                            )
+                        })?;
                         let size = usize::try_from(size).unwrap_or(0);
-                        Some(Ok(((kind, id), size)))
+                        Ok(((kind, id), size))
                     })
                     .collect::<Result<std::collections::HashMap<(i64, [u8; 32]), usize>, _>>()
-                })
-                .map_err(index_error)?;
+                })?;
             for (i, key) in chunk {
                 if let Some(size) = found.get(&(kind_of(*key), key.id())) {
                     answers[*i] = Some(*size);
