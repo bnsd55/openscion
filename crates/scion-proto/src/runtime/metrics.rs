@@ -170,6 +170,14 @@ pub struct Metrics {
     /// (`blob_count_set` says whether any refresh ran).
     blob_count: AtomicU64,
     blob_count_set: std::sync::atomic::AtomicBool,
+    /// Milliseconds the latest blob-count refresh took, success or
+    /// failure (`blob_count_refresh_set` says whether any refresh ran).
+    /// Stored in milliseconds so a sub-second scan keeps its fraction;
+    /// the gauge renders seconds with three decimals. The refresh
+    /// spaces itself by its own cost, so this gauge is what an operator
+    /// reads to learn how stale the count may be.
+    blob_count_refresh_ms: AtomicU64,
+    blob_count_refresh_set: std::sync::atomic::AtomicBool,
     /// The memory floor the server's budgets sum to, set at start
     /// (`memory_floor_set` says the start-up check ran).
     memory_floor_bytes: AtomicU64,
@@ -223,6 +231,15 @@ const SUPPORTED_BLOBS: u64 = 1_000_000;
 /// The blob count as a share of the ceiling. The counts the ceiling
 /// names stay far under 2^52, so the f64 divide loses nothing.
 #[must_use]
+/// Milliseconds as seconds with the fraction kept: the value is a
+/// duration, so the f64's 52-bit mantissa loses nothing a duration
+/// could carry.
+fn seconds_of(milliseconds: u64) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let ms = milliseconds as f64;
+    ms / 1000.0
+}
+
 fn share_of_ceiling(count: u64) -> f64 {
     #[allow(clippy::cast_precision_loss)]
     let count = count as f64;
@@ -373,6 +390,15 @@ impl Metrics {
     pub fn set_blob_count(&self, blobs: u64) {
         self.blob_count.store(blobs, Ordering::Relaxed);
         self.blob_count_set.store(true, Ordering::Relaxed);
+    }
+
+    /// Sets the milliseconds the latest blob-count refresh took,
+    /// success or failure: the refresh spaces itself by this, so a slow
+    /// scan waits proportionally longer before the next one.
+    pub fn set_blob_count_refresh_ms(&self, milliseconds: u64) {
+        self.blob_count_refresh_ms
+            .store(milliseconds, Ordering::Relaxed);
+        self.blob_count_refresh_set.store(true, Ordering::Relaxed);
     }
 
     /// Sets the memory floor the server's budgets sum to, at start.
@@ -565,6 +591,15 @@ impl Metrics {
                  scion_blob_ceiling_share {}",
                 count,
                 share_of_ceiling(count)
+            );
+        }
+        if self.blob_count_refresh_set.load(Ordering::Relaxed) {
+            let _ = writeln!(
+                text,
+                "# HELP scion_blob_count_refresh_seconds Seconds the latest blob-count refresh took, success or failure; the refresh waits at least 100x this before the next one, so a large store's count may be minutes stale.\n\
+                 # TYPE scion_blob_count_refresh_seconds gauge\n\
+                 scion_blob_count_refresh_seconds {:.3}",
+                seconds_of(self.blob_count_refresh_ms.load(Ordering::Relaxed))
             );
         }
         if self.memory_floor_set.load(Ordering::Relaxed) {
@@ -1466,8 +1501,16 @@ mod tests {
         let text = metrics.render();
         assert!(!text.contains("scion_blob_count"), "{text}");
         metrics.set_blob_count(3);
+        // A sub-second scan keeps its fraction: 612 ms renders 0.612,
+        // not 0, so the staleness the docs point at is honest at the
+        // sizes where the wait matters.
+        metrics.set_blob_count_refresh_ms(612);
         let text = metrics.render();
         assert!(text.contains("scion_blob_count 3\n"), "{text}");
+        assert!(
+            text.contains("scion_blob_count_refresh_seconds 0.612"),
+            "{text}"
+        );
         assert!(
             text.contains("scion_blob_ceiling_share 0.000003\n"),
             "{text}"

@@ -309,6 +309,9 @@ scion_blob_count
 # HELP scion_blob_ceiling_share The blob count as a share of the 1,000,000 blobs docs/support.md supports per data directory.
 # TYPE scion_blob_ceiling_share gauge
 scion_blob_ceiling_share
+# HELP scion_blob_count_refresh_seconds Seconds the latest blob-count refresh took, success or failure; the refresh waits at least 100x this before the next one, so a large store's count may be minutes stale.
+# TYPE scion_blob_count_refresh_seconds gauge
+scion_blob_count_refresh_seconds
 # HELP scion_derive_walks_in_flight Derive walks holding a permit now.
 # TYPE scion_derive_walks_in_flight gauge
 scion_derive_walks_in_flight

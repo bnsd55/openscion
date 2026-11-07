@@ -243,11 +243,21 @@ fn spawn_blob_count_poll(
     tokio::spawn(async move {
         let mut stop = stop;
         loop {
+            let started = std::time::Instant::now();
             let counted = tokio::task::spawn_blocking({
                 let store = store.clone();
                 move || store.read(|c| c.blob_count())
             })
             .await;
+            // The spacing counts the failed attempt's time too: a slow
+            // or failing refresh backs off the same way, and the gauge
+            // keeps its last good value meanwhile.
+            let took = started.elapsed();
+            // u128 -> u64: a refresh that runs past 584 million years
+            // has bigger problems than its gauge.
+            #[allow(clippy::cast_possible_truncation)]
+            let took_ms = took.as_millis() as u64;
+            metrics.set_blob_count_refresh_ms(took_ms);
             match counted {
                 Ok(Ok(blobs)) => metrics.set_blob_count(blobs),
                 Ok(Err(e)) => {
@@ -256,7 +266,7 @@ fn spawn_blob_count_poll(
                 Err(e) => tracing::warn!(error = %e, "the blob-count poll failed"),
             }
             tokio::select! {
-                () = tokio::time::sleep(BLOB_COUNT_POLL) => {}
+                () = tokio::time::sleep(blob_count_next_wait(took)) => {}
                 _ = stop.changed() => break,
             }
         }
@@ -331,8 +341,26 @@ const FREE_SPACE_STAT_BOUND: Duration = Duration::from_secs(6);
 
 /// How often the blob-count gauge is refreshed from the metadata: one
 /// bounded query per tick, never a scrape-time walk, and never a
-/// directory listing.
+/// directory listing. The refresh spaces itself by its own cost (see
+/// [`blob_count_next_wait`]), so this is the floor, not the period.
 const BLOB_COUNT_POLL: Duration = Duration::from_secs(60);
+
+/// How many of its own durations the blob-count refresh waits before
+/// the next one: the scan's cost grows with the store (a DISTINCT over
+/// every `repo_blobs` row), and 100 caps the scan near 1% of one read
+/// connection at any size. At 1,000,000 blobs (a ~0.6 s scan) the
+/// floor keeps the 60 s period; a 3 s scan at 5,000,000 waits 5 min.
+const BLOB_COUNT_REFRESH_SPACE: u32 = 100;
+
+/// The wait before the next blob-count refresh: the poll's floor, or
+/// 100 x the last refresh's own duration, whichever is longer. The
+/// last duration counts on a failure too, so a slow or failing refresh
+/// backs off instead of retrying at the floor; the count keeps its
+/// last good value meanwhile, as the free-space poll's gauges do.
+fn blob_count_next_wait(last_refresh: Duration) -> Duration {
+    let spaced = last_refresh.saturating_mul(BLOB_COUNT_REFRESH_SPACE);
+    spaced.max(BLOB_COUNT_POLL)
+}
 
 /// What a server serves with, besides the data directory and the access
 /// rules: its limits, its per-principal quotas, its TLS, and its metrics.
@@ -2596,6 +2624,56 @@ mod tests {
             );
         }
         drop(park);
+    }
+
+    /// The blob-count refresh spaces itself by its own cost: the wait
+    /// before the next refresh is the poll's floor, or 100x the last
+    /// scan's duration, whichever is longer. The floor keeps a small
+    /// store's minute cadence; the space keeps the scan near 1% of one
+    /// read connection at any size.
+    #[test]
+    fn the_blob_count_refresh_spaces_itself_by_its_own_cost() {
+        // The floor: a cheap scan keeps the poll's period. The edge is
+        // exact: 100 x 0.6 s is the floor itself.
+        assert_eq!(blob_count_next_wait(Duration::ZERO), BLOB_COUNT_POLL);
+        assert_eq!(
+            blob_count_next_wait(Duration::from_millis(600)),
+            BLOB_COUNT_POLL
+        );
+        // The curve: an expensive scan waits 100x.
+        assert_eq!(
+            blob_count_next_wait(Duration::from_secs(3)),
+            Duration::from_secs(300)
+        );
+        // Monotone: a longer scan never waits less.
+        assert!(
+            blob_count_next_wait(Duration::from_secs(10))
+                > blob_count_next_wait(Duration::from_secs(5))
+        );
+    }
+
+    /// The refresh reports its own duration: the gauge renders after
+    /// one refresh. On main the poll exported no duration, so this
+    /// read had no series - the red proof on main.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_blob_count_refresh_reports_its_own_duration() {
+        let dir = crate::test_support::private_tempdir();
+        let metrics = Arc::new(Metrics::default());
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(());
+        let store = Backend::open_test(dir.path()).unwrap();
+        spawn_blob_count_poll(store, Arc::clone(&metrics), stop_rx);
+        let mut spins = 0;
+        loop {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if metrics
+                .render()
+                .contains("scion_blob_count_refresh_seconds ")
+            {
+                break;
+            }
+            spins += 1;
+            assert!(spins < 1_000, "the refresh never reported its duration");
+        }
     }
 
     /// Receives one step's go signal, or panics naming the step: a
