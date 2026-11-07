@@ -41,6 +41,17 @@ on:
         required: false
         default: ""
         type: string
+      runner:
+        description: >-
+          empty (the default) runs ubuntu-24.04 with the Postgres service;
+          "macos-15" runs the macOS runner without it - for the modules
+          whose killing tests are macOS-gated (the auth ACL code, #986).
+          A macOS runner has no service containers, so the database
+          cannot start there; a package whose tests open it cannot be
+          mutated on this runner.
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -60,6 +71,11 @@ env:
 jobs:
   mutants:
     name: mutants
+    # One job per run: the runner input picks which. The Postgres
+    # service cannot be conditional (no if on services), and a macOS
+    # runner has no service containers at all, so the macOS shape is a
+    # separate job without one.
+    if: ${{ inputs.runner != 'macos-15' }}
     runs-on: ubuntu-24.04
     # The dispatch's number, fromJSON'd: timeout-minutes needs a number
     # and every input arrives a string.
@@ -124,6 +140,71 @@ jobs:
           # so the real paths carry the extra level. A run that got past
           # the build always wrote them; their absence is a bug and
           # fails here instead of reading as "(none) missed".
+          set -eu
+          lists=mutants-out/mutants.out
+          for list in missed.txt caught.txt timeout.txt outcomes.json; do
+            [ -f "$lists/$list" ] || {
+              echo "the run wrote no $lists/$list"; ls -la "$lists" || true; exit 2;
+            }
+          done
+          {
+            printf 'missed: %s\n' "$(grep -c '^' "$lists/missed.txt")"
+            printf 'timeout: %s\n' "$(grep -c '^' "$lists/timeout.txt")"
+            printf 'caught: %s\n' "$(grep -c '^' "$lists/caught.txt")"
+            printf '\nmissed mutants:\n'
+            cat "$lists/missed.txt"
+          } > mutants-out/summary.txt
+          cat mutants-out/summary.txt
+      - name: upload the outcome lists
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants-out-${{ github.run_id }}
+          path: mutants-out/
+          if-no-files-found: error
+
+  mutants-macos:
+    name: mutants (macOS)
+    # The macOS twin: no Postgres service (a macOS runner has no service
+    # containers), no database URL - a package whose tests open the
+    # database cannot be mutated here. Exists for the modules whose
+    # killing tests are macOS-gated: the auth ACL code (#986, #961's
+    # F5: 42 mutants the Linux run cannot reach).
+    if: ${{ inputs.runner == 'macos-15' }}
+    runs-on: macos-15
+    timeout-minutes: ${{ fromJSON(inputs.job_timeout_minutes || '120') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
+        with:
+          tool: protoc
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
+        with:
+          tool: cargo-mutants@27.1.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: the mutation run
+        env:
+          FILES: ${{ inputs.files }}
+          MUTANT_TIMEOUT: ${{ inputs.timeout_per_mutant }}
+          TEST_ARGS: ${{ inputs.test_args }}
+        run: |
+          set -eu
+          file_args=""
+          # shellcheck disable=SC2086
+          for f in $FILES; do
+            [ -f "$f" ] || { echo "not a file: $f"; exit 2; }
+            file_args="$file_args -f $f"
+          done
+          df -h /
+          # shellcheck disable=SC2086
+          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $file_args -- $TEST_ARGS
+          df -h /
+      - name: the outcome lists
+        if: always()
+        run: |
           set -eu
           lists=mutants-out/mutants.out
           for list in missed.txt caught.txt timeout.txt outcomes.json; do
