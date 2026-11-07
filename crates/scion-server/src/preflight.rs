@@ -1302,7 +1302,10 @@ mod tests {
             report.lines
         );
         assert!(
-            !report.lines.iter().any(|line| line.contains("one-server lock")),
+            !report
+                .lines
+                .iter()
+                .any(|line| line.contains("one-server lock")),
             "no lock line for a run that already fails:\n{:#?}",
             report.lines
         );

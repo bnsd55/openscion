@@ -632,18 +632,16 @@ impl Disk {
             }
         }
         for chunk in misses.chunks(CHUNK) {
-            let values = chunk
-                .iter()
-                .map(|_| "(?,?)")
-                .collect::<Vec<_>>()
-                .join(",");
-            let sql = format!(
-                "SELECT kind, id, size FROM objects WHERE (kind, id) IN (VALUES {values})"
-            );
+            let values = chunk.iter().map(|_| "(?,?)").collect::<Vec<_>>().join(",");
+            let sql =
+                format!("SELECT kind, id, size FROM objects WHERE (kind, id) IN (VALUES {values})");
             let params = chunk.iter().flat_map(|(_, key)| {
                 let kind = kind_of(*key);
                 let id = key.id();
-                [rusqlite::types::Value::Integer(kind), rusqlite::types::Value::Blob(id.to_vec())]
+                [
+                    rusqlite::types::Value::Integer(kind),
+                    rusqlite::types::Value::Blob(id.to_vec()),
+                ]
             });
             let found: std::collections::HashMap<(i64, [u8; 32]), usize> = self
                 .conn
