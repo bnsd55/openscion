@@ -7,6 +7,104 @@ release.
 
 ## [Unreleased]
 
+The changes since v0.1.0, from the merged commits. Test-only, CI-only,
+dependency-bump and docs-only commits that restate the code's behavior
+are omitted.
+
+### Changed
+
+- Migrations are explicit. Only `scion-server migrate` and
+  `serve --migrate` move the schema; every other open checks the
+  version first and refuses a database that is behind, with a message
+  that says which to run. `migrate --check` prints the database's
+  version, the build's version and the pending steps, and exits 0 when
+  up to date, 3 when steps are pending, 1 when the state cannot be
+  read. An upgrade is now: check, back up, migrate, serve (#822).
+- A refusing open writes nothing, and the migration window runs past
+  the statement budget; each schema's migrations take that schema's own
+  lock, so parallel opens of different schemas no longer queue on one
+  key (#885, #910).
+- Secrets left the command line. The `--postgres-url` flag is gone:
+  pass the URL in `SCION_POSTGRES_URL` or `--postgres-url-file`, and
+  the tokens in their file or environment forms; an old command line
+  fails at once and never echoes the secret (#821, #818).
+- A connection over the connection cap (128) fails fast: it waits at
+  most 5 s for a place and is then closed, and the waiters are capped,
+  so a connection storm holds about twice the cap in sockets instead of
+  leaving a client silent for up to 30 minutes. A failed accept is
+  paced, counted and warned (#842, #878).
+- A short deadline keeps at least 50 ms (never more than half of the
+  timeout) for the answer's trip back, so the deepest tier's
+  RESOURCE_EXHAUSTED reaches the caller instead of a spurious
+  CANCELLED (#808).
+- At start, serve reads the host's memory limit (cgroup v2, then v1,
+  then the OS total) against a floor of about 6.4 GiB and logs an error
+  that names the limit, its source and the shares when the host is
+  under it; the production profile states an 8 GiB host. The floor
+  counts the diffs' rename share, and a view derivation and a rename
+  pass have memory bounds of their own (#778, #877, #856).
+- The whole Postgres connect has one deadline, and a failed store open
+  names the step and the statement that waited, keeping the database's
+  error as the source (#833, #907).
+- Work stops when the caller is gone: ReadFile, ListDir and GetRootTree
+  stop when their call is cancelled; a cancelled land or create frees
+  its permit and its ref lock at the next fill step; a derive step
+  without a deadline yields to writers for at most 2 s; the land fills
+  a missing head tree only, and before the write transaction (#802,
+  #915, #928, #841, #892, #871).
+- The write lane's statement count came down in five folds: a land
+  costs 22 statements and a create 20, each pinned exactly by a test,
+  from the open batch that carries the lane key (#917), the record's
+  prechecks in one statement (#934, #869, #852, #876), a create's
+  derived rows in one INSERT with its checks in one read (#935, #899,
+  #903), the old-row trim riding the verdict statement (#946), and
+  transactions that open in one round trip (#864).
+- The tier's claim window scan asks the store once instead of once per
+  key, and the preflight's missing-schema condition answers once, as a
+  failure (#943).
+
+### Added
+
+- `scion-server preflight`: a read-only command that runs every
+  first-boot check against a data directory and database and names each
+  fix, with exit codes a script can read (#893).
+- Metrics and alerts: the blob count and its share of the supported
+  ceiling, with alerts (#896); a free-inodes gauge with two inode
+  alerts, quiet on a filesystem with no inode table (#906); the inbound
+  byte count of served replies (#775); an alert that fires when the
+  disk gauges go stale, so a stuck free-space poll is visible (#916).
+- create-repo and create-ref make a repo and a ref without a Git
+  import (#785).
+- A directory of up to 100,000 names is supported, with the measured
+  cost per change; the capacity tables are re-measured on the current
+  build (#819, #850).
+
+### Fixed
+
+- A stuck free-space sample no longer stops the poll, and the stale
+  sample's age counts from the poll's start, so the stale alert also
+  fires when the first sample never lands (#916, #933).
+- The blob-count refresh spaces itself by its own cost, so its scan
+  stays near 1% of one read connection at any store size (#939).
+- The deferred derived-row delete counts each row once when a kind
+  repeats, and the rename cache keeps its total and walks its oldest
+  first (#866, #880).
+- A statement whose reply is the connection's FATAL answers that the
+  transaction was lost, and a failed reconnect records a transaction in
+  progress as lost, so the caller is not left waiting on a lost write
+  (#923, #944).
+
+### Security
+
+- pulldown-cmark 0.13.6, for RUSTSEC-2026-0433 (#766).
+- The threat model's gaps found before the outside review are closed,
+  and the secrets' command-line removal above is part of them (#811).
+
+### Removed
+
+- The `--postgres-url` flag: the URL goes through
+  `SCION_POSTGRES_URL` or `--postgres-url-file` (#821).
+
 ## [v0.1.0] - 2026-10-31
 
 The first release: the server, its cache tiers, and the `scn` client.
