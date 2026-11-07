@@ -1745,22 +1745,26 @@ checking out through a cache and a daemon beside it.
 | Filesystem | the filesystem the run measured, from the run's `machine.txt` artifact (`df -T` on the work directory); the `ubuntu-24.04` class's root disk is ext4 ([support.md](support.md)) |
 | Repetitions | 2 per cell; the table reports the cell's whole run, and the run's raw samples are the workflow run's `capacity.csv` artifact |
 
-| backend | writers | readers | land p99 ms | checkout p50 ms | checkout p99 ms | timeouts | errors | server RSS MiB | landed | lands per second | blob store KiB per 1k lands | database KiB per 1k lands |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| postgres | 2 | 0 | 48.7 | - | - | 0 | 0 | 21 | 2000 | 28.0 | 5664 | 87558 |
-| postgres | 2 | 5 | 123.0 | 200 | 239 | 0 | 0 | 33 | 2000 | 12.3 | 5668 | 84246 |
-| postgres | 2 | 20 | 254.2 | 775 | 1026 | 0 | 0 | 30 | 2000 | 8.4 | 5668 | 86106 |
-| postgres | 50 | 0 | 1425.7 | - | - | 0 | 0 | 34 | 2000 | 32.0 | 5672 | 34612 |
-| postgres | 50 | 5 | 3213.2 | 208 | 256 | 0 | 0 | 40 | 2000 | 13.6 | 5670 | 34446 |
-| postgres | 50 | 20 | 6090.3 | 841 | 1101 | 0 | 0 | 46 | 2000 | 8.7 | 5668 | 34586 |
-| postgres | 200 | 0 | 1383.9 | - | - | 0 | 0 | 38 | 2000 | 28.9 | 5670 | 62382 |
-| postgres | 200 | 5 | 3326.3 | 207 | 255 | 0 | 0 | 44 | 2000 | 13.5 | 5668 | 62284 |
-| postgres | 200 | 20 | 4765.6 | 791 | 1062 | 0 | 0 | 46 | 2000 | 8.6 | 5668 | 62374 |
+| backend | writers | readers | land p99 ms | push p99 ms | checkout p50 ms | checkout p99 ms | timeouts | errors | server RSS MiB | landed | lands per second | blob store KiB per 1k lands | database KiB per 1k lands |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| postgres | 2 | 0 | 48.7 | 91.4 | - | - | 0 | 0 | 21 | 2000 | 28.0 | 5664 | 87558 |
+| postgres | 2 | 5 | 123.0 | 243.9 | 200 | 239 | 0 | 0 | 33 | 2000 | 12.3 | 5668 | 84246 |
+| postgres | 2 | 20 | 254.2 | 528.5 | 775 | 1026 | 0 | 0 | 30 | 2000 | 8.4 | 5668 | 86106 |
+| postgres | 50 | 0 | 1425.7 | 3457.6 | - | - | 0 | 0 | 34 | 2000 | 32.0 | 5672 | 34612 |
+| postgres | 50 | 5 | 3213.2 | 7734.0 | 208 | 256 | 0 | 0 | 40 | 2000 | 13.6 | 5670 | 34446 |
+| postgres | 50 | 20 | 6090.3 | 14482.0 | 841 | 1101 | 0 | 0 | 46 | 2000 | 8.7 | 5668 | 34586 |
+| postgres | 200 | 0 | 1383.9 | 9342.2 | - | - | 0 | 0 | 38 | 2000 | 28.9 | 5670 | 62382 |
+| postgres | 200 | 5 | 3326.3 | 20262.2 | 207 | 255 | 0 | 0 | 44 | 2000 | 13.5 | 5668 | 62284 |
+| postgres | 200 | 20 | 4765.6 | 34879.3 | 791 | 1062 | 0 | 0 | 46 | 2000 | 8.6 | 5668 | 62374 |
+
+Push p99 is a writer's whole push - PutBlob, CreateChangeset, Land -
+the bench's end-to-end p99 from the run's `bench-*.json` artifacts
+(the last repetition, the rule the land p99 column follows).
 
 The land p99 fell at 50 and 200 writers because writers now queue in
 changeset creation, not in the land: a writer's whole push still takes
-about writers / lands-per-second, which the bench's end-to-end column
-carries. Read 1.4 s as the Land RPC's wait, never as the push time.
+about writers / lands-per-second, which the push p99 column carries.
+Read the land p99 as the Land RPC's wait, never as the push time.
 
 Every cell runs on a store the cell's own import made: a database the
 cell dropped and recreated, so a cell's numbers are the store's at its
