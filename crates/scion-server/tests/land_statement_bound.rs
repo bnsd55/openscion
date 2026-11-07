@@ -6,7 +6,9 @@
 //! statements through one seam). The per-land cost is the floor of the
 //! land ceiling: a land under the ref's slot lock cannot beat its own
 //! round trips, so this guard pins the count the way the tree batch
-//! guard pins the derivation's. The count is a process-wide seam, so
+//! guard pins the derivation's. The counter reads round trips, not SQL
+//! statements: one entry per job, and a batch - however many statements
+//! its text carries - is one entry. The count is a process-wide seam, so
 //! this guard owns its binary: no other test speaks SQL in its process.
 
 use scion_core::{Changeset, FileState, RepoPath};

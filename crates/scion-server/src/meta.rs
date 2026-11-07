@@ -447,8 +447,9 @@ pub trait MetaTx {
 
     /// Records derived values, one statement for the whole batch. The
     /// callers write rows of changesets this transaction just stored, so
-    /// a conflicting stored row is corrupt state, not a legal second
-    /// write: the batch refuses on any conflict.
+    /// a stored row that differs from the batch's value is corrupt state
+    /// and fails the call; an agreeing stored row (a fill that stored the
+    /// same value first) is legal.
     fn put_derived_all(&mut self, rows: &[(String, u32, ChangesetId, Vec<u8>)]) -> Result<()>;
 
     /// Deletes up to `limit` derived values of `kind` below `version`.

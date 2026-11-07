@@ -1356,7 +1356,9 @@ the process, scraped from there. The names:
   up while the in-flight count sits at the cap mean a cold history read
   that queues behind the walkers.
 - `scion_pg_collector_key_wait_seconds` — a Postgres write's wait for the
-  collector's advisory key; waits that climb toward the key's own 60 s
+  collector's advisory key, measured across the transaction's open batch
+  (BEGIN, the lock-timeout guard, and the key's wait in one round trip);
+  the batch's bulk is the lock. Waits that climb toward the key's own 60 s
   bound mean the writer queue does not drain.
 - `scion_pg_pool_wait_seconds` — (Postgres only) how long calls waited for
   a read connection. A read transaction is bounded at 300 s per statement
