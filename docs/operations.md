@@ -1818,6 +1818,12 @@ Push p99 is a writer's whole push - PutBlob, CreateChangeset, Land -
 the bench's end-to-end p99 of the cell's last repetition, from the
 `capacity.csv` artifact, as the land p99 column is.
 
+Readers pay twice in these cells: the checkouts' daemon and its file
+writes run on the same runner and disk as the server and Postgres. The
+run's sampler shows the daemon holding about one CPU core whenever
+readers run, and the disk's write time rising with the reader count,
+while the Postgres wait-event counts do not grow.
+
 At 50 and 200 writers the queue is in changeset creation, not in the
 land, so the land p99 is small next to the push p99: a writer's whole
 push takes about writers / lands-per-second. Read the land p99 as the
