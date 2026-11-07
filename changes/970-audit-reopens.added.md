@@ -1,0 +1,1 @@
+`scion_audit_reopens_failed_total` counter: audit reopens the server refused in a rename-and-signal rotation, when the fresh open of the renamed path fails (a symlink at the path, an unwritable directory, a full disk). The old file keeps recording, the error names the path and the cause, and the next SIGHUP retries (#970).
