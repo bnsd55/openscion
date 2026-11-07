@@ -1299,9 +1299,16 @@ mod tests {
     /// comparison that enforces it, is caught (run 42391198417, missed).
     #[test]
     fn a_checked_file_at_the_cap_reads_and_one_over_is_refused() {
+        // The cap is pinned by its literal, not by reading the constant:
+        // a test sized by MAX_CHECKED_FILE shrinks with a mutated cap
+        // and pins nothing. 4096 bytes sits above a flipped cap of
+        // 1024 + 1024 and below the real one; the mebibyte edges pin
+        // the comparison itself.
         let (tmp, _me) = tempdir();
         let file = tmp.path().join("big");
-        let cap = usize::try_from(MAX_CHECKED_FILE).unwrap();
+        fs::write(&file, vec![b'x'; 4096]).unwrap();
+        read_checked_file(&file, false).unwrap();
+        let cap = 1024 * 1024usize;
         fs::write(&file, vec![b'x'; cap]).unwrap();
         let read = read_checked_file(&file, false).unwrap();
         assert_eq!(read.len(), cap);
