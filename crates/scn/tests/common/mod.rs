@@ -356,14 +356,11 @@ pub(crate) fn changeset(parent: Option<ChangesetId>, files: &[(&str, FileState)]
 }
 
 /// A changeset on `parent` that puts `files` and carries `message`, as
-/// git import would write it: committer n1 at the fixed epoch, so a
-/// changeset the corpus builds for the import's replay and one the
-/// same commit's import builds encode to the same length. Only the big
-/// fixture rides this: its bytes replay an import, never a create.
-/// A changeset on `parent` that puts `files` and carries `message`, as
 /// git import would write it: author Ada, committer n1, both at the
-/// fixed epoch, so a changeset the corpus builds and one the same
-/// commit's import builds encode to the same length.
+/// fixed epoch, so a changeset the corpus builds for the import's
+/// replay and one the same commit's import builds encode to the same
+/// length. Only the big fixture rides this: its bytes replay an
+/// import, never a create.
 pub(crate) fn changeset_msg(
     parent: Option<ChangesetId>,
     files: &[(&str, FileState)],
