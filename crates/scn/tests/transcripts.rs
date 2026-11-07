@@ -1452,9 +1452,12 @@ fn n1_repo(dir: &Path) -> PathBuf {
         "-q",
         "feature",
     ]);
+    // The file grows by one line per commit, as the corpus's chain
+    // does: a rewrite per commit names one changeset for ever.
+    let mut n1_lines: Vec<u8> = b"pub fn main() {}\npub fn extra() {}\n".to_vec();
     for k in 0..101 {
-        let text = format!("pub fn main() {{}}\npub fn extra() {{}}\nline {k}\n");
-        fs::write(src.join("src/lines.txt"), text.as_bytes()).expect("the file writes");
+        n1_lines.extend_from_slice(format!("line {k}\n").as_bytes());
+        fs::write(src.join("src/lines.txt"), &n1_lines).expect("the file writes");
         git(&["-C", &src.display().to_string(), "add", "-A"]);
         git(&[
             "-C",
