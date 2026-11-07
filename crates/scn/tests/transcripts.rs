@@ -764,28 +764,12 @@ fn guard_cs_refusals(qualifying: &mut [(PathBuf, Transcript)]) {
 /// file, the side and both answers. Skipped green when `PREV_BIN` is
 /// unset: the legs belong to the version-matrix job, which builds N-1
 /// and points `PREV_BIN` at it.
-#[test]
-fn the_n1_side_answers_as_its_files_say() {
-    let Ok(prev_bin) = std::env::var("PREV_BIN") else {
-        eprintln!("PREV_BIN unset: the N-1 legs run in the version-matrix job");
-        return;
-    };
-    let prev_bin = PathBuf::from(prev_bin);
-
-    // The logs must outlive a red run: the version-matrix job uploads
-    // /tmp/scion-matrix*/, so the work dir sits there, named for this
-    // run, and only a green run removes it.
-    let dir = std::env::temp_dir().join(format!("scion-matrix-n1-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("the work dir is made");
-    make_private(&dir);
-    eprintln!("the N-1 work dir: {}", dir.display());
-
-    // The N-1 version decides which files qualify: a file's `since`
-    // must be at or under it. `PREV_REF` names the ref the
-    // version-matrix job tested; a `v`-prefixed release ref carries
-    // the version itself, a stand-in commit carries none and so every
-    // file qualifies against it.
+/// The files the N-1 side runs: a file's `since` must be at or under
+/// the version `PREV_REF` names. `PREV_REF` names the ref the
+/// version-matrix job tested; a `v`-prefixed release ref carries the
+/// version itself, a stand-in commit carries none and so every file
+/// qualifies against it.
+fn n1_qualifying() -> Vec<(PathBuf, Transcript)> {
     let ref_name = std::env::var("PREV_REF").unwrap_or_else(|_| "unset".to_owned());
     let (prev, printed) = match ref_version(&ref_name) {
         Some(v) => (v, format!("N-1 {ref_name}")),
@@ -811,6 +795,76 @@ fn the_n1_side_answers_as_its_files_say() {
         "the N-1 legs have nothing to prove: the corpus's oldest since is {oldest_printed}, the N-1 side is {prev:?} ({printed})"
     );
     guard_cs_refusals(&mut qualifying);
+    qualifying
+}
+
+/// Prints the N-1 server's ids for the chain's ends: the head's and the
+/// root changeset's, with the trees `GetRootTree` names for each.
+fn n1_print_ids(runtime: &tokio::runtime::Runtime, server: &str, base: &Fixture) {
+    let root_tree_of = |cs: &scion_core::ChangesetId| -> String {
+        runtime.block_on(async {
+            let mut client = connect(server).await;
+            client
+                .get_root_tree(scion_proto::v1::GetRootTreeRequest {
+                    repo: common::REPO.into(),
+                    changeset_id: cs.as_bytes().to_vec(),
+                })
+                .await
+                .expect("the N-1 server mints")
+                .into_inner()
+                .tree_id
+                .try_into()
+                .map(|t: [u8; 32]| hex(t.as_slice()))
+                .expect("the tree id is 32 bytes")
+        })
+    };
+    eprintln!(
+        "N1 IDS head={} head_tree={} root_cs={} root_tree={}",
+        hex(base.cs.as_bytes()),
+        root_tree_of(&base.cs),
+        hex(base.root_cs.as_bytes()),
+        root_tree_of(&base.root_cs),
+    );
+}
+
+/// Prints one `GetObjects` file's inputs: the ticket's own root tree and
+/// the refs after substitution, so a red run names the id that disagrees.
+fn n1_print_file(file: &std::path::Path, t: &Transcript, base: &Fixture, ticket: &[u8]) {
+    let scope = scion_proto::ticket::parse_unverified(ticket, scion_proto::ticket::now())
+        .map(|t| hex(t.root_tree.as_slice()))
+        .map_err(|e| e.to_string());
+    let refs: Vec<String> = t
+        .request
+        .iter()
+        .filter(|(k, _)| k == "refs")
+        .map(|(_, v)| resolve(v, base))
+        .collect();
+    eprintln!(
+        "N1 {} ticket_root={scope:?} refs={refs:?} root_cs={} blob={}",
+        file.display(),
+        hex(base.root_cs.as_bytes()),
+        hex(base.blob.as_bytes()),
+    );
+}
+
+#[test]
+fn the_n1_side_answers_as_its_files_say() {
+    let Ok(prev_bin) = std::env::var("PREV_BIN") else {
+        eprintln!("PREV_BIN unset: the N-1 legs run in the version-matrix job");
+        return;
+    };
+    let prev_bin = PathBuf::from(prev_bin);
+
+    // The logs must outlive a red run: the version-matrix job uploads
+    // /tmp/scion-matrix*/, so the work dir sits there, named for this
+    // run, and only a green run removes it.
+    let dir = std::env::temp_dir().join(format!("scion-matrix-n1-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("the work dir is made");
+    make_private(&dir);
+    eprintln!("the N-1 work dir: {}", dir.display());
+
+    let qualifying = n1_qualifying();
 
     // Leg 1: the qualifying files against the N-1 server and its tiers.
     let (db_guard, pg) = n1_database();
@@ -819,10 +873,16 @@ fn the_n1_side_answers_as_its_files_say() {
     let _entered = runtime.enter();
     let base = n1_fixture(&runtime, &stack.server);
     let mut ran = 0usize;
+    // What the N-1 server answers for the chain's ends: the ids a
+    // GetObjects file's refs name must be these.
+    n1_print_ids(&runtime, &stack.server, &base);
     for (file, t) in &qualifying {
         // The GetObjects file's refs name the root changeset's tree and
         // blob: the ticket must be that tree's, as the corpus's is.
         let ticket = n1_mint(&runtime, &stack.server, &base.root_cs);
+        if t.method == "Objects/GetObjects" {
+            n1_print_file(file, t, &base, &ticket);
+        }
         let f = Fixture {
             unsigned: unsigned_of(&ticket),
             ticket,
