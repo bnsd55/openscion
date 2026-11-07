@@ -1,0 +1,13 @@
+# A file with more versions than one call diffs: the reply names the
+# first page's changesets and answers a cursor for the rest.
+since: v0.1
+method: Scion/Blame
+fixture: landed
+
+request.repo: r
+request.changeset_id: $blame_head
+request.path: src/lines.txt
+
+status: ok
+entries: 100
+next_nonempty: true

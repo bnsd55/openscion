@@ -1,0 +1,12 @@
+# The walk's last page: the cursor is empty when the history ends.
+since: v0.1
+method: Scion/Log
+fixture: landed
+
+request.repo: r
+request.changeset_id: $cs_root
+request.limit: 1
+
+status: ok
+entries: 1
+next:

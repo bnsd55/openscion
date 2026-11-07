@@ -1,0 +1,13 @@
+# The first page of the walk: one entry, and the cursor names the
+# changeset the next call starts at.
+since: v0.1
+method: Scion/Log
+fixture: landed
+
+request.repo: r
+request.changeset_id: $cs
+request.limit: 1
+
+status: ok
+entries: 1
+next: $cs_mid
