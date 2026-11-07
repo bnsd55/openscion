@@ -529,12 +529,17 @@ batch() {
   nstat -az TcpExtListenOverflows TcpExtListenDrops > "$WORK/$name.nstat.0" 2>/dev/null || \
     netstat -s > "$WORK/$name.nstat.0" 2>/dev/null || true
   # The job's number drives the stagger, and its path is the checkout
-  # target, so sh gets both: $3 is the number, $2 the command, and $1 the
-  # path that the command's own "$1" reads.
+  # target, so sh gets all three: $3 is the number, $2 the command, $1
+  # the path that the command's own "$1" reads, and $4 the batch's job
+  # count (the count is a shell local; a child cannot see it, and
+  # without it the sleep line dies and every job starts at once). The
+  # slot form is two decimals, so the count caps at 99: at 100+ the
+  # form folds ("0.100" reads as 0.1 s) and the pace breaks.
+  [ "$jobs" -le 99 ] || die "batch: $jobs jobs breaks the two-decimal stagger cap (99)"
   local rc=0
   seq 1 "$jobs" | /usr/bin/time -p xargs -P "$jobs" -I{} sh -c \
-    'sleep "$(printf "0.%02ds" $(( ($3 - 1) % $jobs )))"; eval "$2"' \
-    sh "$WORK/$name/{}" "$cmd" {} \
+    'sleep "$(printf "0.%02d" $(( ($3 - 1) % $4 )))"; eval "$2"' \
+    sh "$WORK/$name/{}" "$cmd" {} "$jobs" \
     > "$WORK/$name.log" 2>&1 || rc=$?
   # The counters land even when the batch failed: an overflow during a
   # failed batch is exactly the evidence the run exists for.
