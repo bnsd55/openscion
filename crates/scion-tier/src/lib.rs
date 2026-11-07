@@ -1092,10 +1092,19 @@ impl<S: Store> Tier<S> {
         }
         // The window the claim may cover: from one batch behind `i` - a
         // batch tiles from `fetched_to`, which is at least `i` - 127 here -
-        // to one batch ahead.
+        // to one batch ahead. One store call for the whole window: a sync
+        // size check per key would be up to 255 round trips to the store
+        // on this worker.
         let from = i.saturating_sub(MAX_BATCH - 1);
         let to = keys.len().min(i + MAX_BATCH);
-        let has: Vec<bool> = (from..to).map(|j| stored(&keys[j].0)).collect();
+        let window: Vec<Key> = keys[from..to].iter().map(|(key, _)| *key).collect();
+        let has: Vec<bool> = self
+            .inner
+            .store
+            .sizes(&window)
+            .into_iter()
+            .map(|stored| matches!(stored, Ok(Some(_))))
+            .collect();
         let mut flights = lock(&self.inner.flights);
         if flights.contains_key(key) {
             // Another reply's fetch got this key: join, and fetch nothing
@@ -2376,6 +2385,105 @@ mod tests {
             request_id: None,
             stalled: None,
         }
+    }
+
+    /// A store that counts how the claim path asks it: `size` per key, and
+    /// `sizes` per window.
+    struct Probe {
+        memory: MemoryStore,
+        size_calls: Arc<AtomicUsize>,
+        sizes_calls: Arc<AtomicUsize>,
+    }
+
+    impl Store for Probe {
+        fn size(&self, key: Key) -> io::Result<Option<usize>> {
+            self.size_calls.fetch_add(1, Ordering::SeqCst);
+            self.memory.size(key)
+        }
+
+        fn sizes(&self, keys: &[Key]) -> Vec<io::Result<Option<usize>>> {
+            self.sizes_calls.fetch_add(1, Ordering::SeqCst);
+            self.memory.sizes(keys)
+        }
+
+        fn get(&self, key: Key, size: usize) -> io::Result<Option<Bytes>> {
+            self.memory.get(key, size)
+        }
+
+        fn put(&self, key: Key, data: &Bytes) -> io::Result<()> {
+            self.memory.put(key, data)
+        }
+    }
+
+    /// One claim's window scan is one store call, not one per key: the
+    /// scan of a full window is up to [`MAX_BATCH`] x 2 - 1 keys, and it
+    /// runs on the async worker.
+    #[tokio::test]
+    async fn a_claims_window_scan_asks_the_store_once() {
+        // 300 keys the store lacks: the claim at 130 scans the window
+        // 3..258, 255 keys, under the early single-key check.
+        let keys: Vec<Key> = (0u32..300)
+            .map(|i| Key::Blob(BlobId::of(i.to_le_bytes().as_slice())))
+            .collect();
+        let key_ed = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+        let ticket =
+            scion_proto::ticket::sign(&key_ed, "r", "test", [7; 32], scion_proto::ticket::now())
+                .unwrap();
+        let ticket = scion_proto::ticket::parse(
+            &ticket,
+            &[key_ed.verifying_key()],
+            scion_proto::ticket::now(),
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let fake = Fake {
+            objects: Arc::new(HashMap::new()),
+            key: key_ed.clone(),
+            root: TreeId::from_bytes([7; 32]),
+            asked: Arc::default(),
+            largest: Arc::default(),
+            calls: Arc::default(),
+        };
+        tokio::spawn(
+            Server::builder()
+                .add_service(ObjectsServer::new(fake))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        let probe = Probe {
+            memory: MemoryStore::new(1 << 20),
+            size_calls: Arc::new(AtomicUsize::new(0)),
+            sizes_calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let size_calls = Arc::clone(&probe.size_calls);
+        let batch_calls = Arc::clone(&probe.sizes_calls);
+        let tier = Tier::new(
+            probe,
+            &url,
+            "token",
+            CACHE_UPSTREAM_TIMEOUT,
+            None,
+            vec![key_ed.verifying_key()],
+        )
+        .unwrap();
+        let ask = Ask {
+            repo: "r".to_owned(),
+            walk: Arc::new(Mutex::new(scion_proto::ticket::Walker::new([7; 32]))),
+            ticket,
+            keys: keys.iter().map(|key| (*key, b"f".to_vec())).collect(),
+            zstd: false,
+            until: Until::NONE,
+            request_id: None,
+            stalled: None,
+        };
+        let later = tier.claim(&ask, 130, &Progress::default());
+        // The claim starts the batch at its own index (the boundary is at
+        // 0, more than a batch behind), so it holds 258 - 131 = 127 keys;
+        // the window it scanned is wider: 255 keys, from one batch behind
+        // to one ahead.
+        assert_eq!(later.len(), 127, "the claim holds its batch");
+        assert_eq!(batch_calls.load(Ordering::SeqCst), 1, "one window call");
+        assert_eq!(size_calls.load(Ordering::SeqCst), 1, "one key check");
     }
 
     #[tokio::test]

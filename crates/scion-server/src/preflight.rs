@@ -165,7 +165,9 @@ fn database_checks(
             "store pairing",
             Answer::Fail("the schema's state does not read".to_owned()),
         ));
-        answers.push(("one-server lock", live_server(db)));
+        // No one-server lock line: it would answer warn for the same
+        // condition the run already fails on, and a reader of the line's
+        // level would disagree with the run's verdict.
         return;
     };
 
@@ -1264,6 +1266,49 @@ mod tests {
             raw.batch_execute(&format!("DROP SCHEMA IF EXISTS {fresh}"))
                 .unwrap();
         }
+    }
+
+    /// A search path that names no schema fails the schema check twice,
+    /// and answers nothing else: the one-server lock line would warn for
+    /// the same condition the run fails on, and a reader of the line's
+    /// level would disagree with the verdict.
+    #[test]
+    fn a_missing_schema_fails_and_answers_no_lock_line() {
+        let lock = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_memory, ()) = MemoryOverride::set(&lock);
+        let (dir, _url) = ready_store();
+        let base = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let sep = if base.contains('?') { '&' } else { '?' };
+        let url = url_file(
+            dir.path(),
+            &format!("{base}{sep}options=--search_path%3Dno_such_schema"),
+        );
+        let report = run_cli(dir.path(), Some(&url));
+        assert_eq!(
+            report.code, 2,
+            "a missing schema fails the run:\n{:#?}",
+            report.lines
+        );
+        assert!(
+            line(&report, "schema version").starts_with("fail"),
+            "the schema check fails:\n{:#?}",
+            report.lines
+        );
+        assert!(
+            line(&report, "store pairing").starts_with("fail"),
+            "the pairing check fails:\n{:#?}",
+            report.lines
+        );
+        assert!(
+            !report
+                .lines
+                .iter()
+                .any(|line| line.contains("one-server lock")),
+            "no lock line for a run that already fails:\n{:#?}",
+            report.lines
+        );
     }
 
     /// A filesystem that does not answer fails: the numbers are the
