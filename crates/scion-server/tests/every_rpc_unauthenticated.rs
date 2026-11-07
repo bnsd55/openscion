@@ -1,8 +1,11 @@
 //! Every RPC of both services answers `UNAUTHENTICATED` to a call that
-//! carries no token or a wrong token, and none of the calls has a side
-//! effect. The list of RPCs comes from `proto/scion.proto` itself: a new
-//! RPC without a row here fails this test, so a new method cannot land
-//! without auth coverage.
+//! carries no token or a wrong token, and a ticket-bearing method answers
+//! `PERMISSION_DENIED` to a ticket with a flipped signature byte. None of
+//! the calls has a side effect. The list of RPCs comes from the descriptor
+//! set this build compiled (`scion_proto::descriptor_set`), not from a hand
+//! parse of the proto text: a new RPC without a row here fails this test,
+//! so a new method cannot land without auth coverage, even one a text
+//! parse would miss.
 
 use scion_proto::runtime::auth::token_digest;
 use scion_proto::runtime::listen::Limits;
@@ -334,39 +337,50 @@ fn rows() -> Vec<Row> {
     ]
 }
 
-/// The `(service, rpc)` pairs that `proto/scion.proto` declares, and the
-/// service names the generated code claims. A new RPC without a row
-/// fails the test; so does a row whose RPC is gone.
-fn declared() -> (Vec<(String, String)>, Vec<String>) {
-    // The proto of the repository: the same file the build compiles.
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../proto/scion.proto");
-    let text = std::fs::read_to_string(&path).expect("proto/scion.proto is readable");
-    let package = text
-        .lines()
-        .map(str::trim)
-        .find_map(|line| {
-            line.strip_prefix("package ")
-                .and_then(|rest| rest.strip_suffix(';'))
-        })
-        .expect("the proto declares a package")
-        .to_owned();
-    let mut service = String::new();
+use prost::Message as _;
+use prost_types::FileDescriptorSet;
+
+type Rpcs = Vec<(String, String)>;
+
+/// The `(service, rpc)` pairs and the ticket-bearing methods that the
+/// build's descriptor set declares, and the service names the generated
+/// code claims. Both lists come from what the compiler saw: a new RPC or a
+/// new service is in the descriptor set as soon as it compiles, whatever
+/// the proto text looks like.
+fn declared() -> (Rpcs, Rpcs, Vec<String>) {
+    let bytes = scion_proto::descriptor_set();
+    let set = FileDescriptorSet::decode(bytes).expect("the build's descriptor set decodes");
     let mut declared = Vec::new();
-    for line in text.lines().map(str::trim) {
-        if let Some(name) = line
-            .strip_prefix("service ")
-            .and_then(|r| r.strip_suffix(" {"))
-        {
-            // The file's package makes the full name the generated code
-            // publishes as SERVICE_NAME.
-            service = format!("{package}.{}", name.trim());
-        } else if let Some(rest) = line.strip_prefix("rpc ") {
-            let name = rest.split('(').next().expect("rpc NAME(").trim().to_owned();
-            declared.push((service.clone(), name));
+    let mut ticket_rpcs = Vec::new();
+    for file in &set.file {
+        let package = file.package.clone().unwrap_or_default();
+        for service in &file.service {
+            let service_full = format!("{package}.{}", service.name.clone().unwrap_or_default());
+            for method in &service.method {
+                // A method whose request message carries a `ticket` field
+                // takes the ticket as its only permission (section 8 of
+                // docs/architecture.md): a bad ticket is PERMISSION_DENIED,
+                // not UNAUTHENTICATED. Requests are top-level messages of
+                // the same file.
+                let input = method.input_type.clone().unwrap_or_default();
+                let takes_ticket = file.message_type.iter().any(|message| {
+                    let full = format!(".{package}.{}", message.name.clone().unwrap_or_default());
+                    full == input
+                        && message
+                            .field
+                            .iter()
+                            .any(|field| field.name.as_deref() == Some("ticket"))
+                });
+                let name = method.name.clone().unwrap_or_default();
+                if takes_ticket {
+                    ticket_rpcs.push((service_full.clone(), name.clone()));
+                }
+                declared.push((service_full.clone(), name));
+            }
         }
     }
     let generated = vec![SCION_SERVICE.to_owned(), OBJECTS_SERVICE.to_owned()];
-    (declared, generated)
+    (declared, ticket_rpcs, generated)
 }
 
 /// The repo's state that the calls must not change: the version of
@@ -454,7 +468,7 @@ fn changeset_on(
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn every_rpc_answers_unauthenticated_without_a_valid_token() {
-    let (declared, generated) = declared();
+    let (declared, ticket_rpcs, generated) = declared();
     // The proto and the generated code agree on the services.
     for name in &generated {
         assert!(
@@ -555,6 +569,56 @@ async fn every_rpc_answers_unauthenticated_without_a_valid_token() {
             );
         }
     }
+    // The ticket-bearing methods: a real ticket minted through the right
+    // token, then the same request with one signature byte flipped and no
+    // token at all (the ticket is the only permission). A damaged ticket
+    // is PERMISSION_DENIED, per docs/protocol-v1.md: the ticket is
+    // missing, damaged, expired, or not signed by the server's keys.
+    let minted = ci
+        .objects
+        .get_root_tree(GetRootTreeRequest {
+            repo: REPO.into(),
+            changeset_id: root.as_bytes().to_vec(),
+        })
+        .await
+        .expect("the right token mints a read ticket")
+        .into_inner()
+        .ticket;
+    assert!(!minted.is_empty(), "the reply carries a ticket");
+    let mut flipped = minted.clone();
+    let last = flipped.len() - 1;
+    flipped[last] ^= 0x01; // The signature is the ticket's last 64 bytes.
+    for (service, rpc) in &ticket_rpcs {
+        let reply = match (service.as_str(), rpc.as_str()) {
+            ("scion.v1.Objects", "GetObjects") => {
+                let mut objects = none.objects.clone();
+                objects
+                    .get_objects(GetObjectsRequest {
+                        refs: vec![scion_proto::v1::ObjectRef {
+                            kind: scion_proto::v1::ObjectKind::Blob as i32,
+                            id: vec![0; 32],
+                            path: Vec::new(),
+                        }],
+                        accept: Vec::new(),
+                        ticket: flipped.clone(),
+                    })
+                    .await
+            }
+            other => unreachable!(
+                "a ticket-bearing RPC {other:?} without a call here: add one, so it cannot land without ticket coverage"
+            ),
+        };
+        let Err(status) = reply else {
+            panic!("{service}.{rpc}: a flipped-signature ticket went through")
+        };
+        assert_eq!(
+            status.code(),
+            Code::PermissionDenied,
+            "{service}.{rpc} with a damaged ticket: {}",
+            status.message()
+        );
+    }
+
     // No refused call moved a ref, stored a blob, or landed anything.
     let after = state_of(&store, dir.path()).await;
     assert_eq!(before, after, "a refused call changed the repo");
