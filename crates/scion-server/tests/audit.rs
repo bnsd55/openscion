@@ -5,6 +5,7 @@
 use scion_proto::runtime::auth::token_digest;
 use scion_proto::runtime::listen::Limits;
 use scion_proto::v1::ResolveRefRequest;
+use scion_proto::v1::objects_client::ObjectsClient;
 use scion_proto::v1::scion_client::ScionClient;
 
 use scion_core::ChangesetId;
@@ -34,6 +35,7 @@ impl Interceptor for Bearer {
 }
 
 type Scion = ScionClient<InterceptedService<Channel, Bearer>>;
+type Objects = ObjectsClient<InterceptedService<Channel, Bearer>>;
 
 fn access() -> Access {
     let digest = blake3::Hash::from(token_digest("ci")).to_hex().to_string();
@@ -121,6 +123,14 @@ async fn client(url: &str, token: &str) -> Scion {
     ScionClient::with_interceptor(channel, Bearer(Some(value)))
 }
 
+async fn objects_client(url: &str, token: &str) -> Objects {
+    let channel = common::channel(url).await.unwrap();
+    let value = format!("Bearer {token}")
+        .parse()
+        .expect("a bearer header parses");
+    ObjectsClient::with_interceptor(channel, Bearer(Some(value)))
+}
+
 fn read_lines(path: &std::path::Path) -> Vec<serde_json::Value> {
     let bytes = std::fs::read(path).unwrap();
     String::from_utf8(bytes)
@@ -169,6 +179,62 @@ async fn refused_authentication_is_one_counted_line_per_peer_and_names_no_token(
     // never per call, and a port rotation cannot bury anyone.
     assert_eq!(refusals.len(), 1, "one line per address, not per call");
     assert_eq!(refusals[0]["count"], 40, "every refusal is counted");
+    assert_eq!(refusals[0]["peer"], "127.0.0.1");
+    let bytes = std::fs::read(&audit_path).unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(!text.contains(wrong), "the refused token never appears");
+    let digest = blake3::Hash::from(token_digest(wrong)).to_hex().to_string();
+    assert!(
+        !text.contains(&digest),
+        "the refused token's digest never appears"
+    );
+}
+
+/// The same stream on the Objects service's `ResolveRef`: every client
+/// read starts here, and a refused token must be counted and recorded
+/// exactly as the Scion service's refusal is - one line per peer, the
+/// count of every refusal, and never the token or its digest.
+#[tokio::test]
+async fn refused_authentication_on_the_objects_service_is_counted_like_the_scion_service_s_is() {
+    let dir = scion_server::test_support::private_tempdir();
+    let store = store(dir.path());
+    let audit_path = dir.path().join("audit.log");
+    let audit = Audit::open(&audit_path).unwrap();
+    audit
+        .record(Event::new(
+            "admin",
+            "ok",
+            serde_json::json!({ "what": "start" }),
+        ))
+        .await
+        .unwrap();
+    let (stop, url) = serve_with_audit(&store, dir.path(), access(), audit).await;
+
+    // Twenty refused calls on the read path's own service.
+    let wrong = "wrong-token-4e8b1d";
+    let mut objects = objects_client(&url, wrong).await;
+    for _ in 0..20 {
+        let err = objects
+            .resolve_ref(ResolveRefRequest {
+                repo: REPO.into(),
+                name: "main".into(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
+    }
+
+    // The stop flushes the meter's counts before the server ends.
+    stop.send(()).unwrap();
+    wait_for_lines(&audit_path, 2).await;
+
+    let lines = read_lines(&audit_path);
+    let refusals: Vec<_> = lines
+        .iter()
+        .filter(|line| line["event"] == "auth" && line["outcome"] == "refused")
+        .collect();
+    assert_eq!(refusals.len(), 1, "the Objects refusal is recorded");
+    assert_eq!(refusals[0]["count"], 20, "every refusal is counted");
     assert_eq!(refusals[0]["peer"], "127.0.0.1");
     let bytes = std::fs::read(&audit_path).unwrap();
     let text = String::from_utf8(bytes).unwrap();

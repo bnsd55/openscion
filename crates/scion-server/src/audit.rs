@@ -441,38 +441,6 @@ pub(crate) async fn meter_task(meter: Arc<Meter>, audit: Audit, mut stop: watch:
     }
 }
 
-/// The bearer-token check of [`Auth`], counting every refusal into the
-/// meter. The principal of an accepted call rides through unchanged.
-#[derive(Clone)]
-pub(crate) struct AuditedAuth {
-    inner: scion_proto::runtime::auth::Auth,
-    meter: Arc<Meter>,
-}
-
-impl AuditedAuth {
-    pub(crate) fn new(inner: scion_proto::runtime::auth::Auth, meter: Arc<Meter>) -> Self {
-        Self { inner, meter }
-    }
-}
-
-impl tonic::service::Interceptor for AuditedAuth {
-    fn call(&mut self, request: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
-        let key = request
-            .extensions()
-            .get::<scion_proto::runtime::listen::Stalled>()
-            .and_then(scion_proto::runtime::listen::Stalled::peer)
-            .map(|addr| meter_key(&addr))
-            .unwrap_or_default();
-        match self.inner.call(request) {
-            Err(status) => {
-                self.meter.count(&key);
-                Err(status)
-            }
-            ok => ok,
-        }
-    }
-}
-
 /// The unit the refusal meter keys by: the address, not the socket.
 /// One machine can open a thousand connections from a thousand ports,
 /// and each port would fill the peer cap for free and bury every real

@@ -89,6 +89,8 @@ pub(crate) struct ObjectsService {
     quotas: Quotas,
     /// The tokens of the server: every call of this service but
     /// `GetObjects` needs one. An object read's permission is its ticket.
+    /// The refusal sink rides on it, so a refused token is counted and
+    /// recorded the way the Scion service's is.
     auth: Auth,
     /// The keys that mint the tickets of `GetRootTree` replies. `None`
     /// keeps every object read closed: a reply then carries no ticket.
@@ -104,10 +106,11 @@ impl ObjectsService {
         quotas: Quotas,
         tickets: Option<Arc<Keys>>,
         metrics: Arc<Metrics>,
+        auth: Auth,
     ) -> Self {
         Self {
             worker,
-            auth: access.auth(),
+            auth,
             access,
             quotas,
             tickets,
@@ -382,8 +385,10 @@ impl Objects for ObjectsService {
         &self,
         mut request: Request<ResolveRefRequest>,
     ) -> Result<Response<ResolveRefResponse>, Status> {
-        // No interceptor on this service: `GetObjects` has none, and the
-        // service's token-checked calls name their caller themselves.
+        // The check is handler-side on this service (`GetObjects` carries
+        // no token, so the service has no interceptor), and the refusal
+        // records through the auth's own sink: the same counted line per
+        // peer the interceptor's refusals make.
         let caller = self.auth.caller_of(&request)?;
         request.extensions_mut().insert(caller);
         resolve_ref(&self.worker, &self.access, &self.quotas, request)

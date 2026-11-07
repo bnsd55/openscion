@@ -427,7 +427,6 @@ pub async fn serve(
         audit,
     } = options;
     let access = Arc::new(access.into());
-    let auth = access.auth();
     // The backend records into the registry: the Postgres pool's wait,
     // busy readers and tx age (which this task keeps fresh), and on both
     // backends the blob full flushes, the derive-walk gauges and the
@@ -471,6 +470,22 @@ pub async fn serve(
         audit.clone(),
         stop_rx.clone(),
     ));
+    // The one auth of the server, with the meter as its refusal sink:
+    // every refused token - the interceptor's and the Objects service's
+    // handler-side `caller_of` alike - counts here and flushes as one
+    // counted line per peer. A new service cannot skip the recording:
+    // it is inside the auth itself.
+    let auth = {
+        let meter = Arc::clone(&meter);
+        access
+            .auth()
+            .on_refusal(Arc::new(move |peer: Option<std::net::SocketAddr>| {
+                let key = peer
+                    .map(|addr| crate::audit::meter_key(&addr))
+                    .unwrap_or_default();
+                meter.count(&key);
+            }))
+    };
     tokio::spawn(pg_tx_age_sample(
         worker.store(),
         Arc::clone(&metrics),
@@ -518,12 +533,22 @@ pub async fn serve(
                 audit.clone(),
             )
             .into_server(),
-            crate::audit::AuditedAuth::new(auth.clone(), Arc::clone(&meter)),
+            auth.clone(),
         )),
     );
-    let objects = reply_memory.layer(MetricsLayer::new(Arc::clone(&metrics)).layer(
-        ObjectsService::new(worker, access, quotas, tickets, Arc::clone(&metrics)).into_server(),
-    ));
+    let objects = reply_memory.layer(
+        MetricsLayer::new(Arc::clone(&metrics)).layer(
+            ObjectsService::new(
+                worker,
+                access,
+                quotas,
+                tickets,
+                Arc::clone(&metrics),
+                auth.clone(),
+            )
+            .into_server(),
+        ),
+    );
     // The health service answers `grpc.health.v1.Check` and `Watch` on the
     // same port, without a token: a probe carries none. The store opens
     // before this call, so the server starts serving. A fence trip
@@ -3631,6 +3656,7 @@ mod tests {
             Quotas::off(),
             None,
             Arc::default(),
+            Access::single("t").auth(),
         ));
         (dir, store, service, objects, head, last)
     }
