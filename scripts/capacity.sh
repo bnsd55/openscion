@@ -141,9 +141,36 @@ pg_cpu_ms() {
     done
   fi
   [ -n "$cgroup" ] || return 0
-  usec=$(awk '/^usage_usec / { print $2 }' "/sys/fs/cgroup$cgroup/cpu.stat" 2> /dev/null)
+  # The container's scope may name a level the mount does not carry a
+  # cpu.stat at; walk up until one has the file.
+  usec=""
+  local probe="$cgroup"
+  while [ -n "$probe" ] && [ "$probe" != "/" ]; do
+    usec=$(awk '/^usage_usec / { print $2 }' "/sys/fs/cgroup$probe/cpu.stat" 2> /dev/null)
+    [ -n "$usec" ] && break
+    probe=$(dirname "$probe")
+  done
   [ -n "$usec" ] || return 0
   awk -v u="$usec" -v clk="$clk" 'BEGIN { printf "%d", u / 1000 }'
+}
+
+# wal_fsync_ms: the WAL's own fsync milliseconds since the server's
+# start, from pg_stat_wal.wal_sync_time - the mechanism behind a slow
+# land, measured directly (Postgres needs track_wal_io_timing=on,
+# which the capacity job's service turns on; without it the column is
+# empty and the sampler stays silent). The connection rides
+# SCION_TEST_POSTGRES_URL, the workflow's own env.
+wal_fsync_ms() {
+  local url=${SCION_TEST_POSTGRES_URL:-}
+  [ -n "$url" ] || return 0
+  local cred=${url#postgres://}
+  cred=${cred%%@*}
+  local userpass=${cred%%:*} pass=${cred#*:}
+  local hostport=${url#*@}; hostport=${hostport%%/*}
+  PGPASSWORD=$pass PGGSSENCMODE=disable psql -h "${hostport%%:*}" \
+    -p "${hostport##*:}" -U "$userpass" -d postgres -Atqc \
+    "SELECT wal_sync_time FROM pg_stat_wal" 2> /dev/null |
+    awk '{ if ($1 ~ /^[0-9.]+$/) printf "%d", $1 * 1000 }'
 }
 
 # bench_cpu_ms PID CLK: the bench client's CPU milliseconds. One bench
@@ -253,8 +280,9 @@ sample_cell() {
     disk_line=$(probe disk disk_ms)
     cur_disk_read=${disk_line%% *}
     cur_disk_write=${disk_line#* }
+    cur_wal=$(probe wal-fsync wal_fsync_ms)
     load1=$(cut -d ' ' -f 1 /proc/loadavg)
-    printf '%s,%s,%s,%s,%s,%s,%s,"%s",%s,%s\n' \
+    printf '%s,%s,%s,%s,%s,%s,%s,"%s",%s,%s,%s\n' \
       "$tick" \
       "$(awk -v a="$cur_server" -v b="$prev_server" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
       "$(awk -v a="$cur_pg" -v b="$prev_pg" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
@@ -263,12 +291,14 @@ sample_cell() {
       "$(awk -v a="$cur_bench" -v b="$prev_bench" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
       "$load1" \
       "$(probe pg-waits pg_waits)" \
+      "$(awk -v a="$cur_wal" -v b="$prev_wal" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
       "$(awk -v a="$cur_disk_read" -v b="$prev_disk_read" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
       "$(awk -v a="$cur_disk_write" -v b="$prev_disk_write" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
       >> "$out"
     prev_server=$cur_server; prev_pg=$cur_pg; prev_cache=$cur_cache
     prev_daemon=$cur_daemon; prev_bench=$cur_bench
     prev_disk_read=$cur_disk_read; prev_disk_write=$cur_disk_write
+    prev_wal=$cur_wal
     sleep 1
   done
 }
