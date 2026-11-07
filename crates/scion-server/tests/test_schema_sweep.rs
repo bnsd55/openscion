@@ -853,6 +853,14 @@ fn a_write_that_loses_the_lane_key_answers_busy_and_leaves_no_transaction_open()
     );
 }
 
+/// Restores the const's bound when the proof ends, panic included.
+struct ResetWait;
+impl Drop for ResetWait {
+    fn drop(&mut self) {
+        Backend::set_clean_lock_wait_secs(0);
+    }
+}
+
 /// A holder that lives but does not move: another connection holds
 /// `CLEAN_LOCK` past the preparation's bound, and the open must fail in
 /// bounded time with `CLEAN_LOCK`'s name in the error, not hang (#965).
@@ -863,6 +871,12 @@ fn a_write_that_loses_the_lane_key_answers_busy_and_leaves_no_transaction_open()
 #[test]
 fn an_open_behind_a_held_cleanup_lock_fails_bounded_and_names_it() {
     let _lock = locked();
+    // The bound is the production const's, 120 s; this proof sets its
+    // own short one so the test stays fast. It rides the sweep tests'
+    // pairwise lock (taken above), so the override cannot reach
+    // another test's wait, and the guard restores the const's.
+    Backend::set_clean_lock_wait_secs(3);
+    let _reset = ResetWait;
     let mut holder = connect();
     holder
         .batch_execute(&format!("SELECT pg_advisory_lock({CLEAN_LOCK})"))
@@ -883,7 +897,7 @@ fn an_open_behind_a_held_cleanup_lock_fails_bounded_and_names_it() {
             .err()
             .expect("the open behind a held CLEAN_LOCK must fail");
         assert!(
-            took >= std::time::Duration::from_secs(10),
+            took >= std::time::Duration::from_secs(2),
             "the open gave up before its bound: {took:?}"
         );
         assert!(

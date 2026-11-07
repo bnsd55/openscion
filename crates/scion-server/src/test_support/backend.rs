@@ -142,6 +142,15 @@ impl Backend {
         Self::open_test_with_readers(data, PG_TEST_READERS)
     }
 
+    /// Sets the test's own short cleanup-lock bound, in seconds, so the
+    /// red proof of the bound stays fast; 0 restores the const's. The
+    /// caller holds the override until it sets 0 back - drop a guard.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_clean_lock_wait_secs(secs: u64) {
+        crate::pg::test_hooks::set_clean_lock_wait_for_test(secs);
+    }
+
     /// [`Backend::open_test`], with the reader pool the caller names: the
     /// tests of a pool's cap need the server's pool size, while the rest
     /// of the suite runs far under it so the test database's
