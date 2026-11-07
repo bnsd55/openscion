@@ -151,14 +151,18 @@ bench_cpu_ms() {
 }
 
 # disk_ms: the work disk's read and write milliseconds since boot, from
-# /proc/diskstats (the device that holds $WORK, field 7 and 11).
+# /proc/diskstats (the device that holds $WORK, field 7 and 11). The
+# device rides the directory's st_dev (stat -c %d splits into major and
+# minor), not df's name: the runner's work directory sits on an overlay
+# whose df name is not a diskstats row, and a grep on it would never
+# match - the sampler's first death, silently, under set -e.
 disk_ms() {
-  local dev maj min
-  dev=$(df "$WORK" | awk 'NR == 2 { print $1 }')
-  maj=${dev%/*}; maj=${maj#/dev/}; min=${dev#*/dev/}
-  maj=${maj%%[0-9]}; [ -n "$maj" ] || return 0
-  grep "^ $maj $min " /proc/diskstats 2> /dev/null |
-    awk '{ print $7, $11 }'
+  local d maj min line
+  d=$(stat -c %d "$WORK" 2> /dev/null) || return 0
+  [ -n "$d" ] || return 0
+  maj=$((d >> 8)); min=$((d & 0xff))
+  line=$(grep "^ $maj $min " /proc/diskstats 2> /dev/null) || return 0
+  awk '{ print $7, $11 }' <<< "$line"
 }
 
 # pg_waits: the Postgres's wait-event counts, one `type:count` group
@@ -182,6 +186,11 @@ pg_waits() {
 # milliseconds in the past second. A tier that died mid-cell carries
 # empty CPU fields from then on: a gap is data, not a crash.
 sample_cell() {
+  # The sampler is a best-effort observer and runs its own shell: the
+  # probes are best-effort too, so their failures are gaps (empty
+  # fields), never a death. The parent's set -euo pipefail stays off
+  # in here; a probe that fails leaves the row's field empty.
+  set +euo pipefail
   local w=$1 r=$2 out="$WORK/samples-w$w-r$r.csv"
   local clk
   clk=$(getconf CLK_TCK)
