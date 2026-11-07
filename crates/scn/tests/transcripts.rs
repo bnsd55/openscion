@@ -361,7 +361,7 @@ fn remember_cursor(t: &Transcript, cursor: Vec<u8>) {
 
 /// The cursor a `cursor_from` file sends: the reply of the file it
 /// names. Empty when that file has not run - a wiring mistake.
-fn cursor_of(t: &Transcript, source: &str) -> Vec<u8> {
+fn cursor_of(source: &str) -> Result<Vec<u8>, String> {
     let name = std::path::Path::new(source)
         .file_name()
         .expect("the source has a name")
@@ -372,7 +372,7 @@ fn cursor_of(t: &Transcript, source: &str) -> Vec<u8> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(&name)
         .cloned()
-        .unwrap_or_else(|| panic!("{} resumes {} before it ran", t.path, source))
+        .ok_or_else(|| format!("CURSOR_FROM names {source}, which has not run in this pass"))
 }
 
 /// A parsed `kind=... id=...` item of a stream.
@@ -668,6 +668,48 @@ fn run_objects_across_tiers(
     }
 }
 
+/// Every `cursor_from` names a file in the corpus whose since is the
+/// same or older, so the source runs (or skips) beside its dependent in
+/// every pass, never leaves it without a cursor.
+fn check_cursor_sources(files: &[PathBuf]) -> Result<(), String> {
+    let mut sinces: std::collections::HashMap<String, (u64, u64, u64)> =
+        std::collections::HashMap::new();
+    for file in files {
+        let text = fs::read_to_string(file).expect("the transcript opens");
+        let name = file
+            .file_name()
+            .expect("the file has a name")
+            .to_string_lossy()
+            .to_string();
+        sinces.insert(name, version_of(&parse(file, &text).since));
+    }
+    for file in files {
+        let text = fs::read_to_string(file).expect("the transcript opens");
+        let t = parse(file, &text);
+        for (k, v) in &t.expect {
+            if k != "cursor_from" {
+                continue;
+            }
+            let name = std::path::Path::new(v)
+                .file_name()
+                .expect("the source has a name")
+                .to_string_lossy()
+                .to_string();
+            let source = sinces
+                .get(&name)
+                .ok_or_else(|| format!("CURSOR_FROM names {v}, which is not in the corpus"))?;
+            let mine = version_of(&t.since);
+            if *source > mine {
+                return Err(format!(
+                    "CURSOR_FROM names {v}, whose since is newer than {}'s",
+                    file.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn the_corpus_answers_as_its_files_say() {
     let corpus = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -681,6 +723,7 @@ fn the_corpus_answers_as_its_files_say() {
         39,
         "the corpus pins 39 behaviours; a file added or removed must update this count"
     );
+    check_cursor_sources(&files).unwrap_or_else(|e| panic!("{e}"));
     // One store and one set of tiers for the whole run: the fixture is
     // the expensive part. Each file still mints its own ticket, right
     // before its calls, so a ticket at a call is always seconds old.
@@ -2181,7 +2224,7 @@ async fn run_blame(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> R
         }
     }
     let cursor = match t.expect.iter().find(|(k, _)| k == "cursor_from") {
-        Some((_, source)) => cursor_of(t, source),
+        Some((_, source)) => cursor_of(source)?,
         None => field(t, "cursor").unwrap_or_default().into_bytes(),
     };
     let req = scion_proto::v1::BlameRequest {
