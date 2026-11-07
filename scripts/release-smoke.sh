@@ -117,8 +117,12 @@ run_story() {
 
   # The server on a port the OS chooses: `--listen 127.0.0.1:0`, and the
   # log's `serving listen=` line names the port, so the story never races
-  # another test for a fixed port.
-  SCION_TOKEN=smoke SCION_POSTGRES_URL="$PG_URL" "$BIN/scion-server" --data "$WORK/server" serve \
+  # another test for a fixed port. The gate dir rides along as the
+  # release build's own check: a release build has no land gates, so the
+  # land below must finish with no pause marker ever written.
+  mkdir -p "$WORK/gates"
+  SCION_TOKEN=smoke SCION_POSTGRES_URL="$PG_URL" SCION_TEST_GATE_DIR="$WORK/gates" \
+    "$BIN/scion-server" --data "$WORK/server" serve \
     --listen 127.0.0.1:0 --ticket-key "$WORK/ticket.key" \
     >"$WORK/server.log" 2>&1 &
   SERVER_PID=$!
@@ -168,6 +172,16 @@ run_story() {
   "$BIN/scn" cat main:hello.txt >"$WORK/hello.out"
   grep -q '^hello from the release smoke test$' "$WORK/hello.out" \
     || die "step 'land' did not move main (umask $UMASK_RUN)"
+  # The release build has no land gates: the pause dir proves only that
+  # the gate dir was never used, because without an arm file the gate
+  # returns before it can pause. The binary itself proves the build: a
+  # release binary carries no gate variables, so the name must not
+  # appear in it.
+  if grep -aq SCION_TEST_GATE_DIR "$BIN/scion-server"; then
+    die "the release binary carries the land-gate variables (umask $UMASK_RUN)"
+  fi
+  [ -z "$(ls -A "$WORK/gates/pause" 2>/dev/null)" ] \
+    || die "the release build paused at a land gate (umask $UMASK_RUN)"
 
   # fsck while the server runs, as the README says is safe: it must be
   # clean. Its exit code says so (0 clean, 1 damage, 2 cannot run).

@@ -259,6 +259,42 @@ impl Server {
         Self::spawn_on("One server", data, log)
     }
 
+    /// Starts a server with extra environment for the child, waited until
+    /// it listens: the land model's gate variables ride here, so a gate
+    /// dir names the run's own temp dir and no other test's spawn sees
+    /// it. The backend proof is `start`'s, unchanged.
+    pub(crate) fn start_with_env(data: &Path, log: &Path, vars: &[(&str, &Path)]) -> Self {
+        let url = postgres_url(data);
+        let mut server = Self::spawn_with_url_and_env("One server", data, Some(&url), log, vars);
+        // Only this start's lines are its business, and the CI log
+        // renderer truncates a long panic message - so a failed start
+        // reports the lines the server itself wrote, whose tail carries
+        // the exit's reason, not the whole shared log.
+        let mark = usize::try_from(fs::metadata(log).map_or(0, |m| m.len()))
+            .expect("the log's length fits usize");
+        let start = Instant::now();
+        while !server.listens(log) {
+            if let Some(status) = server.child.try_wait().unwrap() {
+                panic!("{}", exit_report(log, mark, status));
+            }
+            assert!(start.elapsed() < Duration::from_secs(60), "no listen");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        {
+            let marker = fs::read_to_string(data.join("backend")).unwrap_or_default();
+            assert_eq!(
+                marker.lines().next(),
+                Some("postgres"),
+                "the server is not Postgres-backed: marker {marker:?}"
+            );
+            assert!(
+                !data.join("scion.db").exists(),
+                "a Postgres-backed server must not keep a SQLite database"
+            );
+        }
+        server
+    }
+
     pub(crate) fn spawn_on(heading: &'static str, data: &Path, log: &Path) -> Self {
         let url = postgres_url(data);
         Self::spawn_with_url(heading, data, Some(&url), log)
@@ -326,6 +362,16 @@ impl Server {
         postgres_url: Option<&str>,
         log: &Path,
     ) -> Self {
+        Self::spawn_with_url_and_env(heading, data, postgres_url, log, &[])
+    }
+
+    pub(crate) fn spawn_with_url_and_env(
+        heading: &'static str,
+        data: &Path,
+        postgres_url: Option<&str>,
+        log: &Path,
+        vars: &[(&str, &Path)],
+    ) -> Self {
         // The binary refuses a missing data directory (#578); the harness
         // is for servers that serve, so it makes the directory the way
         // the runbook's operator does: private.
@@ -387,6 +433,11 @@ impl Server {
             // flag), so the spawn carries it whatever the subcommand.
             if let Some(url) = &postgres_url {
                 cmd.env("SCION_POSTGRES_URL", url);
+            }
+            // The test-hooks seams that name a directory of their own: the
+            // value is the caller's own temp dir, never another test's.
+            for (name, value) in vars {
+                cmd.env(name, value);
             }
             cmd.args(serve_args);
             // Plain log lines, so the address parses without escape
@@ -486,6 +537,32 @@ impl Drop for Server {
 /// count.
 pub(crate) fn start_after_kill(data: &Path, log: &Path) -> (Server, u64) {
     spawn_until_lock_free(data, log, || Server::spawn(data, log))
+}
+
+/// Restarts a killed server with extra environment. A run that arms gate
+/// points must arm them on the restart too: a restarted server without
+/// the gate dir never parks, and a later awaitgate would wait on an arm
+/// that cannot fire.
+pub(crate) fn start_after_kill_with_env(
+    data: &Path,
+    log: &Path,
+    vars: Option<&std::path::PathBuf>,
+) -> (Server, u64) {
+    let vars: Vec<(String, String)> = vars
+        .map(|dir| {
+            vec![(
+                "SCION_TEST_GATE_DIR".to_owned(),
+                dir.to_string_lossy().into_owned(),
+            )]
+        })
+        .unwrap_or_default();
+    let vars: Vec<(&str, &Path)> = vars
+        .iter()
+        .map(|(k, v)| (k.as_str(), Path::new(v.as_str())))
+        .collect();
+    spawn_until_lock_free(data, log, || {
+        Server::spawn_with_url_and_env("One server", data, Some(&postgres_url(data)), log, &vars)
+    })
 }
 
 /// Spawns a server - however the caller builds it - and waits until it
@@ -1084,6 +1161,23 @@ impl LandsReader {
         Self {
             client: Some(client),
         }
+    }
+
+    /// The state of one land by its request key, or `None` when no row
+    /// carries it (the land's record still runs).
+    pub(crate) fn state_of_key(&mut self, key: &str) -> Option<String> {
+        let c = self.client.as_mut().expect("the reader's client is open");
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let row = c.query_opt(
+                    "SELECT state::text FROM lands WHERE request_key = $1",
+                    &[&key],
+                );
+                row.unwrap().map(|row| row.get::<_, String>(0))
+            })
+            .join()
+            .unwrap()
+        })
     }
 
     /// The total land rows the server's backend holds, and the pending

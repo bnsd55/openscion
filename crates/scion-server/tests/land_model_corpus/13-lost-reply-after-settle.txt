@@ -1,0 +1,11 @@
+# the reply is lost after the settle commits: the land parks with its
+# move already durable, the resume lets the call finish, the abandon
+# drops the call before its reply is read, and the retry with the same
+# request key answers the same land ID, LANDED, from the ledger
+land 0 0 0 0
+landnow 1 0 0 settled
+awaitgate 1 settled
+resume 1 settled
+abandon 1
+retry 1 1
+check
