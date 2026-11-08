@@ -1253,12 +1253,18 @@ mod tests {
     fn a_bare_destination_name_uses_the_working_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = std::env::current_dir().unwrap();
+        // This is the scn suite's only cwd change, and it is process-
+        // global: the other tests must keep absolute paths, as they do
+        // today. The work runs in one closure so a failure cannot leave
+        // the later tests in the wrong directory.
         std::env::set_current_dir(tmp.path()).unwrap();
-        let mut checkout = Checkout::start(Path::new("foo")).unwrap();
-        checkout.file(&path("f"), false, b"f\n").unwrap();
-        let done = checkout.finish();
+        let written = (|| {
+            let mut checkout = Checkout::start(Path::new("foo"))?;
+            checkout.file(&path("f"), false, b"f\n")?;
+            checkout.finish()
+        })();
         std::env::set_current_dir(cwd).unwrap();
-        done.unwrap();
+        written.unwrap();
         assert_eq!(fs::read(tmp.path().join("foo").join("f")).unwrap(), b"f\n");
     }
 
