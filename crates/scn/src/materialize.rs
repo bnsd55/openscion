@@ -1162,6 +1162,85 @@ mod tests {
         Ok(checkout)
     }
 
+    /// The exit message names the temp directory a dropped checkout is
+    /// removing: `removing` reads what `set_removing` wrote (#1014).
+    #[test]
+    fn the_removal_marker_names_the_temp_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let temp = tmp.path().join("scn-temp-x");
+        set_removing(Some(temp.clone()));
+        assert_eq!(removing(), Some(temp));
+        set_removing(None);
+        assert_eq!(removing(), None);
+    }
+
+    /// On NFS version 3 the rename that moved the temp directory to a
+    /// missing destination loses its reply: the call worked, and the
+    /// client sees ENOENT. The checkout must answer with success when
+    /// the inode moved (#1014).
+    #[test]
+    fn a_new_destination_survives_a_lost_rename_reply() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("dest");
+        let mut checkout = start(&dest, Some(Nfs::ReplyLost), false).unwrap();
+        checkout.file(&path("f"), false, b"f\n").unwrap();
+        checkout.finish().unwrap();
+        assert_eq!(fs::read(dest.join("f")).unwrap(), b"f\n");
+    }
+
+    /// A missing destination with more than one part is created in its
+    /// own parent: the temp directory starts next to `dest`, not in the
+    /// process's working directory. The cwd is process-wide, the same
+    /// note #1019's bare-name test carries (#1014).
+    #[test]
+    fn a_missing_nested_destination_is_created_in_its_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("a").join("b").join("c");
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        let mut checkout = start(&dest, None, false).unwrap();
+        checkout.file(&path("f"), false, b"f\n").unwrap();
+        checkout.finish().unwrap();
+        assert_eq!(fs::read(dest.join("f")).unwrap(), b"f\n");
+        assert_eq!(temp_dirs(dest.parent().unwrap()), Vec::<String>::new());
+    }
+
+    /// A name that folds onto a made directory collides: the checkout
+    /// must refuse it, not take the folded directory for a lost reply.
+    /// The fold only exists where the filesystem folds case, so this
+    /// runs on macOS and skips where the tree at hand does not fold.
+    /// The mutants workflow's macOS job runs it (#1014).
+    #[test]
+    fn a_directory_that_folds_onto_a_made_one_collides() {
+        let tmp = tempfile::tempdir().unwrap();
+        // The runtime probe: if the tree at hand does not fold case,
+        // there is nothing for this test to see.
+        fs::write(tmp.path().join("Probe"), b"").unwrap();
+        if !tmp.path().join("probe").exists() {
+            return;
+        }
+        let dest = tmp.path().join("dest");
+        fs::create_dir(&dest).unwrap();
+        let mut checkout = start(&dest, None, false).unwrap();
+        checkout.file(&path("Sub/x"), false, b"x\n").unwrap();
+        let err = checkout
+            .file(&path("sub/y"), false, b"y\n")
+            .expect_err("a name folding onto a made directory must collide");
+        assert!(err.to_string().contains("collides"), "{err:?}");
+    }
+
+    /// Without hard links the copy keeps the tree's mode: a non-
+    /// executable file does not gain bits on the way up (#1014).
+    #[test]
+    fn a_copied_up_file_keeps_the_tree_s_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("dest");
+        fs::create_dir(&dest).unwrap();
+        let mut checkout = start(&dest, Some(Nfs::Plain), true).unwrap();
+        checkout.file(&path("f"), false, b"f\n").unwrap();
+        checkout.finish().unwrap();
+        assert_eq!(mode(&dest.join("f")) & 0o777, 0o644);
+    }
+
     #[test]
     fn an_existing_empty_directory_is_kept() {
         existing_empty_directory_is_kept(None, false);
