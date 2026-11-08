@@ -402,6 +402,7 @@ fn store_changeset_impl(
     // batching owns both shapes already — its pending buffer answers
     // the reads and its flush deletes once per kind — so it keeps them.
     if !c.changeset_batching() {
+        let _guard = crate::land_profile::Guard::enter(crate::land_profile::Phase::PreloadDerived);
         c.defer_derived_deletes();
         let mut css = cs.parents().to_vec();
         css.push(cs.id());
@@ -418,40 +419,53 @@ fn store_changeset_impl(
     let base = cs
         .parents()
         .first()
-        .map(|&parent| match deadline {
-            Some(deadline) => derive_root_tree_within(c, repo, parent, lens, deadline),
-            None => derive_root_tree(c, repo, parent, lens),
+        .map(|&parent| {
+            let _guard = crate::land_profile::Guard::enter(crate::land_profile::Phase::DeriveRoot);
+            match deadline {
+                Some(deadline) => derive_root_tree_within(c, repo, parent, lens, deadline),
+                None => derive_root_tree(c, repo, parent, lens),
+            }
         })
         .transpose()?;
-    let tree = match deadline {
-        Some(deadline) => apply_within(c, base, cs.changes(), lens, deadline),
-        None => apply(c, base, cs.changes(), lens),
-    }?;
-    let id = c.insert_changeset(repo, cs)?;
-    // One round trip for every blob the changeset puts, however many
-    // paths name the same one.
-    let mut puts: Vec<BlobId> = db::puts(cs).map(|(_, blob)| blob).collect();
-    puts.sort();
-    puts.dedup();
-    c.add_repo_blobs(repo, &puts)?;
-    // The three derived rows land in one statement: the rows are of
-    // this transaction's own changeset, so the batch's conflict guard
-    // keeps the single put's meaning, and the reads above answered from
-    // the preload before any row lands.
-    let mut rows = Vec::new();
-    derived::put_row::<RootTree>(&mut rows, id, &tree);
-    derived::remove_old::<RootTree>(c)?;
-    derived::on_write_into::<CommitGraph>(&mut rows, c, id, cs, lens)?;
-    derived::on_write_into::<PathHistory>(&mut rows, c, id, cs, lens)?;
-    // The write path trims older versions of every kind it writes, not
-    // only the root tree's: after a version bump, the old rows clear as
-    // the store is written, not only when a fill step or a backfill
-    // walks their changesets (#949). The calls ride the deferral this
-    // transaction turned on (tree.rs above the preload), so the commit's
-    // one-statement flush carries them and no round trip moves.
-    derived::remove_old::<CommitGraph>(c)?;
-    derived::remove_old::<PathHistory>(c)?;
-    derived::put_all(c, rows)?;
+    let tree = {
+        let _guard = crate::land_profile::Guard::enter(crate::land_profile::Phase::ApplyTrees);
+        match deadline {
+            Some(deadline) => apply_within(c, base, cs.changes(), lens, deadline),
+            None => apply(c, base, cs.changes(), lens),
+        }?
+    };
+    let (id, tree) = {
+        let _guard = crate::land_profile::Guard::enter(crate::land_profile::Phase::InsertChangeset);
+        let id = c.insert_changeset(repo, cs)?;
+        // One round trip for every blob the changeset puts, however many
+        // paths name the same one.
+        let mut puts: Vec<BlobId> = db::puts(cs).map(|(_, blob)| blob).collect();
+        puts.sort();
+        puts.dedup();
+        c.add_repo_blobs(repo, &puts)?;
+        (id, tree)
+    };
+    {
+        let _guard = crate::land_profile::Guard::enter(crate::land_profile::Phase::PutDerived);
+        // The three derived rows land in one statement: the rows are of
+        // this transaction's own changeset, so the batch's conflict guard
+        // keeps the single put's meaning, and the reads above answered from
+        // the preload before any row lands.
+        let mut rows = Vec::new();
+        derived::put_row::<RootTree>(&mut rows, id, &tree);
+        derived::remove_old::<RootTree>(c)?;
+        derived::on_write_into::<CommitGraph>(&mut rows, c, id, cs, lens)?;
+        derived::on_write_into::<PathHistory>(&mut rows, c, id, cs, lens)?;
+        // The write path trims older versions of every kind it writes, not
+        // only the root tree's: after a version bump, the old rows clear as
+        // the store is written, not only when a fill step or a backfill
+        // walks their changesets (#949). The calls ride the deferral this
+        // transaction turned on (tree.rs above the preload), so the commit's
+        // one-statement flush carries them and no round trip moves.
+        derived::remove_old::<CommitGraph>(c)?;
+        derived::remove_old::<PathHistory>(c)?;
+        derived::put_all(c, rows)?;
+    }
     Ok((id, tree))
 }
 

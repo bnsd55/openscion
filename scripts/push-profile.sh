@@ -188,6 +188,21 @@ cell() {
   : > "$WORK/cpu-$name.log"
   cpu_sample &
   cpu_pid=$!
+  # The sampling safety net, one cell only: perf watches the server for
+  # the whole window, and its folded call graph lands in the artifacts.
+  perf_pid=""
+  if [ "$name" = "push-w200-r0" ]; then
+    PERF_BIN=${PERF_BIN:-perf}
+    if command -v "$PERF_BIN" > /dev/null || [ -x "${PERF_BIN}" ]; then
+      server_pid=$(lsof -t -iTCP:"$SERVER_PORT" -sTCP:LISTEN 2> /dev/null | head -n 1)
+      if [ -n "$server_pid" ]; then
+        "$PERF_BIN" record -F 199 -g -p "$server_pid" -o "$WORK/perf-$name.data"           -- sleep infinity 2> "$WORK/perf-$name.err" &
+        perf_pid=$!
+        sleep 1
+        kill -0 "$perf_pid" 2> /dev/null || perf_pid=""
+      fi
+    fi
+  fi
   rep=1
   while [ "$rep" -le "$PROFILE_REPS" ]; do
     if ! "$TIMEOUT" 900 "$BIN/scn" --server "$SERVER" bench --agents "$writers" \
@@ -208,6 +223,15 @@ cell() {
     while read -r pid; do kill -TERM "$pid" 2> /dev/null || true; done < "$WORK/readers.pids"
     while read -r pid; do kill -CONT "$pid" 2> /dev/null || true; done < "$WORK/readers.pids"
     while read -r pid; do wait "$pid" 2> /dev/null || true; done < "$WORK/readers.pids"
+  fi
+  if [ -n "$perf_pid" ]; then
+    kill -INT "$perf_pid" 2> /dev/null || true
+    sleep 2
+    kill -TERM "$perf_pid" 2> /dev/null || true
+    wait "$perf_pid" 2> /dev/null || true
+    PERF_BIN=${PERF_BIN:-perf}
+    "$PERF_BIN" script -i "$WORK/perf-$name.data" > "$WORK/perf-$name.txt" \
+      2>> "$WORK/perf-$name.err" || true
   fi
   kill "$cpu_pid" 2> /dev/null || true
   wait "$cpu_pid" 2> /dev/null || true
@@ -335,7 +359,7 @@ for name in $names; do
       }
       END {
         printf "%-10s %9s %9s %9s %12s %9s %9s %8s %9s\n", "phase", "wall50", "wall99", "wallavg", "wait50", "wait99", "waitavg", "stmts", "attempts"
-        m = split("total pre_checks pre_intent pre_rest slot_wait record outcome plan fill_root lens settle build cas set_state post other", order, " ")
+        m = split("total pre_checks pre_intent pre_rest slot_wait record outcome plan fill_root lens settle build cas set_state post other preload_derived derive_root apply_trees insert_changeset put_derived generation", order, " ")
         for (i = 1; i <= m; i++) {
           p = order[i]
           if (!n[p]) continue
@@ -375,7 +399,7 @@ for name in $names; do
         return v
       }
       BEGIN {
-        m = split("record settle gc_sweep derive_steps create_commit put_blob_row other", order, " ")
+        m = split("record settle gc_sweep derive_steps create_commit put_blob_row other preload_derived derive_root apply_trees insert_changeset put_derived generation", order, " ")
         total_held = 0
         for (i = 1; i <= m; i++) {
           p = order[i]

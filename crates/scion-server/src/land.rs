@@ -1013,7 +1013,10 @@ fn settle(
                     "ref {target:?} moved during the land; retry with the same request key"
                 )));
             }
-            let generation = c.generation(repo, id)?;
+            let generation = {
+                let _guard = profile::Guard::enter(profile::Phase::Generation);
+                c.generation(repo, id)?
+            };
             let mut outcome = {
                 let _guard = profile::Guard::enter(Phase::SetState);
                 c.set_land_state(

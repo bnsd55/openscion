@@ -66,9 +66,21 @@ pub(crate) enum Phase {
     DeriveSteps,
     /// The blob files' fsync after a write; not on the connection.
     FlushFile,
+    /// The build's preloaded reads and the deferred deletes' arming.
+    PreloadDerived,
+    /// The build's derive of the parent's root tree.
+    DeriveRoot,
+    /// The build's apply: the path tree rows' node encode, hash and put.
+    ApplyTrees,
+    /// The changeset row and the repo-blob rows.
+    InsertChangeset,
+    /// The derived rows' put and the old versions' removes.
+    PutDerived,
+    /// The generation read between the cas and the verdict.
+    Generation,
 }
 
-pub(crate) const PHASES: [Phase; 20] = [
+pub(crate) const PHASES: [Phase; 26] = [
     Phase::PreChecks,
     Phase::PreIntent,
     Phase::PreRest,
@@ -89,6 +101,12 @@ pub(crate) const PHASES: [Phase; 20] = [
     Phase::GcSweep,
     Phase::DeriveSteps,
     Phase::FlushFile,
+    Phase::PreloadDerived,
+    Phase::DeriveRoot,
+    Phase::ApplyTrees,
+    Phase::InsertChangeset,
+    Phase::PutDerived,
+    Phase::Generation,
 ];
 
 impl Phase {
@@ -119,6 +137,12 @@ impl Phase {
             Phase::GcSweep => "gc_sweep",
             Phase::DeriveSteps => "derive_steps",
             Phase::FlushFile => "flush_file",
+            Phase::PreloadDerived => "preload_derived",
+            Phase::DeriveRoot => "derive_root",
+            Phase::ApplyTrees => "apply_trees",
+            Phase::InsertChangeset => "insert_changeset",
+            Phase::PutDerived => "put_derived",
+            Phase::Generation => "generation",
         }
     }
 }
