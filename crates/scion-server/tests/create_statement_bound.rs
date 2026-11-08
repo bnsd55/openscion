@@ -124,23 +124,28 @@ fn a_one_put_create_costs_a_fixed_number_of_statements() {
     // write connection - the derived preload, the trees on the changed
     // paths, the history node the build reads first - onto a reader
     // before the transaction begins, in its own read transaction: its
-    // begin, the derived values WITHOUT the generation (the generation
-    // is mutable state the transaction reads itself - the insert's own
-    // read), the trees read, the history read, and its rollback. Every
-    // pre-read answer is committed and immutable or write-once, so it
-    // cannot be stale, and every miss re-reads in the transaction. The
-    // write transaction is 7 statements (from 10); the whole call is 18.
+    // begin, the derived values WITHOUT the generation (the transaction
+    // reads the generation itself - the insert's own read), the trees
+    // read, the history read, and its rollback. Every pre-read answer is
+    // committed and immutable or write-once, so it cannot be stale, and
+    // every miss re-reads in the transaction. The write transaction is 7
+    // statements, from main's 9 (measured with this same window against
+    // 3a9ea1e): three reads moved off the lane, and the insert's own
+    // generation read took one back - the preload's cache answered it
+    // before. The whole call is 18.
     // The exact count below is the measured number (18); a statement
     // coming or going fails in both directions. This test owns its
     // binary: no other test speaks SQL in its process.
     const EXACT: u64 = 18;
     // The lane pin: the statements between the write transaction's begin
-    // (the begin that carries the lane key - a pre-read on the write
-    // connection would carry it too and push this count past 7) and its
-    // commit. The lane is what the PR's gain rides: 7, from 10. The
-    // total above stays 18 if the pre-read rode the write connection;
-    // this count is what catches it.
+    // (the one that carries the lane key) and its commit. The lane is
+    // what the PR's gain rides: 7, from main's 9. The total above stays
+    // 18 if the pre-read rode the write connection; this count is what
+    // catches it.
     const LANE: usize = 7;
+    // The red proof: the pre-read on `store.write` instead of
+    // `store.read` plants its own begin under the lane key, and the
+    // window lands on the pre-read's transaction - the pin fails at 5.
     let _log = LOG_LOCK.lock().unwrap();
     let count = create_statement_count();
     assert_eq!(
