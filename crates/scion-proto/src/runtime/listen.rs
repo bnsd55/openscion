@@ -1531,9 +1531,10 @@ mod tests {
     impl Objects for Stalls {
         async fn resolve_ref(
             &self,
-            _: Request<ResolveRefRequest>,
+            request: Request<ResolveRefRequest>,
         ) -> Result<Response<ResolveRefResponse>, Status> {
-            Err(Status::not_found("no ref"))
+            let peer = Stalled::of(&request).and_then(|s| s.peer());
+            Err(Status::not_found(format!("no ref; peer is {peer:?}")))
         }
 
         async fn get_root_tree(
@@ -2412,6 +2413,74 @@ mod tests {
     async fn a_partial_preface_is_cut_at_the_handshake_timeout() {
         let (addr, _) = serve(Limits::default(), timers("age")).await;
         assert!(closes_a_peer_that_sends(addr, b"PRI * HT").await);
+    }
+
+    /// The served connection's peer reaches the stub: the audit's refusal
+    /// lines name it, so a serve that attaches None makes every call
+    /// anonymous. Over plain TCP.
+    #[tokio::test]
+    async fn the_served_peer_reaches_the_stub() {
+        let (addr, _) = serve(Limits::default(), TIMERS).await;
+        let mut client = ObjectsClient::new(endpoint(addr).connect().await.unwrap());
+        let error = client
+            .resolve_ref(ResolveRefRequest::default())
+            .await
+            .unwrap_err();
+        assert!(
+            error.message().contains("peer is Some(127.0.0.1"),
+            "the stub sees the loopback peer: {}",
+            error.message()
+        );
+    }
+
+    /// The same promise through the TLS accept path: the peer of a
+    /// `TlsStream` reaches the stub too.
+    #[tokio::test]
+    async fn the_served_tls_peer_reaches_the_stub() {
+        let certs = test_certs();
+        let dir = crate::runtime::private_tempdir();
+        let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
+        let (addr, _) = serve_tls(
+            Limits::default(),
+            TIMERS,
+            &server_tls,
+            Duration::from_secs(20),
+        )
+        .await;
+        let mut client = client(addr, &certs.authority.cert(), Some(&certs.client))
+            .await
+            .unwrap();
+        let error = client
+            .resolve_ref(ResolveRefRequest::default())
+            .await
+            .unwrap_err();
+        assert!(
+            error.message().contains("peer is Some(127.0.0.1"),
+            "the stub sees the loopback peer: {}",
+            error.message()
+        );
+    }
+
+    /// The keepalive getters hand tonic/hyper values that keep a dead peer
+    /// noticeable. A zero interval would ping without pause, and a zero
+    /// timeout kills the connection at its first ping (hyper's
+    /// `maybe_timeout` fires the moment the ping is sent), so the documented
+    /// constants must survive the getters.
+    #[tokio::test]
+    async fn the_keepalive_getters_hand_tonic_working_values() {
+        let (interval, answer) = client_keepalive();
+        assert!(
+            interval > Duration::ZERO,
+            "a zero keepalive interval pings without pause"
+        );
+        assert!(
+            answer > Duration::ZERO,
+            "a zero keepalive timeout kills the connection at the first ping"
+        );
+        assert!(
+            client_tcp_keepalive() > Duration::ZERO,
+            "a zero tcp keepalive is not a keepalive"
+        );
     }
 
     /// A TLS reply that outruns the socket's send buffer must still arrive
