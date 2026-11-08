@@ -1008,8 +1008,6 @@ mod tests {
     /// both.
     #[test]
     fn a_merge_above_the_meeting_point_gives_two_bases() {
-        let dir = crate::test_support::private_tempdir();
-        let store = Backend::open_test(dir.path()).unwrap();
         let _slot = damage::slot();
         // 0 the root; 1 and 2 its children; 3 the merge of 1 and 2 (a);
         // 4 a child of 1; 5 the merge of 4 and 2 (b).
@@ -1035,7 +1033,7 @@ mod tests {
         let _slot = damage::slot();
         let mut parents: Vec<Vec<usize>> = vec![vec![]];
         let mut history = vec![0];
-        for i in 1..N {
+        for _ in 1..N {
             let last = *history.last().unwrap();
             parents.push(vec![last]);
             history.push(parents.len() - 1);
@@ -1070,8 +1068,6 @@ mod tests {
     /// still answers, and one that needs one more dies.
     #[test]
     fn the_visit_bound_lets_an_answer_on_it_through() {
-        let dir = crate::test_support::private_tempdir();
-        let store = Backend::open_test(dir.path()).unwrap();
         let _slot = damage::slot();
         // 0 the root; 1 and 2 its children; 3 the merge of 1 and 2 (a);
         // 4 a child of 1; 5 the merge of 4 and 2 (b). The paint walk
