@@ -1531,9 +1531,10 @@ mod tests {
     impl Objects for Stalls {
         async fn resolve_ref(
             &self,
-            _: Request<ResolveRefRequest>,
+            request: Request<ResolveRefRequest>,
         ) -> Result<Response<ResolveRefResponse>, Status> {
-            Err(Status::not_found("no ref"))
+            let peer = Stalled::of(&request).and_then(|s| s.peer());
+            Err(Status::not_found(format!("no ref; peer is {peer:?}")))
         }
 
         async fn get_root_tree(
@@ -1811,6 +1812,11 @@ mod tests {
         LOG.get_or_init(Captured::default).clone()
     }
 
+    /// Serializes the tests that count accept-warning lines in the shared
+    /// captured log: each writes exactly one, so they must not overlap.
+    /// Async-aware, because the window spans the test's awaits.
+    static ACCEPT_WARN_LOG: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn init_log() {
         static INIT: std::sync::Once = std::sync::Once::new();
         INIT.call_once(|| {
@@ -1843,7 +1849,11 @@ mod tests {
     /// rate-limited warning.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_listener_that_fails_every_accept_is_paced_and_counted() {
+        let _log_window = ACCEPT_WARN_LOG.lock().await;
         init_log();
+        // The captured log is process-wide; only this test's own lines
+        // count, so the scan starts at the offset this test begins at.
+        let log_start = log().0.lock().unwrap().len();
         let limits = Limits::default();
         let metrics = Arc::new(Metrics::default());
         let attempts = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1880,7 +1890,7 @@ mod tests {
             line, "scion_accept_errors_total 0",
             "the failed accepts are not counted:\n{text}"
         );
-        let text = String::from_utf8(log().0.lock().unwrap().clone()).unwrap();
+        let text = String::from_utf8(log().0.lock().unwrap()[log_start..].to_vec()).unwrap();
         let warns: Vec<&str> = text
             .lines()
             .filter(|l| {
@@ -1903,6 +1913,99 @@ mod tests {
             "the warning must name at least one failure: {}",
             warns[0]
         );
+    }
+
+    /// An incoming stream whose first item is an accept failure; the rest
+    /// come from the real listener it wraps.
+    struct FailFirst<S> {
+        failed: bool,
+        inner: S,
+    }
+
+    impl<S> Stream for FailFirst<S>
+    where
+        S: Stream<Item = io::Result<TcpStream>> + Unpin,
+    {
+        type Item = io::Result<TcpStream>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if !self.failed {
+                self.failed = true;
+                return Poll::Ready(Some(Err(io::Error::other("the first accept fails"))));
+            }
+            Pin::new(&mut self.inner).poll_next(cx)
+        }
+    }
+
+    /// One failed accept must not end the serve: the listener keeps taking
+    /// connections after it. A failed accept that ends the serve is a
+    /// server that stops taking connections.
+    #[tokio::test]
+    async fn a_failed_accept_does_not_end_the_serve() {
+        let _log_window = ACCEPT_WARN_LOG.lock().await;
+        init_log();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = FailFirst {
+            failed: false,
+            inner: tcp(listener),
+        };
+        let limits = Limits::default();
+        let metrics = Arc::new(Metrics::default());
+        tokio::spawn(async move {
+            let router = |mut server: Server| server.add_service(ObjectsServer::new(Stalls));
+            let pending = std::future::pending();
+            let _ = limits
+                .serve_with(
+                    &Accepting::of(&limits, &TIMERS),
+                    router,
+                    incoming,
+                    None,
+                    pending,
+                    metrics,
+                )
+                .await;
+        });
+        let mut client = ObjectsClient::new(endpoint(addr).connect().await.unwrap());
+        assert_eq!(quick(&mut client).await, Code::NotFound);
+    }
+
+    /// The same promise through the TLS accept path: one failed accept
+    /// there must not end the serve either.
+    #[tokio::test]
+    async fn a_failed_tls_accept_does_not_end_the_serve() {
+        let _log_window = ACCEPT_WARN_LOG.lock().await;
+        init_log();
+        let certs = test_certs();
+        let dir = crate::runtime::private_tempdir();
+        let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
+        let config = server_tls.config();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = FailFirst {
+            failed: false,
+            inner: tcp(listener),
+        };
+        let limits = Limits::default();
+        let metrics = Arc::new(Metrics::default());
+        tokio::spawn(async move {
+            let router = |mut server: Server| server.add_service(ObjectsServer::new(Stalls));
+            let pending = std::future::pending();
+            let _ = limits
+                .serve_with(
+                    &Accepting::of(&limits, &TIMERS),
+                    router,
+                    incoming,
+                    Some(config),
+                    pending,
+                    metrics,
+                )
+                .await;
+        });
+        let mut client = client(addr, &certs.authority.cert(), Some(&certs.client))
+            .await
+            .unwrap();
+        assert_eq!(quick(&mut client).await, Code::NotFound);
     }
 
     /// The stub, served within `limits` with `timers`, and its address.
@@ -2302,6 +2405,139 @@ mod tests {
         assert!(closes_a_peer_that_sends(addr, preface).await);
     }
 
+    /// A peer that sends only part of the preface and then stalls is cut at
+    /// the handshake timeout: the preface counter runs until the preface is
+    /// all in, so a few bytes do not buy a silent connection a place
+    /// forever. (It also fails if any read at all stops the counter.)
+    #[tokio::test]
+    async fn a_partial_preface_is_cut_at_the_handshake_timeout() {
+        let (addr, _) = serve(Limits::default(), timers("age")).await;
+        assert!(closes_a_peer_that_sends(addr, b"PRI * HT").await);
+    }
+
+    /// The served connection's peer reaches the stub: the audit's refusal
+    /// lines name it, so a serve that attaches None makes every call
+    /// anonymous. Over plain TCP.
+    #[tokio::test]
+    async fn the_served_peer_reaches_the_stub() {
+        let (addr, _) = serve(Limits::default(), TIMERS).await;
+        let mut client = ObjectsClient::new(endpoint(addr).connect().await.unwrap());
+        let error = client
+            .resolve_ref(ResolveRefRequest::default())
+            .await
+            .unwrap_err();
+        assert!(
+            error.message().contains("peer is Some(127.0.0.1"),
+            "the stub sees the loopback peer: {}",
+            error.message()
+        );
+    }
+
+    /// The same promise through the TLS accept path: the peer of a
+    /// `TlsStream` reaches the stub too.
+    #[tokio::test]
+    async fn the_served_tls_peer_reaches_the_stub() {
+        let certs = test_certs();
+        let dir = crate::runtime::private_tempdir();
+        let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
+        let (addr, _) = serve_tls(
+            Limits::default(),
+            TIMERS,
+            &server_tls,
+            Duration::from_secs(20),
+        )
+        .await;
+        let mut client = client(addr, &certs.authority.cert(), Some(&certs.client))
+            .await
+            .unwrap();
+        let error = client
+            .resolve_ref(ResolveRefRequest::default())
+            .await
+            .unwrap_err();
+        assert!(
+            error.message().contains("peer is Some(127.0.0.1"),
+            "the stub sees the loopback peer: {}",
+            error.message()
+        );
+    }
+
+    /// The keepalive getters hand tonic/hyper values that keep a dead peer
+    /// noticeable. A zero interval would ping without pause, and a zero
+    /// timeout kills the connection at its first ping (hyper's
+    /// `maybe_timeout` fires the moment the ping is sent), so the documented
+    /// constants must survive the getters.
+    #[tokio::test]
+    async fn the_keepalive_getters_hand_tonic_working_values() {
+        let (interval, answer) = client_keepalive();
+        assert!(
+            interval > Duration::ZERO,
+            "a zero keepalive interval pings without pause"
+        );
+        assert!(
+            answer > Duration::ZERO,
+            "a zero keepalive timeout kills the connection at the first ping"
+        );
+        assert!(
+            client_tcp_keepalive() > Duration::ZERO,
+            "a zero tcp keepalive is not a keepalive"
+        );
+    }
+
+    /// A TLS reply that outruns the socket's send buffer must still arrive
+    /// in full: `rustls`' `poll_write` may return with ciphertext still in the
+    /// session (its own doc says so), and the connection's flush is what
+    /// drives the rest out. A flush that does nothing strands the tail of a
+    /// final reply until the next write, which for a final reply never
+    /// comes - the h2 task never re-registers its waker.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tls_reply_arrives_in_full_even_after_a_socket_pause() {
+        init_log();
+        // The listener's send buffer is small; Linux accepted sockets
+        // inherit it, so the 128 KiB parts cannot leave rustls' session in
+        // one poll and the flush is what empties it.
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        rustix::net::sockopt::set_socket_send_buffer_size(&std_listener, 4096).unwrap();
+        std_listener.set_nonblocking(true).unwrap();
+        let listener = TcpListener::from_std(std_listener).unwrap();
+        let certs = test_certs();
+        let dir = crate::runtime::private_tempdir();
+        let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
+        let config = server_tls.config();
+        let addr = listener.local_addr().unwrap();
+        let limits = Limits::default();
+        let metrics = Arc::new(Metrics::default());
+        tokio::spawn(async move {
+            let router = |mut server: Server| server.add_service(ObjectsServer::new(Stalls));
+            let pending = std::future::pending();
+            let _ = limits
+                .serve_with(
+                    &Accepting::of(&limits, &TIMERS),
+                    router,
+                    tcp(listener),
+                    Some(config),
+                    pending,
+                    metrics,
+                )
+                .await;
+        });
+        let mut client = client(addr, &certs.authority.cert(), Some(&certs.client))
+            .await
+            .unwrap();
+        let mut parts = stall(&mut client).await;
+        let mut got = 0;
+        loop {
+            let part = tokio::time::timeout(Duration::from_secs(30), parts.message())
+                .await
+                .unwrap_or_else(|_| panic!("the reply stalled past 30 s"))
+                .unwrap();
+            match part {
+                Some(_) => got += 1,
+                None => break,
+            }
+        }
+        assert_eq!(got, 10, "the whole reply arrives");
+    }
+
     /// The client preface, then an empty SETTINGS frame: what a real client
     /// sends at once, so a connection that is served would live.
     const PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\x04\0\0\0\0\0";
@@ -2630,7 +2866,9 @@ mod tests {
         let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, None);
         let (addr, _) = serve_tls(Limits::default(), TIMERS, &server_tls, HANDSHAKE_TIMEOUT).await;
-        let mut client = client(addr, &certs.authority.cert(), None).await.unwrap();
+        let mut client = client(addr, &certs.authority.cert(), Some(&certs.client))
+            .await
+            .unwrap();
         assert_eq!(quick(&mut client).await, Code::NotFound);
     }
 
