@@ -298,13 +298,13 @@ async fn start_reply(
     // within the busy wait: the call ends `RESOURCE_EXHAUSTED`. A walk that
     // decoded nothing takes no share.
     let walk_share = if decoded > 0 {
-        Some(reply::take(&in_flight, decoded, busy).await)
+        let Some(permit) = reply::take(&in_flight, decoded, busy).await else {
+            return Err(reply::busy());
+        };
+        Some(permit)
     } else {
         None
     };
-    if decoded > 0 && walk_share.is_none() {
-        return Err(reply::busy());
-    }
     let first = find(&worker, &in_flight, busy, read, &allowed, zstd, key)
         .await
         .ok_or_else(reply::busy)?;
@@ -995,6 +995,108 @@ mod tests {
         assert_eq!(parts, 4);
         assert_eq!(data, content);
         assert_eq!(in_flight.available_permits(), IN_FLIGHT_BYTES);
+    }
+
+    /// The walk's share refusal is the reply's answer: when the walk
+    /// decoded more than the budget will ever free, the reply ends
+    /// `RESOURCE_EXHAUSTED` at the walk share's own wait - it does not
+    /// go on to wait for the first object's smaller share, which a
+    /// later freeing would satisfy. The regression test for #1016: the
+    /// refusal wrapped the take in `Some`, and `Some(None).is_none()`
+    /// is false, so a refused walk share served the objects anyway.
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_walk_share_ends_the_reply_busy() {
+        use scion_core::{Entry, FileEntry, FileState, PathElem, Tree};
+        use std::collections::BTreeMap;
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let blob_id = store.blobs().put(b"a blob").unwrap();
+        let (root, leaf) = store
+            .write(|c| {
+                let leaf = c.put_tree(
+                    &Tree::new(BTreeMap::from([(
+                        PathElem::new("f").unwrap(),
+                        Entry::File(FileEntry::new(
+                            FileState::Regular {
+                                content: blob_id,
+                                executable: false,
+                            },
+                            0,
+                        )),
+                    )]))
+                    .expect("tree fits the format"),
+                )?;
+                let mid = c.put_tree(
+                    &Tree::new(BTreeMap::from([(
+                        PathElem::new("s").unwrap(),
+                        Entry::Dir(leaf),
+                    )]))
+                    .expect("tree fits the format"),
+                )?;
+                let root = c.put_tree(
+                    &Tree::new(BTreeMap::from([(
+                        PathElem::new("d").unwrap(),
+                        Entry::Dir(mid),
+                    )]))
+                    .expect("tree fits the format"),
+                )?;
+                Ok((root, leaf))
+            })
+            .unwrap();
+        // What the walk decodes for d/s: the three trees it crosses.
+        // Their sum outsizes what the budget will ever free.
+        let (mid_id, leaf_id) = store
+            .read(|c| {
+                let root_tree = c.get_tree(root)?;
+                let mid = match root_tree.entries().iter().next() {
+                    Some((_, Entry::Dir(id))) => *id,
+                    _ => unreachable!("root holds one dir"),
+                };
+                let mid_tree = c.get_tree(mid)?;
+                let leaf = match mid_tree.entries().iter().next() {
+                    Some((_, Entry::Dir(id))) => *id,
+                    _ => unreachable!("mid holds one dir"),
+                };
+                Ok((mid, leaf))
+            })
+            .unwrap();
+        assert_eq!(leaf_id, leaf, "the mid's dir is the leaf");
+        let decoded = store
+            .read(|c| Ok(c.tree_size(root)? + c.tree_size(mid_id)? + c.tree_size(leaf_id)?))
+            .unwrap();
+        assert!(decoded > 30, "{decoded}");
+        // The budget: 1000 bytes, all held. 30 come back two paused
+        // seconds in - less than the walk's share, more than the blob's.
+        let in_flight = Arc::new(Semaphore::new(1000));
+        let held = reply::try_take(&in_flight, 970).unwrap();
+        std::mem::forget(held);
+        let gift = reply::try_take(&in_flight, 30).unwrap();
+        let freer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            drop(gift);
+        });
+        let a = Key::Blob(blob_id);
+        let waits = Waits {
+            until: Until::after(Duration::from_secs(3)),
+            ..WAITS
+        };
+        let reply = start_reply(
+            Worker::new(store),
+            vec![a],
+            HashSet::from([a]),
+            Reply {
+                in_flight,
+                waits,
+                stalled: None,
+                call: Call::default(),
+            },
+            read_object,
+            true,
+            decoded,
+        );
+        let status = reply.await.unwrap_err();
+        assert_eq!(status.code(), Code::ResourceExhausted, "{status:?}");
+        freer.await.unwrap();
     }
 
     /// The ticket walk pays as it goes: a tree is handed to the walk only
