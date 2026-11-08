@@ -117,10 +117,14 @@ fn a_one_put_create_costs_a_fixed_number_of_statements() {
     // twice more: the changeset row, its parents and its membership
     // ride one CTE chain, and the trees, the derived rows and the repo
     // blobs ride a second - each arm keeping its own ON CONFLICT rule.
-    // The exact count below is the measured number (16); a statement
+    // #1031 folds the history INSERT into that second chain as its
+    // fourth arm: the settle drains the transaction's deferred history
+    // buffer, so the commit's flush has nothing to write - the write
+    // transaction is 9 statements, the whole call 15. The exact count
+    // below is the measured number (15); a statement
     // coming or going fails in both directions. This test owns its
     // binary: no other test speaks SQL in its process.
-    const EXACT: u64 = 16;
+    const EXACT: u64 = 15;
     let _log = LOG_LOCK.lock().unwrap();
     let count = create_statement_count();
     assert_eq!(
