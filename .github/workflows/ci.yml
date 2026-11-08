@@ -161,7 +161,9 @@ jobs:
     if: >-
       ${{ !cancelled() && (needs.tier.result == 'success' || needs.tier.result == 'skipped') && !github.event.pull_request.draft && needs.tier.outputs.docs_only != 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    # A hang guard, not a speed budget: a branch that changes a dependency's
+    # features rebuilds the workspace cold, and clippy runs past 5 minutes.
+    timeout-minutes: 15
     steps:
       # Depth 2: the changelog check names the pull request's own changes
       # as HEAD^1..HEAD, the base side of the merge commit.
