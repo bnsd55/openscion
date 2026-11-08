@@ -858,12 +858,13 @@ mod tests {
     }
 
     /// A file put at a directory above the path is a touch: the chain
-    /// makes a/b/c at the base, then puts a FILE a/x - a sibling under
-    /// the directory a - well after the base. The path a/b/c itself is
-    /// unchanged since the base; the touch is only the file above it.
-    /// The land path's conflict check for old bases reads exactly this.
-    /// The mutant that fires only at `above == base_gen` never sees a
-    /// `base_gen` + 5 and reports nothing.
+    /// makes a/b/c at the base, then replaces the directory a/b with
+    /// the FILE a/b - a/b/c deleted, a/b put, one changeset - well
+    /// after the base. The lookup of a/b/c stops at the file: its hit
+    /// is only the put at the directory above it, never a change of
+    /// a/b/c itself. The land path's conflict check for old bases reads
+    /// exactly this. The mutant that fires only at `above == base_gen`
+    /// never sees a `base_gen` + 5 and reports nothing.
     #[test]
     fn a_file_put_at_a_directory_above_touched_the_path() {
         let (_dir, store, repo) = open();
