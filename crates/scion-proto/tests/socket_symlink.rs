@@ -63,3 +63,20 @@ async fn a_regular_file_at_the_socket_path_is_refused() {
         "the file is untouched"
     );
 }
+
+/// A bare filename (no directory) binds in the current directory: the
+/// empty parent falls back to ".", so the private-dir check still runs
+/// on the directory the process serves from, and the socket lands there.
+#[tokio::test]
+async fn a_bare_socket_name_binds_in_the_current_directory() {
+    let dir = private_dir();
+    let cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+    let bound = bind_unix(std::path::Path::new("daemon.sock")).await;
+    std::env::set_current_dir(cwd).unwrap();
+    bound.expect("the bare name binds in the current directory");
+    assert!(
+        dir.path().join("daemon.sock").exists(),
+        "the socket lands in the current directory"
+    );
+}
