@@ -968,6 +968,171 @@ mod tests {
         );
     }
 
+    /// The first-parent check's answer, which the land path trusts for
+    /// whether a base may be landed on: a base on the tip's first-parent
+    /// history is `Some(true)`, one off it `Some(false)`, and a tip
+    /// without a node is `None`. A body swapped for a constant, or the
+    /// final comparison flipped, makes a land proceed unverified or
+    /// refuse a legal base.
+    #[test]
+    fn a_base_on_the_first_parent_history_is_true_and_one_off_it_false() {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let _slot = damage::slot();
+        let (repo, ids, side) = deep_chain(&store, 16);
+        let tip = ids[15];
+        let gen_of = |id| store.read(|c| c.generation(repo, id)).unwrap();
+        let check = |base, base_gen| {
+            store
+                .read(|c| on_first_parents(c, tip, base, base_gen, &later()))
+                .unwrap()
+        };
+        // The root and a mid-chain changeset are on the history: the
+        // walk descends to their generation and lands on them.
+        assert_eq!(check(ids[0], gen_of(ids[0])), Some(true));
+        assert_eq!(check(ids[7], gen_of(ids[7])), Some(true));
+        // The side branch's tip is not on the first-parent history: the
+        // walk stops at the oldest changeset at or above its generation,
+        // which is its parent on the chain, not the side changeset.
+        assert_eq!(check(side, gen_of(side)), Some(false));
+        // A floor below the base's own generation lands above the root:
+        // the root is not there, so the answer is false for it.
+        assert_eq!(check(ids[0], gen_of(ids[7])), Some(false));
+    }
+
+    /// A merge above the first-parent meeting point breaks the fast
+    /// path's disjointness: the merge's other parent's history joins the
+    /// other side deeper down, so the bases are two siblings, not the
+    /// one changeset the first-parent meet lands on. `merge_bases` must
+    /// refuse the fast path (its `None`) and let the paint walk find
+    /// both.
+    #[test]
+    fn a_merge_above_the_meeting_point_gives_two_bases() {
+        let _slot = damage::slot();
+        // 0 the root; 1 and 2 its children; 3 the merge of 1 and 2 (a);
+        // 4 a child of 1; 5 the merge of 4 and 2 (b).
+        let parents = vec![vec![], vec![0], vec![0], vec![1, 2], vec![1], vec![4, 2]];
+        let (_dir, store, repo, ids) = store_graph(&parents);
+        let bases = merge_bases(&store, repo, ids[3], ids[5], &later()).unwrap();
+        assert!(bases.contains(&ids[1]), "{bases:?}");
+        assert!(bases.contains(&ids[2]), "{bases:?}");
+    }
+
+    /// The paint walk stops when a side dies, not when the queue drains:
+    /// `tally` keeps the live counts, and a side at zero ends the walk
+    /// before the remaining one-sided tail is walked. The mutant that
+    /// makes `tally` refuse every mark freezes the counts, and the walk
+    /// drains the whole graph - here past the visit bound, so the answer
+    /// becomes an error.
+    #[test]
+    fn a_paint_walk_ends_when_a_side_dies_not_when_the_queue_drains() {
+        // A first-parent history of 2,000 changesets; `side` branched
+        // from the 100th and was never merged, so the a-side dies right
+        // after it is taken, while the b-side's tail is still queued.
+        const N: usize = 2_000;
+        let _slot = damage::slot();
+        let mut parents: Vec<Vec<usize>> = vec![vec![]];
+        let mut history = vec![0];
+        for _ in 1..N {
+            let last = *history.last().unwrap();
+            parents.push(vec![last]);
+            history.push(parents.len() - 1);
+        }
+        parents.push(vec![history[100]]);
+        let (_dir, store, repo, ids) = store_graph_seeded(&parents);
+        let (a, b) = (
+            At::get_unbounded(&store, repo, *ids.last().unwrap()).unwrap(),
+            At::get_unbounded(&store, repo, ids[history[N - 1]]).unwrap(),
+        );
+        let mut paint = Paint::new(a, b);
+        let bounded = Steps {
+            reads: 100,
+            visits: 1000,
+        };
+        let (bases, cost) = in_steps(
+            &store,
+            &later(),
+            bounded,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            |index| paint.next(index),
+        )
+        .unwrap();
+        assert_eq!(bases, [ids[history[100]]]);
+        assert!(cost.visits < 1000, "{cost:?}");
+    }
+
+    /// The visit bound bites at the first visit past it, and lets an
+    /// answer that lands exactly on it through: the comparison is
+    /// strictly greater, so a walk whose last move is visit `bound`
+    /// still answers, and one that needs one more dies.
+    #[test]
+    fn the_visit_bound_lets_an_answer_on_it_through() {
+        let _slot = damage::slot();
+        // 0 the root; 1 and 2 its children; 3 the merge of 1 and 2 (a);
+        // 4 a child of 1; 5 the merge of 4 and 2 (b). The paint walk
+        // between 3 and 5 answers in a handful of visits.
+        let parents = vec![vec![], vec![0], vec![0], vec![1, 2], vec![1], vec![4, 2]];
+        let (_dir, store, repo, ids) = store_graph(&parents);
+        let (a, b) = (
+            At::get_unbounded(&store, repo, ids[3]).unwrap(),
+            At::get_unbounded(&store, repo, ids[5]).unwrap(),
+        );
+        let mut paint = Paint::new(a, b);
+        let unbounded = Steps {
+            reads: 100,
+            visits: 1_000_000,
+        };
+        let (_, cost) = in_steps(
+            &store,
+            &later(),
+            unbounded,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            |index| paint.next(index),
+        )
+        .unwrap();
+        let answer_visits = cost.visits;
+        assert!(answer_visits > 0, "{cost:?}");
+        // The same walk, one visit short of its answer: the bound fires.
+        let mut paint = Paint::new(a, b);
+        let short = Steps {
+            reads: 100,
+            visits: answer_visits - 1,
+        };
+        let got = in_steps(
+            &store,
+            &later(),
+            short,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            |index| paint.next(index),
+        );
+        assert!(
+            matches!(&got, Err(crate::error::Error::ResourceExhausted(text))
+                if text.contains("visit bound")),
+            "{got:?}"
+        );
+        // The answer exactly on the bound goes through: the comparison
+        // is strict, so visit `bound` itself is allowed.
+        let mut paint = Paint::new(a, b);
+        let exact = Steps {
+            reads: 100,
+            visits: answer_visits,
+        };
+        let (bases, cost) = in_steps(
+            &store,
+            &later(),
+            exact,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            |index| paint.next(index),
+        )
+        .unwrap();
+        assert_eq!(bases, [ids[1], ids[2]]);
+        assert_eq!(cost.visits, answer_visits);
+    }
+
     /// A deadline that a test does not reach.
     fn later() -> Deadline {
         Deadline::new(Instant::now() + Duration::from_secs(600))

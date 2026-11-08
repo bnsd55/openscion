@@ -1162,6 +1162,176 @@ mod tests {
         Ok(checkout)
     }
 
+    /// The exit message names the temp directory a dropped checkout is
+    /// removing: `removing` reads what `set_removing` wrote (#1014).
+    #[test]
+    fn the_removal_marker_names_the_temp_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("scn-temp-x");
+        set_removing(Some(marker.clone()));
+        assert_eq!(removing(), Some(marker));
+        set_removing(None);
+        assert_eq!(removing(), None);
+    }
+
+    /// On NFS version 3 the rename that moved the temp directory to a
+    /// missing destination loses its reply: the call worked, and the
+    /// client sees ENOENT. The checkout must answer with success when
+    /// the inode moved (#1014).
+    #[test]
+    fn a_new_destination_survives_a_lost_rename_reply() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("dest");
+        let mut checkout = start(&dest, Some(Nfs::ReplyLost), false).unwrap();
+        checkout.file(&path("f"), false, b"f\n").unwrap();
+        checkout.finish().unwrap();
+        assert_eq!(fs::read(dest.join("f")).unwrap(), b"f\n");
+    }
+
+    /// A missing destination with more than one part is created in its
+    /// own parent: the temp directory starts next to `dest`, not in the
+    /// process's working directory. The cwd is process-wide, the same
+    /// note #1019's bare-name test carries (#1014).
+    #[test]
+    fn a_missing_nested_destination_is_created_in_its_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("a").join("b").join("c");
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        let mut checkout = start(&dest, None, false).unwrap();
+        checkout.file(&path("f"), false, b"f\n").unwrap();
+        checkout.finish().unwrap();
+        assert_eq!(fs::read(dest.join("f")).unwrap(), b"f\n");
+        assert_eq!(temp_dirs(dest.parent().unwrap()), Vec::<String>::new());
+    }
+
+    /// A refusal must not wait on the thing it refuses: with
+    /// `O_DIRECTORY` the open of a FIFO fails at once, without it the open
+    /// blocks until a writer comes. A FIFO is mode 0600 so the mode
+    /// check does not answer first; the answer arrives in a thread, and
+    /// the test bounds it (#1014).
+    #[test]
+    fn a_fifo_at_the_destination_is_refused_without_waiting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("pipe");
+        mkfifo_0600(&dest);
+        let (send, recv) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let _ = send.send(Checkout::start(&dest).is_err());
+        });
+        assert!(
+            recv.recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+            "the checkout must refuse a FIFO destination at once"
+        );
+    }
+
+    /// The same bound for the parent of a missing destination: a FIFO
+    /// there must fail the open at once (#1014).
+    #[test]
+    fn a_fifo_at_the_destinations_parent_is_refused_without_waiting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pipe = tmp.path().join("pipe");
+        mkfifo_0600(&pipe);
+        let dest = pipe.join("child");
+        let (send, recv) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let _ = send.send(Checkout::start(&dest).is_err());
+        });
+        assert!(
+            recv.recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+            "the checkout must refuse a FIFO parent at once"
+        );
+    }
+
+    /// A bare destination name has an empty parent: the checkout then
+    /// works in the process's working directory (the same cwd note the
+    /// socket test carries, #1019). This is the scn suite's only cwd
+    /// change, and it is process-global: the other tests must keep
+    /// absolute paths, as they do today. (#1014)
+    #[test]
+    fn a_bare_destination_name_uses_the_working_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        // This is the scn suite's only cwd change, and it is process-
+        // global: the other tests must keep absolute paths, as they do
+        // today. The work runs in one closure so a failure cannot leave
+        // the later tests in the wrong directory.
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let written = (|| {
+            let mut checkout = Checkout::start(Path::new("foo"))?;
+            checkout.file(&path("f"), false, b"f\n")?;
+            checkout.finish()
+        })();
+        std::env::set_current_dir(cwd).unwrap();
+        written.unwrap();
+        assert_eq!(fs::read(tmp.path().join("foo").join("f")).unwrap(), b"f\n");
+    }
+
+    /// A rename that fails with ENOENT for real - the temp directory is
+    /// gone - is a failure, not a lost reply: the checkout must fail,
+    /// whatever the guard believes (#1014).
+    #[test]
+    fn a_rename_that_failed_for_real_fails_the_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("dest");
+        let mut checkout = start(&dest, None, false).unwrap();
+        checkout.file(&path("f"), false, b"f\n").unwrap();
+        let temps = temp_dirs(tmp.path());
+        assert_eq!(temps.len(), 1, "one temp directory next to the dest");
+        fs::remove_dir_all(tmp.path().join(&temps[0])).unwrap();
+        let why = checkout
+            .finish()
+            .expect_err("a real ENOENT is not a lost reply");
+        assert!(why.to_string().contains("cannot move"), "{why:?}");
+    }
+
+    /// Makes a FIFO that the mode checks answer last, not first: the
+    /// point is the open's `O_DIRECTORY`, so the FIFO carries the user's
+    /// own 0600.
+    #[cfg(unix)]
+    fn mkfifo_0600(path: &Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let done = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("mkfifo runs");
+        assert!(done.success(), "mkfifo");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    /// A lost reply for a directory make is the call's own even when a
+    /// recorded path next to it cannot be stated: the kind clause of the
+    /// fold filter keeps a recorded file out of a directory's check. The
+    /// recorded file is removed, so its stat fails with ENOENT, which
+    /// counts as a fold for anything the filter admits (#1014).
+    #[test]
+    fn a_lost_mkdir_reply_survives_a_recorded_file_it_cannot_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("dest");
+        fs::create_dir(&dest).unwrap();
+        let mut checkout = start(&dest, Some(Nfs::ReplyLost), false).unwrap();
+        checkout.file(&path("f"), false, b"").unwrap();
+        let recorded = checkout.temp_path().join("f");
+        fs::remove_file(&recorded).unwrap();
+        checkout.file(&path("d/x"), false, b"x\n").unwrap();
+        checkout.finish().unwrap();
+        assert_eq!(fs::read(dest.join("d").join("x")).unwrap(), b"x\n");
+    }
+
+    /// Without hard links the copy keeps the tree's mode: a non-
+    /// executable file does not gain bits on the way up (#1014).
+    #[test]
+    fn a_copied_up_file_keeps_the_tree_s_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("dest");
+        fs::create_dir(&dest).unwrap();
+        let mut checkout = start(&dest, Some(Nfs::Plain), true).unwrap();
+        checkout.file(&path("f"), false, b"f\n").unwrap();
+        checkout.finish().unwrap();
+        assert_eq!(mode(&dest.join("f")) & 0o777, 0o644);
+    }
+
     #[test]
     fn an_existing_empty_directory_is_kept() {
         existing_empty_directory_is_kept(None, false);
