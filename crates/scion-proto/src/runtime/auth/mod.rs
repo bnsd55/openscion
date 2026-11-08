@@ -1454,13 +1454,21 @@ mod tests {
         // the comparison itself.
         let (tmp, _me) = tempdir();
         let file = tmp.path().join("big");
+        // fs::write takes the umask: under umask 002 the file lands
+        // group-writable and the checked read rightly refuses it. The
+        // test's subject is the cap, not the mode, so each write is
+        // followed by the owner-only mode the other checked-file tests
+        // set.
         fs::write(&file, vec![b'x'; 4096]).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
         read_checked_file(&file, false).unwrap();
         let cap = 1024 * 1024usize;
         fs::write(&file, vec![b'x'; cap]).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
         let read = read_checked_file(&file, false).unwrap();
         assert_eq!(read.len(), cap);
         fs::write(&file, vec![b'x'; cap + 1]).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
         let err = read_checked_file(&file, false).unwrap_err();
         assert!(err.to_string().contains("past the"), "{err}");
     }
