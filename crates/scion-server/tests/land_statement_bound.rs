@@ -754,7 +754,8 @@ fn a_bounded_advance_reads_one_page_not_the_chain() {
         .filter(|sql| sql.starts_with("WITH RECURSIVE walk"))
         .count();
     assert_eq!(
-        pages, 10,
+        pages,
+        10,
         "the bounded walk stops at the bound (10 pages), not the chain's 12: {:#?}",
         Backend::test_statement_log()
     );
