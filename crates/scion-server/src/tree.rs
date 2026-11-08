@@ -482,7 +482,6 @@ fn store_changeset_impl(
         )
         .collect();
     c.put_settle_rows(&tree_rows, &rows, repo, &puts)?;
-    }
     Ok((id, tree))
 }
 

@@ -96,6 +96,17 @@ fn a_settled_changeset_whose_stored_root_tree_differs_is_refused() {
         )]),
     )
     .expect("changeset fits the format");
+    // The cs's tree rows go away first, so the refused settle's tree
+    // arm would insert fresh rows: what survives the refusal is what
+    // proves the rollback, since the same rows hit DO NOTHING when
+    // they are already there.
+    let schema = Backend::test_schema(dir.path());
+    let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    client
+        .batch_execute(&format!("SET search_path TO {schema}"))
+        .unwrap();
+    client.execute("DELETE FROM trees", &[]).unwrap();
     let error = store
         .write(|c| tree::store_changeset(c, repo, &again, &mut |_| Ok(0)))
         .unwrap_err();
@@ -107,12 +118,6 @@ fn a_settled_changeset_whose_stored_root_tree_differs_is_refused() {
     // The refusal rolled back: the corrupted value still stands, and
     // the settle's other arms (the trees, the blob membership) wrote
     // nothing.
-    let schema = Backend::test_schema(dir.path());
-    let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
-    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
-    client
-        .batch_execute(&format!("SET search_path TO {schema}"))
-        .unwrap();
     let stored: Vec<u8> = client
         .query_one(
             "SELECT value FROM derived WHERE kind = 'root_tree' AND cs = $1",
@@ -125,5 +130,5 @@ fn a_settled_changeset_whose_stored_root_tree_differs_is_refused() {
         .query_one("SELECT count(*) FROM trees", &[])
         .unwrap()
         .get(0);
-    assert_eq!(trees, 1, "the refused settle wrote no tree rows");
+    assert_eq!(trees, 0, "the refused settle's tree arm rolled back");
 }
