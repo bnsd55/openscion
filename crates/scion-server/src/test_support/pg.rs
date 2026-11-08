@@ -5,7 +5,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::{Client, Error, Marker, P, Path, Pg, PgClient, Result, connect_with, map_pg_error};
 
@@ -18,6 +18,46 @@ pub(crate) const TEST_SCHEMA_PREFIX: &str = "scion_test_";
 /// The advisory lock of the test-schema cleanup.
 #[cfg(any(test, feature = "test-hooks"))]
 const CLEAN_LOCK: i64 = 0x5343_494F_4E53_5445;
+
+/// How long a preparation waits for the cleanup lock before it fails
+/// with the lock's name in the error (#965). 120 s because the wait
+/// stacks: `lock_timeout` counts one waiter's whole queue, and a waiter
+/// behind several holders adds their holds up - on a loaded CI runner
+/// (11 runtimes, each sweep 50 + drops, one test holding 5.5 s on
+/// purpose) a normal wait can pass any small bound, and the bound must
+/// not turn a slow normal queue into a new flaky failure. It only has
+/// to beat the job's 25 min limit by a lot: a real hang still fails in
+/// 2 min, named. Postgres drops a session lock when its session ends,
+/// so a killed holder releases; the wait exists for a holder that
+/// lives but does not move - a maker stuck in an unbounded statement -
+/// so an open cannot hang behind one. The red-proof test sets its own
+/// short bound through `Backend::set_clean_lock_wait_secs` so it stays
+/// fast; it takes the sweep tests' pairwise lock first, so the
+/// override cannot leak into another test's wait.
+#[cfg(any(test, feature = "test-hooks"))]
+const CLEAN_LOCK_WAIT_SECS: u64 = 120;
+
+/// A test's own short bound, so the red proof stays fast: 0 means the
+/// const above. Set through the test-support handle only.
+#[cfg(any(test, feature = "test-hooks"))]
+static WAIT_OVERRIDE: AtomicU64 = AtomicU64::new(0);
+
+/// The bound one preparation waits, in seconds: the test's override,
+/// else the const above.
+#[cfg(any(test, feature = "test-hooks"))]
+fn clean_lock_wait_secs() -> u64 {
+    match WAIT_OVERRIDE.load(Ordering::SeqCst) {
+        0 => CLEAN_LOCK_WAIT_SECS,
+        secs => secs,
+    }
+}
+
+/// Sets the test's own short bound. The override stays until it is
+/// set back to 0; the test that sets it drops a guard that resets.
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) fn set_clean_lock_wait_for_test(secs: u64) {
+    WAIT_OVERRIDE.store(secs, Ordering::SeqCst);
+}
 
 /// How many stale schemas one process drops, oldest registration
 /// first: a database with hundreds of stale schemas must not stall the
@@ -36,6 +76,65 @@ const SWEEP_CAP: usize = 50;
 /// instead of its case count.
 #[cfg(any(test, feature = "test-hooks"))]
 const DRAIN_CAP: usize = 8;
+
+/// Whether the error is the bounded wait's own refusal: the mapped
+/// error keeps the database's own as its source, and the walk reads
+/// the SQLSTATE the bound raises (55P03).
+#[cfg(any(test, feature = "test-hooks"))]
+fn source_sqlstate_is_lock_timeout(e: &Error) -> bool {
+    let mut src: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    std::iter::from_fn(|| {
+        let current = src?;
+        src = current.source();
+        Some(current)
+    })
+    .find_map(|s| s.downcast_ref::<postgres::Error>())
+    .and_then(|pe| pe.code())
+    .is_some_and(|code| code.code() == "55P03")
+}
+
+/// Takes the cleanup lock for one sweep: the automatic sweep tries,
+/// a test-driven sweep waits - bounded by the preparer's `lock_timeout`
+/// (#965), so a holder that lives but does not move fails the wait in
+/// bounded time instead of hanging every later open. Answers the
+/// try-lock's verdict and whether the bounded wait gave up.
+#[cfg(any(test, feature = "test-hooks"))]
+fn take_cleanup_lock(maker: &PgClient, automatic: bool) -> (Option<bool>, bool) {
+    let got = if automatic {
+        maker.query_opt("SELECT pg_try_advisory_lock($1)", &[P::i64(CLEAN_LOCK)])
+    } else {
+        maker.query_opt("SELECT pg_advisory_lock($1)", &[P::i64(CLEAN_LOCK)])
+    };
+    match got {
+        // The try's row holds the verdict; the blocking lock's row is
+        // void - a grant is the only way it answers.
+        Ok(row) if automatic => (
+            Some(row.expect("the try's verdict row").get::<_, bool>(0)),
+            false,
+        ),
+        Ok(_) => (Some(true), false),
+        Err(why) => lock_wait_gave_up(&why, automatic),
+    }
+}
+
+/// The blocking wait's answer when it failed (#965): the bound raised
+/// 55P03 - the holder outlived it, so the caller refuses with
+/// `CLEAN_LOCK`'s name - or any other failure, where the next open tries
+/// again as before.
+#[cfg(any(test, feature = "test-hooks"))]
+fn lock_wait_gave_up(why: &Error, automatic: bool) -> (Option<bool>, bool) {
+    let timed_out = source_sqlstate_is_lock_timeout(why);
+    if timed_out {
+        tracing::warn!(
+            after = clean_lock_wait_secs(),
+            "the test-schema cleanup lock (CLEAN_LOCK) stayed held past the bound"
+        );
+    }
+    if automatic {
+        SWEPT.store(false, Ordering::SeqCst);
+    }
+    (None, timed_out)
+}
 
 /// Whether this process has swept: the sweep runs at the start of the
 /// run, on the first test open, and not again.
@@ -57,32 +156,31 @@ static SWEPT: AtomicBool = AtomicBool::new(false);
 /// `cap` drops per call, oldest registration first, and one line says
 /// what dropped and what stayed.
 #[cfg(any(test, feature = "test-hooks"))]
-fn drop_stale_schemas(maker: &PgClient, automatic: bool, cap: usize) -> (usize, usize) {
+fn drop_stale_schemas(maker: &PgClient, automatic: bool, cap: usize) -> (usize, usize, bool) {
     if automatic && SWEPT.swap(true, Ordering::SeqCst) {
-        return (0, 0);
+        return (0, 0, false);
     }
-    let got = if automatic {
-        maker.query_opt("SELECT pg_try_advisory_lock($1)", &[P::i64(CLEAN_LOCK)])
-    } else {
-        // A test-driven sweep waits for the cleanup lock: it must run
-        // against the database the test shaped, even while a run's own
-        // sweep holds the lock.
-        maker.query_opt("SELECT pg_advisory_lock($1)", &[P::i64(CLEAN_LOCK)])
-    };
-    let Ok(got) = got else {
+    let (got, timed_out) = take_cleanup_lock(maker, automatic);
+    if timed_out {
+        // The bounded wait gave up (#965): the holder outlived the
+        // bound, and the caller refuses with CLEAN_LOCK's name instead
+        // of queuing behind it forever.
+        return (0, 0, true);
+    }
+    let Some(got) = got else {
         // This connection cannot even ask: another open's cleanup runs, or
         // the database is in trouble. The next open tries again.
         if automatic {
             SWEPT.store(false, Ordering::SeqCst);
         }
-        return (0, 0);
+        return (0, 0, false);
     };
     // The try-lock's answer is a row that holds the verdict: a `false`
     // row means another cleanup runs, and this one stands down. The
     // blocking lock's row always grants.
-    if automatic && !got.is_some_and(|row| row.get::<_, bool>(0)) {
+    if automatic && !got {
         SWEPT.store(false, Ordering::SeqCst);
-        return (0, 0);
+        return (0, 0, false);
     }
     // The registry names every test schema with its start time, in
     // `public`, spelled in full: the maker's search path is the
@@ -203,7 +301,7 @@ fn drop_stale_schemas(maker: &PgClient, automatic: bool, cap: usize) -> (usize, 
     if let Err(why) = maker.query_opt("SELECT pg_advisory_unlock($1)", &[P::i64(CLEAN_LOCK)]) {
         tracing::warn!(error = %why, "cannot unlock the test-schema cleanup");
     }
-    (dropped, left)
+    (dropped, left, false)
 }
 
 /// The database server's clock, as the registry's `started` column
@@ -266,6 +364,18 @@ pub(crate) fn register_test_schema(
 #[cfg(any(test, feature = "test-hooks"))]
 fn prepare_test_schema(url: &str, schema: &str, dir: &Path) -> Result<()> {
     let preparer = connect(url, None)?;
+    // The cleanup lock's wait is bounded (#965): a preparation whose
+    // CLEAN_LOCK wait passes the bound fails in bounded time, with
+    // CLEAN_LOCK's name in the error, instead of hanging behind a
+    // holder that lives but does not move.
+    preparer.raw(Box::new(|client| {
+        client
+            .batch_execute(&format!(
+                "SET lock_timeout TO '{}s'",
+                clean_lock_wait_secs()
+            ))
+            .map_err(map_pg_error)
+    }))?;
     preparer.raw(Box::new({
         let name = schema.to_owned();
         move |client| {
@@ -282,7 +392,21 @@ fn prepare_test_schema(url: &str, schema: &str, dir: &Path) -> Result<()> {
     // few stale schemas, so the suite's leftovers never outgrow its
     // concurrency (#849).
     drop_stale_schemas(&preparer, true, SWEEP_CAP);
-    drop_stale_schemas(&preparer, false, DRAIN_CAP);
+    let (_, _, blocked) = drop_stale_schemas(&preparer, false, DRAIN_CAP);
+    if blocked {
+        // The bounded wait named its cause (#965): the open is refused
+        // here, with CLEAN_LOCK's name in the error, instead of queuing
+        // on the registration's xact lock behind the same holder.
+        return Err(named_step(
+            "the test schema's cleanup lock (CLEAN_LOCK)",
+            "SELECT pg_advisory_lock(CLEAN_LOCK) -- 55P03 past SET lock_timeout",
+            Error::Unavailable(format!(
+                "the test-schema cleanup lock (CLEAN_LOCK) stayed held past \
+                 {}s; the open is refused instead of waiting",
+                clean_lock_wait_secs()
+            )),
+        ));
+    }
     preparer.raw(Box::new({
         let name = schema.to_owned();
         let dir = dir.to_path_buf();
@@ -323,12 +447,35 @@ fn named_step(step: &'static str, sql: &str, err: Error) -> Error {
 #[cfg(any(test, feature = "test-hooks"))]
 pub(crate) fn sweep_stale_test_schemas(url: &str) -> Result<(usize, usize)> {
     let preparer = connect(url, None)?;
+    // The same bound the preparation's own sweeps carry (#965): a sweep
+    // that cannot take the cleanup lock in bounded time fails with
+    // CLEAN_LOCK's name instead of hanging.
+    preparer.raw(Box::new(|client| {
+        client
+            .batch_execute(&format!(
+                "SET lock_timeout TO '{}s'",
+                clean_lock_wait_secs()
+            ))
+            .map_err(map_pg_error)
+    }))?;
     preparer.raw(Box::new(move |client| {
         client
             .batch_execute("SET application_name TO ''")
             .map_err(map_pg_error)
     }))?;
-    Ok(drop_stale_schemas(&preparer, false, SWEEP_CAP))
+    let (dropped, left, blocked) = drop_stale_schemas(&preparer, false, SWEEP_CAP);
+    if blocked {
+        return Err(named_step(
+            "the test-schema cleanup lock (CLEAN_LOCK)",
+            "SELECT pg_advisory_lock(CLEAN_LOCK) -- 55P03 past SET lock_timeout",
+            Error::Unavailable(format!(
+                "the test-schema cleanup lock (CLEAN_LOCK) stayed held past \
+                 {}s; the sweep is refused instead of waiting",
+                clean_lock_wait_secs()
+            )),
+        ));
+    }
+    Ok((dropped, left))
 }
 
 impl Pg {

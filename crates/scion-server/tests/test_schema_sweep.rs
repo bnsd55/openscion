@@ -28,7 +28,11 @@ fn connect() -> postgres::Client {
 /// while another test's sweep reads it makes that sweep see a database
 /// the test never shaped; the cap test's fifty rows would spend the
 /// sweep's whole cap before another test's younger schema came up. The
-/// lock releases when the client drops, a panic included.
+/// lock releases when the client drops, a panic included. EVERY test
+/// in this binary that opens a store must hold it for its whole body:
+/// the process-wide bound override (`set_clean_lock_wait_secs`) would
+/// otherwise reach an open of a test that runs beside its holder, and
+/// a 3 s bound would fail that open's normal wait.
 fn locked() -> postgres::Client {
     let mut client = connect();
     client
@@ -434,6 +438,7 @@ fn a_schema_the_comment_predates_drops_when_it_is_old_and_unused() {
 /// the same recorded directory, so a reopen never orphans a schema.
 #[test]
 fn the_recorded_directory_is_the_one_the_name_hashes() {
+    let _lock = locked();
     let dir = private_tempdir();
     let schema = Backend::test_schema(dir.path());
     {
@@ -851,4 +856,63 @@ fn a_write_that_loses_the_lane_key_answers_busy_and_leaves_no_transaction_open()
         state, "idle in transaction",
         "the failed write left no transaction open"
     );
+}
+
+/// Restores the const's bound when the proof ends, panic included.
+struct ResetWait;
+impl Drop for ResetWait {
+    fn drop(&mut self) {
+        Backend::set_clean_lock_wait_secs(0);
+    }
+}
+
+/// A holder that lives but does not move: another connection holds
+/// `CLEAN_LOCK` past the preparation's bound, and the open must fail in
+/// bounded time with `CLEAN_LOCK`'s name in the error, not hang (#965).
+/// A killed holder is not this case: Postgres drops a session advisory
+/// lock when its session ends, so a killed test releases the lock at
+/// once. The wait exists for the holder that outlives the bound - a
+/// maker stuck in an unbounded statement, a stalled connection.
+#[test]
+fn an_open_behind_a_held_cleanup_lock_fails_bounded_and_names_it() {
+    let _lock = locked();
+    // The bound is the production const's, 120 s; this proof sets its
+    // own short one so the test stays fast. It rides the sweep tests'
+    // pairwise lock (taken above), so the override cannot reach
+    // another test's wait, and the guard restores the const's.
+    Backend::set_clean_lock_wait_secs(3);
+    let _reset = ResetWait;
+    let mut holder = connect();
+    holder
+        .batch_execute(&format!("SELECT pg_advisory_lock({CLEAN_LOCK})"))
+        .unwrap();
+    let dir = private_tempdir();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let started = std::time::Instant::now();
+    std::thread::spawn(move || {
+        let out = Backend::open_test(dir.path());
+        let _ = tx.send((started.elapsed(), out));
+        drop(dir);
+    });
+    let (took, out) = rx
+        .recv_timeout(std::time::Duration::from_secs(50))
+        .expect("the open hung past 50s behind a held CLEAN_LOCK instead of failing bounded");
+    {
+        let err = out
+            .err()
+            .expect("the open behind a held CLEAN_LOCK must fail");
+        assert!(
+            took >= std::time::Duration::from_secs(2),
+            "the open gave up before its bound: {took:?}"
+        );
+        assert!(
+            took < std::time::Duration::from_secs(45),
+            "the open was not bounded: {took:?}"
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("CLEAN_LOCK"),
+            "the error names the lock: {text}"
+        );
+    }
 }
