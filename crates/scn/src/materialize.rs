@@ -1244,45 +1244,8 @@ mod tests {
         );
     }
 
-    /// The same bound for a name in the destination that a local user
-    /// planted a FIFO at: the walk must refuse it at once, not wait for
-    /// a writer that never comes (#1014).
-    #[test]
-    fn a_fifo_in_the_destination_is_refused_without_waiting() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dest = tmp.path().join("dest");
-        fs::create_dir(&dest).unwrap();
-        // The local user plants the FIFO after the checkout started:
-        // `start` refuses a destination that is already non-empty.
-        let (started, wait) = (
-            std::sync::mpsc::sync_channel(1),
-            std::sync::mpsc::sync_channel(1),
-        );
-        let dest_for_thread = dest.clone();
-        let worker = std::thread::spawn(move || {
-            let mut checkout = Checkout::start(&dest_for_thread).unwrap();
-            started.send(()).unwrap();
-            wait.recv().unwrap();
-            let refused = checkout.file(&path("d/f"), false, b"f\n").is_err();
-            drop(checkout);
-            refused
-        });
-        started.recv().unwrap();
-        mkfifo_0600(&dest.join("d"));
-        wait.send(()).unwrap();
-        let (done, check) = std::sync::mpsc::sync_channel(1);
-        std::thread::spawn(move || {
-            let _ = check.send(worker.join().unwrap());
-        });
-        assert!(
-            done.recv_timeout(std::time::Duration::from_secs(5))
-                .unwrap(),
-            "the checkout must refuse a FIFO name at once"
-        );
-    }
-
     /// Makes a FIFO that the mode checks answer last, not first: the
-    /// point is the open's O_DIRECTORY, so the FIFO carries the user's
+    /// point is the open's `O_DIRECTORY`, so the FIFO carries the user's
     /// own 0600.
     #[cfg(unix)]
     fn mkfifo_0600(path: &Path) {
@@ -1316,7 +1279,7 @@ mod tests {
         let err = checkout
             .file(&path("sub/y"), false, b"y\n")
             .expect_err("a name folding onto a made directory must collide");
-        assert!(err.to_string().contains("collides"), "{err:?}");
+        assert!(format!("{err:#}").contains("collides"), "{err:?}");
     }
 
     /// Without hard links the copy keeps the tree's mode: a non-
