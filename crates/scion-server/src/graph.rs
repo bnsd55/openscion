@@ -1000,6 +1000,26 @@ mod tests {
         assert_eq!(check(ids[0], gen_of(ids[7])), Some(false));
     }
 
+    /// A merge above the first-parent meeting point breaks the fast
+    /// path's disjointness: the merge's other parent's history joins the
+    /// other side deeper down, so the bases are two siblings, not the
+    /// one changeset the first-parent meet lands on. `merge_bases` must
+    /// refuse the fast path (its `None`) and let the paint walk find
+    /// both.
+    #[test]
+    fn a_merge_above_the_meeting_point_gives_two_bases() {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let _slot = damage::slot();
+        // 0 the root; 1 and 2 its children; 3 the merge of 1 and 2 (a);
+        // 4 a child of 1; 5 the merge of 4 and 2 (b).
+        let parents = vec![vec![], vec![0], vec![0], vec![1, 2], vec![1], vec![4, 2]];
+        let (_dir, store, repo, ids) = store_graph(&parents);
+        let bases = merge_bases(&store, repo, ids[3], ids[5], &later()).unwrap();
+        assert!(bases.contains(&ids[1]), "{bases:?}");
+        assert!(bases.contains(&ids[2]), "{bases:?}");
+    }
+
     /// A deadline that a test does not reach.
     fn later() -> Deadline {
         Deadline::new(Instant::now() + Duration::from_secs(600))
