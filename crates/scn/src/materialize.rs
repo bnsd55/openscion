@@ -1204,6 +1204,78 @@ mod tests {
         assert_eq!(temp_dirs(dest.parent().unwrap()), Vec::<String>::new());
     }
 
+    /// A refusal must not wait on the thing it refuses: with
+    /// O_DIRECTORY the open of a FIFO fails at once, without it the open
+    /// blocks until a writer comes. A FIFO is mode 0600 so the mode
+    /// check does not answer first; the answer arrives in a thread, and
+    /// the test bounds it (#1014).
+    #[test]
+    fn a_fifo_at_the_destination_is_refused_without_waiting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("pipe");
+        mkfifo_0600(&dest);
+        let (send, recv) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let _ = send.send(Checkout::start(&dest).is_err());
+        });
+        assert!(
+            recv.recv_timeout(std::time::Duration::from_secs(5)).unwrap(),
+            "the checkout must refuse a FIFO destination at once"
+        );
+    }
+
+    /// The same bound for the parent of a missing destination: a FIFO
+    /// there must fail the open at once (#1014).
+    #[test]
+    fn a_fifo_at_the_destinations_parent_is_refused_without_waiting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pipe = tmp.path().join("pipe");
+        mkfifo_0600(&pipe);
+        let dest = pipe.join("child");
+        let (send, recv) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let _ = send.send(Checkout::start(&dest).is_err());
+        });
+        assert!(
+            recv.recv_timeout(std::time::Duration::from_secs(5)).unwrap(),
+            "the checkout must refuse a FIFO parent at once"
+        );
+    }
+
+    /// The same bound for a name in the destination that a local user
+    /// planted a FIFO at: the walk must refuse it at once, not wait for
+    /// a writer that never comes (#1014).
+    #[test]
+    fn a_fifo_in_the_destination_is_refused_without_waiting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("dest");
+        fs::create_dir(&dest).unwrap();
+        mkfifo_0600(&dest.join("d"));
+        let (send, recv) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let mut checkout = Checkout::start(&dest).unwrap();
+            let _ = send.send(checkout.file(&path("d/f"), false, b"f\n").is_err());
+        });
+        assert!(
+            recv.recv_timeout(std::time::Duration::from_secs(5)).unwrap(),
+            "the checkout must refuse a FIFO name at once"
+        );
+    }
+
+    /// Makes a FIFO that the mode checks answer last, not first: the
+    /// point is the open's O_DIRECTORY, so the FIFO carries the user's
+    /// own 0600.
+    #[cfg(unix)]
+    fn mkfifo_0600(path: &Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let done = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("mkfifo runs");
+        assert!(done.success(), "mkfifo");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
     /// A name that folds onto a made directory collides: the checkout
     /// must refuse it, not take the folded directory for a lost reply.
     /// The fold only exists where the filesystem folds case, so this
