@@ -584,14 +584,10 @@ async fn a_get_objects_stream_holds_its_principals_slot() {
     })
     .await;
     stop.send(()).ok();
-
-
-
 }
 
 #[path = "common/mod.rs"]
 mod common;
-
 
 /// The caller's deadline, from the request's `grpc-timeout`, ends the
 /// object reply's waits: with a deadline that has already passed, the

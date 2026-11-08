@@ -1018,13 +1018,7 @@ mod tests {
         std::fs::write(&path, b"").unwrap();
         let size = store.blobs().size(id).unwrap();
         assert_eq!(size, 0, "the empty file's content size");
-        let plan = plan(
-            &store,
-            Key::Blob(id),
-            &HashSet::from([Key::Blob(id)]),
-            true,
-        )
-        .unwrap();
+        let plan = plan(&store, Key::Blob(id), &HashSet::from([Key::Blob(id)]), true).unwrap();
         assert_eq!(plan.encoding, Encoding::Raw, "{plan:?}");
     }
 
@@ -1068,8 +1062,7 @@ mod tests {
                 Ok((leaf, refs, root_body.len() + mid_body.len()))
             })
             .unwrap();
-        let (_, decoded) =
-            prove(&store, *root_id.as_bytes(), &refs, cap, None).unwrap();
+        let (_, decoded) = prove(&store, *root_id.as_bytes(), &refs, cap, None).unwrap();
         assert!(decoded > 0, "{decoded}");
     }
 
@@ -1199,13 +1192,7 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         let size = store.blobs().size(id).unwrap();
         assert!(zstd_bound(size) < std::fs::metadata(&path).unwrap().len() as usize);
-        let err = plan(
-            &store,
-            Key::Blob(id),
-            &HashSet::from([Key::Blob(id)]),
-            true,
-        )
-        .unwrap_err();
+        let err = plan(&store, Key::Blob(id), &HashSet::from([Key::Blob(id)]), true).unwrap_err();
         assert!(matches!(err, Error::Corrupt(_)), "{err:?}");
     }
 
@@ -1348,7 +1335,6 @@ mod tests {
         let status = reply.await.unwrap_err();
         assert_eq!(status.code(), Code::ResourceExhausted, "{status:?}");
         freer.await.unwrap();
-
     }
 
     /// The ticket walk pays as it goes: a tree is handed to the walk only
