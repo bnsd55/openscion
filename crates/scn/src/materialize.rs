@@ -1292,28 +1292,23 @@ mod tests {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
     }
 
-    /// A name that folds onto a made directory collides: the checkout
-    /// must refuse it, not take the folded directory for a lost reply.
-    /// The fold only exists where the filesystem folds case, so this
-    /// runs on macOS and skips where the tree at hand does not fold.
-    /// The mutants workflow's macOS job runs it (#1014).
+    /// A lost reply for a directory make is the call's own even when a
+    /// recorded path next to it cannot be stated: the kind clause of the
+    /// fold filter keeps a recorded file out of a directory's check. The
+    /// recorded file is removed, so its stat fails with ENOENT, which
+    /// counts as a fold for anything the filter admits (#1014).
     #[test]
-    fn a_directory_that_folds_onto_a_made_one_collides() {
+    fn a_lost_mkdir_reply_survives_a_recorded_file_it_cannot_state() {
         let tmp = tempfile::tempdir().unwrap();
-        // The runtime probe: if the tree at hand does not fold case,
-        // there is nothing for this test to see.
-        fs::write(tmp.path().join("Probe"), b"").unwrap();
-        if !tmp.path().join("probe").exists() {
-            return;
-        }
         let dest = tmp.path().join("dest");
         fs::create_dir(&dest).unwrap();
-        let mut checkout = start(&dest, None, false).unwrap();
-        checkout.file(&path("Sub/x"), false, b"x\n").unwrap();
-        let err = checkout
-            .file(&path("sub/y"), false, b"y\n")
-            .expect_err("a name folding onto a made directory must collide");
-        assert!(format!("{err:#}").contains("collides"), "{err:?}");
+        let mut checkout = start(&dest, Some(Nfs::ReplyLost), false).unwrap();
+        checkout.file(&path("f"), false, b"").unwrap();
+        let recorded = checkout.temp_path().join("f");
+        fs::remove_file(&recorded).unwrap();
+        checkout.file(&path("d/x"), false, b"x\n").unwrap();
+        checkout.finish().unwrap();
+        assert_eq!(fs::read(dest.join("d").join("x")).unwrap(), b"x\n");
     }
 
     /// Without hard links the copy keeps the tree's mode: a non-
