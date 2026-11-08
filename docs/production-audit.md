@@ -10,10 +10,10 @@ The blocking audit for v1.0. Every finding carries exactly one status:
 - **outside the production profile** — with the `support.md` line that
   excludes it.
 - **open** — no status yet. An open finding is a v1.0 blocker; the
-  maintainers cut a card for each one until it carries a status. Nothing
+  maintainers open an issue for each one until it carries a status. Nothing
   in this document is merely "known".
 
-Sections follow the production review of 2026-10-23 (Q4). The harness
+Sections follow the production review of 2026-10-23. The harness
 vacuity table of the same day feeds section 8. Each finding names
 its evidence point `file:line`, checked once against the commit this
 document landed on.
@@ -96,7 +96,7 @@ each caller answers per row and the reply is a set:
 
 ## 5. Failure paths
 
-### 5a. The panic inventory (O7)
+### 5a. The panic inventory
 
 Every `unwrap`, `expect`, `panic!`, `unreachable!` and `todo!` in
 non-test code of `scion-server`, `scn`, `scion-proto` and
@@ -147,7 +147,7 @@ excluded). Verdicts:
 | `scn/src/vfs.rs:1510` (`.expect("cannot read /dev/urandom")`) | the OS entropy source | SAFE — `/dev/urandom` always opens on the supported platforms; the mount fails at startup, before it serves |
 | `scion-core`, `scion-proto` ticket decode, and every `take`-then-`try_into` in the codecs | the wire | SAFE — the same `take` contract |
 
-### 5b. The lock-poison inventory (O7)
+### 5b. The lock-poison inventory
 
 Every `Mutex`/`RwLock` that guards store or derived state. Policy:
 `unwrap_or_else(PoisonError::into_inner)` — a poisoned lock is used,
