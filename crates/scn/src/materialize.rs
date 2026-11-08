@@ -1167,9 +1167,9 @@ mod tests {
     #[test]
     fn the_removal_marker_names_the_temp_directory() {
         let tmp = tempfile::tempdir().unwrap();
-        let temp = tmp.path().join("scn-temp-x");
-        set_removing(Some(temp.clone()));
-        assert_eq!(removing(), Some(temp));
+        let marker = tmp.path().join("scn-temp-x");
+        set_removing(Some(marker.clone()));
+        assert_eq!(removing(), Some(marker));
         set_removing(None);
         assert_eq!(removing(), None);
     }
@@ -1205,7 +1205,7 @@ mod tests {
     }
 
     /// A refusal must not wait on the thing it refuses: with
-    /// O_DIRECTORY the open of a FIFO fails at once, without it the open
+    /// `O_DIRECTORY` the open of a FIFO fails at once, without it the open
     /// blocks until a writer comes. A FIFO is mode 0600 so the mode
     /// check does not answer first; the answer arrives in a thread, and
     /// the test bounds it (#1014).
@@ -1252,14 +1252,30 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dest = tmp.path().join("dest");
         fs::create_dir(&dest).unwrap();
+        // The local user plants the FIFO after the checkout started:
+        // `start` refuses a destination that is already non-empty.
+        let (started, wait) = (
+            std::sync::mpsc::sync_channel(1),
+            std::sync::mpsc::sync_channel(1),
+        );
+        let dest_for_thread = dest.clone();
+        let worker = std::thread::spawn(move || {
+            let mut checkout = Checkout::start(&dest_for_thread).unwrap();
+            started.send(()).unwrap();
+            wait.recv().unwrap();
+            let refused = checkout.file(&path("d/f"), false, b"f\n").is_err();
+            drop(checkout);
+            refused
+        });
+        started.recv().unwrap();
         mkfifo_0600(&dest.join("d"));
-        let (send, recv) = std::sync::mpsc::sync_channel(1);
+        wait.send(()).unwrap();
+        let (done, check) = std::sync::mpsc::sync_channel(1);
         std::thread::spawn(move || {
-            let mut checkout = Checkout::start(&dest).unwrap();
-            let _ = send.send(checkout.file(&path("d/f"), false, b"f\n").is_err());
+            let _ = check.send(worker.join().unwrap());
         });
         assert!(
-            recv.recv_timeout(std::time::Duration::from_secs(5))
+            done.recv_timeout(std::time::Duration::from_secs(5))
                 .unwrap(),
             "the checkout must refuse a FIFO name at once"
         );
