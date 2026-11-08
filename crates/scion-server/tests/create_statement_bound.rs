@@ -113,11 +113,14 @@ fn a_one_put_create_costs_a_fixed_number_of_statements() {
     // #930 folds the three derived INSERTs into one unnest INSERT, and
     // joins the in-transaction repos read, the parent check and the
     // retry check into one statement; #917 folds the lane key into the
-    // write transaction's open batch. The exact count below is the
-    // measured number on that main (20); a statement coming or going
-    // fails in both directions. This test owns its binary: no other test
-    // speaks SQL in its process.
-    const EXACT: u64 = 20;
+    // write transaction's open batch. #1004 folds the create's tail
+    // twice more: the changeset row, its parents and its membership
+    // ride one CTE chain, and the trees, the derived rows and the repo
+    // blobs ride a second - each arm keeping its own ON CONFLICT rule.
+    // The exact count below is the measured number (16); a statement
+    // coming or going fails in both directions. This test owns its
+    // binary: no other test speaks SQL in its process.
+    const EXACT: u64 = 16;
     let _log = LOG_LOCK.lock().unwrap();
     let count = create_statement_count();
     assert_eq!(

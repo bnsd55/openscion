@@ -92,9 +92,14 @@ pub fn apply(
     base: Option<TreeId>,
     changes: &BTreeMap<RepoPath, Option<FileState>>,
     lens: BlobLens<'_>,
-) -> Result<TreeId> {
+) -> Result<Applied> {
     apply_impl(c, base, changes, lens, None)
 }
+
+/// What an apply answers: the root tree's id, and the rows of every
+/// node it built (each id is its body's hash, so the rows can land
+/// after the walk, folded into the caller's own write statement).
+pub(crate) type Applied = (TreeId, Vec<(TreeId, Vec<u8>)>);
 
 /// The build checks the deadline per path, so a cancelled call's job
 /// stops between paths and frees its permit instead of building on.
@@ -108,7 +113,7 @@ pub fn apply_within(
     changes: &BTreeMap<RepoPath, Option<FileState>>,
     lens: BlobLens<'_>,
     deadline: &Deadline,
-) -> Result<TreeId> {
+) -> Result<Applied> {
     apply_impl(c, base, changes, lens, Some(deadline))
 }
 
@@ -118,7 +123,7 @@ fn apply_impl(
     changes: &BTreeMap<RepoPath, Option<FileState>>,
     lens: BlobLens<'_>,
     deadline: Option<&Deadline>,
-) -> Result<TreeId> {
+) -> Result<Applied> {
     // The stored trees on every changed path, one get_trees per level of
     // depth: a commit that touches many directories loads them in one
     // statement per level instead of one per directory.
@@ -155,10 +160,13 @@ fn apply_impl(
         #[cfg(test)]
         crate::write::PARK_APPLY.park(String::from_utf8_lossy(path.as_bytes()));
     }
+    // The rows ride back to the caller: the settle folds them into its
+    // one write statement with the derived rows and the repo blobs
+    // (#1004). The id is the body's hash, so nothing here needs the
+    // rows stored before the caller goes on.
     let mut rows = Vec::new();
     let tree = root.store(&mut rows)?;
-    c.put_trees(&rows)?;
-    Ok(tree)
+    Ok((tree, rows))
 }
 
 /// Finds the entry at `path` under `root`.
@@ -213,10 +221,21 @@ impl Kind for RootTree {
         parents: Vec<TreeId>,
         lens: BlobLens<'_>,
     ) -> Result<TreeId> {
-        apply(c, parents.first().copied(), changeset.changes(), lens).map_err(|e| match e {
-            Error::Apply(e) => Error::Corrupt(format!("stored changeset {id} does not apply: {e}")),
-            other => other,
-        })
+        // Every caller but the land's settle stores its own rows here:
+        // the settle folds them into its one write statement instead
+        // (#1004), and passes them past this trait method's shape.
+        apply(c, parents.first().copied(), changeset.changes(), lens)
+            .map(|(tree, rows)| {
+                c.put_trees(&rows)?;
+                Ok(tree)
+            })
+            .map_err(|e| match e {
+                Error::Apply(e) => {
+                    Error::Corrupt(format!("stored changeset {id} does not apply: {e}"))
+                }
+                other => other,
+            })
+            .and_then(|inner| inner)
     }
 
     fn encode(tree: &TreeId) -> Vec<u8> {
@@ -423,21 +442,14 @@ fn store_changeset_impl(
             None => derive_root_tree(c, repo, parent, lens),
         })
         .transpose()?;
-    let tree = match deadline {
+    let (tree, tree_rows) = match deadline {
         Some(deadline) => apply_within(c, base, cs.changes(), lens, deadline),
         None => apply(c, base, cs.changes(), lens),
     }?;
     let id = c.insert_changeset(repo, cs)?;
-    // One round trip for every blob the changeset puts, however many
-    // paths name the same one.
-    let mut puts: Vec<BlobId> = db::puts(cs).map(|(_, blob)| blob).collect();
-    puts.sort();
-    puts.dedup();
-    c.add_repo_blobs(repo, &puts)?;
-    // The three derived rows land in one statement: the rows are of
-    // this transaction's own changeset, so the batch's conflict guard
-    // keeps the single put's meaning, and the reads above answered from
-    // the preload before any row lands.
+    // The three kinds' rows: of this transaction's own changeset, so
+    // the batch's conflict guard keeps the single put's meaning, and
+    // the reads above answered from the preload before any row lands.
     let mut rows = Vec::new();
     derived::put_row::<RootTree>(&mut rows, id, &tree);
     derived::remove_old::<RootTree>(c)?;
@@ -451,7 +463,25 @@ fn store_changeset_impl(
     // one-statement flush carries them and no round trip moves.
     derived::remove_old::<CommitGraph>(c)?;
     derived::remove_old::<PathHistory>(c)?;
-    derived::put_all(c, rows)?;
+    // The settle's whole write in one statement: the trees, the derived
+    // rows and the repo's blob membership (#1004). The method checks
+    // the stored rows itself, before its memory write, so a stored
+    // value that differs from the computed one refuses as corrupt.
+    let mut puts: Vec<BlobId> = db::puts(cs).map(|(_, blob)| blob).collect();
+    puts.sort();
+    puts.dedup();
+    let rows: Vec<(String, u32, ChangesetId, Vec<u8>)> = rows
+        .into_iter()
+        .map(
+            |derived::PutRow {
+                 kind,
+                 version,
+                 cs,
+                 value,
+             }| { (kind.to_owned(), version, cs, value) },
+        )
+        .collect();
+    c.put_settle_rows(&tree_rows, &rows, repo, &puts)?;
     Ok((id, tree))
 }
 
@@ -719,6 +749,14 @@ mod tests {
             .unwrap()
     }
 
+    /// A test stand-in for the settle: apply no longer writes the
+    /// trees it built, so a test that reads them back stores them the
+    /// way the settle's one statement does.
+    fn store_trees(c: &mut dyn MetaTx, applied: &Applied) -> TreeId {
+        c.put_settle_rows(&applied.1, &[], RepoId(0), &[]).unwrap();
+        applied.0
+    }
+
     fn files(c: &mut dyn MetaTx, root: TreeId) -> Vec<String> {
         let mut out = Vec::new();
         let mut stack = vec![(String::new(), root)];
@@ -738,19 +776,22 @@ mod tests {
     #[test]
     fn puts_and_deletes_build_the_expected_tree() {
         with_db(|c| {
-            let t1 = apply(
+            let applied = apply(
                 c,
                 None,
                 &changes(&[("a/b/c", Some("1")), ("a/d", Some("2")), ("e", Some("3"))]),
                 &mut lens_none(),
             )?;
+            let t1 = store_trees(c, &applied);
             assert_eq!(files(c, t1), ["a/b/c", "a/d", "e"]);
-            let t2 = apply(
+            let applied = apply(
                 c,
                 Some(t1),
                 &changes(&[("a/b/c", None), ("f/g", Some("4"))]),
                 &mut lens_none(),
             )?;
+            let t2 = store_trees(c, &applied);
+
             assert_eq!(files(c, t2), ["a/d", "e", "f/g"], "empty a/b is pruned");
             assert_eq!(
                 lookup(c, t2, &path("a/d"))?,
@@ -808,7 +849,7 @@ mod tests {
     #[test]
     fn lookup_tree_entry_answers_what_the_full_decode_answers() {
         with_db(|c| {
-            let t = apply(
+            let applied = apply(
                 c,
                 None,
                 &changes(&[
@@ -823,6 +864,8 @@ mod tests {
                 ]),
                 &mut lens_none(),
             )?;
+            let t = store_trees(c, &applied);
+
             // Every directory level of the tree, with its id.
             let mut dirs = vec![t];
             for p in ["aB", "b", "deep", "deep/x", "\u{3bb}"] {
@@ -852,14 +895,16 @@ mod tests {
     #[test]
     fn same_content_gives_same_tree_id() {
         with_db(|c| {
-            let direct = apply(c, None, &changes(&[("x/y", Some("1"))]), &mut lens_none())?;
-            let t = apply(
+            let direct = apply(c, None, &changes(&[("x/y", Some("1"))]), &mut lens_none())?.0;
+            let applied = apply(
                 c,
                 None,
                 &changes(&[("x/y", Some("1")), ("z", Some("2"))]),
                 &mut lens_none(),
             )?;
-            let via_delete = apply(c, Some(t), &changes(&[("z", None)]), &mut lens_none())?;
+            let t = store_trees(c, &applied);
+
+            let via_delete = apply(c, Some(t), &changes(&[("z", None)]), &mut lens_none())?.0;
             assert_eq!(direct, via_delete);
             Ok(())
         });
@@ -868,20 +913,25 @@ mod tests {
     #[test]
     fn file_and_directory_swap_in_one_changeset() {
         with_db(|c| {
-            let t = apply(c, None, &changes(&[("a", Some("1"))]), &mut lens_none())?;
-            let t = apply(
+            let applied = apply(c, None, &changes(&[("a", Some("1"))]), &mut lens_none())?;
+            let t = store_trees(c, &applied);
+            let applied = apply(
                 c,
                 Some(t),
                 &changes(&[("a", None), ("a/b", Some("2"))]),
                 &mut lens_none(),
             )?;
+            let t = store_trees(c, &applied);
+
             assert_eq!(files(c, t), ["a/b"]);
-            let t = apply(
+            let applied = apply(
                 c,
                 Some(t),
                 &changes(&[("a", Some("3")), ("a/b", None)]),
                 &mut lens_none(),
             )?;
+            let t = store_trees(c, &applied);
+
             assert_eq!(files(c, t), ["a"]);
             Ok(())
         });
@@ -890,12 +940,14 @@ mod tests {
     #[test]
     fn structural_conflicts_are_rejected() {
         with_db(|c| {
-            let t = apply(
+            let applied = apply(
                 c,
                 None,
                 &changes(&[("a", Some("1")), ("d/x", Some("2"))]),
                 &mut lens_none(),
             )?;
+            let t = store_trees(c, &applied);
+
             let cases: [(Edits<'_>, ApplyError); 6] = [
                 (
                     &[("a/b", Some("x"))],
@@ -1002,11 +1054,13 @@ mod tests {
                         })
                         .collect();
                     let flat_changes = edits.iter().map(|(p, c)| ((*p).to_owned(), *c)).collect();
+                    let outcome = apply(c, tree, &changes, &mut lens_none());
                     match (
                         apply_flat(&model, &flat_changes),
-                        apply(c, tree, &changes, &mut lens_none()),
+                        outcome,
                     ) {
                         (Some(next), Ok(next_tree)) => {
+                            let next_tree = store_trees(c, &next_tree);
                             assert_eq!(snapshot(c, next_tree), next);
                             model = next;
                             tree = Some(next_tree);
