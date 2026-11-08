@@ -1020,6 +1020,50 @@ mod tests {
         assert!(bases.contains(&ids[2]), "{bases:?}");
     }
 
+    /// The paint walk stops when a side dies, not when the queue drains:
+    /// `tally` keeps the live counts, and a side at zero ends the walk
+    /// before the remaining one-sided tail is walked. The mutant that
+    /// makes `tally` refuse every mark freezes the counts, and the walk
+    /// drains the whole graph - here past the visit bound, so the answer
+    /// becomes an error.
+    #[test]
+    fn a_paint_walk_ends_when_a_side_dies_not_when_the_queue_drains() {
+        // A first-parent history of 2,000 changesets; `side` branched
+        // from the 100th and was never merged, so the a-side dies right
+        // after it is taken, while the b-side's tail is still queued.
+        const N: usize = 2_000;
+        let _slot = damage::slot();
+        let mut parents: Vec<Vec<usize>> = vec![vec![]];
+        let mut history = vec![0];
+        for i in 1..N {
+            let last = *history.last().unwrap();
+            parents.push(vec![last]);
+            history.push(parents.len() - 1);
+        }
+        parents.push(vec![history[100]]);
+        let (_dir, store, repo, ids) = store_graph_seeded(&parents);
+        let (a, b) = (
+            At::get_unbounded(&store, repo, *ids.last().unwrap()).unwrap(),
+            At::get_unbounded(&store, repo, ids[history[N - 1]]).unwrap(),
+        );
+        let mut paint = Paint::new(a, b);
+        let bounded = Steps {
+            reads: 100,
+            visits: 1000,
+        };
+        let (bases, cost) = in_steps(
+            &store,
+            &later(),
+            bounded,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            |index| paint.next(index),
+        )
+        .unwrap();
+        assert_eq!(bases, [ids[history[100]]]);
+        assert!(cost.visits < 1000, "{cost:?}");
+    }
+
     /// A deadline that a test does not reach.
     fn later() -> Deadline {
         Deadline::new(Instant::now() + Duration::from_secs(600))
