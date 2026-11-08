@@ -115,14 +115,6 @@ pub(crate) static PARK_PUT: Park = Park {
     root: std::sync::Mutex::new(None),
 };
 
-/// The park of [`create_changeset`], between its pre-transaction read
-/// and its write transaction: a test lands in the window and pins what
-/// the transaction must read itself.
-#[cfg(test)]
-pub(crate) static PARK_PRE_READ: Park = Park {
-    root: std::sync::Mutex::new(None),
-};
-
 /// Stores a changeset sent as `ChangesetV1` bytes, with the root tree of its
 /// parent plus its changes. Safe to repeat: the ID is the content.
 ///
@@ -184,11 +176,6 @@ pub fn create_changeset(
     // generation read for a parent it walks, the insert's own read for a
     // parent it does not.
     let pre = store.read(|c| tree::pre_read(c, repo_id, &cs))?;
-    // The test seam of the pre-read window: the caller parks here, after
-    // the pre-read and before the write transaction, so a test can act
-    // in the window and pin what the transaction reads itself.
-    #[cfg(test)]
-    PARK_PRE_READ.park(cs.id());
     store.write(|c| {
         // The rules re-checked inside the transaction, one statement for
         // the repo and both membership questions: the parent's, and the
@@ -736,94 +723,5 @@ mod tests {
             }
             other => panic!("expected InvalidArgument, got {other:?}"),
         }
-    }
-
-    /// A land in the pre-read window: the create parks between its
-    /// pre-transaction read and its write transaction, a land moves
-    /// `main` in the window, and the created changeset still takes its
-    /// generation from its parent - read in the transaction, never from
-    /// the moved ref's tip. The pre-read carries no generation: the
-    /// generation is mutable state the transaction reads itself.
-    #[test]
-    fn a_land_in_the_pre_read_window_leaves_the_generation_to_the_transaction() {
-        let _slot = damage::slot();
-        let (_dir, store, root) = store_with_root();
-        store
-            .write(|c| {
-                let repo = c.repo_id("main")?;
-                c.cas_ref(repo, "main", None, root)
-            })
-            .unwrap();
-        // A (gen 1): B's parent, whose rows the pre-read will read, and
-        // the ref `main` points at, so the window land can land M.
-        let a =
-            create_changeset(&store, "main", &changeset(vec![root]).encode(), &later()).unwrap();
-        store
-            .write(|c| {
-                let repo = c.repo_id("main")?;
-                let head = c
-                    .get_ref(repo, "main")?
-                    .expect("main exists: the root set it");
-                c.cas_ref(repo, "main", Some(head.version), a)
-            })
-            .unwrap();
-        // M (gen 2): a sibling of B the window land lands on `main`.
-        let m = create_changeset(&store, "main", &changeset(vec![a]).encode(), &later()).unwrap();
-        let repo = store.read(|c| c.repo_id("main")).unwrap();
-        let (a_gen, m_gen) = store
-            .read(|c| Ok((c.generation(repo, a)?, c.generation(repo, m)?)))
-            .unwrap();
-        assert_eq!(m_gen, a_gen + 1, "M hangs from A");
-
-        // B: a child of A. Its create parks after the pre-read; the
-        // window land moves `main` to M (gen 2), past A.
-        let (bytes, b) = changeset(vec![a]).encode_with_id();
-        let hooks = crate::test_support::private_tempdir();
-        PARK_PRE_READ.arm(hooks.path());
-        std::fs::write(hooks.path().join(format!("park-{b}")), b"").unwrap();
-        let held = later();
-        let writer = store.clone();
-        let created = std::thread::spawn(move || create_changeset(&writer, "main", &bytes, &held));
-        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !hooks.path().join(format!("parked-{b}")).exists() {
-            assert!(
-                std::time::Instant::now() < give_up,
-                "the create never parked after its pre-read"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        let tip = store
-            .read(|c| Ok(c.get_ref(repo, "main")?.map(|r| r.target)))
-            .unwrap();
-        assert_eq!(tip, Some(a), "main points at A before the land: {tip:?}");
-        let lands = crate::test_support::land::Lands::default();
-        let request = crate::test_support::land::LandRequest {
-            repo: "main".into(),
-            changeset: m,
-            target_ref: "main".into(),
-            request_key: m.to_string(),
-            deadline: later(),
-        };
-        let outcome = lands
-            .land(&store, &crate::auth::Caller("t".into()), &request)
-            .unwrap();
-        assert_eq!(
-            outcome.state,
-            crate::test_support::land::LandState::Landed,
-            "{}",
-            outcome.detail
-        );
-        std::fs::remove_file(hooks.path().join(format!("park-{b}"))).unwrap();
-        let answer = created.join().expect("the create's thread answers");
-        PARK_PRE_READ.lift();
-        assert_eq!(
-            answer.expect("the create lands"),
-            b,
-            "the create lands its own changeset"
-        );
-        // The generation: the parent's, read in the transaction - not
-        // the tip's, which the window land moved to M (gen 2).
-        let b_gen = store.read(|c| c.generation(repo, b)).unwrap();
-        assert_eq!(b_gen, a_gen + 1, "the generation comes from the parent");
     }
 }

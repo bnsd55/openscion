@@ -6116,35 +6116,39 @@ impl MetaTx for PgTx<'_> {
         // are committed and content-addressed, so an answer cannot be
         // stale. A miss re-reads in the transaction, which also keeps the
         // answer for a tree whose row committed after the pre-read began.
+        // The misses' positions ride a map, so one pass builds the ask
+        // and one pass per found key fills the slots - no scan per chunk,
+        // and a land's whole level (the land carries no pre-read) is one
+        // pass and one statement per 1,000 keys, as on main.
         let pre = self.pre_trees.as_ref();
         let mut out: Vec<Option<Vec<u8>>> = Vec::with_capacity(ids.len());
-        let mut misses: Vec<Vec<u8>> = Vec::new();
-        for id in ids {
+        let mut miss_at: std::collections::HashMap<Vec<u8>, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, id) in ids.iter().enumerate() {
             let key = id_bytes(id.as_bytes());
             if let Some(body) = pre.and_then(|map| map.get(&key)) {
                 out.push(Some(body.clone()));
             } else {
                 out.push(None);
-                if !misses.contains(&key) {
-                    misses.push(key);
-                }
+                miss_at.entry(key).or_default().push(i);
             }
         }
-        if !misses.is_empty() {
-            for chunk in misses.chunks(crate::meta::DERIVED_BATCH) {
+        if !miss_at.is_empty() {
+            let keys: Vec<&Vec<u8>> = miss_at.keys().collect();
+            for chunk in keys.chunks(crate::meta::DERIVED_BATCH) {
+                let chunk: Vec<Vec<u8>> = chunk.iter().map(|key| (*key).clone()).collect();
                 let rows = self.c.query(
                     "SELECT id, body FROM trees WHERE id = ANY($1)",
-                    &[P::bytea_array(chunk.to_vec())],
+                    &[P::bytea_array(chunk.clone())],
                 )?;
                 let bodies: std::collections::HashMap<Vec<u8>, Vec<u8>> = rows
                     .into_iter()
                     .map(|row| (row.get::<_, Vec<u8>>(0), row.get::<_, Vec<u8>>(1)))
                     .collect();
-                for (id, slot) in ids.iter().zip(out.iter_mut()) {
-                    if slot.is_none() {
-                        let key = id_bytes(id.as_bytes());
-                        if let Some(body) = bodies.get(&key) {
-                            *slot = Some(body.clone());
+                for key in &chunk {
+                    if let (Some(body), Some(positions)) = (bodies.get(key), miss_at.get(key)) {
+                        for &i in positions {
+                            out[i] = Some(body.clone());
                         }
                     }
                 }

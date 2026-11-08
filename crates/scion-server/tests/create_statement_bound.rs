@@ -134,6 +134,13 @@ fn a_one_put_create_costs_a_fixed_number_of_statements() {
     // coming or going fails in both directions. This test owns its
     // binary: no other test speaks SQL in its process.
     const EXACT: u64 = 18;
+    // The lane pin: the statements between the write transaction's begin
+    // (the begin that carries the lane key - a pre-read on the write
+    // connection would carry it too and push this count past 7) and its
+    // commit. The lane is what the PR's gain rides: 7, from 10. The
+    // total above stays 18 if the pre-read rode the write connection;
+    // this count is what catches it.
+    const LANE: usize = 7;
     let _log = LOG_LOCK.lock().unwrap();
     let count = create_statement_count();
     assert_eq!(
@@ -141,5 +148,19 @@ fn a_one_put_create_costs_a_fixed_number_of_statements() {
         EXACT,
         "a one-put create cost {count} statements, not {EXACT}:\n{:#?}",
         Backend::test_statement_log()
+    );
+    let log = Backend::test_statement_log();
+    let begin = log
+        .iter()
+        .position(|s| s.starts_with("BEGIN; SET LOCAL lock_timeout"))
+        .expect("the write transaction's begin carries the lane key");
+    let lane = log[begin..]
+        .iter()
+        .position(|s| *s == "COMMIT")
+        .expect("the write transaction commits")
+        + 1;
+    assert_eq!(
+        lane, LANE,
+        "the create's write transaction cost {lane} statements on the lane, not {LANE}:\n{log:#?}"
     );
 }
