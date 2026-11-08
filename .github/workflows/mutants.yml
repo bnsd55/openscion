@@ -41,6 +41,20 @@ on:
         required: false
         default: ""
         type: string
+      shard:
+        description: >-
+          this run's 1-based shard index (cargo-mutants --shard k/n). Set
+          both this and shards for a file whose mutant count cannot fit
+          one job's timeout (#1008, listen.rs); leave both empty for a
+          whole-file run.
+        required: false
+        default: ""
+        type: string
+      shards:
+        description: the shard count the shard index counts from 1
+        required: false
+        default: ""
+        type: string
       runner:
         description: >-
           the runner: ubuntu-24.04 (the default) with the Postgres service;
@@ -118,6 +132,8 @@ jobs:
           FILES: ${{ inputs.files }}
           MUTANT_TIMEOUT: ${{ inputs.timeout_per_mutant }}
           TEST_ARGS: ${{ inputs.test_args }}
+          SHARD: ${{ inputs.shard }}
+          SHARDS: ${{ inputs.shards }}
         run: |
           # The dispatch names files, one per -f: cargo-mutants examines
           # only those files' functions. Every name must be a file in the
@@ -130,8 +146,12 @@ jobs:
             file_args="$file_args -f $f"
           done
           df -h /
+          shard_args=""
+          if [ -n "$SHARD" ] && [ -n "$SHARDS" ]; then
+            shard_args="--shard $SHARD/$SHARDS"
+          fi
           # shellcheck disable=SC2086
-          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $file_args -- $TEST_ARGS
+          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $file_args $shard_args -- $TEST_ARGS
           df -h /
       - name: the outcome lists
         if: always()
@@ -192,6 +212,8 @@ jobs:
           FILES: ${{ inputs.files }}
           MUTANT_TIMEOUT: ${{ inputs.timeout_per_mutant }}
           TEST_ARGS: ${{ inputs.test_args }}
+          SHARD: ${{ inputs.shard }}
+          SHARDS: ${{ inputs.shards }}
         run: |
           set -eu
           file_args=""
@@ -201,8 +223,12 @@ jobs:
             file_args="$file_args -f $f"
           done
           df -h /
+          shard_args=""
+          if [ -n "$SHARD" ] && [ -n "$SHARDS" ]; then
+            shard_args="--shard $SHARD/$SHARDS"
+          fi
           # shellcheck disable=SC2086
-          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $file_args -- $TEST_ARGS
+          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $file_args $shard_args -- $TEST_ARGS
           df -h /
       - name: the outcome lists
         if: always()
