@@ -445,7 +445,6 @@ fn a_rebasing_lands_history_nodes_ride_the_settle_statement() {
             .unwrap();
         rows[0].get(0)
     };
-    let rows_before = count(&mut client);
     let third = make_changeset(&store, repo, tip, "c.txt");
     let rows_before = count(&mut client);
     Backend::test_reset_statement_count();
