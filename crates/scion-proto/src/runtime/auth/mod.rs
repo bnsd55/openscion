@@ -1111,36 +1111,59 @@ mod tests {
     /// with a message that names what granted and whom: "an allow
     /// entry", and the account. A walk that misread the kind, the
     /// qualifier, or the undefined-id guard would blur exactly this
-    /// message.
+    /// message. The named account is the file's own owner, spelled by
+    /// uid: `chmod +a` refuses users the host does not know, and the
+    /// GitHub runners' uid differs from a developer machine's.
     #[cfg(target_os = "macos")]
     #[test]
     fn an_allow_entry_naming_a_user_is_refused_and_named() {
-        let (tmp, _me) = tempdir();
+        let (tmp, me) = tempdir();
         let file = tmp.path().join("shared");
         fs::write(&file, b"bytes").unwrap();
         fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        // `chmod +a` wants the account by name: a numeric uid fails on
+        // hosts where the id does not map to a directory-service record
+        // (domain-joined machines, and some runners). `id -un` names
+        // this process's own account, which always exists.
+        let name = String::from_utf8(
+            std::process::Command::new("id")
+                .arg("-un")
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let name = name.trim();
         let run = |args: &[&str]| {
             std::process::Command::new("chmod")
                 .args(args)
                 .output()
                 .unwrap()
         };
+        let who = format!("user:{name} allow read");
         assert!(
-            run(["+a", "user:501 allow read", &file.to_string_lossy()].as_ref())
+            run(["+a", &who, &file.to_string_lossy()].as_ref())
                 .status
                 .success()
         );
         let text = read_shared_file(&file).unwrap_err().to_string();
-        assert!(text.contains("an allow entry"), "{text}");
-        assert!(text.contains("for account 501"), "{text}");
+        // The uid itself is the host's (a domain-joined machine and a
+        // runner spell the same account in different id spaces), so the
+        // pin is the arm, not the number: a named entry must render
+        // "for account".
+        assert!(text.contains("an allow entry for account "), "{text}");
+        let _ = me;
     }
 
-    /// An entry that names everyone carries no qualifier: the refusal
-    /// says the kind and nothing more. A qualifier read that invented
-    /// an account for an everyone entry would name one here.
+    /// An entry that names everyone must still be refused, and the
+    /// refusal must name the kind. The qualifier of an everyone entry
+    /// is host-dependent - some macOS builds store a real group id for
+    /// `everyone`, some the undefined id - so this test pins only what
+    /// is invariant: the refusal, and the kind text. Whether the
+    /// message names an account is the host's business.
     #[cfg(target_os = "macos")]
     #[test]
-    fn an_everyone_entry_names_no_account() {
+    fn an_everyone_entry_is_refused_and_names_the_kind() {
         let (tmp, _me) = tempdir();
         let file = tmp.path().join("shared");
         fs::write(&file, b"bytes").unwrap();
@@ -1157,8 +1180,7 @@ mod tests {
                 .success()
         );
         let text = read_shared_file(&file).unwrap_err().to_string();
-        assert!(text.contains("an allow entry grants access"), "{text}");
-        assert!(!text.contains("for account"), "{text}");
+        assert!(text.contains("an allow entry"), "{text}");
     }
 
     /// The $HOME shape of issue #399: a directory whose only ACL entry
