@@ -627,7 +627,9 @@ async fn the_requests_deadline_ends_a_get_objects_at_once() {
     for _ in 0..50 {
         held.push(hold_objects(channel.clone(), alice_ticket.clone(), big_blob).await);
     }
-    let mut request = tonic::Request::new(read_request(alice_ticket.clone(), blob));
+    // The held streams' producers take their shares as they start;
+    // give them a beat, so alice's call meets a full budget.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     request.set_timeout(std::time::Duration::from_secs(2));
     let stream = objects(channel.clone())
         .get_objects(request)
