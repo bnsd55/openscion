@@ -2237,6 +2237,23 @@ impl<'a> PgTx<'a> {
         Ok(())
     }
 
+    /// Takes the transaction's deferred history rows out of the buffer,
+    /// sorted by id for a deterministic statement, and resets the
+    /// buffer's byte count. The settle's statement writes them (its
+    /// `hn` arm); the commit's flush then finds nothing to write.
+    fn drain_history_rows(&mut self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let Some(pending) = self.history_pending.as_deref_mut() else {
+            return Vec::new();
+        };
+        if pending.rows.is_empty() {
+            return Vec::new();
+        }
+        let mut node_rows: Vec<(Vec<u8>, Vec<u8>)> = pending.rows.drain().collect();
+        pending.bytes = 0;
+        node_rows.sort();
+        node_rows
+    }
+
     /// Writes the history nodes the transaction inserted while batching,
     /// after the derived rows and before the `git_import` rows: one
     /// statement per 1,000 rows. The nodes are content-addressed, so
@@ -4325,6 +4342,117 @@ fn id_bytes(id: &[u8; 32]) -> Vec<u8> {
 }
 
 impl PgTx<'_> {
+    /// The settle's one statement: a CTE chain whose arm per row kind
+    /// keeps its own `ON CONFLICT` rule, and a top `SELECT` that answers
+    /// each arm's inserted count. The history arm carries the
+    /// transaction's deferred nodes (#1031); the count names name each
+    /// arm, in order.
+    fn settle_statement(
+        trees: &[(TreeId, Vec<u8>)],
+        rows: &[(String, u32, ChangesetId, Vec<u8>)],
+        repo: RepoId,
+        blobs: &[BlobId],
+        history: &[(Vec<u8>, Vec<u8>)],
+    ) -> (String, Vec<Param>, Vec<String>) {
+        let mut arms: Vec<String> = Vec::new();
+        let mut params: Vec<Param> = Vec::new();
+        let mut n = 1usize;
+        let mut counts: Vec<String> = Vec::new();
+        if !trees.is_empty() {
+            let ids: Vec<Vec<u8>> = trees
+                .iter()
+                .map(|(id, _)| id_bytes(id.as_bytes()))
+                .collect();
+            let bodies: Vec<Vec<u8>> = trees.iter().map(|(_, body)| body.clone()).collect();
+            params.push(Param::ByteaArray(ids));
+            params.push(Param::ByteaArray(bodies));
+            arms.push(format!(
+                "tr AS (
+                   INSERT INTO trees (id, body)
+                   SELECT * FROM unnest(${n}::bytea[], ${next}::bytea[])
+                   ON CONFLICT (id) DO NOTHING
+                   RETURNING 1
+                 )",
+                n = n,
+                next = n + 1
+            ));
+            counts.push("tr".to_owned());
+            n += 2;
+        }
+        if !rows.is_empty() {
+            let kinds: Vec<String> = rows.iter().map(|(kind, _, _, _)| kind.clone()).collect();
+            let versions: Vec<i64> = rows.iter().map(|(_, v, _, _)| i64::from(*v)).collect();
+            let css: Vec<Vec<u8>> = rows
+                .iter()
+                .map(|(_, _, cs, _)| id_bytes(cs.as_bytes()))
+                .collect();
+            let values: Vec<Vec<u8>> = rows.iter().map(|(_, _, _, value)| value.clone()).collect();
+            params.push(Param::TextArray(kinds));
+            params.push(Param::I64Array(versions));
+            params.push(Param::ByteaArray(css));
+            params.push(Param::ByteaArray(values));
+            arms.push(format!(
+                "der AS (
+                   INSERT INTO derived (kind, version, cs, value)
+                   SELECT * FROM unnest(${n}::text[], ${next}::int8[], ${next2}::bytea[], ${next3}::bytea[])
+                   ON CONFLICT (kind, version, cs) DO NOTHING
+                   RETURNING 1
+                 )",
+                n = n,
+                next = n + 1,
+                next2 = n + 2,
+                next3 = n + 3
+            ));
+            counts.push("der".to_owned());
+            n += 4;
+        }
+        if !blobs.is_empty() {
+            let ids: Vec<Vec<u8>> = blobs.iter().map(|blob| id_bytes(blob.as_bytes())).collect();
+            params.push(Param::I64(repo.0));
+            params.push(Param::ByteaArray(ids));
+            arms.push(format!(
+                "blb AS (
+                   INSERT INTO repo_blobs (repo_id, blob)
+                   SELECT ${n}, x FROM unnest(${next}::bytea[]) AS x
+                   ON CONFLICT (repo_id, blob) DO NOTHING
+                   RETURNING 1
+                 )",
+                n = n,
+                next = n + 1
+            ));
+            counts.push("blb".to_owned());
+            n += 2;
+        }
+        if !history.is_empty() {
+            let ids: Vec<Vec<u8>> = history.iter().map(|(id, _)| id.clone()).collect();
+            let bodies: Vec<Vec<u8>> = history.iter().map(|(_, body)| body.clone()).collect();
+            params.push(Param::ByteaArray(ids));
+            params.push(Param::ByteaArray(bodies));
+            arms.push(format!(
+                "hn AS (
+                   INSERT INTO history_nodes (id, body)
+                   SELECT * FROM unnest(${n}::bytea[], ${next}::bytea[])
+                   ON CONFLICT (id) DO NOTHING
+                   RETURNING 1
+                 )",
+                n = n,
+                next = n + 1
+            ));
+            counts.push("hn".to_owned());
+            #[cfg(test)]
+            {
+                let bytes: usize = history.iter().map(|(_, body)| body.len()).sum();
+                crate::history::note_flushed_node_bytes(bytes);
+            }
+        }
+        // The top SELECT answers each arm's inserted count.
+        let selects: Vec<String> = counts
+            .iter()
+            .map(|arm| format!("(SELECT count(*) FROM {arm})"))
+            .collect();
+        let sql = format!("WITH {} SELECT {}", arms.join(",\n"), selects.join(", "));
+        (sql, params, counts)
+    }
     /// A short derived count is a stored row for one of the keys: legal
     /// when it agrees, corrupt when it differs. Checked row by row on
     /// this rare path.
@@ -5540,83 +5668,20 @@ impl MetaTx for PgTx<'_> {
             self.add_repo_blobs(repo, blobs)?;
             return Ok(());
         }
-        if trees.is_empty() && rows.is_empty() && blobs.is_empty() {
+        // The transaction's deferred history nodes ride the same
+        // statement: the settle wrote them through the buffer, and the
+        // commit's flush finds nothing to write. The importer's chunked
+        // flush keeps its path (the early return above), and a
+        // transaction that never deferred keeps `put_history_node`'s
+        // direct insert - there is no settle statement to ride there.
+        // The nodes are content-addressed, so their order does not
+        // matter; the ids sort for a deterministic statement, as the
+        // flush sorts its chunks.
+        let history = self.drain_history_rows();
+        if trees.is_empty() && rows.is_empty() && blobs.is_empty() && history.is_empty() {
             return Ok(());
         }
-        let mut arms: Vec<String> = Vec::new();
-        let mut params: Vec<Param> = Vec::new();
-        let mut n = 1usize;
-        let mut counts: Vec<String> = Vec::new();
-        if !trees.is_empty() {
-            let ids: Vec<Vec<u8>> = trees
-                .iter()
-                .map(|(id, _)| id_bytes(id.as_bytes()))
-                .collect();
-            let bodies: Vec<Vec<u8>> = trees.iter().map(|(_, body)| body.clone()).collect();
-            params.push(Param::ByteaArray(ids));
-            params.push(Param::ByteaArray(bodies));
-            arms.push(format!(
-                "tr AS (
-                   INSERT INTO trees (id, body)
-                   SELECT * FROM unnest(${n}::bytea[], ${next}::bytea[])
-                   ON CONFLICT (id) DO NOTHING
-                   RETURNING 1
-                 )",
-                n = n,
-                next = n + 1
-            ));
-            counts.push("tr".to_owned());
-            n += 2;
-        }
-        if !rows.is_empty() {
-            let kinds: Vec<String> = rows.iter().map(|(kind, _, _, _)| kind.clone()).collect();
-            let versions: Vec<i64> = rows.iter().map(|(_, v, _, _)| i64::from(*v)).collect();
-            let css: Vec<Vec<u8>> = rows
-                .iter()
-                .map(|(_, _, cs, _)| id_bytes(cs.as_bytes()))
-                .collect();
-            let values: Vec<Vec<u8>> = rows.iter().map(|(_, _, _, value)| value.clone()).collect();
-            params.push(Param::TextArray(kinds));
-            params.push(Param::I64Array(versions));
-            params.push(Param::ByteaArray(css));
-            params.push(Param::ByteaArray(values));
-            arms.push(format!(
-                "der AS (
-                   INSERT INTO derived (kind, version, cs, value)
-                   SELECT * FROM unnest(${n}::text[], ${next}::int8[], ${next2}::bytea[], ${next3}::bytea[])
-                   ON CONFLICT (kind, version, cs) DO NOTHING
-                   RETURNING 1
-                 )",
-                n = n,
-                next = n + 1,
-                next2 = n + 2,
-                next3 = n + 3
-            ));
-            counts.push("der".to_owned());
-            n += 4;
-        }
-        if !blobs.is_empty() {
-            let ids: Vec<Vec<u8>> = blobs.iter().map(|blob| id_bytes(blob.as_bytes())).collect();
-            params.push(Param::I64(repo.0));
-            params.push(Param::ByteaArray(ids));
-            arms.push(format!(
-                "blb AS (
-                   INSERT INTO repo_blobs (repo_id, blob)
-                   SELECT ${n}, x FROM unnest(${next}::bytea[]) AS x
-                   ON CONFLICT (repo_id, blob) DO NOTHING
-                   RETURNING 1
-                 )",
-                n = n,
-                next = n + 1
-            ));
-            counts.push("blb".to_owned());
-        }
-        // The top SELECT answers each arm's inserted count.
-        let selects: Vec<String> = counts
-            .iter()
-            .map(|arm| format!("(SELECT count(*) FROM {arm})"))
-            .collect();
-        let sql = format!("WITH {} SELECT {}", arms.join(",\n"), selects.join(", "));
+        let (sql, params, counts) = Self::settle_statement(trees, rows, repo, blobs, &history);
         let rows_out = self.c.query(&sql, &params)?;
         for (i, arm) in counts.iter().enumerate() {
             if arm == "der" {
