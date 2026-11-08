@@ -45,7 +45,12 @@ if [ -z "$GRPCURL" ]; then
   tarball=$dir/grpcurl.tar.gz
   if [ ! -x "$dir/grpcurl" ]; then
     url="https://github.com/fullstorydev/grpcurl/releases/download/v$GRPCURL_VERSION/grpcurl_${GRPCURL_VERSION}_${asset}.tar.gz"
-    curl -sL -o "$tarball" "$url"
+    # -f fails on an HTTP error before any byte is kept: without it an
+    # error body becomes the tarball and the hash check reads like a
+    # tampered release (#1024). A transient error retries; a lasting
+    # one dies here with the status, before any hash.
+    curl -fsSL --retry 3 --retry-all-errors -o "$tarball" "$url" \
+      || die "the grpcurl download failed ($url)"
     got=$(shasum -a 256 "$tarball" | cut -d' ' -f1)
     [ "$got" = "$want" ] || die "grpcurl $asset sha256 $got is not the pinned $want"
     tar xzf "$tarball" -C "$dir"
