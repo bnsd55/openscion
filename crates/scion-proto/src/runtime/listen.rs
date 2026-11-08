@@ -1811,6 +1811,10 @@ mod tests {
         LOG.get_or_init(Captured::default).clone()
     }
 
+    /// Serializes the tests that count accept-warning lines in the shared
+    /// captured log: each writes exactly one, so they must not overlap.
+    static ACCEPT_WARN_LOG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn init_log() {
         static INIT: std::sync::Once = std::sync::Once::new();
         INIT.call_once(|| {
@@ -1843,6 +1847,7 @@ mod tests {
     /// rate-limited warning.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_listener_that_fails_every_accept_is_paced_and_counted() {
+        let _log_window = ACCEPT_WARN_LOG.lock().unwrap();
         init_log();
         let limits = Limits::default();
         let metrics = Arc::new(Metrics::default());
@@ -1903,6 +1908,99 @@ mod tests {
             "the warning must name at least one failure: {}",
             warns[0]
         );
+    }
+
+    /// An incoming stream whose first item is an accept failure; the rest
+    /// come from the real listener it wraps.
+    struct FailFirst<S> {
+        failed: bool,
+        inner: S,
+    }
+
+    impl<S> Stream for FailFirst<S>
+    where
+        S: Stream<Item = io::Result<TcpStream>> + Unpin,
+    {
+        type Item = io::Result<TcpStream>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if !self.failed {
+                self.failed = true;
+                return Poll::Ready(Some(Err(io::Error::other("the first accept fails"))));
+            }
+            Pin::new(&mut self.inner).poll_next(cx)
+        }
+    }
+
+    /// One failed accept must not end the serve: the listener keeps taking
+    /// connections after it. A failed accept that ends the serve is a
+    /// server that stops taking connections.
+    #[tokio::test]
+    async fn a_failed_accept_does_not_end_the_serve() {
+        let _log_window = ACCEPT_WARN_LOG.lock().unwrap();
+        init_log();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = FailFirst {
+            failed: false,
+            inner: tcp(listener),
+        };
+        let limits = Limits::default();
+        let metrics = Arc::new(Metrics::default());
+        tokio::spawn(async move {
+            let router = |mut server: Server| server.add_service(ObjectsServer::new(Stalls));
+            let pending = std::future::pending();
+            let _ = limits
+                .serve_with(
+                    &Accepting::of(&limits, &TIMERS),
+                    router,
+                    incoming,
+                    None,
+                    pending,
+                    metrics,
+                )
+                .await;
+        });
+        let mut client = ObjectsClient::new(endpoint(addr).connect().await.unwrap());
+        assert_eq!(quick(&mut client).await, Code::NotFound);
+    }
+
+    /// The same promise through the TLS accept path: one failed accept
+    /// there must not end the serve either.
+    #[tokio::test]
+    async fn a_failed_tls_accept_does_not_end_the_serve() {
+        let _log_window = ACCEPT_WARN_LOG.lock().unwrap();
+        init_log();
+        let certs = test_certs();
+        let dir = crate::runtime::private_tempdir();
+        let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
+        let config = server_tls.config();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = FailFirst {
+            failed: false,
+            inner: tcp(listener),
+        };
+        let limits = Limits::default();
+        let metrics = Arc::new(Metrics::default());
+        tokio::spawn(async move {
+            let router = |mut server: Server| server.add_service(ObjectsServer::new(Stalls));
+            let pending = std::future::pending();
+            let _ = limits
+                .serve_with(
+                    &Accepting::of(&limits, &TIMERS),
+                    router,
+                    incoming,
+                    Some(config),
+                    pending,
+                    metrics,
+                )
+                .await;
+        });
+        let mut client = client(addr, &certs.authority.cert(), Some(&certs.client))
+            .await
+            .unwrap();
+        assert_eq!(quick(&mut client).await, Code::NotFound);
     }
 
     /// The stub, served within `limits` with `timers`, and its address.
@@ -2302,6 +2400,16 @@ mod tests {
         assert!(closes_a_peer_that_sends(addr, preface).await);
     }
 
+    /// A peer that sends only part of the preface and then stalls is cut at
+    /// the handshake timeout: the preface counter runs until the preface is
+    /// all in, so a few bytes do not buy a silent connection a place
+    /// forever. (It also fails if any read at all stops the counter.)
+    #[tokio::test]
+    async fn a_partial_preface_is_cut_at_the_handshake_timeout() {
+        let (addr, _) = serve(Limits::default(), timers("age")).await;
+        assert!(closes_a_peer_that_sends(addr, b"PRI * HT").await);
+    }
+
     /// The client preface, then an empty SETTINGS frame: what a real client
     /// sends at once, so a connection that is served would live.
     const PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\x04\0\0\0\0\0";
@@ -2630,7 +2738,9 @@ mod tests {
         let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, None);
         let (addr, _) = serve_tls(Limits::default(), TIMERS, &server_tls, HANDSHAKE_TIMEOUT).await;
-        let mut client = client(addr, &certs.authority.cert(), None).await.unwrap();
+        let mut client = client(addr, &certs.authority.cert(), Some(&certs.client))
+            .await
+            .unwrap();
         assert_eq!(quick(&mut client).await, Code::NotFound);
     }
 
