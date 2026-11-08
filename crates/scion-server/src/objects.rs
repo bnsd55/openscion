@@ -997,6 +997,285 @@ mod tests {
         assert_eq!(in_flight.available_permits(), IN_FLIGHT_BYTES);
     }
 
+    /// A 0-byte blob file holds no frame; the size reader answers 0 for
+    /// it, and the plan must send it RAW, not as a zstd frame that does
+    /// not exist. The writer always frames its content, so the file is
+    /// emptied by hand: this is the state the arm exists for (only the
+    /// empty blob's file may be 0 bytes; `Blobs::verify` says so).
+    #[test]
+    fn an_empty_blob_file_plans_raw() {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let id = BlobId::of(b"");
+        let hex = id.to_string();
+        let path = dir
+            .path()
+            .join("objects")
+            .join("blob")
+            .join(&hex[..2])
+            .join(&hex[2..]);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"").unwrap();
+        let size = store.blobs().size(id).unwrap();
+        assert_eq!(size, 0, "the empty file's content size");
+        let plan = plan(&store, Key::Blob(id), &HashSet::from([Key::Blob(id)]), true).unwrap();
+        assert_eq!(plan.encoding, Encoding::Raw, "{plan:?}");
+    }
+
+    /// The walk's cap arithmetic: the bytes it holds plus the next
+    /// tree's bytes must fit the cap - not their product, and the
+    /// boundary is exclusive. Two trees whose sum is exactly the cap
+    /// go through; under `held * bytes` or `>=` the walk refuses.
+    #[test]
+    fn the_walk_cap_takes_the_sum_of_two_trees_to_its_exact_bound() {
+        use scion_core::{Entry, FileEntry, FileState, PathElem, Tree};
+        use std::collections::BTreeMap;
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let blob = BlobId::of(b"blob");
+        let entry = |name: &str| {
+            Tree::new(BTreeMap::from([(
+                PathElem::new(name.as_bytes().to_vec()).unwrap(),
+                Entry::File(FileEntry::new(
+                    FileState::Regular {
+                        content: blob,
+                        executable: false,
+                    },
+                    0,
+                )),
+            )]))
+            .expect("tree fits the format")
+        };
+        let (mid_body, mid_id) = entry("m").encode_with_id();
+        let (root_body, root_id) = Tree::new(BTreeMap::from([(
+            PathElem::new("d").unwrap(),
+            Entry::Dir(mid_id),
+        )]))
+        .expect("tree fits the format")
+        .encode_with_id();
+        let (refs, cap) = store
+            .write(|c| {
+                // The bodies the walk decodes are exactly these.
+                c.put_trees(&[(mid_id, mid_body.clone()), (root_id, root_body.clone())])?;
+                let leaf = c.put_tree(&entry("f"))?;
+                let refs = [(Key::Tree(leaf), b"d/m".to_vec())];
+                Ok((refs, root_body.len() + mid_body.len()))
+            })
+            .unwrap();
+        let (_, decoded) = prove(&store, *root_id.as_bytes(), &refs, cap, None).unwrap();
+        assert!(decoded > 0, "{decoded}");
+    }
+
+    /// The tree-size guard's boundary: a tree whose body is exactly the
+    /// object limit reads; one byte over would be damage. The mutants
+    /// that move the comparison (`>` to `==` or `>=`) refuse the
+    /// exact-limit tree.
+    #[test]
+    fn a_tree_at_the_object_limit_plans_raw() {
+        use scion_core::{Entry, FileEntry, FileState, PathElem, Tree};
+        use scion_proto::MAX_OBJECT_BYTES;
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let blob = BlobId::of(b"blob");
+        // Build the tree, measure, then shave the excess off the tail
+        // names, from the last one back, keeping every name at least
+        // 1 byte. A name's bytes are the body's bytes one for one.
+        let wide = 4096_usize;
+        let base_count = MAX_OBJECT_BYTES / (wide + 44);
+        let mut names: Vec<Vec<u8>> = Vec::new();
+        for i in 0..base_count {
+            let mut name = vec![b'n'; wide];
+            let byte = |v: usize| u8::try_from(v % 46 + 1).unwrap();
+            name[0] = byte(i);
+            name[1] = byte(i / 46);
+            name[2] = byte(i / 2_116);
+            names.push(name);
+        }
+        names.push(vec![b'z'; 44]);
+        let (body, _id) = {
+            let tree = Tree::new(
+                names
+                    .iter()
+                    .map(|n| {
+                        (
+                            PathElem::new(n.clone()).unwrap(),
+                            Entry::File(FileEntry::new(
+                                FileState::Regular {
+                                    content: blob,
+                                    executable: false,
+                                },
+                                0,
+                            )),
+                        )
+                    })
+                    .collect(),
+            )
+            .expect("tree fits the format");
+            tree.encode_with_id()
+        };
+        let mut over = body.len() - MAX_OBJECT_BYTES;
+        for name in names.iter_mut().rev() {
+            if over == 0 {
+                break;
+            }
+            let shave = over.min(name.len() - 1);
+            name.truncate(name.len() - shave);
+            over -= shave;
+        }
+        assert_eq!(over, 0, "the tail carried the whole excess");
+        let (body, id) = {
+            let tree = Tree::new(
+                names
+                    .iter()
+                    .map(|n| {
+                        (
+                            PathElem::new(n.clone()).unwrap(),
+                            Entry::File(FileEntry::new(
+                                FileState::Regular {
+                                    content: blob,
+                                    executable: false,
+                                },
+                                0,
+                            )),
+                        )
+                    })
+                    .collect(),
+            )
+            .expect("tree fits the format");
+            tree.encode_with_id()
+        };
+        assert_eq!(body.len(), MAX_OBJECT_BYTES, "{}", body.len());
+        let tree_id = TreeId::try_from(id.as_bytes().as_slice()).unwrap();
+        store.write(|c| c.put_trees(&[(tree_id, body)])).unwrap();
+        let plan = plan(
+            &store,
+            Key::Tree(tree_id),
+            &HashSet::from([Key::Tree(tree_id)]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(plan.encoding, Encoding::Raw, "{plan:?}");
+    }
+
+    /// A stored file bigger than a zstd frame of its content size is
+    /// damage, and the plan refuses it by name. The writer never writes
+    /// one - a real frame's blocks add a fraction of the bound - so the
+    /// file is grown by hand: the same state a damaged store carries.
+    #[test]
+    fn a_packed_file_over_its_zstd_bound_is_corrupt() {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let id = store.blobs().put(b"a blob").unwrap();
+        // The frame stays; the file grows past the bound of its content.
+        let hex = id.to_string();
+        let path = dir
+            .path()
+            .join("objects")
+            .join("blob")
+            .join(&hex[..2])
+            .join(&hex[2..]);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend(vec![b'x'; 1024]);
+        std::fs::write(&path, bytes).unwrap();
+        let size = store.blobs().size(id).unwrap();
+        let stored = usize::try_from(std::fs::metadata(&path).unwrap().len()).unwrap();
+        assert!(zstd_bound(size) < stored);
+        let err = plan(&store, Key::Blob(id), &HashSet::from([Key::Blob(id)]), true).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "{err:?}");
+    }
+
+    /// The caller's deadline, read from the request's `grpc-timeout`
+    /// into the reply's waits, ends a reply whose budget is fully held:
+    /// the waits end at the deadline with `RESOURCE_EXHAUSTED`, not at
+    /// the 30-second busy window. The initializer that reads the
+    /// request is what the mutation run dropped; without it the waits
+    /// ride the default `Until::NONE` and wait out the window.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_requests_deadline_ends_the_replys_waits() {
+        use crate::objects::ObjectsService;
+        use scion_proto::v1::objects_server::Objects as _;
+        use scion_proto::v1::{GetObjectsRequest, ObjectKind, ObjectRef};
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        // A repo whose README the ticket's walk reaches.
+        let blob = store.blobs().put(b"# hello\n").unwrap();
+        let (root, _content) = store
+            .write(|c| {
+                let repo = c.create_repo("r")?;
+                let content = BlobId::of(b"# hello\n");
+                let cs = c.insert_changeset(
+                    repo,
+                    &scion_core::Changeset::new(
+                        vec![],
+                        scion_core::IdentityTime::new(
+                            b"Ada".to_vec(),
+                            b"ada@example.com".to_vec(),
+                            1_700_000_000,
+                            0,
+                        )
+                        .expect("identity fits the format"),
+                        None,
+                        b"root\n".to_vec(),
+                        [(
+                            scion_core::RepoPath::new("README").unwrap(),
+                            Some(scion_core::FileState::Regular {
+                                content,
+                                executable: false,
+                            }),
+                        )]
+                        .into(),
+                    )
+                    .expect("changeset fits the format"),
+                )?;
+                c.cas_ref(repo, "main", None, cs)?;
+                Ok((cs, content))
+            })
+            .unwrap();
+        let root_tree = crate::test_support::read::root_tree(
+            &store,
+            "r",
+            root,
+            &crate::test_support::deadline::Deadline::new(
+                std::time::Instant::now() + std::time::Duration::from_secs(300),
+            ),
+        )
+        .unwrap();
+        let keys = crate::tickets::Keys::generate();
+        let ticket = keys.sign("r", "alice", *root_tree.as_bytes()).unwrap();
+        let mut service = ObjectsService::new(
+            Worker::new(store),
+            Arc::new(crate::Access::single("t")),
+            crate::Quotas::off(),
+            Some(Arc::new(keys)),
+            Arc::default(),
+            crate::Access::single("t").auth(),
+        );
+        // The budget, small and fully held: the reply's waits wait.
+        service.in_flight = Arc::new(Semaphore::new(1000));
+        let _others = reply::try_take(&service.in_flight, 1000).unwrap();
+        let request = GetObjectsRequest {
+            ticket,
+            accept: Vec::new(),
+            refs: vec![ObjectRef {
+                kind: ObjectKind::Blob as i32,
+                id: blob.as_bytes().to_vec(),
+                path: b"README".to_vec(),
+            }],
+        };
+        let mut request = tonic::Request::new(request);
+        request.set_timeout(Duration::from_secs(2));
+        let started = std::time::Instant::now();
+        let reply = service.get_objects(request).await;
+        let elapsed = started.elapsed();
+        let status = reply.unwrap_err();
+        assert_eq!(status.code(), Code::ResourceExhausted, "{status:?}");
+        // The deadline (2 s less the server's margin), not the 30 s
+        // busy window, ended the wait. The waits may take the deadline
+        // twice (the walk's share, then the reply's own); the window is
+        // ten times longer, so the order of magnitude tells them apart.
+        assert!(elapsed < Duration::from_secs(15), "{elapsed:?}");
+    }
+
     /// The walk's share refusal is the reply's answer: when the walk
     /// decoded more than the budget will ever free, the reply ends
     /// `RESOURCE_EXHAUSTED` at the walk share's own wait - it does not
