@@ -997,6 +997,82 @@ mod tests {
         assert_eq!(in_flight.available_permits(), IN_FLIGHT_BYTES);
     }
 
+    /// A 0-byte blob file holds no frame; the size reader answers 0 for
+    /// it, and the plan must send it RAW, not as a zstd frame that does
+    /// not exist. The writer always frames its content, so the file is
+    /// emptied by hand: this is the state the arm exists for (only the
+    /// empty blob's file may be 0 bytes; Blobs::verify says so).
+    #[test]
+    fn an_empty_blob_file_plans_raw() {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let id = BlobId::of(b"");
+        let hex = id.to_string();
+        let path = dir
+            .path()
+            .join("objects")
+            .join("blob")
+            .join(&hex[..2])
+            .join(&hex[2..]);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"").unwrap();
+        let size = store.blobs().size(id).unwrap();
+        assert_eq!(size, 0, "the empty file's content size");
+        let plan = plan(
+            &store,
+            Key::Blob(id),
+            &HashSet::from([Key::Blob(id)]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(plan.encoding, Encoding::Raw, "{plan:?}");
+    }
+
+    /// The walk's cap arithmetic: the bytes it holds plus the next
+    /// tree's bytes must fit the cap - not their product, and the
+    /// boundary is exclusive. Two trees whose sum is exactly the cap
+    /// go through; under `held * bytes` or `>=` the walk refuses.
+    #[test]
+    fn the_walk_cap_takes_the_sum_of_two_trees_to_its_exact_bound() {
+        use scion_core::{Entry, FileEntry, FileState, PathElem, Tree};
+        use std::collections::BTreeMap;
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let blob = BlobId::of(b"blob");
+        let entry = |name: &str| {
+            Tree::new(BTreeMap::from([(
+                PathElem::new(name.as_bytes().to_vec()).unwrap(),
+                Entry::File(FileEntry::new(
+                    FileState::Regular {
+                        content: blob,
+                        executable: false,
+                    },
+                    0,
+                )),
+            )]))
+            .expect("tree fits the format")
+        };
+        let (mid_body, mid_id) = entry("m").encode_with_id();
+        let (root_body, root_id) = Tree::new(BTreeMap::from([(
+            PathElem::new("d").unwrap(),
+            Entry::Dir(mid_id),
+        )]))
+        .expect("tree fits the format")
+        .encode_with_id();
+        let (leaf, refs, cap) = store
+            .write(|c| {
+                // The bodies the walk decodes are exactly these.
+                c.put_trees(&[(mid_id, mid_body.clone()), (root_id, root_body.clone())])?;
+                let leaf = c.put_tree(&entry("f"))?;
+                let refs = [(Key::Tree(leaf), b"d/m".to_vec())];
+                Ok((leaf, refs, root_body.len() + mid_body.len()))
+            })
+            .unwrap();
+        let (_, decoded) =
+            prove(&store, *root_id.as_bytes(), &refs, cap, None).unwrap();
+        assert!(decoded > 0, "{decoded}");
+    }
+
     /// The ticket walk pays as it goes: a tree is handed to the walk only
     /// while the bytes it holds fit the reply budget, and an expired
     /// deadline stops the walk before the first tree. The walk reaches a
