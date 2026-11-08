@@ -2420,9 +2420,13 @@ mod tests {
             0,
             "the flusher carried the interval's count out"
         );
-        // The end: what is left is written and the task stops.
-        over.store(true, Ordering::Relaxed);
+        // The end: what is left is written and the task stops. The count
+        // goes in before `over` is set: a flusher tick between the two
+        // stores would otherwise see an empty count, take `over`, and
+        // stop - the count would sit forever, and the test would depend
+        // on the scheduler's mood.
         warn.since.fetch_add(2, Ordering::Relaxed);
+        over.store(true, Ordering::Relaxed);
         tokio::time::sleep(Duration::from_millis(60)).await;
         assert_eq!(
             warn.since.load(Ordering::Relaxed),
@@ -2567,7 +2571,14 @@ mod tests {
         init_log();
         let limits = Limits::default();
         let accepting = Accepting::of(&limits, &timers("keepalive"));
+        // The first tick always writes (the limiter has never written),
+        // so its count is gone; the second tick's write is gated by the
+        // interval (the limiter wrote microseconds ago), so its count is
+        // what is left. One tick leaves nothing for the last line to
+        // carry - under one test per process that reads as an empty log.
         accepting.waits.tick();
+        accepting.waits.tick();
+        accepting.refusals.tick();
         accepting.refusals.tick();
         Limits::warn_the_last(&accepting);
         let text = String::from_utf8(log().0.lock().unwrap().clone()).unwrap();
