@@ -119,12 +119,33 @@ fn a_one_put_create_costs_a_fixed_number_of_statements() {
     // blobs ride a second - each arm keeping its own ON CONFLICT rule.
     // #1031 folds the history INSERT into that second chain as its
     // fourth arm: the settle drains the transaction's deferred history
-    // buffer, so the commit's flush has nothing to write - the write
-    // transaction is 9 statements, the whole call 15. The exact count
-    // below is the measured number (15); a statement
+    // buffer, so the commit's flush has nothing to write.
+    // #1031's pre-read then moves the three reads the settle ran on the
+    // write connection - the derived preload, the trees on the changed
+    // paths, the history node the build reads first - onto a reader
+    // before the transaction begins, in its own read transaction: its
+    // begin, the derived values WITHOUT the generation (the transaction
+    // reads the generation itself - the insert's own read), the trees
+    // read, the history read, and its rollback. Every pre-read answer is
+    // committed and immutable or write-once, so it cannot be stale, and
+    // every miss re-reads in the transaction. The write transaction is 7
+    // statements, from main's 9 (measured with this same window against
+    // 3a9ea1e): three reads moved off the lane, and the insert's own
+    // generation read took one back - the preload's cache answered it
+    // before. The whole call is 18.
+    // The exact count below is the measured number (18); a statement
     // coming or going fails in both directions. This test owns its
     // binary: no other test speaks SQL in its process.
-    const EXACT: u64 = 15;
+    const EXACT: u64 = 18;
+    // The lane pin: the statements between the write transaction's begin
+    // (the one that carries the lane key) and its commit. The lane is
+    // what the PR's gain rides: 7, from main's 9. The total above stays
+    // 18 if the pre-read rode the write connection; this count is what
+    // catches it.
+    const LANE: usize = 7;
+    // The red proof: the pre-read on `store.write` instead of
+    // `store.read` plants its own begin under the lane key, and the
+    // window lands on the pre-read's transaction - the pin fails at 5.
     let _log = LOG_LOCK.lock().unwrap();
     let count = create_statement_count();
     assert_eq!(
@@ -132,5 +153,19 @@ fn a_one_put_create_costs_a_fixed_number_of_statements() {
         EXACT,
         "a one-put create cost {count} statements, not {EXACT}:\n{:#?}",
         Backend::test_statement_log()
+    );
+    let log = Backend::test_statement_log();
+    let begin = log
+        .iter()
+        .position(|s| s.starts_with("BEGIN; SET LOCAL lock_timeout"))
+        .expect("the write transaction's begin carries the lane key");
+    let lane = log[begin..]
+        .iter()
+        .position(|s| *s == "COMMIT")
+        .expect("the write transaction commits")
+        + 1;
+    assert_eq!(
+        lane, LANE,
+        "the create's write transaction cost {lane} statements on the lane, not {LANE}:\n{log:#?}"
     );
 }
