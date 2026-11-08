@@ -43,9 +43,10 @@ on:
         type: string
       shard:
         description: >-
-          this run's 1-based shard index (cargo-mutants --shard k/n). Set
-          both this and shards for a file whose mutant count cannot fit
-          one job's timeout (#1008, listen.rs); leave both empty for a
+          this run's shard index, 0-based (cargo-mutants --shard k/n,
+          valid k: 0..shards-1; k must be less than shards). Set both
+          this and shards for a file whose mutant count cannot fit one
+          job's timeout (#1008, listen.rs); leave both empty for a
           whole-file run.
         required: false
         default: ""
