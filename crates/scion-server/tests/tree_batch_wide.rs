@@ -86,6 +86,16 @@ fn a_wide_changeset_builds_under_the_bound() {
         .map(|path| path.as_bytes().split(|&b| b == b'/').count() as u64)
         .sum();
     eprintln!("the walk took {steps} steps for paths whose depths sum to {bound}");
+    // The exact count: every one of the 100,000 changed paths crosses
+    // exactly one stored directory (its own), one resolution step each,
+    // so the walk takes 100,000 steps and no other move costs a step.
+    // The lower side pins the counter as hard as the upper one: a walk
+    // that reports fewer steps missed directories the apply then reads
+    // one by one, and a lying counter hides that.
+    assert_eq!(
+        steps, 100_000,
+        "the walk took {steps} steps for 100,000 single-directory paths"
+    );
     assert!(
         steps <= bound,
         "the walk took {steps} steps, past the {bound} the paths sum to"
