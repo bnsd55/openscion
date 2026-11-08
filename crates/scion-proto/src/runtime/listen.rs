@@ -2329,6 +2329,189 @@ mod tests {
         assert_eq!(warn.flush(), None, "nothing is left to flush");
     }
 
+    /// The waits line names the cap and the count it covers: the operator
+    /// reading the log learns which cap and how many connections.
+    #[tokio::test]
+    async fn the_waits_line_names_the_cap_and_the_count() {
+        init_log();
+        let warn = WaitWarn::new(Duration::from_millis(1));
+        let waited = warn.tick().unwrap();
+        warn_waited(7, waited);
+        let text = String::from_utf8(log().0.lock().unwrap().clone()).unwrap();
+        let line = text
+            .lines()
+            .rev()
+            .find(|l| l.contains("a connection waits"))
+            .unwrap_or_else(|| panic!("no waits line in the log:\n{text}"));
+        assert!(line.contains("max=7"), "the line names the cap: {line}");
+        assert!(
+            line.contains("waited="),
+            "the line carries the count: {line}"
+        );
+    }
+
+    /// The refusals line names the cap, the count, and the wait: an
+    /// operator learns which cap closed how many connections after how
+    /// long.
+    #[tokio::test]
+    async fn the_refusals_line_names_the_cap_the_count_and_the_wait() {
+        init_log();
+        warn_refusals(7, 3, Duration::from_millis(250));
+        let text = String::from_utf8(log().0.lock().unwrap().clone()).unwrap();
+        let line = text
+            .lines()
+            .rev()
+            .find(|l| l.contains("a connection that did not"))
+            .unwrap_or_else(|| panic!("no refusals line in the log:\n{text}"));
+        assert!(line.contains("max=7"), "the line names the cap: {line}");
+        assert!(
+            line.contains("waited=3"),
+            "the line carries the count: {line}"
+        );
+        assert!(
+            line.contains("wait=250ms"),
+            "the line carries the wait: {line}"
+        );
+    }
+
+    /// A refused connection's warning is rate limited by the refusals'
+    /// own limiter: the first refusal writes, a second within the
+    /// interval does not.
+    #[tokio::test]
+    async fn warn_refused_writes_the_rate_limited_refusal() {
+        init_log();
+        let refusals = WaitWarn::new(Duration::from_millis(1));
+        warn_refused(&refusals, 7, Duration::from_millis(250));
+        let text = String::from_utf8(log().0.lock().unwrap().clone()).unwrap();
+        let line = text
+            .lines()
+            .rev()
+            .find(|l| l.contains("a connection that did not"))
+            .unwrap_or_else(|| panic!("no refusal line in the log:\n{text}"));
+        assert!(
+            line.contains("waited=1"),
+            "the first refusal writes: {line}"
+        );
+    }
+
+    /// The flusher writes each interval's count even with no new event,
+    /// and stops when the serve has ended. With the spawn gone, or with
+    /// the end check inverted, no interval line is ever written.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_flusher_writes_each_interval_and_stops_at_the_end() {
+        init_log();
+        let warn = WaitWarn::new(Duration::from_millis(10));
+        let over = Arc::new(AtomicBool::new(false));
+        warn.spawn_flusher(
+            {
+                let over = Arc::clone(&over);
+                move || over.load(Ordering::Relaxed)
+            },
+            move |_| {},
+        );
+        // A count with no new event: only the flusher can carry it out.
+        warn.since.fetch_add(1, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        // The flusher's line goes through the caller's closure - here a
+        // no-op - so the observable is the limiter's own state: the count
+        // left the limiter, which only the flusher's flush does.
+        assert_eq!(
+            warn.since.load(Ordering::Relaxed),
+            0,
+            "the flusher carried the interval's count out"
+        );
+        // The end: what is left is written and the task stops.
+        over.store(true, Ordering::Relaxed);
+        warn.since.fetch_add(2, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(
+            warn.since.load(Ordering::Relaxed),
+            0,
+            "the flusher wrote what was left at the end"
+        );
+    }
+
+    /// `spawn_cap_flushers` spawns both flushers: the waits line and the
+    /// refusals line each carry their own count out at the interval.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spawn_cap_flushers_spawns_both_flushers() {
+        init_log();
+        let limits = Limits::default();
+        let mut accepting = Accepting::of(&limits, &timers("keepalive"));
+        // The real interval is 10 s; a 10 ms limiter makes the flushers'
+        // interval work observable in the test.
+        accepting.waits = WaitWarn::new(Duration::from_millis(10));
+        accepting.refusals = WaitWarn::new(Duration::from_millis(10));
+        let over = Arc::new(AtomicBool::new(false));
+        spawn_cap_flushers(
+            {
+                let over = Arc::clone(&over);
+                move || over.load(Ordering::Relaxed)
+            },
+            accepting.max,
+            accepting.wait,
+            &accepting.waits,
+            &accepting.refusals,
+        );
+        // Counts with no new events: only the flushers can carry them out.
+        accepting.waits.since.fetch_add(1, Ordering::Relaxed);
+        accepting.refusals.since.fetch_add(1, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(
+            accepting.waits.since.load(Ordering::Relaxed),
+            0,
+            "the waits flusher carried its count out"
+        );
+        assert_eq!(
+            accepting.refusals.since.load(Ordering::Relaxed),
+            0,
+            "the refusals flusher carried its count out"
+        );
+        let text = String::from_utf8(log().0.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.lines().any(|l| l.contains("a connection waits")),
+            "the waits line is in the log:\n{text}"
+        );
+        assert!(
+            text.lines()
+                .any(|l| l.contains("a connection that did not")),
+            "the refusals line is in the log:\n{text}"
+        );
+    }
+
+    /// The serve's last line writes what is left, without the interval
+    /// check: the counts the binaries exit with are in the log, not
+    /// dropped.
+    #[tokio::test]
+    async fn warn_the_last_writes_what_is_left() {
+        init_log();
+        let limits = Limits::default();
+        let accepting = Accepting::of(&limits, &timers("keepalive"));
+        accepting.waits.tick();
+        accepting.refusals.tick();
+        Limits::warn_the_last(&accepting);
+        let text = String::from_utf8(log().0.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.lines().any(|l| l.contains("a connection waits")),
+            "the last waits line is in the log:\n{text}"
+        );
+        assert!(
+            text.lines()
+                .any(|l| l.contains("a connection that did not")),
+            "the last refusals line is in the log:\n{text}"
+        );
+        assert_eq!(
+            accepting.waits.flush_all(),
+            None,
+            "the waits are written, not left"
+        );
+        assert_eq!(
+            accepting.refusals.flush_all(),
+            None,
+            "the refusals are written, not left"
+        );
+    }
+
     /// The serve itself writes what is left when it ends: a refusal, the
     /// signal before the interval, and after the serve returns the
     /// accepting's refusals are gone - the serve's last line took them. A
