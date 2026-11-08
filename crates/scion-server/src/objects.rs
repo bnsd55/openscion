@@ -298,13 +298,13 @@ async fn start_reply(
     // within the busy wait: the call ends `RESOURCE_EXHAUSTED`. A walk that
     // decoded nothing takes no share.
     let walk_share = if decoded > 0 {
-        Some(reply::take(&in_flight, decoded, busy).await)
+        let Some(permit) = reply::take(&in_flight, decoded, busy).await else {
+            return Err(reply::busy());
+        };
+        Some(permit)
     } else {
         None
     };
-    if decoded > 0 && walk_share.is_none() {
-        return Err(reply::busy());
-    }
     let first = find(&worker, &in_flight, busy, read, &allowed, zstd, key)
         .await
         .ok_or_else(reply::busy)?;
@@ -995,6 +995,55 @@ mod tests {
         assert_eq!(parts, 4);
         assert_eq!(data, content);
         assert_eq!(in_flight.available_permits(), IN_FLIGHT_BYTES);
+    }
+
+    /// The walk's share refusal is the reply's answer: when the walk
+    /// decoded more than the budget will ever free, the reply ends
+    /// `RESOURCE_EXHAUSTED` at the walk share's own wait - it does not
+    /// go on to wait for the first object's smaller share, which a
+    /// later freeing would satisfy. The regression test for #1016: the
+    /// refusal wrapped the take in `Some`, and `Some(None).is_none()`
+    /// is false, so a refused walk share served the objects anyway.
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_walk_share_ends_the_reply_busy() {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        // The buggy path must have an object to serve.
+        let blob_id = store.blobs().put(b"a blob").unwrap();
+        // More than the 30 the budget frees below, so the walk share
+        // waits to the deadline; start_reply takes it as a plain number.
+        let decoded = 100;
+        // The budget: 1000 bytes, all held. 30 come back two paused
+        // seconds in - less than the walk's share, more than the blob's.
+        let in_flight = Arc::new(Semaphore::new(1000));
+        let _held = reply::try_take(&in_flight, 970).unwrap();
+        let gift = reply::try_take(&in_flight, 30).unwrap();
+        let freer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            drop(gift);
+        });
+        let a = Key::Blob(blob_id);
+        let waits = Waits {
+            until: Until::after(Duration::from_secs(3)),
+            ..WAITS
+        };
+        let reply = start_reply(
+            Worker::new(store),
+            vec![a],
+            HashSet::from([a]),
+            Reply {
+                in_flight,
+                waits,
+                stalled: None,
+                call: Call::default(),
+            },
+            read_object,
+            true,
+            decoded,
+        );
+        let status = reply.await.unwrap_err();
+        assert_eq!(status.code(), Code::ResourceExhausted, "{status:?}");
+        freer.await.unwrap();
     }
 
     /// The ticket walk pays as it goes: a tree is handed to the walk only
