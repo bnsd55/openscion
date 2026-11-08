@@ -2547,6 +2547,12 @@ mod tests {
         // holds must overlap to cross the limit, as real replies do.
         let first = st.hold(60);
         assert!(!st.over(), "under the limit the connection lives");
+        // A hold under the limit must not spend the once-only cutoff
+        // warning: the guard's logged flag stays clear until the crossing.
+        assert!(
+            !st.0.logged.load(Ordering::Relaxed),
+            "no cutoff warning under the limit"
+        );
         let second = st.hold(60);
         assert!(st.over(), "past the limit the read side fails");
         drop(second);
