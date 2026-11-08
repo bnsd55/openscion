@@ -968,6 +968,38 @@ mod tests {
         );
     }
 
+    /// The first-parent check's answer, which the land path trusts for
+    /// whether a base may be landed on: a base on the tip's first-parent
+    /// history is `Some(true)`, one off it `Some(false)`, and a tip
+    /// without a node is `None`. A body swapped for a constant, or the
+    /// final comparison flipped, makes a land proceed unverified or
+    /// refuse a legal base.
+    #[test]
+    fn a_base_on_the_first_parent_history_is_true_and_one_off_it_false() {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let _slot = damage::slot();
+        let (repo, ids, side) = deep_chain(&store, 16);
+        let tip = ids[15];
+        let gen_of = |id| store.read(|c| c.generation(repo, id)).unwrap();
+        let check = |base, base_gen| {
+            store
+                .read(|c| on_first_parents(c, tip, base, base_gen, &later()))
+                .unwrap()
+        };
+        // The root and a mid-chain changeset are on the history: the
+        // walk descends to their generation and lands on them.
+        assert_eq!(check(ids[0], gen_of(ids[0])), Some(true));
+        assert_eq!(check(ids[7], gen_of(ids[7])), Some(true));
+        // The side branch's tip is not on the first-parent history: the
+        // walk stops at the oldest changeset at or above its generation,
+        // which is its parent on the chain, not the side changeset.
+        assert_eq!(check(side, gen_of(side)), Some(false));
+        // A floor below the base's own generation lands above the root:
+        // the root is not there, so the answer is false for it.
+        assert_eq!(check(ids[0], gen_of(ids[7])), Some(false));
+    }
+
     /// A deadline that a test does not reach.
     fn later() -> Deadline {
         Deadline::new(Instant::now() + Duration::from_secs(600))
