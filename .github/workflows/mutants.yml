@@ -56,12 +56,12 @@ on:
         required: false
         default: ""
         type: string
-      test_workspace:
+      test_package:
         description: >-
-          "true" runs the whole workspace's tests for every mutant
-          (cargo-mutants --test-workspace true): for mutants in one
-          package whose killing tests live in another (#961's Bearer
-          mutant). The default runs only the mutated package's tests.
+          run the tests of this package for every mutant (cargo-mutants
+          --test-package), for mutants in one package whose killing
+          tests live in another (#961's Bearer mutant, #1008's listen
+          boundary). The default runs only the mutated package's tests.
         required: false
         default: ""
         type: string
@@ -144,7 +144,7 @@ jobs:
           TEST_ARGS: ${{ inputs.test_args }}
           SHARD: ${{ inputs.shard }}
           SHARDS: ${{ inputs.shards }}
-          TEST_WORKSPACE: ${{ inputs.test_workspace }}
+          TEST_PACKAGE: ${{ inputs.test_package }}
         run: |
           # The dispatch names files, one per -f: cargo-mutants examines
           # only those files' functions. Every name must be a file in the
@@ -162,8 +162,8 @@ jobs:
             shard_args="--shard $SHARD/$SHARDS"
           fi
           mutants_args=""
-          if [ "$TEST_WORKSPACE" = "true" ]; then
-            mutants_args="--test-workspace true"
+          if [ -n "$TEST_PACKAGE" ]; then
+            mutants_args="--test-package $TEST_PACKAGE"
           fi
           # shellcheck disable=SC2086
           cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args -- $TEST_ARGS
@@ -229,7 +229,7 @@ jobs:
           TEST_ARGS: ${{ inputs.test_args }}
           SHARD: ${{ inputs.shard }}
           SHARDS: ${{ inputs.shards }}
-          TEST_WORKSPACE: ${{ inputs.test_workspace }}
+          TEST_PACKAGE: ${{ inputs.test_package }}
         run: |
           set -eu
           file_args=""
@@ -244,8 +244,8 @@ jobs:
             shard_args="--shard $SHARD/$SHARDS"
           fi
           mutants_args=""
-          if [ "$TEST_WORKSPACE" = "true" ]; then
-            mutants_args="--test-workspace true"
+          if [ -n "$TEST_PACKAGE" ]; then
+            mutants_args="--test-package $TEST_PACKAGE"
           fi
           # shellcheck disable=SC2086
           cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args -- $TEST_ARGS
