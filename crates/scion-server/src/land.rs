@@ -3613,6 +3613,28 @@ mod tests {
         assert!(f.file(f.main().target, "t15/f24").is_some());
     }
 
+    /// The retention window is a promise the docs make, in the doc's own
+    /// terms: a finished land still answers a week minus an hour after
+    /// it finished, and is swept a week plus an hour later. The seconds
+    /// are literals, not the constant, so a changed expression moves the
+    /// sweep against this test instead of moving the tests with it.
+    #[test]
+    fn a_land_sweeps_a_week_after_it_finished() {
+        let _slot = damage::slot();
+        let f = fixture();
+        let fresh = f.land(f.commit(f.root, &[put("a/x", "1")]), "fresh");
+        let old = f.land(f.root, "old");
+        // Six days 23 hours old: inside the week, still answerable.
+        f.age(fresh.land_id, 6 * 86_400 + 23 * 3_600);
+        // Seven days one hour old: outside it, swept.
+        f.age(old.land_id, 7 * 86_400 + 3_600);
+        // The next land runs the sweep. The batch takes the oldest two,
+        // and only one land is outside the week.
+        let _ = f.land(f.commit(f.root, &[put("a/z", "1")]), "trigger");
+        assert!(f.get(fresh.land_id).is_ok(), "a land inside the week stays");
+        assert!(f.gone(&old), "a land a week old is swept");
+    }
+
     #[test]
     fn finished_lands_expire_after_the_retention_period() {
         use LandState::{Conflict, Landed, Pending, Rejected};
