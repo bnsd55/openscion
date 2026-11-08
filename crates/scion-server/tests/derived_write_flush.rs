@@ -378,7 +378,7 @@ fn land_once(
 /// commit writes the transaction's nodes with one statement. The rows
 /// are there after the commit, and the land answers.
 #[test]
-fn a_rebasing_lands_history_nodes_ride_the_commit_flush() {
+fn a_rebasing_lands_history_nodes_ride_the_settle_statement() {
     let _log = LOG_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -418,22 +418,21 @@ fn a_rebasing_lands_history_nodes_ride_the_commit_flush() {
         .iter()
         .filter(|sql| sql.contains("INSERT INTO history_nodes") && sql.contains("VALUES"))
         .count();
-    let flushed = log
+    let written = log
         .iter()
-        .filter(|sql| sql.contains("INSERT INTO history_nodes") && sql.contains("unnest"))
+        .filter(|sql| sql.contains("INSERT INTO history_nodes"))
         .count();
     assert_eq!(
         direct, 0,
-        "the rebase's history nodes must wait for the commit flush"
+        "the rebase's history nodes must not take a direct statement"
     );
     assert_eq!(
-        flushed, 1,
-        "the commit must write the transaction's history nodes with exactly one statement, \
-         not {flushed}"
+        written, 0,
+        "the rebase's history nodes ride the settle statement's fourth arm, so the \n         transaction holds no history_nodes statement of their own (the arm sits \n         past the log's 90-character window, so the log cannot show it)"
     );
-    // The rows are there, not only the statement: the flush wrote the
-    // rebase's nodes into the table, more than the import and the
-    // first land left.
+    // The rows are there, not only the shape: the settle statement
+    // stored the rebase's nodes into the table, more than the import
+    // and the first land left.
     let schema = Backend::test_schema(dir.path());
     let mut client = postgres::Client::connect(
         &std::env::var("SCION_TEST_POSTGRES_URL").unwrap(),
@@ -447,27 +446,27 @@ fn a_rebasing_lands_history_nodes_ride_the_commit_flush() {
         rows[0].get(0)
     };
     let third = make_changeset(&store, repo, tip, "c.txt");
-    let before = count(&mut client);
+    let rows_before = count(&mut client);
     Backend::test_reset_statement_count();
     let outcome = land_once(&lands, &store, third, "third");
     assert_eq!(outcome.state, LandState::Landed, "{}", outcome.detail);
-    let flushed_third = Backend::test_statement_log()
+    let written_third = Backend::test_statement_log()
         .iter()
-        .filter(|sql| sql.contains("INSERT INTO history_nodes") && sql.contains("unnest"))
+        .filter(|sql| sql.contains("INSERT INTO history_nodes"))
         .count();
     let after = count(&mut client);
     assert!(
-        after > before,
-        "the land's commit flush stored no history nodes: {after} against {before}"
+        after > rows_before,
+        "the land's settle statement stored no history nodes: {after} against {rows_before}"
     );
     assert_eq!(
-        flushed_third, 1,
-        "the third land's commit wrote its history nodes with exactly one statement, \
-         not {flushed_third}"
+        written_third, 0,
+        "the third land's history nodes ride the settle statement's fourth arm, \
+         not a statement of their own (found {written_third})"
     );
 
-    // The landed head's history answers: the flush ran inside the
-    // transaction, so a rollback would have kept the rows.
+    // The landed head's history answers: the settle statement ran inside
+    // the transaction, so a rollback would have kept the rows.
     let head = store
         .read(|c| Ok(c.get_ref(repo, "main")?.expect("the ref exists").target))
         .unwrap();

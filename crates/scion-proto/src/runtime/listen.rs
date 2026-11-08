@@ -1531,9 +1531,10 @@ mod tests {
     impl Objects for Stalls {
         async fn resolve_ref(
             &self,
-            _: Request<ResolveRefRequest>,
+            request: Request<ResolveRefRequest>,
         ) -> Result<Response<ResolveRefResponse>, Status> {
-            Err(Status::not_found("no ref"))
+            let peer = Stalled::of(&request).and_then(|s| s.peer());
+            Err(Status::not_found(format!("no ref; peer is {peer:?}")))
         }
 
         async fn get_root_tree(
@@ -1811,6 +1812,11 @@ mod tests {
         LOG.get_or_init(Captured::default).clone()
     }
 
+    /// Serializes the tests that count accept-warning lines in the shared
+    /// captured log: each writes exactly one, so they must not overlap.
+    /// Async-aware, because the window spans the test's awaits.
+    static ACCEPT_WARN_LOG: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn init_log() {
         static INIT: std::sync::Once = std::sync::Once::new();
         INIT.call_once(|| {
@@ -1843,7 +1849,11 @@ mod tests {
     /// rate-limited warning.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_listener_that_fails_every_accept_is_paced_and_counted() {
+        let _log_window = ACCEPT_WARN_LOG.lock().await;
         init_log();
+        // The captured log is process-wide; only this test's own lines
+        // count, so the scan starts at the offset this test begins at.
+        let log_start = log().0.lock().unwrap().len();
         let limits = Limits::default();
         let metrics = Arc::new(Metrics::default());
         let attempts = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1880,7 +1890,7 @@ mod tests {
             line, "scion_accept_errors_total 0",
             "the failed accepts are not counted:\n{text}"
         );
-        let text = String::from_utf8(log().0.lock().unwrap().clone()).unwrap();
+        let text = String::from_utf8(log().0.lock().unwrap()[log_start..].to_vec()).unwrap();
         let warns: Vec<&str> = text
             .lines()
             .filter(|l| {
@@ -1903,6 +1913,99 @@ mod tests {
             "the warning must name at least one failure: {}",
             warns[0]
         );
+    }
+
+    /// An incoming stream whose first item is an accept failure; the rest
+    /// come from the real listener it wraps.
+    struct FailFirst<S> {
+        failed: bool,
+        inner: S,
+    }
+
+    impl<S> Stream for FailFirst<S>
+    where
+        S: Stream<Item = io::Result<TcpStream>> + Unpin,
+    {
+        type Item = io::Result<TcpStream>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if !self.failed {
+                self.failed = true;
+                return Poll::Ready(Some(Err(io::Error::other("the first accept fails"))));
+            }
+            Pin::new(&mut self.inner).poll_next(cx)
+        }
+    }
+
+    /// One failed accept must not end the serve: the listener keeps taking
+    /// connections after it. A failed accept that ends the serve is a
+    /// server that stops taking connections.
+    #[tokio::test]
+    async fn a_failed_accept_does_not_end_the_serve() {
+        let _log_window = ACCEPT_WARN_LOG.lock().await;
+        init_log();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = FailFirst {
+            failed: false,
+            inner: tcp(listener),
+        };
+        let limits = Limits::default();
+        let metrics = Arc::new(Metrics::default());
+        tokio::spawn(async move {
+            let router = |mut server: Server| server.add_service(ObjectsServer::new(Stalls));
+            let pending = std::future::pending();
+            let _ = limits
+                .serve_with(
+                    &Accepting::of(&limits, &TIMERS),
+                    router,
+                    incoming,
+                    None,
+                    pending,
+                    metrics,
+                )
+                .await;
+        });
+        let mut client = ObjectsClient::new(endpoint(addr).connect().await.unwrap());
+        assert_eq!(quick(&mut client).await, Code::NotFound);
+    }
+
+    /// The same promise through the TLS accept path: one failed accept
+    /// there must not end the serve either.
+    #[tokio::test]
+    async fn a_failed_tls_accept_does_not_end_the_serve() {
+        let _log_window = ACCEPT_WARN_LOG.lock().await;
+        init_log();
+        let certs = test_certs();
+        let dir = crate::runtime::private_tempdir();
+        let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
+        let config = server_tls.config();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = FailFirst {
+            failed: false,
+            inner: tcp(listener),
+        };
+        let limits = Limits::default();
+        let metrics = Arc::new(Metrics::default());
+        tokio::spawn(async move {
+            let router = |mut server: Server| server.add_service(ObjectsServer::new(Stalls));
+            let pending = std::future::pending();
+            let _ = limits
+                .serve_with(
+                    &Accepting::of(&limits, &TIMERS),
+                    router,
+                    incoming,
+                    Some(config),
+                    pending,
+                    metrics,
+                )
+                .await;
+        });
+        let mut client = client(addr, &certs.authority.cert(), Some(&certs.client))
+            .await
+            .unwrap();
+        assert_eq!(quick(&mut client).await, Code::NotFound);
     }
 
     /// The stub, served within `limits` with `timers`, and its address.
@@ -2226,6 +2329,280 @@ mod tests {
         assert_eq!(warn.flush(), None, "nothing is left to flush");
     }
 
+    /// The waits line names the cap and the count it covers: the operator
+    /// reading the log learns which cap and how many connections.
+    #[tokio::test]
+    async fn the_waits_line_names_the_cap_and_the_count() {
+        init_log();
+        let warn = WaitWarn::new(Duration::from_millis(1));
+        let waited = warn.tick().unwrap();
+        warn_waited(7, waited);
+        let text = String::from_utf8(log().0.lock().unwrap().clone()).unwrap();
+        let line = text
+            .lines()
+            .rev()
+            .find(|l| l.contains("a connection waits"))
+            .unwrap_or_else(|| panic!("no waits line in the log:\n{text}"));
+        assert!(line.contains("max=7"), "the line names the cap: {line}");
+        assert!(
+            line.contains("waited="),
+            "the line carries the count: {line}"
+        );
+    }
+
+    /// The refusals line names the cap, the count, and the wait: an
+    /// operator learns which cap closed how many connections after how
+    /// long.
+    #[tokio::test]
+    async fn the_refusals_line_names_the_cap_the_count_and_the_wait() {
+        init_log();
+        warn_refusals(7, 3, Duration::from_millis(250));
+        let text = String::from_utf8(log().0.lock().unwrap().clone()).unwrap();
+        let line = text
+            .lines()
+            .rev()
+            .find(|l| l.contains("a connection that did not"))
+            .unwrap_or_else(|| panic!("no refusals line in the log:\n{text}"));
+        assert!(line.contains("max=7"), "the line names the cap: {line}");
+        assert!(
+            line.contains("waited=3"),
+            "the line carries the count: {line}"
+        );
+        assert!(
+            line.contains("wait=250ms"),
+            "the line carries the wait: {line}"
+        );
+    }
+
+    /// A refused connection's warning is rate limited by the refusals'
+    /// own limiter: the first refusal writes, a second within the
+    /// interval does not.
+    #[tokio::test]
+    async fn warn_refused_writes_the_rate_limited_refusal() {
+        init_log();
+        let refusals = WaitWarn::new(Duration::from_millis(1));
+        warn_refused(&refusals, 7, Duration::from_millis(250));
+        let text = String::from_utf8(log().0.lock().unwrap().clone()).unwrap();
+        let line = text
+            .lines()
+            .rev()
+            .find(|l| l.contains("a connection that did not"))
+            .unwrap_or_else(|| panic!("no refusal line in the log:\n{text}"));
+        assert!(
+            line.contains("waited=1"),
+            "the first refusal writes: {line}"
+        );
+    }
+
+    /// The flusher writes each interval's count even with no new event,
+    /// and stops when the serve has ended. With the spawn gone, or with
+    /// the end check inverted, no interval line is ever written.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_flusher_writes_each_interval_and_stops_at_the_end() {
+        init_log();
+        let warn = WaitWarn::new(Duration::from_millis(10));
+        let over = Arc::new(AtomicBool::new(false));
+        warn.spawn_flusher(
+            {
+                let over = Arc::clone(&over);
+                move || over.load(Ordering::Relaxed)
+            },
+            move |_| {},
+        );
+        // A count with no new event: only the flusher can carry it out.
+        warn.since.fetch_add(1, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        // The flusher's line goes through the caller's closure - here a
+        // no-op - so the observable is the limiter's own state: the count
+        // left the limiter, which only the flusher's flush does.
+        assert_eq!(
+            warn.since.load(Ordering::Relaxed),
+            0,
+            "the flusher carried the interval's count out"
+        );
+        // The end: what is left is written and the task stops. The count
+        // goes in before `over` is set: a flusher tick between the two
+        // stores would otherwise see an empty count, take `over`, and
+        // stop - the count would sit forever, and the test would depend
+        // on the scheduler's mood.
+        warn.since.fetch_add(2, Ordering::Relaxed);
+        over.store(true, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(
+            warn.since.load(Ordering::Relaxed),
+            0,
+            "the flusher wrote what was left at the end"
+        );
+    }
+
+    /// `spawn_cap_flushers` spawns both flushers: the waits line and the
+    /// refusals line each carry their own count out at the interval.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spawn_cap_flushers_spawns_both_flushers() {
+        init_log();
+        let limits = Limits::default();
+        let mut accepting = Accepting::of(&limits, &timers("keepalive"));
+        // The real interval is 10 s; a 10 ms limiter makes the flushers'
+        // interval work observable in the test.
+        accepting.waits = WaitWarn::new(Duration::from_millis(10));
+        accepting.refusals = WaitWarn::new(Duration::from_millis(10));
+        let over = Arc::new(AtomicBool::new(false));
+        spawn_cap_flushers(
+            {
+                let over = Arc::clone(&over);
+                move || over.load(Ordering::Relaxed)
+            },
+            accepting.max,
+            accepting.wait,
+            &accepting.waits,
+            &accepting.refusals,
+        );
+        // Counts with no new events: only the flushers can carry them out.
+        accepting.waits.since.fetch_add(1, Ordering::Relaxed);
+        accepting.refusals.since.fetch_add(1, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(
+            accepting.waits.since.load(Ordering::Relaxed),
+            0,
+            "the waits flusher carried its count out"
+        );
+        assert_eq!(
+            accepting.refusals.since.load(Ordering::Relaxed),
+            0,
+            "the refusals flusher carried its count out"
+        );
+        let text = String::from_utf8(log().0.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.lines().any(|l| l.contains("a connection waits")),
+            "the waits line is in the log:\n{text}"
+        );
+        assert!(
+            text.lines()
+                .any(|l| l.contains("a connection that did not")),
+            "the refusals line is in the log:\n{text}"
+        );
+    }
+
+    /// The backoff resets on a success: a failure, a success, and another
+    /// failure wait the first wait again, not the doubled one - a serve
+    /// that keeps the doubled pace across a success punishes the next
+    /// storm's clients.
+    #[tokio::test]
+    async fn the_backoff_resets_on_a_success() {
+        // The asserts are windows: the wait's floor is the backoff, the
+        // ceiling leaves room for the scheduler.
+        let within = |got: Duration, floor: Duration| {
+            got >= floor && got < floor + Duration::from_millis(100)
+        };
+        let mut backoff = Backoff::new();
+        let start = std::time::Instant::now();
+        backoff.wait().await;
+        assert!(
+            within(start.elapsed(), FIRST_ACCEPT_BACKOFF),
+            "the first wait is the first backoff"
+        );
+        // A success resets, so the next failure waits the first wait again.
+        backoff.reset();
+        let mark = std::time::Instant::now();
+        backoff.wait().await;
+        assert!(
+            within(mark.elapsed(), FIRST_ACCEPT_BACKOFF),
+            "the wait after the reset is the first wait, not the doubled one"
+        );
+        // Without a reset the doubling holds, and caps at the maximum.
+        let mark = std::time::Instant::now();
+        backoff.wait().await;
+        assert!(within(mark.elapsed(), FIRST_ACCEPT_BACKOFF * 2), "doubles");
+        let mark = std::time::Instant::now();
+        backoff.wait().await;
+        assert!(
+            within(mark.elapsed(), FIRST_ACCEPT_BACKOFF * 4),
+            "the doubling holds"
+        );
+        // The doubling continues 80, 160, 320, 640, and stops at the cap.
+        let mut floor = FIRST_ACCEPT_BACKOFF * 8;
+        for _ in 0..4 {
+            let mark = std::time::Instant::now();
+            backoff.wait().await;
+            assert!(within(mark.elapsed(), floor), "the doubling holds");
+            floor *= 2;
+        }
+        let mark = std::time::Instant::now();
+        backoff.wait().await;
+        assert!(within(mark.elapsed(), MAX_ACCEPT_BACKOFF), "caps");
+        let mark = std::time::Instant::now();
+        backoff.wait().await;
+        assert!(within(mark.elapsed(), MAX_ACCEPT_BACKOFF), "the cap holds");
+    }
+
+    /// The stalled-bytes cap: a hold under the limit keeps the connection
+    /// alive, past it the read side fails. The per-connection count alone
+    /// crosses it - not the process total, and not the inverted sense.
+    #[tokio::test]
+    async fn the_stall_cap_crosses_on_the_connection_count_alone() {
+        let limit = 100;
+        let st = Stalled::new(
+            Some(SocketAddr::from(([127, 0, 0, 1], 9))),
+            limit,
+            Arc::new(Metrics::default()),
+            Arc::new(TotalBytes::new(1 << 20)),
+        );
+        // The Stall stays alive: its drop gives the bytes back, so the
+        // holds must overlap to cross the limit, as real replies do.
+        let first = st.hold(60);
+        assert!(!st.over(), "under the limit the connection lives");
+        // A hold under the limit must not spend the once-only cutoff
+        // warning: the guard's logged flag stays clear until the crossing.
+        assert!(
+            !st.0.logged.load(Ordering::Relaxed),
+            "no cutoff warning under the limit"
+        );
+        let second = st.hold(60);
+        assert!(st.over(), "past the limit the read side fails");
+        drop(second);
+        drop(first);
+    }
+
+    /// The serve's last line writes what is left, without the interval
+    /// check: the counts the binaries exit with are in the log, not
+    /// dropped.
+    #[tokio::test]
+    async fn warn_the_last_writes_what_is_left() {
+        init_log();
+        let limits = Limits::default();
+        let accepting = Accepting::of(&limits, &timers("keepalive"));
+        // The first tick always writes (the limiter has never written),
+        // so its count is gone; the second tick's write is gated by the
+        // interval (the limiter wrote microseconds ago), so its count is
+        // what is left. One tick leaves nothing for the last line to
+        // carry - under one test per process that reads as an empty log.
+        accepting.waits.tick();
+        accepting.waits.tick();
+        accepting.refusals.tick();
+        accepting.refusals.tick();
+        Limits::warn_the_last(&accepting);
+        let text = String::from_utf8(log().0.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.lines().any(|l| l.contains("a connection waits")),
+            "the last waits line is in the log:\n{text}"
+        );
+        assert!(
+            text.lines()
+                .any(|l| l.contains("a connection that did not")),
+            "the last refusals line is in the log:\n{text}"
+        );
+        assert_eq!(
+            accepting.waits.flush_all(),
+            None,
+            "the waits are written, not left"
+        );
+        assert_eq!(
+            accepting.refusals.flush_all(),
+            None,
+            "the refusals are written, not left"
+        );
+    }
+
     /// The serve itself writes what is left when it ends: a refusal, the
     /// signal before the interval, and after the serve returns the
     /// accepting's refusals are gone - the serve's last line took them. A
@@ -2300,6 +2677,139 @@ mod tests {
         // server is ever answered, so its ping is not either.
         let preface = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\x04\0\0\0\0\0";
         assert!(closes_a_peer_that_sends(addr, preface).await);
+    }
+
+    /// A peer that sends only part of the preface and then stalls is cut at
+    /// the handshake timeout: the preface counter runs until the preface is
+    /// all in, so a few bytes do not buy a silent connection a place
+    /// forever. (It also fails if any read at all stops the counter.)
+    #[tokio::test]
+    async fn a_partial_preface_is_cut_at_the_handshake_timeout() {
+        let (addr, _) = serve(Limits::default(), timers("age")).await;
+        assert!(closes_a_peer_that_sends(addr, b"PRI * HT").await);
+    }
+
+    /// The served connection's peer reaches the stub: the audit's refusal
+    /// lines name it, so a serve that attaches None makes every call
+    /// anonymous. Over plain TCP.
+    #[tokio::test]
+    async fn the_served_peer_reaches_the_stub() {
+        let (addr, _) = serve(Limits::default(), TIMERS).await;
+        let mut client = ObjectsClient::new(endpoint(addr).connect().await.unwrap());
+        let error = client
+            .resolve_ref(ResolveRefRequest::default())
+            .await
+            .unwrap_err();
+        assert!(
+            error.message().contains("peer is Some(127.0.0.1"),
+            "the stub sees the loopback peer: {}",
+            error.message()
+        );
+    }
+
+    /// The same promise through the TLS accept path: the peer of a
+    /// `TlsStream` reaches the stub too.
+    #[tokio::test]
+    async fn the_served_tls_peer_reaches_the_stub() {
+        let certs = test_certs();
+        let dir = crate::runtime::private_tempdir();
+        let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
+        let (addr, _) = serve_tls(
+            Limits::default(),
+            TIMERS,
+            &server_tls,
+            Duration::from_secs(20),
+        )
+        .await;
+        let mut client = client(addr, &certs.authority.cert(), Some(&certs.client))
+            .await
+            .unwrap();
+        let error = client
+            .resolve_ref(ResolveRefRequest::default())
+            .await
+            .unwrap_err();
+        assert!(
+            error.message().contains("peer is Some(127.0.0.1"),
+            "the stub sees the loopback peer: {}",
+            error.message()
+        );
+    }
+
+    /// The keepalive getters hand tonic/hyper values that keep a dead peer
+    /// noticeable. A zero interval would ping without pause, and a zero
+    /// timeout kills the connection at its first ping (hyper's
+    /// `maybe_timeout` fires the moment the ping is sent), so the documented
+    /// constants must survive the getters.
+    #[tokio::test]
+    async fn the_keepalive_getters_hand_tonic_working_values() {
+        let (interval, answer) = client_keepalive();
+        assert!(
+            interval > Duration::ZERO,
+            "a zero keepalive interval pings without pause"
+        );
+        assert!(
+            answer > Duration::ZERO,
+            "a zero keepalive timeout kills the connection at the first ping"
+        );
+        assert!(
+            client_tcp_keepalive() > Duration::ZERO,
+            "a zero tcp keepalive is not a keepalive"
+        );
+    }
+
+    /// A TLS reply that outruns the socket's send buffer must still arrive
+    /// in full: `rustls`' `poll_write` may return with ciphertext still in the
+    /// session (its own doc says so), and the connection's flush is what
+    /// drives the rest out. A flush that does nothing strands the tail of a
+    /// final reply until the next write, which for a final reply never
+    /// comes - the h2 task never re-registers its waker.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tls_reply_arrives_in_full_even_after_a_socket_pause() {
+        init_log();
+        // The listener's send buffer is small; Linux accepted sockets
+        // inherit it, so the 128 KiB parts cannot leave rustls' session in
+        // one poll and the flush is what empties it.
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        rustix::net::sockopt::set_socket_send_buffer_size(&std_listener, 4096).unwrap();
+        std_listener.set_nonblocking(true).unwrap();
+        let listener = TcpListener::from_std(std_listener).unwrap();
+        let certs = test_certs();
+        let dir = crate::runtime::private_tempdir();
+        let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
+        let config = server_tls.config();
+        let addr = listener.local_addr().unwrap();
+        let limits = Limits::default();
+        let metrics = Arc::new(Metrics::default());
+        tokio::spawn(async move {
+            let router = |mut server: Server| server.add_service(ObjectsServer::new(Stalls));
+            let pending = std::future::pending();
+            let _ = limits
+                .serve_with(
+                    &Accepting::of(&limits, &TIMERS),
+                    router,
+                    tcp(listener),
+                    Some(config),
+                    pending,
+                    metrics,
+                )
+                .await;
+        });
+        let mut client = client(addr, &certs.authority.cert(), Some(&certs.client))
+            .await
+            .unwrap();
+        let mut parts = stall(&mut client).await;
+        let mut got = 0;
+        loop {
+            let part = tokio::time::timeout(Duration::from_secs(30), parts.message())
+                .await
+                .unwrap_or_else(|_| panic!("the reply stalled past 30 s"))
+                .unwrap();
+            match part {
+                Some(_) => got += 1,
+                None => break,
+            }
+        }
+        assert_eq!(got, 10, "the whole reply arrives");
     }
 
     /// The client preface, then an empty SETTINGS frame: what a real client
@@ -2630,7 +3140,9 @@ mod tests {
         let dir = crate::runtime::private_tempdir();
         let server_tls = server_tls(dir.path(), &certs.server, None);
         let (addr, _) = serve_tls(Limits::default(), TIMERS, &server_tls, HANDSHAKE_TIMEOUT).await;
-        let mut client = client(addr, &certs.authority.cert(), None).await.unwrap();
+        let mut client = client(addr, &certs.authority.cert(), Some(&certs.client))
+            .await
+            .unwrap();
         assert_eq!(quick(&mut client).await, Code::NotFound);
     }
 
@@ -2828,5 +3340,120 @@ mod tests {
             "the silent peer is not yet closed"
         );
         drop(silent);
+    }
+    /// A serve's end gives a connected TLS client a clean close: the
+    /// drain's h2 shutdown runs the connection's `poll_shutdown`, rustls
+    /// sends its `close_notify`, and the client reads an end of stream -
+    /// not the abrupt `UnexpectedEof` of a peer that never sent it. The
+    /// mutant that replaces the connection's `poll_shutdown` with
+    /// `Ok(())` dies here: the close notify never goes out and the
+    /// client's read answers with the error instead.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_serve_end_closes_tls_cleanly() {
+        init_log();
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        std_listener.set_nonblocking(true).unwrap();
+        let listener = TcpListener::from_std(std_listener).unwrap();
+        let certs = test_certs();
+        let dir = crate::runtime::private_tempdir();
+        let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
+        let config = server_tls.config();
+        let addr = listener.local_addr().unwrap();
+        let limits = Limits::default();
+        let metrics = Arc::new(Metrics::default());
+        let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let router = |mut server: Server| server.add_service(ObjectsServer::new(Stalls));
+            let shutdown = async move {
+                let _ = stop_rx.changed().await;
+            };
+            let _ = limits
+                .serve_with(
+                    &Accepting::of(&limits, &TIMERS),
+                    router,
+                    tcp(listener),
+                    Some(config),
+                    shutdown,
+                    metrics,
+                )
+                .await;
+            let _ = done_tx.send(());
+        });
+        let mut stream = raw_connect(addr, &certs.authority.cert(), Some(&certs.client))
+            .await
+            .unwrap();
+        stream.write_all(PREFACE).await.unwrap();
+        stream.flush().await.unwrap();
+        // The server's SETTINGS: the connection is past the transport
+        // sniffing and into the h2 serve, so the drain below runs the h2
+        // close path.
+        let mut buf = [0u8; 4096];
+        tokio::time::timeout(Duration::from_secs(10), stream.read(&mut buf))
+            .await
+            .unwrap_or_else(|_| panic!("the server's SETTINGS never came"))
+            .unwrap();
+        // One task reads what the server sends and answers the drain's
+        // PING, like a real h2 client's runtime does; without the pong
+        // the drain waits for it. The read's end is the verdict: an end
+        // of stream is the clean close, rustls' `UnexpectedEof` is the
+        // abrupt one.
+        let (mut rd, mut wr) = tokio::io::split(stream);
+        let reader = tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            let mut pending: Vec<u8> = Vec::new();
+            loop {
+                match rd.read(&mut buf).await {
+                    Ok(0) => return None,
+                    Ok(n) => {
+                        pending.extend_from_slice(&buf[..n]);
+                        let mut off = 0;
+                        while pending.len() >= off + 9 {
+                            let len = u32::from_be_bytes([
+                                0,
+                                pending[off],
+                                pending[off + 1],
+                                pending[off + 2],
+                            ]) as usize;
+                            if pending.len() < off + 9 + len {
+                                break;
+                            }
+                            // A PING without the ACK flag is answered
+                            // with its ACK, the payload echoed.
+                            if pending[off + 3] == 0x06 && pending[off + 4] == 0 {
+                                let mut pong = [0u8; 17];
+                                pong[2] = 8;
+                                pong[3] = 0x06;
+                                pong[4] = 1;
+                                pong[9..17].copy_from_slice(&pending[off + 9..off + 17]);
+                                if wr.write_all(&pong).await.is_err() {
+                                    return Some(io::Error::new(
+                                        io::ErrorKind::BrokenPipe,
+                                        "the drain's ping could not be answered",
+                                    ));
+                                }
+                                wr.flush().await.ok()?;
+                            }
+                            off += 9 + len;
+                        }
+                        pending.drain(..off);
+                    }
+                    Err(e) => return Some(e),
+                }
+            }
+        });
+        stop_tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(30), done_rx)
+            .await
+            .unwrap_or_else(|_| panic!("the serve did not end"))
+            .unwrap();
+        let abrupt = tokio::time::timeout(Duration::from_secs(30), reader)
+            .await
+            .unwrap_or_else(|_| panic!("the client's read never ended"))
+            .unwrap();
+        assert!(
+            abrupt.is_none(),
+            "the client read an error, not an end of stream: {abrupt:?}"
+        );
     }
 }

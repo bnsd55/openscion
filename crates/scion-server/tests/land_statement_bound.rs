@@ -383,7 +383,12 @@ fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound()
     // parents and its repo membership ride one CTE chain, and the
     // trees, the derived rows and the repo's blob membership ride a
     // second - each arm keeping its own ON CONFLICT rule (#1004) - and
-    // the land costs 18. The record with a pending limit pays one more
+    // the land costs 18. The settle's statement also carries the
+    // transaction's deferred history nodes as its fourth arm (#1031);
+    // this shape derives none: the input changeset is stored before
+    // the land, so its insert conflicts and `on_write_into` finds its
+    // stored path history - the settle writes no new nodes, and the
+    // count stays 18. The record with a pending limit pays one more
     // for the quota
     // column's answer; the land's own record passes none (measured
     // with the named test binary on main 506051c).

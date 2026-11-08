@@ -41,6 +41,10 @@ use crate::error::{Error, Result};
 use crate::history::NodeId;
 use crate::land::{LandOutcome, LandRejectReason, LandRequest, LandState};
 
+/// The derived values a transaction preloaded, by (kind, version,
+/// changeset): the write path's memory of the rows it reads first.
+pub(crate) type DerivedValues = std::collections::HashMap<(String, i64, Vec<u8>), Vec<u8>>;
+
 /// One pending land the stale-land sweep found, with everything the
 /// answer to its intent line names: the repo (by ID for the ref's lock,
 /// by name for the line), the land ID, the target ref, the principal
@@ -513,6 +517,41 @@ pub trait MetaTx {
     /// with a write path that defers. A backend that does not defer
     /// keeps writing per call, which is also right.
     fn defer_derived_deletes(&mut self) {}
+
+    /// The derived values a pre-transaction phase read, by (kind,
+    /// version, changeset), for the write path to install with
+    /// [`adopt_pre_read`](Self::adopt_pre_read). The map carries no
+    /// generation: the transaction reads the generation itself (the
+    /// insert's own read), so the pre-read carries none. The values are
+    /// written once at their own changeset's settle, so a committed
+    /// answer cannot be stale.
+    /// A backend that reads nothing returns an empty map, which stays
+    /// correct: the transaction's reads then go to the store as before.
+    ///
+    /// # Errors
+    ///
+    /// Database errors.
+    fn read_derived_preload(
+        &mut self,
+        _repo: RepoId,
+        _kinds: &[(&'static str, u32)],
+        _css: &[ChangesetId],
+    ) -> Result<DerivedValues> {
+        Ok(DerivedValues::new())
+    }
+
+    /// Installs a pre-transaction read's results on the transaction:
+    /// the derived values, and the history-node bodies the build's
+    /// derives read first. The tree bodies ride the pre-read value
+    /// itself. Every miss re-reads in the transaction, so a backend
+    /// that ignores the install stays correct, only slower.
+    ///
+    /// # Errors
+    ///
+    /// Database errors.
+    fn adopt_pre_read(&mut self, _pre: crate::tree::PreRead) -> Result<()> {
+        Ok(())
+    }
 
     /// The view that a rule-set digest of `version` derives for the real
     /// tree `tree` under the path-context digest `ctx`, if derived already.
