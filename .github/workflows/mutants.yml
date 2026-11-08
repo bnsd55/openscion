@@ -52,7 +52,7 @@ on:
         default: ""
         type: string
       shards:
-        description: the shard count the shard index counts from 1
+        description: the number of shards, n in --shard k/n; set with shard
         required: false
         default: ""
         type: string
@@ -161,6 +161,10 @@ jobs:
             file_args="$file_args -f $f"
           done
           df -h /
+          if { [ -n "$SHARD" ] && [ -z "$SHARDS" ]; } || { [ -z "$SHARD" ] && [ -n "$SHARDS" ]; }; then
+            echo "error: set both shard and shards, or neither (got one)" >&2
+            exit 1
+          fi
           shard_args=""
           if [ -n "$SHARD" ] && [ -n "$SHARDS" ]; then
             shard_args="--shard $SHARD/$SHARDS"
@@ -243,6 +247,10 @@ jobs:
             file_args="$file_args -f $f"
           done
           df -h /
+          if { [ -n "$SHARD" ] && [ -z "$SHARDS" ]; } || { [ -z "$SHARD" ] && [ -n "$SHARDS" ]; }; then
+            echo "error: set both shard and shards, or neither (got one)" >&2
+            exit 1
+          fi
           shard_args=""
           if [ -n "$SHARD" ] && [ -n "$SHARDS" ]; then
             shard_args="--shard $SHARD/$SHARDS"
