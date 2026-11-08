@@ -1813,7 +1813,8 @@ mod tests {
 
     /// Serializes the tests that count accept-warning lines in the shared
     /// captured log: each writes exactly one, so they must not overlap.
-    static ACCEPT_WARN_LOG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Async-aware, because the window spans the test's awaits.
+    static ACCEPT_WARN_LOG: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn init_log() {
         static INIT: std::sync::Once = std::sync::Once::new();
@@ -1847,7 +1848,7 @@ mod tests {
     /// rate-limited warning.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_listener_that_fails_every_accept_is_paced_and_counted() {
-        let _log_window = ACCEPT_WARN_LOG.lock().unwrap();
+        let _log_window = ACCEPT_WARN_LOG.lock().await;
         init_log();
         // The captured log is process-wide; only this test's own lines
         // count, so the scan starts at the offset this test begins at.
@@ -1940,7 +1941,7 @@ mod tests {
     /// server that stops taking connections.
     #[tokio::test]
     async fn a_failed_accept_does_not_end_the_serve() {
-        let _log_window = ACCEPT_WARN_LOG.lock().unwrap();
+        let _log_window = ACCEPT_WARN_LOG.lock().await;
         init_log();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1972,7 +1973,7 @@ mod tests {
     /// there must not end the serve either.
     #[tokio::test]
     async fn a_failed_tls_accept_does_not_end_the_serve() {
-        let _log_window = ACCEPT_WARN_LOG.lock().unwrap();
+        let _log_window = ACCEPT_WARN_LOG.lock().await;
         init_log();
         let certs = test_certs();
         let dir = crate::runtime::private_tempdir();
@@ -2414,7 +2415,7 @@ mod tests {
     }
 
     /// A TLS reply that outruns the socket's send buffer must still arrive
-    /// in full: rustls' poll_write may return with ciphertext still in the
+    /// in full: `rustls`' `poll_write` may return with ciphertext still in the
     /// session (its own doc says so), and the connection's flush is what
     /// drives the rest out. A flush that does nothing strands the tail of a
     /// final reply until the next write, which for a final reply never
