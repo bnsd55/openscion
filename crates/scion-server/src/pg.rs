@@ -4324,6 +4324,66 @@ fn id_bytes(id: &[u8; 32]) -> Vec<u8> {
     id.to_vec()
 }
 
+impl PgTx<'_> {
+    /// The changeset chain's one statement: the changesets row, the
+    /// parents (when there are any) and the repo membership, each arm
+    /// keeping its own ON CONFLICT DO NOTHING. Returns whether the
+    /// changesets arm inserted.
+    fn insert_changeset_chain(
+        c: &mut Self,
+        repo: RepoId,
+        id: &ChangesetId,
+        generation: i64,
+        body: &[u8],
+        parents: &[Vec<u8>],
+    ) -> Result<i64> {
+        let rows = if parents.is_empty() {
+            c.c.query(
+                "WITH cs AS (
+                   INSERT INTO changesets (id, gen, body) VALUES ($1, $2, $3)
+                   ON CONFLICT (id) DO NOTHING
+                   RETURNING 1
+                 ), mem AS (
+                   INSERT INTO repo_changesets (repo_id, cs) VALUES ($4, $1)
+                   ON CONFLICT (repo_id, cs) DO NOTHING
+                 )
+                 SELECT (SELECT count(*) FROM cs)::bigint",
+                &[
+                    P::bytes(&id_bytes(id.as_bytes())),
+                    P::i64(generation),
+                    P::bytes(body),
+                    P::i64(repo.0),
+                ],
+            )?
+        } else {
+            c.c.query(
+                "WITH cs AS (
+                   INSERT INTO changesets (id, gen, body) VALUES ($1, $2, $3)
+                   ON CONFLICT (id) DO NOTHING
+                   RETURNING 1
+                 ), par AS (
+                   INSERT INTO changeset_parents (cs, n, parent)
+                   SELECT $1, ord - 1, parent
+                   FROM unnest($4::bytea[]) WITH ORDINALITY AS parents(parent, ord)
+                   ON CONFLICT (cs, n) DO NOTHING
+                 ), mem AS (
+                   INSERT INTO repo_changesets (repo_id, cs) VALUES ($5, $1)
+                   ON CONFLICT (repo_id, cs) DO NOTHING
+                 )
+                 SELECT (SELECT count(*) FROM cs)::bigint",
+                &[
+                    P::bytes(&id_bytes(id.as_bytes())),
+                    P::i64(generation),
+                    P::bytes(body),
+                    P::bytea_array(parents.to_vec()),
+                    P::i64(repo.0),
+                ],
+            )?
+        };
+        Ok(rows[0].get::<_, i64>(0))
+    }
+}
+
 impl MetaTx for PgTx<'_> {
     /// Creates a repository, or returns the existing one with that name.
     fn create_repo(&mut self, name: &str) -> Result<RepoId> {
@@ -4415,26 +4475,7 @@ impl MetaTx for PgTx<'_> {
                 self.gen_cache.insert((repo.0, key.clone()), parent_gen_i);
             }
         }
-        let inserted = self.c.execute(
-            "INSERT INTO changesets (id, gen, body) VALUES ($1, $2, $3)
-             ON CONFLICT (id) DO NOTHING",
-            &[
-                P::bytes(&id_bytes(id.as_bytes())),
-                P::i64(parent_gen + 1),
-                P::bytes(&body),
-            ],
-        )?;
         let generation = parent_gen + 1;
-        // Only a row this statement wrote is the transaction's own. A
-        // conflicting row predates the transaction (a land rebases onto
-        // the head its input changeset already hangs from), and the
-        // write path asks `inserted_this_tx` to tell the two apart: the
-        // stored derived rows of an old changeset are real and must be
-        // read, the ones of a new one cannot exist.
-        if inserted > 0 {
-            self.inserted_gens
-                .insert(id_bytes(id.as_bytes()), generation);
-        }
         self.gen_cache
             .insert((repo.0, id_bytes(id.as_bytes())), generation);
         // While the import's batching is on, the parents and the repo
@@ -4447,31 +4488,45 @@ impl MetaTx for PgTx<'_> {
         // order the foreign keys read: changesets, changeset_parents,
         // repo_changesets, derived, history, git_import.
         if self.cs_batching {
+            let inserted = self.c.execute(
+                "INSERT INTO changesets (id, gen, body) VALUES ($1, $2, $3)
+                 ON CONFLICT (id) DO NOTHING",
+                &[
+                    P::bytes(&id_bytes(id.as_bytes())),
+                    P::i64(parent_gen + 1),
+                    P::bytes(&body),
+                ],
+            )?;
+            if inserted > 0 {
+                self.inserted_gens
+                    .insert(id_bytes(id.as_bytes()), generation);
+            }
             if let Some(pending) = self.cs_pending.as_deref_mut() {
                 pending.push((id, cs.parents().to_vec()));
             }
             return Ok(id);
         }
-        // Every parent as one statement, however many a merge has: the
-        // row number is the parent's place in the array, counting from
+        // The changeset's row, its parents and its repo membership in
+        // one statement: three INSERTs in a CTE chain, each keeping its
+        // own ON CONFLICT DO NOTHING (#1004, the #935 pattern). The
+        // parents ride one unnest, however many a merge has: the row
+        // number is the parent's place in the array, counting from
         // zero, as the first-parent readers and the seed writer count.
-        if !parents.is_empty() {
-            self.c.execute(
-                "INSERT INTO changeset_parents (cs, n, parent)
-                 SELECT $1, ord - 1, parent
-                 FROM unnest($2::bytea[]) WITH ORDINALITY AS parents(parent, ord)
-                 ON CONFLICT (cs, n) DO NOTHING",
-                &[
-                    P::bytes(&id_bytes(id.as_bytes())),
-                    P::bytea_array(parents.clone()),
-                ],
-            )?;
+        // A failed arm aborts the statement whole, so the three tables
+        // agree or the transaction sees none of them.
+        let chain_inserted =
+            Self::insert_changeset_chain(self, repo, &id, generation, &body, &parents)?;
+        let inserted = usize::try_from(chain_inserted).unwrap_or(0);
+        // Only a row this statement wrote is the transaction's own. A
+        // conflicting row predates the transaction (a land rebases onto
+        // the head its input changeset already hangs from), and the
+        // write path asks `inserted_this_tx` to tell the two apart: the
+        // stored derived rows of an old changeset are real and must be
+        // read, the ones of a new one cannot exist.
+        if inserted > 0 {
+            self.inserted_gens
+                .insert(id_bytes(id.as_bytes()), generation);
         }
-        self.c.execute(
-            "INSERT INTO repo_changesets (repo_id, cs) VALUES ($1, $2)
-             ON CONFLICT (repo_id, cs) DO NOTHING",
-            &[P::i64(repo.0), P::bytes(&id_bytes(id.as_bytes()))],
-        )?;
         Ok(id)
     }
 
@@ -5447,6 +5502,124 @@ impl MetaTx for PgTx<'_> {
     /// follows the writes into the transaction's memory. The callers
     /// write rows of changesets this transaction just stored, so any
     /// conflict is corrupt state and refuses.
+    /// The settle's whole write in one statement: the trees, the derived
+    /// rows and the repo's blob membership, three INSERTs in a CTE chain
+    /// whose arms keep their own ON CONFLICT rules (#1004). The top
+    /// SELECT answers the derived arm's inserted count, so the
+    /// disagreeing-row check keeps its shape. The empty arms drop out;
+    /// a single arm runs alone.
+    fn put_settle_rows(
+        &mut self,
+        trees: &[(TreeId, Vec<u8>)],
+        rows: &[(String, u32, ChangesetId, Vec<u8>)],
+        repo: RepoId,
+        blobs: &[BlobId],
+    ) -> Result<u64> {
+        // The importer's batching owns the derived rows already; the
+        // blobs and the trees keep their own shapes there.
+        if self.cs_batching {
+            self.put_trees(trees)?;
+            self.put_derived_all(rows)?;
+            self.add_repo_blobs(repo, blobs)?;
+            return Ok(rows.len() as u64);
+        }
+        let mut arms: Vec<String> = Vec::new();
+        let mut params: Vec<Param> = Vec::new();
+        let mut n = 1usize;
+        let mut counts: Vec<String> = Vec::new();
+        if !trees.is_empty() {
+            let ids: Vec<Vec<u8>> = trees
+                .iter()
+                .map(|(id, _)| id_bytes(id.as_bytes()))
+                .collect();
+            let bodies: Vec<Vec<u8>> = trees.iter().map(|(_, body)| body.clone()).collect();
+            params.push(Param::ByteaArray(ids));
+            params.push(Param::ByteaArray(bodies));
+            arms.push(format!(
+                "tr AS (
+                   INSERT INTO trees (id, body)
+                   SELECT * FROM unnest(${n}::bytea[], ${next}::bytea[])
+                   ON CONFLICT (id) DO NOTHING
+                   RETURNING 1
+                 )",
+                n = n,
+                next = n + 1
+            ));
+            counts.push("tr".to_owned());
+            n += 2;
+        }
+        if !rows.is_empty() {
+            let kinds: Vec<String> = rows.iter().map(|(kind, _, _, _)| kind.clone()).collect();
+            let versions: Vec<i64> = rows.iter().map(|(_, v, _, _)| i64::from(*v)).collect();
+            let css: Vec<Vec<u8>> = rows
+                .iter()
+                .map(|(_, _, cs, _)| id_bytes(cs.as_bytes()))
+                .collect();
+            let values: Vec<Vec<u8>> = rows.iter().map(|(_, _, _, value)| value.clone()).collect();
+            params.push(Param::TextArray(kinds));
+            params.push(Param::I64Array(versions));
+            params.push(Param::ByteaArray(css));
+            params.push(Param::ByteaArray(values));
+            arms.push(format!(
+                "der AS (
+                   INSERT INTO derived (kind, version, cs, value)
+                   SELECT * FROM unnest(${n}::text[], ${next}::int8[], ${next2}::bytea[], ${next3}::bytea[])
+                   ON CONFLICT (kind, version, cs) DO NOTHING
+                   RETURNING 1
+                 )",
+                n = n,
+                next = n + 1,
+                next2 = n + 2,
+                next3 = n + 3
+            ));
+            counts.push("der".to_owned());
+            n += 4;
+        }
+        if !blobs.is_empty() {
+            let ids: Vec<Vec<u8>> = blobs.iter().map(|blob| id_bytes(blob.as_bytes())).collect();
+            params.push(Param::I64(repo.0));
+            params.push(Param::ByteaArray(ids));
+            arms.push(format!(
+                "blb AS (
+                   INSERT INTO repo_blobs (repo_id, blob)
+                   SELECT ${n}, x FROM unnest(${next}::bytea[]) AS x
+                   ON CONFLICT (repo_id, blob) DO NOTHING
+                   RETURNING 1
+                 )",
+                n = n,
+                next = n + 1
+            ));
+            counts.push("blb".to_owned());
+        }
+        // The top SELECT answers each arm's inserted count.
+        let selects: Vec<String> = counts
+            .iter()
+            .map(|arm| format!("(SELECT count(*) FROM {arm})"))
+            .collect();
+        let sql = format!("WITH {} SELECT {}", arms.join(",\n"), selects.join(", "));
+        let rows_out = self.c.query(&sql, &params)?;
+        let mut out = 0u64;
+        for (i, arm) in counts.iter().enumerate() {
+            let c: i64 = rows_out[0].get(i);
+            if arm == "der" {
+                out = u64::try_from(c).unwrap_or(0);
+            }
+        }
+        // The transaction's memory follows its writes, as the three
+        // calls did.
+        if !rows.is_empty()
+            && let Some(preload) = self.derived_preload.as_deref_mut()
+        {
+            for (kind, version, cs, value) in rows {
+                preload.insert(
+                    (kind.clone(), i64::from(*version), id_bytes(cs.as_bytes())),
+                    value.clone(),
+                );
+            }
+        }
+        Ok(out)
+    }
+
     fn put_derived_all(&mut self, rows: &[(String, u32, ChangesetId, Vec<u8>)]) -> Result<()> {
         if rows.is_empty() {
             return Ok(());

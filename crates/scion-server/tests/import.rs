@@ -674,7 +674,7 @@ fn verification_catches_a_tree_that_differs_from_git() {
     // A write, not a read: the apply inserts the tree's rows, and the
     // database refuses an INSERT in a read-only transaction.
     let bad = store
-        .write(|c| tree::apply(c, Some(root), &extra, &mut |_| Ok(0)))
+        .write(|c| tree::apply(c, Some(root), &extra, &mut |_| Ok(0)).map(|(tree, _)| tree))
         .unwrap();
     let schema = Backend::test_schema(dir.path());
     let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
