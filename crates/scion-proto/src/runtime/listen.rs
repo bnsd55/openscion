@@ -2479,6 +2479,80 @@ mod tests {
         );
     }
 
+    /// The backoff resets on a success: a failure, a success, and another
+    /// failure wait the first wait again, not the doubled one - a serve
+    /// that keeps the doubled pace across a success punishes the next
+    /// storm's clients.
+    #[tokio::test]
+    async fn the_backoff_resets_on_a_success() {
+        // The asserts are windows: the wait's floor is the backoff, the
+        // ceiling leaves room for the scheduler.
+        let within = |got: Duration, floor: Duration| {
+            got >= floor && got < floor + Duration::from_millis(100)
+        };
+        let mut backoff = Backoff::new();
+        let start = std::time::Instant::now();
+        backoff.wait().await;
+        assert!(
+            within(start.elapsed(), FIRST_ACCEPT_BACKOFF),
+            "the first wait is the first backoff"
+        );
+        // A success resets, so the next failure waits the first wait again.
+        backoff.reset();
+        let mark = std::time::Instant::now();
+        backoff.wait().await;
+        assert!(
+            within(mark.elapsed(), FIRST_ACCEPT_BACKOFF),
+            "the wait after the reset is the first wait, not the doubled one"
+        );
+        // Without a reset the doubling holds, and caps at the maximum.
+        let mark = std::time::Instant::now();
+        backoff.wait().await;
+        assert!(within(mark.elapsed(), FIRST_ACCEPT_BACKOFF * 2), "doubles");
+        let mark = std::time::Instant::now();
+        backoff.wait().await;
+        assert!(
+            within(mark.elapsed(), FIRST_ACCEPT_BACKOFF * 4),
+            "the doubling holds"
+        );
+        // The doubling continues 80, 160, 320, 640, and stops at the cap.
+        let mut floor = FIRST_ACCEPT_BACKOFF * 8;
+        for _ in 0..4 {
+            let mark = std::time::Instant::now();
+            backoff.wait().await;
+            assert!(within(mark.elapsed(), floor), "the doubling holds");
+            floor *= 2;
+        }
+        let mark = std::time::Instant::now();
+        backoff.wait().await;
+        assert!(within(mark.elapsed(), MAX_ACCEPT_BACKOFF), "caps");
+        let mark = std::time::Instant::now();
+        backoff.wait().await;
+        assert!(within(mark.elapsed(), MAX_ACCEPT_BACKOFF), "the cap holds");
+    }
+
+    /// The stalled-bytes cap: a hold under the limit keeps the connection
+    /// alive, past it the read side fails. The per-connection count alone
+    /// crosses it - not the process total, and not the inverted sense.
+    #[tokio::test]
+    async fn the_stall_cap_crosses_on_the_connection_count_alone() {
+        let limit = 100;
+        let st = Stalled::new(
+            Some(SocketAddr::from(([127, 0, 0, 1], 9))),
+            limit,
+            Arc::new(Metrics::default()),
+            Arc::new(TotalBytes::new(1 << 20)),
+        );
+        // The Stall stays alive: its drop gives the bytes back, so the
+        // holds must overlap to cross the limit, as real replies do.
+        let first = st.hold(60);
+        assert!(!st.over(), "under the limit the connection lives");
+        let second = st.hold(60);
+        assert!(st.over(), "past the limit the read side fails");
+        drop(second);
+        drop(first);
+    }
+
     /// The serve's last line writes what is left, without the interval
     /// check: the counts the binaries exit with are in the log, not
     /// dropped.
