@@ -8,3 +8,4 @@ request.changeset_id: $cs
 request.path: src/gone.rs
 
 status: not_found
+message: path "src/gone.rs" not found

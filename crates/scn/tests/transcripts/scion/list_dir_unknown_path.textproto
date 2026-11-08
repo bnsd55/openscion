@@ -8,3 +8,4 @@ request.changeset_id: $cs
 request.path: no/such/dir
 
 status: not_found
+message: path "no/such/dir" not found

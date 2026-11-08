@@ -11,7 +11,11 @@
 //! `$cs`, `$missing`, `$ticket`). The expectation names `status` and the
 //! pinned reply fields (`reply.<path>:`), or for streams the ordered
 //! items (`objects:` lines) and how the stream ended
-//! (`end: none|call=CODE|stream=CODE|refused`). Every listed field must
+//! (`end: none|call=CODE|stream=CODE|refused`). A refusal's text is
+//! pinned by `message: <text>`, matched exactly against the status's
+//! message after placeholder resolution (`$missing` and friends work),
+//! so the documented text distinctions (#955) cannot drift. Every
+//! listed field must
 //! match; unlisted fields never block, so a new optional field does not
 //! break the corpus. The runner parses these lines itself, so an unknown
 //! key fails the file instead of passing in silence.
@@ -110,7 +114,7 @@ fn parse(at: &Path, text: &str) -> Transcript {
             "fixture" => fixture = Some(value.to_owned()),
             "ticket_for" => ticket_for = Some(value.to_owned()),
             "token" => token = Some(value.to_owned()),
-            "status" | "end" | "resume_status" | "objects" | "entries" | "next"
+            "status" | "end" | "resume_status" | "message" | "objects" | "entries" | "next"
             | "next_nonempty" | "cursor_from" | "objects_parts" => {
                 expect.push((key.to_owned(), value.to_owned()));
             }
@@ -943,6 +947,7 @@ fn check_headers(files: &[PathBuf]) -> Result<(), String> {
         "status",
         "end",
         "resume_status",
+        "message",
         "ticket_for",
         "tiers",
         "daemon_warm",
@@ -953,6 +958,7 @@ fn check_headers(files: &[PathBuf]) -> Result<(), String> {
         "status",
         "end",
         "resume_status",
+        "message",
         "ticket_for",
         "token",
         "entries",
@@ -1051,8 +1057,8 @@ fn the_corpus_answers_as_its_files_say() {
     check_headers(&files).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(
         files.len(),
-        56,
-        "the corpus pins 56 behaviours; a file added or removed must update this count"
+        57,
+        "the corpus pins 57 behaviours; a file added or removed must update this count"
     );
     // One store and one set of tiers for the whole run: the fixture is
     // the expensive part. Each file still mints its own ticket, right
@@ -2473,9 +2479,7 @@ async fn run_put_blob(
             check_status(t, Code::Ok)?;
             pinned(t, "blob_id", &reply.into_inner().blob_id, f)
         }
-        Err(status) => {
-            check_status(t, status.code()).map_err(|e| format!("{e}: {}", status.message()))
-        }
+        Err(status) => check_refusal(t, &status, f),
     }
 }
 
@@ -2498,9 +2502,7 @@ async fn run_create_changeset(
             check_status(t, Code::Ok)?;
             pinned(t, "changeset_id", &reply.into_inner().changeset_id, f)
         }
-        Err(status) => {
-            check_status(t, status.code()).map_err(|e| format!("{e}: {}", status.message()))
-        }
+        Err(status) => check_refusal(t, &status, f),
     }
 }
 
@@ -2536,9 +2538,7 @@ async fn run_land(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> Re
             }
             Ok(())
         }
-        Err(status) => {
-            check_status(t, status.code()).map_err(|e| format!("{e}: {}", status.message()))
-        }
+        Err(status) => check_refusal(t, &status, f),
     }
 }
 
@@ -2574,9 +2574,7 @@ async fn run_get_land(
             }
             Ok(())
         }
-        Err(status) => {
-            check_status(t, status.code()).map_err(|e| format!("{e}: {}", status.message()))
-        }
+        Err(status) => check_refusal(t, &status, f),
     }
 }
 
@@ -2594,9 +2592,7 @@ async fn run_scion_resolve_ref(
             check_status(t, Code::Ok)?;
             pinned(t, "changeset_id", &reply.into_inner().changeset_id, f)
         }
-        Err(status) => {
-            check_status(t, status.code()).map_err(|e| format!("{e}: {}", status.message()))
-        }
+        Err(status) => check_refusal(t, &status, f),
     }
 }
 
@@ -2719,9 +2715,7 @@ async fn run_get_changeset(
             .await?;
             check_stream_bytes(t, f, "changeset", &parts)
         }
-        Err(status) => {
-            check_status(t, status.code()).map_err(|e| format!("{e}: {}", status.message()))
-        }
+        Err(status) => check_refusal(t, &status, f),
     }
 }
 
@@ -2750,9 +2744,7 @@ async fn run_read_file(
             .await?;
             check_stream_bytes(t, f, "data", &parts)
         }
-        Err(status) => {
-            check_status(t, status.code()).map_err(|e| format!("{e}: {}", status.message()))
-        }
+        Err(status) => check_refusal(t, &status, f),
     }
 }
 
@@ -2781,9 +2773,7 @@ async fn run_list_dir(
             .await?;
             check_stream_bytes(t, f, "tree", &parts)
         }
-        Err(status) => {
-            check_status(t, status.code()).map_err(|e| format!("{e}: {}", status.message()))
-        }
+        Err(status) => check_refusal(t, &status, f),
     }
 }
 
@@ -2855,9 +2845,7 @@ async fn run_log(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> Res
             check_next(t, f)?;
             Ok(())
         }
-        Err(status) => {
-            check_status(t, status.code()).map_err(|e| format!("{e}: {}", status.message()))
-        }
+        Err(status) => check_refusal(t, &status, f),
     }
 }
 
@@ -2899,9 +2887,7 @@ async fn run_blame(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> R
             check_next(t, f)?;
             Ok(())
         }
-        Err(status) => {
-            check_status(t, status.code()).map_err(|e| format!("{e}: {}", status.message()))
-        }
+        Err(status) => check_refusal(t, &status, f),
     }
 }
 
@@ -2936,9 +2922,7 @@ async fn run_merge_base(
                 f,
             )
         }
-        Err(status) => {
-            check_status(t, status.code()).map_err(|e| format!("{e}: {}", status.message()))
-        }
+        Err(status) => check_refusal(t, &status, f),
     }
 }
 
@@ -2975,9 +2959,7 @@ async fn run_is_ancestor(
             }
             Ok(())
         }
-        Err(status) => {
-            check_status(t, status.code()).map_err(|e| format!("{e}: {}", status.message()))
-        }
+        Err(status) => check_refusal(t, &status, f),
     }
 }
 
@@ -3028,9 +3010,7 @@ async fn run_diff(t: &Transcript, client: &mut ScionClientOf, f: &Fixture) -> Re
             check_next(t, f)?;
             Ok(())
         }
-        Err(status) => {
-            check_status(t, status.code()).map_err(|e| format!("{e}: {}", status.message()))
-        }
+        Err(status) => check_refusal(t, &status, f),
     }
 }
 
@@ -3050,6 +3030,27 @@ fn check_status(t: &Transcript, got: Code) -> Result<(), String> {
         None => Err(format!(
             "the call failed {got:?} where the file expects a reply"
         )),
+    }
+}
+
+/// A pinned refusal: the code as `check_status` reads it, plus the
+/// optional `message:` text, matched exactly against the status's
+/// message after placeholder resolution - the documented text
+/// distinctions (a hidden path and a missing changeset answer the same
+/// `NOT_FOUND` with different texts) cannot drift silently (#988).
+fn check_refusal(t: &Transcript, status: &tonic::Status, f: &Fixture) -> Result<(), String> {
+    check_status(t, status.code())?;
+    let Some((_, want)) = t.expect.iter().find(|(k, _)| k == "message") else {
+        return Ok(());
+    };
+    let want = resolve(want, f);
+    if status.message() == want {
+        Ok(())
+    } else {
+        Err(format!(
+            "the refusal says {:?}, the file says {want:?}",
+            status.message()
+        ))
     }
 }
 
@@ -3091,9 +3092,7 @@ async fn run_resolve_ref(
             check_status(t, Code::Ok)?;
             pinned(t, "changeset_id", &reply.into_inner().changeset_id, f)
         }
-        Err(status) => {
-            check_status(t, status.code()).map_err(|e| format!("{e}: {}", status.message()))
-        }
+        Err(status) => check_refusal(t, &status, f),
     }
 }
 
@@ -3116,9 +3115,7 @@ async fn run_get_root_tree(
             check_status(t, Code::Ok)?;
             pinned(t, "tree_id", &reply.into_inner().tree_id, f)
         }
-        Err(status) => {
-            check_status(t, status.code()).map_err(|e| format!("{e}: {}", status.message()))
-        }
+        Err(status) => check_refusal(t, &status, f),
     }
 }
 
