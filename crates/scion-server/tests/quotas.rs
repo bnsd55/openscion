@@ -588,4 +588,3 @@ async fn a_get_objects_stream_holds_its_principals_slot() {
 
 #[path = "common/mod.rs"]
 mod common;
-
