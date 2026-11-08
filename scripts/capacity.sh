@@ -164,90 +164,6 @@ pg_cpu_ms() {
   awk -v u="$usec" -v clk="$clk" 'BEGIN { printf "%d", u / 1000 }'
 }
 
-# turn_on_wal_io_timing: pg_stat_wal's wal_sync_time only accumulates
-# with track_wal_io_timing=on (SIGHUP-reloadable, superuser). The
-# service's docker options cannot carry postgres flags (docker reads
-# -c as --cpu-shares), so the script turns it on itself, once, before
-# the cells.
-turn_on_wal_io_timing() {
-  local url=${SCION_TEST_POSTGRES_URL:-}
-  [ -n "$url" ] || return 0
-  local cred=${url#postgres://}
-  cred=${cred%%@*}
-  local userpass=${cred%%:*} pass=${cred#*:}
-  local hostport=${url#*@}; hostport=${hostport%%/*}
-  PGPASSWORD=$pass PGGSSENCMODE=disable psql -h "${hostport%%:*}" \
-    -p "${hostport##*:}" -U "$userpass" -d postgres -Atqc \
-    "ALTER SYSTEM SET track_wal_io_timing = on" \
-    -c "SELECT pg_reload_conf()" \
-    > /dev/null 2>&1 || true
-  # The reload took, in the run's log: a wal_sync_time that stays 0.000
-  # with the setting off would read as a fast disk, not a missing flag.
-  local took
-  took=$(PGPASSWORD=$pass PGGSSENCMODE=disable psql -h "${hostport%%:*}" \
-    -p "${hostport##*:}" -U "$userpass" -d postgres -Atqc \
-    "SHOW track_wal_io_timing" 2> /dev/null)
-  echo "track_wal_io_timing=$took"
-}
-
-# wal_fsync_ms: the WAL's own fsync milliseconds since the server's
-# start, from pg_stat_wal.wal_sync_time - the mechanism behind a slow
-# land, measured directly (Postgres needs track_wal_io_timing=on,
-# which the capacity job's service turns on; without it the column is
-# empty and the sampler stays silent). The connection rides
-# SCION_TEST_POSTGRES_URL, the workflow's own env.
-wal_fsync_ms() {
-  local url=${SCION_TEST_POSTGRES_URL:-}
-  [ -n "$url" ] || return 0
-  local cred=${url#postgres://}
-  cred=${cred%%@*}
-  local userpass=${cred%%:*} pass=${cred#*:}
-  local hostport=${url#*@}; hostport=${hostport%%/*}
-  PGPASSWORD=$pass PGGSSENCMODE=disable psql -h "${hostport%%:*}" \
-    -p "${hostport##*:}" -U "$userpass" -d postgres -Atqc \
-    "SELECT wal_sync_time FROM pg_stat_wal" 2> /dev/null |
-    awk '{ if ($1 ~ /^[0-9.]+$/) printf "%d", $1 * 1000 }'
-}
-
-# bench_cpu_ms PID CLK: the bench client's CPU milliseconds. One bench
-# process runs per repetition and lives the whole rep (its agents are
-# threads), and its pid rides the cell's owned pidfile, so the sampler
-# reads the exact process - no cmdline pattern to miss. Across a cell
-# the pid changes at each rep boundary: the sampler reads the newest
-# owned file, and the rows that straddle a boundary are the cell's
-# warm-up and cool-down.
-bench_cpu_ms() {
-  local pid=$1 clk=$2 child grand total=0 ticks
-  # The owned pid names the subshell around the bench; bash may have
-  # exec'd the timeout in it, so the tree (the pid, its children, its
-  # grandchildren) holds the timeout and the scn, whichever way the
-  # shell went. Sum the tree: every process in it is the bench's, and
-  # the idle ones add no ticks.
-  for pid in "$pid" $(pgrep -P "$pid" 2> /dev/null) \
-    $(for child in $(pgrep -P "$pid" 2> /dev/null); do
-        pgrep -P "$child" 2> /dev/null
-      done); do
-    [ -n "$pid" ] || continue
-    ticks=$(awk '{ sub(/^[^)]*\) /, ""); print $11 + $12 }' "/proc/$pid/stat" 2> /dev/null) || continue
-    [ -n "$ticks" ] || continue
-    total=$((total + ticks))
-  done
-  awk -v t="$total" -v clk="$clk" 'BEGIN { printf "%d", t * 1000 / clk }'
-}
-
-# disk_ms: the work disk's read and write milliseconds since boot, from
-# /proc/diskstats, summed over the runner's physical devices (sd, nvme,
-# vd, hd, xvd - loop, ram, dm and optical rows are other machinery).
-# The sum, not one device: the work directory sits on an overlay whose
-# st_dev is virtual and whose df name matches no row, and a hosted
-# runner's disk has no second tenant - the sum IS the disk this cell
-# reads and writes.
-disk_ms() {
-  awk '$3 ~ /^(sd[a-z]+|nvme[0-9]+n[0-9]+|vd[a-z]+|hd[a-z]+|xvd[a-z]+)$/ {
-         read += $7; write += $11
-       } END { if (read || write) print read + 0, write + 0 }' /proc/diskstats 2> /dev/null
-}
-
 # pg_waits: the Postgres's wait-event counts, one `type:count` group
 # per wait type plus `NONE` for the sessions that run, from one
 # pg_stat_activity read. Sessions without a database (the auth and
@@ -299,54 +215,42 @@ sample_cell() {
   pid_server=$(probe owned-server sed -n 's/^pid=//p' "$WORK/owned/server")
   pid_cache=$(probe owned-cache sed -n 's/^pid=//p' "$WORK/owned/cache")
   pid_daemon=$(probe owned-daemon sed -n 's/^pid=//p' "$WORK/owned/daemon")
-  pid_bench=$(probe owned-bench sh -c 'ls "$1"/owned/bench-* 2> /dev/null | sort -V | tail -n 1' _ "$WORK" | sed -n 's/^pid=//p' | head -n 1)
   prev_server=$(probe cpu-server cpu_ms "$pid_server" "$clk")
   prev_cache=$(probe cpu-cache cpu_ms "$pid_cache" "$clk")
   prev_daemon=$(probe cpu-daemon cpu_ms "$pid_daemon" "$clk")
   prev_pg=$(probe cpu-postgres pg_cpu_ms "$clk")
-  prev_bench=$(probe cpu-bench bench_cpu_ms "$pid_bench" "$clk")
   disk_line=$(probe disk disk_ms)
   prev_disk_read=${disk_line%% *}
   prev_disk_write=${disk_line#* }
-  echo "tick,cpu_server_ms,cpu_postgres_ms,cpu_cache_ms,cpu_daemon_ms,cpu_bench_ms,load1,pg_waits,disk_read_ms,disk_write_ms" > "$out"
+  echo "tick,cpu_server_ms,cpu_postgres_ms,cpu_cache_ms,cpu_daemon_ms,load1,pg_waits,disk_read_ms,disk_write_ms" > "$out"
   while [ "$(date +%s)" -lt "$END" ]; do
     local tick cur
     tick=$(date +%s)
-    # The bench's pid is re-read each tick: it changes at a rep
-    # boundary, and the newest owned file always names the live one.
-    pid_bench=$(probe owned-bench sh -c 'ls "$1"/owned/bench-* 2> /dev/null | sort -V | tail -n 1' _ "$WORK" | sed -n 's/^pid=//p' | head -n 1)
     cur_server=$(probe cpu-server cpu_ms "$pid_server" "$clk")
     cur_cache=$(probe cpu-cache cpu_ms "$pid_cache" "$clk")
     cur_daemon=$(probe cpu-daemon cpu_ms "$pid_daemon" "$clk")
     cur_pg=$(probe cpu-postgres pg_cpu_ms "$clk")
-    cur_bench=$(probe cpu-bench bench_cpu_ms "$pid_bench" "$clk")
     disk_line=$(probe disk disk_ms)
     cur_disk_read=${disk_line%% *}
     cur_disk_write=${disk_line#* }
-    cur_wal=$(probe wal-fsync wal_fsync_ms)
     load1=$(cut -d ' ' -f 1 /proc/loadavg)
-    printf '%s,%s,%s,%s,%s,%s,%s,"%s",%s,%s,%s\n' \
+    printf '%s,%s,%s,%s,%s,%s,"%s",%s,%s\n' \
       "$tick" \
       "$(awk -v a="$cur_server" -v b="$prev_server" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
       "$(awk -v a="$cur_pg" -v b="$prev_pg" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
       "$(awk -v a="$cur_cache" -v b="$prev_cache" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
       "$(awk -v a="$cur_daemon" -v b="$prev_daemon" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
-      "$(awk -v a="$cur_bench" -v b="$prev_bench" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
       "$load1" \
       "$(probe pg-waits pg_waits)" \
-      "$(awk -v a="$cur_wal" -v b="$prev_wal" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
       "$(awk -v a="$cur_disk_read" -v b="$prev_disk_read" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
       "$(awk -v a="$cur_disk_write" -v b="$prev_disk_write" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
       >> "$out"
     prev_server=$cur_server; prev_pg=$cur_pg; prev_cache=$cur_cache
-    prev_daemon=$cur_daemon; prev_bench=$cur_bench
+    prev_daemon=$cur_daemon
     prev_disk_read=$cur_disk_read; prev_disk_write=$cur_disk_write
-    prev_wal=$cur_wal
     sleep 1
   done
 }
-
-turn_on_wal_io_timing
 
 note "capacity: building"
 if [ -n "${SCION_BIN:-}" ]; then
@@ -363,6 +267,8 @@ echo "cell_start,reps,landed" > /dev/null
 # backend,writers,readers,land_p99_ms,push_p99_ms,checkout_p50_ms,
 # checkout_p99_ms,reader_timeouts,errors,rss_end_kib,landed,
 # lands_per_second,blob_growth_kib_per_1k_lands,db_growth_kib_per_1k_lands
+# (the sampler's own CSV keeps the CPU columns that proved themselves:
+# server, postgres, cache, daemon, plus the disk's read and write ms)
 
 [ -n "${SCION_PG_URL:-}" ] || {
   note "no SCION_PG_URL: the cells are not run"
@@ -480,22 +386,11 @@ for w in $WRITERS; do
     bench_fail=0
     while [ "$rep" -le "$REPS" ]; do
       # The writers land for this repetition; the server's own report
-      # carries the land percentiles. The bench runs in the background
-      # under its own pidfile (the sampler reads the pid for its CPU
-      # column), and the rep waits for it exactly as a foreground run
-      # would.
+      # carries the land percentiles.
       sleep 10 # the cell's warm start, before bench begins
-      ( "$TIMEOUT" 600 "$BIN/scn" --server "$SERVER" bench --agents "$w" \
+      if ! "$TIMEOUT" 600 "$BIN/scn" --server "$SERVER" bench --agents "$w" \
         --lands "$LANDS" --json > "$WORK/bench-w$w-r$r-rep$rep.json" \
-        2> "$WORK/bench-w$w-r$r-rep$rep.log" ) &
-      bench_pid=$!
-      {
-        echo "pid=$bench_pid"
-        echo "pgid="
-        echo "comm=scn"
-        echo "cmd=bench w$w r$r rep$rep"
-      } > "$WORK/owned/bench-$w-$r-rep$rep"
-      if ! wait "$bench_pid"; then
+        2> "$WORK/bench-w$w-r$r-rep$rep.log"; then
         # A bench that failed is the cell's data, not the run's
         # failure: the envelope's edge is where errors start. The row
         # records it and the grid goes on.
