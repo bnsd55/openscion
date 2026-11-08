@@ -2790,13 +2790,21 @@ mod tests {
             // The writer is provably waiting: it counted itself when its
             // commit started, and it cannot have gotten in, because the
             // walk's step still holds the connection.
+            // The wait is on the LANE's plain queue, not writers_waiting():
+            // that count holds every taker not yet released, granted ones
+            // included - and this walk's own step transaction is one, so
+            // the old condition fired while the test's writer was still on
+            // its way to the lock, and the release ran before it queued
+            // (#993). plain_waiting counts only takers queued and not
+            // granted: the walk's own taker is granted, so it never
+            // counts here.
             for _ in 0..2_000 {
-                if store.writers_waiting() > 0 {
+                if store.writer_lane_waiting().1 > 0 {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
-            assert!(store.writers_waiting() > 0, "the writer never waited");
+            assert!(store.writer_lane_waiting().1 > 0, "the writer never waited");
             // Twelve releases bank the whole walk, so a walk that does not
             // wait for the writer walks on to the end and is caught by the
             // snapshot, instead of blocking at the gate forever.
@@ -2841,13 +2849,21 @@ mod tests {
                     })
                     .unwrap();
             });
+            // The wait is on the LANE's plain queue, not writers_waiting():
+            // that count holds every taker not yet released, granted ones
+            // included - and this walk's own step transaction is one, so
+            // the old condition fired while the test's writer was still on
+            // its way to the lock, and the release ran before it queued
+            // (#993). plain_waiting counts only takers queued and not
+            // granted: the walk's own taker is granted, so it never
+            // counts here.
             for _ in 0..2_000 {
-                if store.writers_waiting() > 0 {
+                if store.writer_lane_waiting().1 > 0 {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
-            assert!(store.writers_waiting() > 0, "the writer never waited");
+            assert!(store.writer_lane_waiting().1 > 0, "the writer never waited");
             gate_release(12);
             writer.join().unwrap();
             assert_eq!(
