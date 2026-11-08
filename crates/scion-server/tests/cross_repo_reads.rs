@@ -109,8 +109,7 @@ async fn log_status(scion: &mut Scion, repo: &str, from: &scion_core::ChangesetI
         Err(status) => Some(status.code()),
         Ok(streamed) => match streamed.into_inner().message().await {
             Err(status) => Some(status.code()),
-            Ok(Some(_)) => None,
-            Ok(None) => None,
+            Ok(_) => None,
         },
     }
 }
