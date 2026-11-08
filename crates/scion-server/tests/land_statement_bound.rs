@@ -688,13 +688,14 @@ fn a_land_whose_head_tree_is_missing_fills_before_the_write_transaction() {
 /// stops the walk at the bound and starts the index over at the head,
 /// instead of reading the whole first-parent chain. This binary is an
 /// integration test, so the lib's test-profile depth (16) does not
-/// apply: [`MAX_DEPTH`] here is one prune cycle (10,000). The chain
-/// below is 12,000 empty changesets, whose byte estimate stays under
-/// the budget, so the page-statement count separates the bounded walk
-/// (it stops at the bound, 11 pages) from a walk that reads the chain
-/// to its root (12). The test owns the binary's log window (the
-/// LOG_LOCK) and its own process: no other test speaks SQL in it, so
-/// the count cannot pick up a neighbor's walks.
+/// apply: [`MAX_DEPTH`] here is one prune cycle (10,000). One page
+/// carries its anchor row plus 1,000 recursive rows, so ten pages hold
+/// 10,010 rows and the stop at 10,001 lands inside the tenth page. The
+/// chain below is 12,000 empty changesets off the root, so a walk that
+/// reads the chain to its root reads 12 pages (12,001 rows). The
+/// page-statement count separates the two. The test owns the binary's
+/// log window (the `LOG_LOCK`) and its own process: no other test
+/// speaks SQL in it, so the count cannot pick up a neighbor's walks.
 #[test]
 fn a_bounded_advance_reads_one_page_not_the_chain() {
     let _log = LOG_LOCK
