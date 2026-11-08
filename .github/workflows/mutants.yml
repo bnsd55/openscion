@@ -55,6 +55,15 @@ on:
         required: false
         default: ""
         type: string
+      test_workspace:
+        description: >-
+          "true" runs the whole workspace's tests for every mutant
+          (cargo-mutants --test-workspace true): for mutants in one
+          package whose killing tests live in another (#961's Bearer
+          mutant). The default runs only the mutated package's tests.
+        required: false
+        default: ""
+        type: string
       runner:
         description: >-
           the runner: ubuntu-24.04 (the default) with the Postgres service;
@@ -134,6 +143,7 @@ jobs:
           TEST_ARGS: ${{ inputs.test_args }}
           SHARD: ${{ inputs.shard }}
           SHARDS: ${{ inputs.shards }}
+          TEST_WORKSPACE: ${{ inputs.test_workspace }}
         run: |
           # The dispatch names files, one per -f: cargo-mutants examines
           # only those files' functions. Every name must be a file in the
@@ -150,8 +160,12 @@ jobs:
           if [ -n "$SHARD" ] && [ -n "$SHARDS" ]; then
             shard_args="--shard $SHARD/$SHARDS"
           fi
+          mutants_args=""
+          if [ "$TEST_WORKSPACE" = "true" ]; then
+            mutants_args="--test-workspace true"
+          fi
           # shellcheck disable=SC2086
-          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $file_args $shard_args -- $TEST_ARGS
+          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args -- $TEST_ARGS
           df -h /
       - name: the outcome lists
         if: always()
@@ -214,6 +228,7 @@ jobs:
           TEST_ARGS: ${{ inputs.test_args }}
           SHARD: ${{ inputs.shard }}
           SHARDS: ${{ inputs.shards }}
+          TEST_WORKSPACE: ${{ inputs.test_workspace }}
         run: |
           set -eu
           file_args=""
@@ -227,8 +242,12 @@ jobs:
           if [ -n "$SHARD" ] && [ -n "$SHARDS" ]; then
             shard_args="--shard $SHARD/$SHARDS"
           fi
+          mutants_args=""
+          if [ "$TEST_WORKSPACE" = "true" ]; then
+            mutants_args="--test-workspace true"
+          fi
           # shellcheck disable=SC2086
-          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $file_args $shard_args -- $TEST_ARGS
+          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args -- $TEST_ARGS
           df -h /
       - name: the outcome lists
         if: always()
