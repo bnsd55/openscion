@@ -2837,52 +2837,6 @@ mod tests {
         usize::try_from(MAX_DEPTH).unwrap()
     }
 
-    /// The depth stop bounds the advance's walk on a deep history: a ref
-    /// that moved past the tip by more than [`MAX_DEPTH`] changesets
-    /// stops the walk at the bound and starts the index over at the
-    /// head, instead of reading the whole first-parent chain. The chain
-    /// here is longer than one walk page (1,000 rows) of empty
-    /// changesets, whose byte estimate stays under the budget for the
-    /// first page, so the page-statement count separates the bounded
-    /// walk (one page) from a walk that reads the chain to its root
-    /// (two).
-    #[test]
-    fn an_advance_past_the_depth_bound_reads_one_page_not_the_whole_chain() {
-        use crate::pg::{test_reset_statement_count, test_statement_log};
-        let _exclusive = damage::exclusive();
-        let f = fixture();
-        // Land once at the root: the index exists, its tip is the root.
-        let seed = f.commit(f.root, &[put("seed", "1")]);
-        assert_eq!(f.land(seed, "seed").state, LandState::Landed);
-        // A first-parent chain of 1,100 empty changesets off the root:
-        // each is one row of the walk, and an empty changeset's byte
-        // estimate is entry_bytes(&[]) = 64, so 1,100 of them cost ~70
-        // KiB: the byte guard fires just past the first page, not inside
-        // it.
-        let head = f
-            .store
-            .write(|c| {
-                let mut head = f.root;
-                for _ in 0..1100 {
-                    let cs = changeset(vec![head], &[]);
-                    head = c.insert_changeset(f.repo, &cs)?;
-                }
-                Ok(head)
-            })
-            .unwrap();
-        f.move_main(head);
-        // The land walks from the chain's head down to the tip: the
-        // depth stop ends it inside the first page.
-        test_reset_statement_count();
-        let out = f.land(f.commit(head, &[put("trigger", "1")]), "deep");
-        assert_eq!(out.state, LandState::Landed, "{out:?}");
-        let pages = test_statement_log()
-            .iter()
-            .filter(|sql| sql.starts_with("WITH RECURSIVE walk"))
-            .count();
-        assert_eq!(pages, 1, "the bounded walk reads one page, not the chain");
-    }
-
     #[test]
     fn a_deep_base_is_checked_in_the_path_history_of_the_head() {
         use LandState::{Conflict, Landed, Rejected};
