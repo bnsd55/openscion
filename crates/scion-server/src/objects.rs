@@ -1209,6 +1209,98 @@ mod tests {
         assert!(matches!(err, Error::Corrupt(_)), "{err:?}");
     }
 
+    /// The caller's deadline, read from the request's `grpc-timeout`
+    /// into the reply's waits, ends a reply whose budget is fully held:
+    /// the waits end at the deadline with `RESOURCE_EXHAUSTED`, not at
+    /// the 30-second busy window. The initializer that reads the
+    /// request is what the mutation run dropped; without it the waits
+    /// ride the default `Until::NONE` and wait out the window.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_requests_deadline_ends_the_replys_waits() {
+        use crate::objects::ObjectsService;
+        use scion_proto::v1::objects_server::Objects as _;
+        use scion_proto::v1::{GetObjectsRequest, ObjectKind, ObjectRef};
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        // A repo whose README the ticket's walk reaches.
+        let blob = store.blobs().put(b"# hello\n").unwrap();
+        let (root, _content) = store
+            .write(|c| {
+                let repo = c.create_repo("r")?;
+                let content = BlobId::of(b"# hello\n");
+                let cs = c.insert_changeset(
+                    repo,
+                    &scion_core::Changeset::new(
+                        vec![],
+                        scion_core::IdentityTime::new(
+                            b"Ada".to_vec(),
+                            b"ada@example.com".to_vec(),
+                            1_700_000_000,
+                            0,
+                        )
+                        .expect("identity fits the format"),
+                        None,
+                        b"root\n".to_vec(),
+                        [(
+                            scion_core::RepoPath::new("README").unwrap(),
+                            Some(scion_core::FileState::Regular {
+                                content,
+                                executable: false,
+                            }),
+                        )]
+                        .into(),
+                    )
+                    .expect("changeset fits the format"),
+                )?;
+                c.cas_ref(repo, "main", None, cs)?;
+                Ok((cs, content))
+            })
+            .unwrap();
+        let root_tree = crate::test_support::read::root_tree(
+            &store,
+            "r",
+            root,
+            &crate::test_support::deadline::Deadline::new(
+                std::time::Instant::now() + std::time::Duration::from_secs(300),
+            ),
+        )
+        .unwrap();
+        let keys = crate::tickets::Keys::generate();
+        let ticket = keys.sign("r", "alice", *root_tree.as_bytes()).unwrap();
+        let mut service = ObjectsService::new(
+            Worker::new(store),
+            Arc::new(crate::Access::single("t")),
+            crate::Quotas::off(),
+            Some(Arc::new(keys)),
+            Arc::default(),
+            crate::Access::single("t").auth(),
+        );
+        // The budget, small and fully held: the reply's waits wait.
+        service.in_flight = Arc::new(Semaphore::new(1000));
+        let _others = reply::try_take(&service.in_flight, 1000).unwrap();
+        let request = GetObjectsRequest {
+            ticket,
+            accept: Vec::new(),
+            refs: vec![ObjectRef {
+                kind: ObjectKind::Blob as i32,
+                id: blob.as_bytes().to_vec(),
+                path: b"README".to_vec(),
+            }],
+        };
+        let mut request = tonic::Request::new(request);
+        request.set_timeout(Duration::from_secs(2));
+        let started = std::time::Instant::now();
+        let reply = service.get_objects(request).await;
+        let elapsed = started.elapsed();
+        let status = reply.unwrap_err();
+        assert_eq!(status.code(), Code::ResourceExhausted, "{status:?}");
+        // The deadline (2 s less the server's margin), not the 30 s
+        // busy window, ended the wait. The waits may take the deadline
+        // twice (the walk's share, then the reply's own); the window is
+        // ten times longer, so the order of magnitude tells them apart.
+        assert!(elapsed < Duration::from_secs(15), "{elapsed:?}");
+    }
+
     /// The ticket walk pays as it goes: a tree is handed to the walk only
     /// while the bytes it holds fit the reply budget, and an expired
     /// deadline stops the walk before the first tree. The walk reaches a
