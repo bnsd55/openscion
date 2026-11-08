@@ -1245,8 +1245,10 @@ mod tests {
     }
 
     /// A bare destination name has an empty parent: the checkout then
-    /// works in the process's working directory. The cwd is process-
-    /// wide, the same note #1019's bare-name test carries (#1014).
+    /// works in the process's working directory (the same cwd note the
+    /// socket test carries, #1019). This is the scn suite's only cwd
+    /// change, and it is process-global: the other tests must keep
+    /// absolute paths, as they do today. (#1014)
     #[test]
     fn a_bare_destination_name_uses_the_working_directory() {
         let tmp = tempfile::tempdir().unwrap();
