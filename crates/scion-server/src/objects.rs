@@ -1177,6 +1177,38 @@ mod tests {
         assert_eq!(plan.encoding, Encoding::Raw, "{plan:?}");
     }
 
+    /// A stored file bigger than a zstd frame of its content size is
+    /// damage, and the plan refuses it by name. The writer never writes
+    /// one - a real frame's blocks add a fraction of the bound - so the
+    /// file is grown by hand: the same state a damaged store carries.
+    #[test]
+    fn a_packed_file_over_its_zstd_bound_is_corrupt() {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let id = store.blobs().put(b"a blob").unwrap();
+        // The frame stays; the file grows past the bound of its content.
+        let hex = id.to_string();
+        let path = dir
+            .path()
+            .join("objects")
+            .join("blob")
+            .join(&hex[..2])
+            .join(&hex[2..]);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend(vec![b'x'; 1024]);
+        std::fs::write(&path, bytes).unwrap();
+        let size = store.blobs().size(id).unwrap();
+        assert!(zstd_bound(size) < std::fs::metadata(&path).unwrap().len() as usize);
+        let err = plan(
+            &store,
+            Key::Blob(id),
+            &HashSet::from([Key::Blob(id)]),
+            true,
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "{err:?}");
+    }
+
     /// The ticket walk pays as it goes: a tree is handed to the walk only
     /// while the bytes it holds fit the reply budget, and an expired
     /// deadline stops the walk before the first tree. The walk reaches a
