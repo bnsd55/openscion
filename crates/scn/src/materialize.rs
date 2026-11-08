@@ -1252,13 +1252,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
-        let written = (|| {
-            let mut checkout = Checkout::start(Path::new("foo")).unwrap();
-            checkout.file(&path("f"), false, b"f\n").unwrap();
-            checkout.finish()
-        })();
+        let mut checkout = Checkout::start(Path::new("foo")).unwrap();
+        checkout.file(&path("f"), false, b"f\n").unwrap();
+        let done = checkout.finish();
         std::env::set_current_dir(cwd).unwrap();
-        written.unwrap();
+        done.unwrap();
         assert_eq!(fs::read(tmp.path().join("foo").join("f")).unwrap(), b"f\n");
     }
 
