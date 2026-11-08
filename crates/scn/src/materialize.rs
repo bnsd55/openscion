@@ -1219,7 +1219,8 @@ mod tests {
             let _ = send.send(Checkout::start(&dest).is_err());
         });
         assert!(
-            recv.recv_timeout(std::time::Duration::from_secs(5)).unwrap(),
+            recv.recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
             "the checkout must refuse a FIFO destination at once"
         );
     }
@@ -1237,7 +1238,8 @@ mod tests {
             let _ = send.send(Checkout::start(&dest).is_err());
         });
         assert!(
-            recv.recv_timeout(std::time::Duration::from_secs(5)).unwrap(),
+            recv.recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
             "the checkout must refuse a FIFO parent at once"
         );
     }
@@ -1257,7 +1259,8 @@ mod tests {
             let _ = send.send(checkout.file(&path("d/f"), false, b"f\n").is_err());
         });
         assert!(
-            recv.recv_timeout(std::time::Duration::from_secs(5)).unwrap(),
+            recv.recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
             "the checkout must refuse a FIFO name at once"
         );
     }
