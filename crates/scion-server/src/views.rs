@@ -1264,6 +1264,12 @@ mod tests {
             &store, repo, &digest, tip, &prefixes, &live, &metrics, &deadline,
         )
         .unwrap();
+        // A cold derivation walks, and the counter says so: the operator
+        // gauge is the signal that a view is being derived, not served.
+        assert!(
+            metrics.view_trees_walked() > 0,
+            "a cold derivation moves the walk counter"
+        );
         // The second derivation of the same changeset finds the root row:
         // the walk counter does not move.
         let walked_before = metrics.view_trees_walked();
