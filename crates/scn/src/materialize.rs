@@ -1244,6 +1244,42 @@ mod tests {
         );
     }
 
+    /// A bare destination name has an empty parent: the checkout then
+    /// works in the process's working directory. The cwd is process-
+    /// wide, the same note #1019's bare-name test carries (#1014).
+    #[test]
+    fn a_bare_destination_name_uses_the_working_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let written = (|| {
+            let mut checkout = Checkout::start(Path::new("foo")).unwrap();
+            checkout.file(&path("f"), false, b"f\n").unwrap();
+            checkout.finish()
+        })();
+        std::env::set_current_dir(cwd).unwrap();
+        written.unwrap();
+        assert_eq!(fs::read(tmp.path().join("foo").join("f")).unwrap(), b"f\n");
+    }
+
+    /// A rename that fails with ENOENT for real - the temp directory is
+    /// gone - is a failure, not a lost reply: the checkout must fail,
+    /// whatever the guard believes (#1014).
+    #[test]
+    fn a_rename_that_failed_for_real_fails_the_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("dest");
+        let mut checkout = start(&dest, None, false).unwrap();
+        checkout.file(&path("f"), false, b"f\n").unwrap();
+        let temps = temp_dirs(tmp.path());
+        assert_eq!(temps.len(), 1, "one temp directory next to the dest");
+        fs::remove_dir_all(tmp.path().join(&temps[0])).unwrap();
+        let why = checkout
+            .finish()
+            .expect_err("a real ENOENT is not a lost reply");
+        assert!(why.to_string().contains("cannot move"), "{why:?}");
+    }
+
     /// Makes a FIFO that the mode checks answer last, not first: the
     /// point is the open's `O_DIRECTORY`, so the FIFO carries the user's
     /// own 0600.
