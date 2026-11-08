@@ -1035,6 +1035,154 @@ mod tests {
         read_shared_file(&file).unwrap();
     }
 
+    /// An ACL that denies first and grants second must still be
+    /// refused: the walk reads every entry, not only the first one, and
+    /// does not stop at the first deny. A walk that ended after one
+    /// entry would call this file deny-only and read it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_acl_that_denies_first_and_grants_second_is_refused() {
+        let (tmp, _me) = tempdir();
+        let file = tmp.path().join("shared");
+        fs::write(&file, b"bytes").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("chmod")
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        // Deny write, allow read: the open the check makes must
+        // succeed, so the refusal comes from the walk, not the kernel.
+        assert!(
+            run(["+a", "everyone deny write", &file.to_string_lossy()].as_ref())
+                .status
+                .success()
+        );
+        assert!(
+            run(["+a", "everyone allow read", &file.to_string_lossy()].as_ref())
+                .status
+                .success()
+        );
+        let err = read_shared_file(&file).unwrap_err();
+        assert!(
+            err.to_string().contains("ACL beyond its mode bits"),
+            "{err}"
+        );
+    }
+
+    /// A parent directory whose ACL grants another account read access
+    /// must be refused: the ancestor walk reads each ancestor's ACL,
+    /// and an ancestor that grants beyond its mode bits is one more
+    /// account that can reach the path. A check that answered "no ACL"
+    /// on every ancestor would let it through.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_parent_dir_whose_acl_grants_read_is_refused() {
+        let (tmp, me) = tempdir();
+        let dir = tmp.path().join("private");
+        mkdir(&dir, 0o700);
+        let run = |args: &[&str]| {
+            std::process::Command::new("chmod")
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        assert!(
+            run(["+a", "everyone allow read", &dir.to_string_lossy()].as_ref())
+                .status
+                .success()
+        );
+        let err = check_ancestors(&dir.join("child"), me).unwrap_err();
+        assert!(
+            err.to_string().contains("ACL beyond its mode bits"),
+            "{err}"
+        );
+        // Clearing the ACL restores the walk.
+        assert!(
+            run(["-N", &dir.to_string_lossy()].as_ref())
+                .status
+                .success()
+        );
+        check_ancestors(&dir.join("child"), me).unwrap();
+    }
+
+    /// An allow entry that names a specific account must be refused
+    /// with a message that names what granted and whom: "an allow
+    /// entry", and the account. A walk that misread the kind, the
+    /// qualifier, or the undefined-id guard would blur exactly this
+    /// message. The named account is the file's own owner, spelled by
+    /// uid: `chmod +a` refuses users the host does not know, and the
+    /// GitHub runners' uid differs from a developer machine's.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_allow_entry_naming_a_user_is_refused_and_named() {
+        let (tmp, me) = tempdir();
+        let file = tmp.path().join("shared");
+        fs::write(&file, b"bytes").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        // `chmod +a` wants the account by name: a numeric uid fails on
+        // hosts where the id does not map to a directory-service record
+        // (domain-joined machines, and some runners). `id -un` names
+        // this process's own account, which always exists.
+        let name = String::from_utf8(
+            std::process::Command::new("id")
+                .arg("-un")
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let name = name.trim();
+        let run = |args: &[&str]| {
+            std::process::Command::new("chmod")
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        let who = format!("user:{name} allow read");
+        assert!(
+            run(["+a", &who, &file.to_string_lossy()].as_ref())
+                .status
+                .success()
+        );
+        let text = read_shared_file(&file).unwrap_err().to_string();
+        // The uid itself is the host's (a domain-joined machine and a
+        // runner spell the same account in different id spaces), so the
+        // pin is the arm, not the number: a named entry must render
+        // "for account".
+        assert!(text.contains("an allow entry for account "), "{text}");
+        let _ = me;
+    }
+
+    /// An entry that names everyone must still be refused, and the
+    /// refusal must name the kind. The qualifier of an everyone entry
+    /// is host-dependent - some macOS builds store a real group id for
+    /// `everyone`, some the undefined id - so this test pins only what
+    /// is invariant: the refusal, and the kind text. Whether the
+    /// message names an account is the host's business.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_everyone_entry_is_refused_and_names_the_kind() {
+        let (tmp, _me) = tempdir();
+        let file = tmp.path().join("shared");
+        fs::write(&file, b"bytes").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("chmod")
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        assert!(
+            run(["+a", "everyone allow read", &file.to_string_lossy()].as_ref())
+                .status
+                .success()
+        );
+        let text = read_shared_file(&file).unwrap_err().to_string();
+        assert!(text.contains("an allow entry"), "{text}");
+    }
+
     /// The $HOME shape of issue #399: a directory whose only ACL entry
     /// denies something (`chmod +a "everyone deny delete"`, the ambient
     /// home-folder shape) denies only, and a file under it is read.
