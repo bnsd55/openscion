@@ -1685,6 +1685,18 @@ mod tests {
         let mut no_flag = bytes.clone();
         no_flag[3] = 0;
         assert_eq!(decode_node(&no_flag), None);
+        // A one-entry node whose entry has nothing of its own and
+        // nothing below it: it names no state, so the decode must
+        // refuse it even though its bytes align.
+        let one = Node::from_iter([(
+            PathElem::new("x").unwrap(),
+            Entry {
+                last: node[&PathElem::new("a").unwrap()].last,
+                own: None,
+                below: None,
+            },
+        )]);
+        assert_eq!(decode_node(&encode_node(&one)), None);
         let cut = encode_node(&node.clone().into_iter().take(1).collect());
         let mut swapped = bytes[cut.len()..].to_vec();
         swapped.extend(&cut);
