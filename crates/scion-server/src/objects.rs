@@ -1006,70 +1006,17 @@ mod tests {
     /// is false, so a refused walk share served the objects anyway.
     #[tokio::test(start_paused = true)]
     async fn a_refused_walk_share_ends_the_reply_busy() {
-        use scion_core::{Entry, FileEntry, FileState, PathElem, Tree};
-        use std::collections::BTreeMap;
         let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test(dir.path()).unwrap();
+        // The buggy path must have an object to serve.
         let blob_id = store.blobs().put(b"a blob").unwrap();
-        let (root, leaf) = store
-            .write(|c| {
-                let leaf = c.put_tree(
-                    &Tree::new(BTreeMap::from([(
-                        PathElem::new("f").unwrap(),
-                        Entry::File(FileEntry::new(
-                            FileState::Regular {
-                                content: blob_id,
-                                executable: false,
-                            },
-                            0,
-                        )),
-                    )]))
-                    .expect("tree fits the format"),
-                )?;
-                let mid = c.put_tree(
-                    &Tree::new(BTreeMap::from([(
-                        PathElem::new("s").unwrap(),
-                        Entry::Dir(leaf),
-                    )]))
-                    .expect("tree fits the format"),
-                )?;
-                let root = c.put_tree(
-                    &Tree::new(BTreeMap::from([(
-                        PathElem::new("d").unwrap(),
-                        Entry::Dir(mid),
-                    )]))
-                    .expect("tree fits the format"),
-                )?;
-                Ok((root, leaf))
-            })
-            .unwrap();
-        // What the walk decodes for d/s: the three trees it crosses.
-        // Their sum outsizes what the budget will ever free.
-        let (mid_id, leaf_id) = store
-            .read(|c| {
-                let root_tree = c.get_tree(root)?;
-                let mid = match root_tree.entries().iter().next() {
-                    Some((_, Entry::Dir(id))) => *id,
-                    _ => unreachable!("root holds one dir"),
-                };
-                let mid_tree = c.get_tree(mid)?;
-                let leaf = match mid_tree.entries().iter().next() {
-                    Some((_, Entry::Dir(id))) => *id,
-                    _ => unreachable!("mid holds one dir"),
-                };
-                Ok((mid, leaf))
-            })
-            .unwrap();
-        assert_eq!(leaf_id, leaf, "the mid's dir is the leaf");
-        let decoded = store
-            .read(|c| Ok(c.tree_size(root)? + c.tree_size(mid_id)? + c.tree_size(leaf_id)?))
-            .unwrap();
-        assert!(decoded > 30, "{decoded}");
+        // More than the 30 the budget frees below, so the walk share
+        // waits to the deadline; start_reply takes it as a plain number.
+        let decoded = 100;
         // The budget: 1000 bytes, all held. 30 come back two paused
         // seconds in - less than the walk's share, more than the blob's.
         let in_flight = Arc::new(Semaphore::new(1000));
-        let held = reply::try_take(&in_flight, 970).unwrap();
-        std::mem::forget(held);
+        let _held = reply::try_take(&in_flight, 970).unwrap();
         let gift = reply::try_take(&in_flight, 30).unwrap();
         let freer = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(2)).await;
