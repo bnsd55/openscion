@@ -751,10 +751,23 @@ fn a_first_open_cut_before_its_marker_opens_again() {
         Backend::open(dir.path(), &db.url_riding(Some("a")), None).expect("the first open mints");
     drop(first);
     std::fs::remove_file(dir.path().join("backend")).unwrap();
+    // The first open's hold is a session advisory lock on its worker
+    // thread's connection: the caller's drop only closes the job
+    // channel, the worker wakes and closes the socket after, and the
+    // lock releases then - the reopen races that release, so it retries
+    // while the hold is still in place, bounded (#1038).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let again = loop {
+        match Backend::open(dir.path(), &db.url_riding(Some("a")), None) {
+            Ok(again) => break again,
+            Err(e)
+                if e.to_string().contains("another server holds this store")
+                    && std::time::Instant::now() < deadline => {}
+            Err(e) => panic!("the first open cut before its marker opens again: {e}"),
+        }
+    };
     // The kill's shape: the row stands, the marker is gone, the schema
     // holds no repo. The next open serves, and writes the marker back.
-    let again = Backend::open(dir.path(), &db.url_riding(Some("a")), None)
-        .expect("the first open cut before its marker opens again");
     again
         .write(|c| c.create_repo("r").map(|_| ()))
         .expect("the reopened store serves");
