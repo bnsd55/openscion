@@ -3979,6 +3979,14 @@ mod tests {
     /// The base's own touch of the land's path is not a conflict: the
     /// base created `c` and nothing changed it after. A refusal there
     /// would refuse every land that edits a file its base created.
+    ///
+    /// A land-path test for the `>=` mutant of the `above` clause cannot
+    /// exist: the only shape with `above == base_gen` is a file alive at
+    /// the head, and the land's apply then refuses it anyway
+    /// (`FileInTheWay`, crates/scion-server/src/tree.rs:679 - a recorded
+    /// Conflict, the same verdict), so the unit test
+    /// `the_base_touching_the_path_is_not_a_conflict` in
+    /// crates/scion-server/src/history.rs pins that clause instead.
     #[test]
     fn the_base_touching_the_path_does_not_conflict_an_old_base() {
         let _slot = damage::slot();
