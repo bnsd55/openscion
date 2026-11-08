@@ -3330,4 +3330,119 @@ mod tests {
         );
         drop(silent);
     }
+    /// A serve's end gives a connected TLS client a clean close: the
+    /// drain's h2 shutdown runs the connection's `poll_shutdown`, rustls
+    /// sends its `close_notify`, and the client reads an end of stream -
+    /// not the abrupt `UnexpectedEof` of a peer that never sent it. The
+    /// mutant that replaces the connection's `poll_shutdown` with
+    /// `Ok(())` dies here: the close notify never goes out and the
+    /// client's read answers with the error instead.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_serve_end_closes_tls_cleanly() {
+        init_log();
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        std_listener.set_nonblocking(true).unwrap();
+        let listener = TcpListener::from_std(std_listener).unwrap();
+        let certs = test_certs();
+        let dir = crate::runtime::private_tempdir();
+        let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
+        let config = server_tls.config();
+        let addr = listener.local_addr().unwrap();
+        let limits = Limits::default();
+        let metrics = Arc::new(Metrics::default());
+        let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let router = |mut server: Server| server.add_service(ObjectsServer::new(Stalls));
+            let shutdown = async move {
+                let _ = stop_rx.changed().await;
+            };
+            let _ = limits
+                .serve_with(
+                    &Accepting::of(&limits, &TIMERS),
+                    router,
+                    tcp(listener),
+                    Some(config),
+                    shutdown,
+                    metrics,
+                )
+                .await;
+            let _ = done_tx.send(());
+        });
+        let mut stream = raw_connect(addr, &certs.authority.cert(), Some(&certs.client))
+            .await
+            .unwrap();
+        stream.write_all(PREFACE).await.unwrap();
+        stream.flush().await.unwrap();
+        // The server's SETTINGS: the connection is past the transport
+        // sniffing and into the h2 serve, so the drain below runs the h2
+        // close path.
+        let mut buf = [0u8; 4096];
+        tokio::time::timeout(Duration::from_secs(10), stream.read(&mut buf))
+            .await
+            .unwrap_or_else(|_| panic!("the server's SETTINGS never came"))
+            .unwrap();
+        // One task reads what the server sends and answers the drain's
+        // PING, like a real h2 client's runtime does; without the pong
+        // the drain waits for it. The read's end is the verdict: an end
+        // of stream is the clean close, rustls' `UnexpectedEof` is the
+        // abrupt one.
+        let (mut rd, mut wr) = tokio::io::split(stream);
+        let reader = tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            let mut pending: Vec<u8> = Vec::new();
+            loop {
+                match rd.read(&mut buf).await {
+                    Ok(0) => return None,
+                    Ok(n) => {
+                        pending.extend_from_slice(&buf[..n]);
+                        let mut off = 0;
+                        while pending.len() >= off + 9 {
+                            let len = u32::from_be_bytes([
+                                0,
+                                pending[off],
+                                pending[off + 1],
+                                pending[off + 2],
+                            ]) as usize;
+                            if pending.len() < off + 9 + len {
+                                break;
+                            }
+                            // A PING without the ACK flag is answered
+                            // with its ACK, the payload echoed.
+                            if pending[off + 3] == 0x06 && pending[off + 4] == 0 {
+                                let mut pong = [0u8; 17];
+                                pong[2] = 8;
+                                pong[3] = 0x06;
+                                pong[4] = 1;
+                                pong[9..17].copy_from_slice(&pending[off + 9..off + 17]);
+                                if wr.write_all(&pong).await.is_err() {
+                                    return Some(io::Error::new(
+                                        io::ErrorKind::BrokenPipe,
+                                        "the drain's ping could not be answered",
+                                    ));
+                                }
+                                wr.flush().await.ok()?;
+                            }
+                            off += 9 + len;
+                        }
+                        pending.drain(..off);
+                    }
+                    Err(e) => return Some(e),
+                }
+            }
+        });
+        stop_tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(30), done_rx)
+            .await
+            .unwrap_or_else(|_| panic!("the serve did not end"))
+            .unwrap();
+        let abrupt = tokio::time::timeout(Duration::from_secs(30), reader)
+            .await
+            .unwrap_or_else(|_| panic!("the client's read never ended"))
+            .unwrap();
+        assert!(
+            abrupt.is_none(),
+            "the client read an error, not an end of stream: {abrupt:?}"
+        );
+    }
 }
