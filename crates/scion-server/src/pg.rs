@@ -52,7 +52,7 @@ use crate::meta::{
     FsckDerivedRow, Meta, MetaTx, RefState, RepoChangeset, RepoId, StaleLand, StartRead,
 };
 use crate::store::Blobs;
-use crate::tree::RootTree;
+use crate::tree::{PreRead, RootTree};
 
 #[cfg(any(test, feature = "test-hooks"))]
 #[path = "test_support/pg.rs"]
@@ -1408,7 +1408,6 @@ impl Pg {
         let (mut writer, _waiting) = self.lock_writer(false);
         let mut pending = Vec::new();
         let mut derived = DerivedPending::default();
-        let mut preload = std::collections::HashMap::new();
         let mut history = HistoryPending::default();
         let mut pg = PgTx {
             c: &mut writer,
@@ -1417,7 +1416,9 @@ impl Pg {
             cs_batching: false,
             cs_pending: Some(&mut pending),
             derived_pending: Some(&mut derived),
-            derived_preload: Some(&mut preload),
+            derived_preload: Some(std::collections::HashMap::new()),
+            pre_trees: None,
+            pre_history: None,
             deferred_deletes: Vec::new(),
             defer_derived: false,
             history_pending: Some(&mut history),
@@ -1547,7 +1548,6 @@ impl Pg {
         // the row it touches (the CAS predicates).
         let mut pending = Vec::new();
         let mut derived = DerivedPending::default();
-        let mut preload = std::collections::HashMap::new();
         let mut history = HistoryPending::default();
         // The wait inside the open batch is the lane key's wait: the
         // clock covers the batch, whose bulk is the lock.
@@ -1556,7 +1556,6 @@ impl Pg {
             &mut writer,
             &mut pending,
             &mut derived,
-            &mut preload,
             &mut history,
             Some(LOCK_TIMEOUT_FOR_KEY),
             Some(LANE_KEY_STATEMENT),
@@ -1878,9 +1877,9 @@ impl Drop for PgWriteWaiter<'_> {
 /// The derived rows a batching transaction holds for the flush.
 type DerivedPending = Vec<(String, i64, ChangesetId, Vec<u8>)>;
 
-/// The derived values of the chains a batching transaction preloaded, by
-/// (kind, version, id).
-type DerivedPreload = std::collections::HashMap<(String, i64, Vec<u8>), Vec<u8>>;
+/// The derived values a transaction preloaded, by (kind, version, id):
+/// the same map the pre-transaction read returns.
+use crate::meta::DerivedValues as DerivedPreload;
 
 /// The history nodes a batching transaction holds for the flush, by
 /// id, with their bytes. The nodes are content-addressed, so a put of
@@ -1956,11 +1955,22 @@ pub struct PgTx<'a> {
     /// changesets they name. Shared with the reborrows, like the
     /// changesets' pending list.
     derived_pending: Option<&'a mut DerivedPending>,
-    /// The derived values of the chains the importer preloaded, by
+    /// The derived values the transaction preloaded or adopted, by
     /// (kind, version, id): the batch's reads of ancestors outside the
     /// transaction cost one chain read for the whole chain, not one per
-    /// commit. Shared with the reborrows.
-    derived_preload: Option<&'a mut DerivedPreload>,
+    /// commit. A write path's pre-transaction read installs its own map
+    /// here, so the transaction's per-value reads answer without round
+    /// trips.
+    derived_preload: Option<DerivedPreload>,
+    /// The stored tree bodies a pre-transaction read loaded, by id: the
+    /// build's reads answer from it, and a miss re-reads in the
+    /// transaction (`get_trees` below). `None` when no pre-read ran.
+    pre_trees: Option<std::collections::HashMap<Vec<u8>, Vec<u8>>>,
+    /// The history-node bodies a pre-transaction read loaded, by id: the
+    /// build's derives answer from them, and a miss re-reads in the
+    /// transaction (`get_history_node` below). `None` when no pre-read
+    /// ran.
+    pre_history: Option<std::collections::HashMap<Vec<u8>, Vec<u8>>>,
     /// The `delete_derived_below` calls a deferring write path made: the
     /// commit deletes with one statement, honoring the summed limits per
     /// kind and version. Only `defer_derived_deletes` fills it.
@@ -2129,7 +2139,7 @@ impl<'a> PgTx<'a> {
             }
         }
         self.derived_preload
-            .as_deref()
+            .as_ref()
             .and_then(|preload| preload.get(&(kind.to_owned(), version, key.clone())))
             .cloned()
     }
@@ -2302,7 +2312,6 @@ impl<'a> PgTx<'a> {
         c: &'a mut PgClient,
         pending: &'a mut Vec<(ChangesetId, Vec<ChangesetId>)>,
         derived: &'a mut DerivedPending,
-        preload: &'a mut DerivedPreload,
         history: &'a mut HistoryPending,
         lock_timeout: Option<&str>,
         lane_key: Option<&str>,
@@ -2322,7 +2331,9 @@ impl<'a> PgTx<'a> {
             cs_batching: false,
             cs_pending: Some(pending),
             derived_pending: Some(derived),
-            derived_preload: Some(preload),
+            derived_preload: Some(std::collections::HashMap::new()),
+            pre_trees: None,
+            pre_history: None,
             deferred_deletes: Vec::new(),
             defer_derived: false,
             history_pending: Some(history),
@@ -2377,6 +2388,8 @@ impl<'a> PgTx<'a> {
             cs_pending: None,
             derived_pending: None,
             derived_preload: None,
+            pre_trees: None,
+            pre_history: None,
             deferred_deletes: Vec::new(),
             defer_derived: false,
             history_pending: None,
@@ -4157,22 +4170,13 @@ fn run_one_migration(client: &mut PgClient, from_version: u32, n: u32, sql: &str
     let step = std::time::Instant::now();
     let mut pending = Vec::new();
     let mut derived = DerivedPending::default();
-    let mut preload = std::collections::HashMap::new();
     let mut history = HistoryPending::default();
     let step_name = PG_MIGRATION_NAMES
         .get(usize::try_from(n).expect("a schema version fits in usize") - 1)
         .copied()
         .unwrap_or("unnamed");
-    let mut tx = PgTx::begin(
-        client,
-        &mut pending,
-        &mut derived,
-        &mut preload,
-        &mut history,
-        None,
-        None,
-    )
-    .map_err(|e| named_step("the migration's begin", "BEGIN", e))?;
+    let mut tx = PgTx::begin(client, &mut pending, &mut derived, &mut history, None, None)
+        .map_err(|e| named_step("the migration's begin", "BEGIN", e))?;
     tx.c.batch(&format!(
         "{sql}\nINSERT INTO schema_migrations (version, name) \
              VALUES ({}, 'postgres schema')",
@@ -4534,6 +4538,22 @@ impl PgTx<'_> {
 }
 
 impl MetaTx for PgTx<'_> {
+    /// Installs a pre-transaction read's results: the derived values the
+    /// read loaded carry no generation (the transaction reads the
+    /// generation itself), the tree and history-node bodies answer the
+    /// build's reads, and every miss re-reads in the transaction.
+    fn adopt_pre_read(&mut self, pre: PreRead) -> Result<()> {
+        self.derived_preload = Some(pre.preload);
+        let mut trees = std::collections::HashMap::with_capacity(pre.trees.len());
+        for (id, tree) in pre.trees {
+            let (body, _) = tree.encode_with_id();
+            trees.insert(id_bytes(id.as_bytes()), body);
+        }
+        self.pre_trees = Some(trees);
+        self.pre_history = Some(pre.history);
+        Ok(())
+    }
+
     /// Creates a repository, or returns the existing one with that name.
     fn create_repo(&mut self, name: &str) -> Result<RepoId> {
         self.c.execute(
@@ -4827,7 +4847,7 @@ impl MetaTx for PgTx<'_> {
             return Ok(());
         }
         let rows = self.get_derived_chain(kind, version, start, limit)?;
-        if let Some(preload) = self.derived_preload.as_deref_mut() {
+        if let Some(preload) = self.derived_preload.as_mut() {
             for (cs, value) in rows {
                 preload.insert(
                     (kind.to_owned(), i64::from(version), id_bytes(cs.as_bytes())),
@@ -5638,7 +5658,7 @@ impl MetaTx for PgTx<'_> {
         // of the same row answers with what was written. It follows
         // after the check above: the check must see the stored row, not
         // the value just written.
-        if let Some(preload) = self.derived_preload.as_deref_mut() {
+        if let Some(preload) = self.derived_preload.as_mut() {
             preload.insert(
                 (kind.to_owned(), version64, id_bytes(cs.as_bytes())),
                 value.to_vec(),
@@ -5695,7 +5715,7 @@ impl MetaTx for PgTx<'_> {
         // The transaction's memory follows its writes, as the three
         // calls did.
         if !rows.is_empty()
-            && let Some(preload) = self.derived_preload.as_deref_mut()
+            && let Some(preload) = self.derived_preload.as_mut()
         {
             for (kind, version, cs, value) in rows {
                 preload.insert(
@@ -5758,7 +5778,7 @@ impl MetaTx for PgTx<'_> {
             }
         }
         // The transaction's memory follows its writes.
-        if let Some(preload) = self.derived_preload.as_deref_mut() {
+        if let Some(preload) = self.derived_preload.as_mut() {
             for (kind, version, cs, value) in rows {
                 preload.insert(
                     (kind.clone(), i64::from(*version), id_bytes(cs.as_bytes())),
@@ -5826,9 +5846,6 @@ impl MetaTx for PgTx<'_> {
         if kinds.is_empty() || css.is_empty() {
             return Ok(());
         }
-        let Some(preload) = self.derived_preload.as_deref_mut() else {
-            return Ok(());
-        };
         let kind_names: Vec<String> = kinds.iter().map(|(name, _)| (*name).to_owned()).collect();
         let versions: Vec<i64> = kinds
             .iter()
@@ -5855,6 +5872,9 @@ impl MetaTx for PgTx<'_> {
                 P::i64(repo.0),
             ],
         )?;
+        let Some(preload) = self.derived_preload.as_mut() else {
+            return Ok(());
+        };
         for row in rows {
             preload.insert((row.get(0), row.get(1), row.get(2)), row.get(3));
             if let Some(read_gen) = row.try_get::<_, Option<i64>>(4).map_err(map_pg_error)? {
@@ -5863,6 +5883,56 @@ impl MetaTx for PgTx<'_> {
             }
         }
         Ok(())
+    }
+
+    /// The derived values of the named kinds for the named changesets,
+    /// read for a pre-transaction phase. The map carries no generation:
+    /// the generation is mutable state the transaction reads itself
+    /// (the walk's generation read, then the insert's own), so a
+    /// pre-transaction answer can never give the insert a stale
+    /// generation. The values themselves are written once at their own
+    /// changeset's settle - the der arm's ON CONFLICT DO NOTHING - so a
+    /// committed answer cannot be stale.
+    ///
+    /// # Errors
+    ///
+    /// Database errors.
+    fn read_derived_preload(
+        &mut self,
+        _repo: RepoId,
+        kinds: &[(&'static str, u32)],
+        css: &[ChangesetId],
+    ) -> Result<DerivedPreload> {
+        let mut preload = DerivedPreload::new();
+        if kinds.is_empty() || css.is_empty() {
+            return Ok(preload);
+        }
+        let kind_names: Vec<String> = kinds.iter().map(|(name, _)| (*name).to_owned()).collect();
+        let versions: Vec<i64> = kinds
+            .iter()
+            .map(|(_, version)| i64::from(*version))
+            .collect();
+        let keys: Vec<Vec<u8>> = css.iter().map(|cs| id_bytes(cs.as_bytes())).collect();
+        // No generation column: the pre-transaction read answers the
+        // build's value reads only. The repo param exists for the
+        // generation's repo-membership join alone, so it drops too; the
+        // transaction's own repo check gates the values it uses.
+        let rows = self.c.query(
+            "SELECT kind, version, cs, value
+             FROM derived AS d
+             WHERE cs = ANY($3)
+               AND (kind, version) IN (SELECT kind, version
+                                       FROM unnest($1::text[], $2::int8[]) AS t(kind, version))",
+            &[
+                P::text_array(kind_names),
+                P::i64_array(versions),
+                P::bytea_array(keys),
+            ],
+        )?;
+        for row in rows {
+            preload.insert((row.get(0), row.get(1), row.get(2)), row.get(3));
+        }
+        Ok(preload)
     }
 
     /// Defers the write path's per-row flushes to the commit: the
@@ -6042,22 +6112,42 @@ impl MetaTx for PgTx<'_> {
     /// The stored bytes of the trees the ids name, in the order asked.
     /// One statement per 1,000 ids: the ids travel as one bytea array.
     fn get_trees(&mut self, ids: &[TreeId]) -> Result<Vec<Option<Vec<u8>>>> {
-        let mut out = Vec::with_capacity(ids.len());
-        for chunk in ids.chunks(crate::meta::DERIVED_BATCH) {
-            let keys: Vec<Vec<u8>> = chunk.iter().map(|id| id_bytes(id.as_bytes())).collect();
-            let rows = self.c.query(
-                "SELECT id, body FROM trees WHERE id = ANY($1)",
-                &[P::bytea_array(keys.clone())],
-            )?;
-            let bodies: std::collections::HashMap<Vec<u8>, Vec<u8>> = rows
-                .into_iter()
-                .map(|row| (row.get::<_, Vec<u8>>(0), row.get::<_, Vec<u8>>(1)))
-                .collect();
-            // Answered from the map without removing it: one tree can sit
-            // under two paths, so a batch may name the same id twice, and
-            // each ask gets the body.
-            for key in keys {
-                out.push(bodies.get(&key).cloned());
+        // The pre-transaction read's answers come first: the rows it read
+        // are committed and content-addressed, so an answer cannot be
+        // stale. A miss re-reads in the transaction, which also keeps the
+        // answer for a tree whose row committed after the pre-read began.
+        let pre = self.pre_trees.as_ref();
+        let mut out: Vec<Option<Vec<u8>>> = Vec::with_capacity(ids.len());
+        let mut misses: Vec<Vec<u8>> = Vec::new();
+        for id in ids {
+            let key = id_bytes(id.as_bytes());
+            if let Some(body) = pre.and_then(|map| map.get(&key)) {
+                out.push(Some(body.clone()));
+            } else {
+                out.push(None);
+                if !misses.contains(&key) {
+                    misses.push(key);
+                }
+            }
+        }
+        if !misses.is_empty() {
+            for chunk in misses.chunks(crate::meta::DERIVED_BATCH) {
+                let rows = self.c.query(
+                    "SELECT id, body FROM trees WHERE id = ANY($1)",
+                    &[P::bytea_array(chunk.to_vec())],
+                )?;
+                let bodies: std::collections::HashMap<Vec<u8>, Vec<u8>> = rows
+                    .into_iter()
+                    .map(|row| (row.get::<_, Vec<u8>>(0), row.get::<_, Vec<u8>>(1)))
+                    .collect();
+                for (id, slot) in ids.iter().zip(out.iter_mut()) {
+                    if slot.is_none() {
+                        let key = id_bytes(id.as_bytes());
+                        if let Some(body) = bodies.get(&key) {
+                            *slot = Some(body.clone());
+                        }
+                    }
+                }
             }
         }
         Ok(out)
@@ -6446,6 +6536,19 @@ impl MetaTx for PgTx<'_> {
             .history_pending
             .as_deref()
             .and_then(|pending| pending.rows.get(id.0.as_slice()))
+        {
+            let len = body.len();
+            return Ok((body.clone(), len));
+        }
+        // A row the pre-transaction read loaded answers from it: the read
+        // verified the body against its ID (the SQL path below), and a
+        // content-addressed row cannot change. A miss re-reads in the
+        // transaction, which also covers a node whose row committed after
+        // the pre-read began.
+        if let Some(body) = self
+            .pre_history
+            .as_ref()
+            .and_then(|pre| pre.get(id.0.as_slice()))
         {
             let len = body.len();
             return Ok((body.clone(), len));

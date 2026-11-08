@@ -23,7 +23,7 @@ use crate::error::{ApplyError, Error, Result};
 use crate::graph::CommitGraph;
 use crate::history::PathHistory;
 use crate::meta as db;
-use crate::meta::{MetaTx, RepoId};
+use crate::meta::{DerivedValues, MetaTx, RepoId};
 
 /// The byte length of a blob, as the tree entries carry it. The store reads
 /// it from the blob's frame header without unpacking it.
@@ -384,11 +384,15 @@ pub fn store_changeset(
     cs: &Changeset,
     lens: BlobLens<'_>,
 ) -> Result<(ChangesetId, TreeId)> {
-    store_changeset_impl(c, repo, cs, lens, None)
+    store_changeset_impl(c, repo, cs, lens, None, None)
 }
 
 /// The build checks the deadline per path, so a cancelled call's job
 /// stops between paths and frees its permit instead of building on.
+///
+/// `pre` carries the reads a caller ran before the transaction (the
+/// create's pre-read); `None` keeps the reads in the transaction, as
+/// the land's settle and the import do.
 ///
 /// # Errors
 ///
@@ -399,8 +403,107 @@ pub fn store_changeset_within(
     cs: &Changeset,
     lens: BlobLens<'_>,
     deadline: &Deadline,
+    pre: Option<PreRead>,
 ) -> Result<(ChangesetId, TreeId)> {
-    store_changeset_impl(c, repo, cs, lens, Some(deadline))
+    store_changeset_impl(c, repo, cs, lens, Some(deadline), pre)
+}
+
+/// The reads a create ran before its write transaction began, on a
+/// reader: the derived values of the parents and the changeset, the
+/// stored trees on the changed paths, and the history node the build's
+/// path-history derive reads first. Every row is committed - the
+/// parent's own transaction wrote it - and content-addressed or written
+/// once at its own changeset's settle, so a pre-transaction answer
+/// cannot be stale; a miss falls through to the transaction's own read.
+/// The map carries no generation: the generation is mutable state the
+/// transaction reads itself.
+#[derive(Default)]
+pub struct PreRead {
+    /// The derived values, by (kind, version, changeset).
+    pub(crate) preload: DerivedValues,
+    /// The base tree, when the read decoded the first parent's root-tree
+    /// value. `None` leaves the base to the transaction's walk, as
+    /// before (a version bump the fill has not caught up with).
+    pub(crate) base: Option<TreeId>,
+    /// The stored trees on the changed paths, decoded and verified
+    /// against their ids.
+    pub(crate) trees: std::collections::HashMap<TreeId, Tree>,
+    /// The history-node bodies the build's derives read first, by node
+    /// id bytes.
+    pub(crate) history: std::collections::HashMap<Vec<u8>, Vec<u8>>,
+}
+
+/// The reads of [`store_changeset_within`] that a create runs before its
+/// write transaction, on a reader: the derived values of the parents and
+/// the changeset, the stored trees on the changed paths, and the history
+/// node the path-history derive reads first. The build's own reads then
+/// answer from these without round trips on the write connection; every
+/// miss re-reads in the transaction, so a row that committed after the
+/// pre-read began is still seen.
+///
+/// The batching keeps its own shapes (its pending buffers answer the
+/// reads and its flush owns the writes), so a batched caller gets an
+/// empty pre-read.
+///
+/// # Errors
+///
+/// Database errors, and as [`prefetch`].
+pub(crate) fn pre_read(c: &mut dyn MetaTx, repo: RepoId, cs: &Changeset) -> Result<PreRead> {
+    if c.changeset_batching() {
+        return Ok(PreRead::default());
+    }
+    let mut css = cs.parents().to_vec();
+    css.push(cs.id());
+    let preload = c.read_derived_preload(
+        repo,
+        &[
+            (RootTree::NAME, RootTree::VERSION),
+            (CommitGraph::NAME, CommitGraph::VERSION),
+            (PathHistory::NAME, PathHistory::VERSION),
+        ],
+        &css,
+    )?;
+    // The base tree: the first parent's root-tree value, decoded. A
+    // value the read missed stays `None`, and the transaction's walk
+    // derives the base as before.
+    let base = cs.parents().first().and_then(|parent| {
+        preload
+            .get(&(
+                RootTree::NAME.to_owned(),
+                i64::from(RootTree::VERSION),
+                parent.as_bytes().to_vec(),
+            ))
+            .and_then(|bytes| <RootTree as Kind>::decode(bytes))
+    });
+    // The stored trees on the changed paths: the same level walk the
+    // build runs, here on the reader. The transaction's `get_trees`
+    // answers from these and re-reads a miss.
+    let trees = match base {
+        Some(base) => prefetch(c, Some(base), cs.changes())?,
+        None => std::collections::HashMap::new(),
+    };
+    // The history node the path-history derive reads first: the first
+    // parent's history root, by its content address. A deeper node - a
+    // directory on a changed path - re-reads in the transaction.
+    let mut history = std::collections::HashMap::new();
+    if let Some(parent) = cs.parents().first()
+        && let Some(root) = preload
+            .get(&(
+                PathHistory::NAME.to_owned(),
+                i64::from(PathHistory::VERSION),
+                parent.as_bytes().to_vec(),
+            ))
+            .and_then(|bytes| <PathHistory as Kind>::decode(bytes))
+    {
+        let (body, _) = c.get_history_node(root)?;
+        history.insert(root.0.to_vec(), body);
+    }
+    Ok(PreRead {
+        preload,
+        base,
+        trees,
+        history,
+    })
 }
 
 fn store_changeset_impl(
@@ -409,6 +512,7 @@ fn store_changeset_impl(
     cs: &Changeset,
     lens: BlobLens<'_>,
     deadline: Option<&Deadline>,
+    pre: Option<PreRead>,
 ) -> Result<(ChangesetId, TreeId)> {
     // The build reads each kind's value for the parents, then deletes a
     // few old rows per kind: the reads ride one preloaded statement and
@@ -420,28 +524,43 @@ fn store_changeset_impl(
     // nodes the build writes ride the same flush. The import's
     // batching owns both shapes already — its pending buffer answers
     // the reads and its flush deletes once per kind — so it keeps them.
+    //
+    // A caller that ran the reads before the transaction (`pre`) has
+    // the build's values installed instead: the pre-read's map carries
+    // no generation, and the generation reads in the transaction - the
+    // walk's start for a parent the build walks, the insert's own read
+    // for a parent it does not. Every pre-read miss re-reads here.
+    let mut base_given = None;
     if !c.changeset_batching() {
         c.defer_derived_deletes();
-        let mut css = cs.parents().to_vec();
-        css.push(cs.id());
-        c.preload_derived(
-            repo,
-            &[
-                (RootTree::NAME, RootTree::VERSION),
-                (CommitGraph::NAME, CommitGraph::VERSION),
-                (PathHistory::NAME, PathHistory::VERSION),
-            ],
-            &css,
-        )?;
+        if let Some(pre) = pre {
+            base_given = pre.base;
+            c.adopt_pre_read(pre)?;
+        } else {
+            let mut css = cs.parents().to_vec();
+            css.push(cs.id());
+            c.preload_derived(
+                repo,
+                &[
+                    (RootTree::NAME, RootTree::VERSION),
+                    (CommitGraph::NAME, CommitGraph::VERSION),
+                    (PathHistory::NAME, PathHistory::VERSION),
+                ],
+                &css,
+            )?;
+        }
     }
-    let base = cs
-        .parents()
-        .first()
-        .map(|&parent| match deadline {
-            Some(deadline) => derive_root_tree_within(c, repo, parent, lens, deadline),
-            None => derive_root_tree(c, repo, parent, lens),
-        })
-        .transpose()?;
+    let base = match base_given {
+        Some(base) => Some(base),
+        None => cs
+            .parents()
+            .first()
+            .map(|&parent| match deadline {
+                Some(deadline) => derive_root_tree_within(c, repo, parent, lens, deadline),
+                None => derive_root_tree(c, repo, parent, lens),
+            })
+            .transpose()?,
+    };
     let (tree, tree_rows) = match deadline {
         Some(deadline) => apply_within(c, base, cs.changes(), lens, deadline),
         None => apply(c, base, cs.changes(), lens),
