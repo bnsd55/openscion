@@ -415,8 +415,8 @@ pub fn store_changeset_within(
 /// parent's own transaction wrote it - and content-addressed or written
 /// once at its own changeset's settle, so a pre-transaction answer
 /// cannot be stale; a miss falls through to the transaction's own read.
-/// The map carries no generation: the generation is mutable state the
-/// transaction reads itself.
+/// The map carries no generation: the transaction reads the generation
+/// itself (the insert's own read), so the pre-read carries none.
 #[derive(Default)]
 pub struct PreRead {
     /// The derived values, by (kind, version, changeset).

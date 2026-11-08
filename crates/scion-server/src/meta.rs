@@ -521,10 +521,10 @@ pub trait MetaTx {
     /// The derived values a pre-transaction phase read, by (kind,
     /// version, changeset), for the write path to install with
     /// [`adopt_pre_read`](Self::adopt_pre_read). The map carries no
-    /// generation: the generation is mutable state the transaction
-    /// reads itself, so a pre-transaction answer can never give the
-    /// insert a stale generation. The values are written once at their
-    /// own changeset's settle, so a committed answer cannot be stale.
+    /// generation: the transaction reads the generation itself (the
+    /// insert's own read), so the pre-read carries none. The values are
+    /// written once at their own changeset's settle, so a committed
+    /// answer cannot be stale.
     /// A backend that reads nothing returns an empty map, which stays
     /// correct: the transaction's reads then go to the store as before.
     ///

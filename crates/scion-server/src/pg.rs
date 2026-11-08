@@ -5887,12 +5887,10 @@ impl MetaTx for PgTx<'_> {
 
     /// The derived values of the named kinds for the named changesets,
     /// read for a pre-transaction phase. The map carries no generation:
-    /// the generation is mutable state the transaction reads itself
-    /// (the walk's generation read, then the insert's own), so a
-    /// pre-transaction answer can never give the insert a stale
-    /// generation. The values themselves are written once at their own
-    /// changeset's settle - the der arm's ON CONFLICT DO NOTHING - so a
-    /// committed answer cannot be stale.
+    /// the transaction reads the generation itself (the insert's own
+    /// read), so the pre-read carries none. The values themselves are
+    /// written once at their own changeset's settle - the der arm's ON
+    /// CONFLICT DO NOTHING - so a committed answer cannot be stale.
     ///
     /// # Errors
     ///

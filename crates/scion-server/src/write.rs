@@ -172,9 +172,8 @@ pub fn create_changeset(
     // wrote it - and content-addressed or written once at its own
     // changeset's settle, so a pre-transaction answer cannot be stale; a
     // miss re-reads in the transaction. The generation rides no pre-read:
-    // it is mutable state the transaction reads itself - the walk's
-    // generation read for a parent it walks, the insert's own read for a
-    // parent it does not.
+    // the transaction reads the generation itself (the insert's own
+    // read), so the pre-read carries none.
     let pre = store.read(|c| tree::pre_read(c, repo_id, &cs))?;
     store.write(|c| {
         // The rules re-checked inside the transaction, one statement for
