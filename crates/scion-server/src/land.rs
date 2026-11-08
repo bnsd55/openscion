@@ -3983,7 +3983,7 @@ mod tests {
     /// A land-path test for the `>=` mutant of the `above` clause cannot
     /// exist: the only shape with `above == base_gen` is a file alive at
     /// the head, and the land's apply then refuses it anyway
-    /// (`FileInTheWay`, crates/scion-server/src/tree.rs:679 - a recorded
+    /// (the apply error `ApplyError::FileInTheWay` in tree.rs - a recorded
     /// Conflict, the same verdict), so the unit test
     /// `the_base_touching_the_path_is_not_a_conflict` in
     /// crates/scion-server/src/history.rs pins that clause instead.
