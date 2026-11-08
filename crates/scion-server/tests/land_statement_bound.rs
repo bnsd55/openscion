@@ -667,4 +667,13 @@ fn a_land_whose_head_tree_is_missing_fills_before_the_write_transaction() {
         derived_writes, 1,
         "the settle transaction writes the land's own derived row alone:\n{log:#?}"
     );
+    // The one derived write is the settle's CTE chain: if the fill's
+    // per-kind puts move back into the settle they write plain INSERT
+    // INTO derived statements, which the count above never sees.
+    assert!(
+        !log[settle_begin..settle_end]
+            .iter()
+            .any(|sql| sql.contains("INSERT INTO derived")),
+        "the settle window holds a plain derived INSERT: {log:#?}"
+    );
 }

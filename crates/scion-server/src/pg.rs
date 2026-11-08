@@ -4325,6 +4325,27 @@ fn id_bytes(id: &[u8; 32]) -> Vec<u8> {
 }
 
 impl PgTx<'_> {
+    /// A short derived count is a stored row for one of the keys: legal
+    /// when it agrees, corrupt when it differs. Checked row by row on
+    /// this rare path.
+    fn check_derived_conflicts(
+        c: &mut Self,
+        rows: &[(String, u32, ChangesetId, Vec<u8>)],
+        inserted_count: i64,
+    ) -> Result<()> {
+        let inserted = u64::try_from(inserted_count).unwrap_or(0);
+        if inserted == rows.len() as u64 {
+            return Ok(());
+        }
+        for (kind, version, cs, value) in rows {
+            if c.get_derived(kind, *version, *cs)?.as_deref() != Some(value) {
+                return Err(Error::Corrupt(format!(
+                    "derived {kind} v{version} for {cs} differs from the stored value"
+                )));
+            }
+        }
+        Ok(())
+    }
     /// The changeset chain's one statement: the changesets row, the
     /// parents (when there are any) and the repo membership, each arm
     /// keeping its own ON CONFLICT DO NOTHING. Returns whether the
@@ -5498,30 +5519,29 @@ impl MetaTx for PgTx<'_> {
         Ok(())
     }
 
-    /// Records derived values, one statement for the whole batch, and
-    /// follows the writes into the transaction's memory. The callers
-    /// write rows of changesets this transaction just stored, so any
-    /// conflict is corrupt state and refuses.
     /// The settle's whole write in one statement: the trees, the derived
     /// rows and the repo's blob membership, three INSERTs in a CTE chain
     /// whose arms keep their own ON CONFLICT rules (#1004). The top
     /// SELECT answers the derived arm's inserted count, so the
-    /// disagreeing-row check keeps its shape. The empty arms drop out;
-    /// a single arm runs alone.
+    /// disagreeing-row check keeps the shape `put_derived_all` applies.
+    /// The empty arms drop out; a single arm runs alone.
     fn put_settle_rows(
         &mut self,
         trees: &[(TreeId, Vec<u8>)],
         rows: &[(String, u32, ChangesetId, Vec<u8>)],
         repo: RepoId,
         blobs: &[BlobId],
-    ) -> Result<u64> {
+    ) -> Result<()> {
         // The importer's batching owns the derived rows already; the
         // blobs and the trees keep their own shapes there.
         if self.cs_batching {
             self.put_trees(trees)?;
             self.put_derived_all(rows)?;
             self.add_repo_blobs(repo, blobs)?;
-            return Ok(rows.len() as u64);
+            return Ok(());
+        }
+        if trees.is_empty() && rows.is_empty() && blobs.is_empty() {
+            return Ok(());
         }
         let mut arms: Vec<String> = Vec::new();
         let mut params: Vec<Param> = Vec::new();
@@ -5598,11 +5618,13 @@ impl MetaTx for PgTx<'_> {
             .collect();
         let sql = format!("WITH {} SELECT {}", arms.join(",\n"), selects.join(", "));
         let rows_out = self.c.query(&sql, &params)?;
-        let mut out = 0u64;
         for (i, arm) in counts.iter().enumerate() {
-            let c: i64 = rows_out[0].get(i);
             if arm == "der" {
-                out = u64::try_from(c).unwrap_or(0);
+                let count: i64 = rows_out[0].get(i);
+                // The check reads before the memory write below, so it
+                // sees the stored row, not the value just written (the
+                // order that matters, as in `put_derived_all`).
+                Self::check_derived_conflicts(self, rows, count)?;
             }
         }
         // The transaction's memory follows its writes, as the three
@@ -5617,9 +5639,13 @@ impl MetaTx for PgTx<'_> {
                 );
             }
         }
-        Ok(out)
+        Ok(())
     }
 
+    /// Records derived values, one statement for the whole batch, and
+    /// follows the writes into the transaction's memory. The callers
+    /// write rows of changesets this transaction just stored, so any
+    /// conflict is corrupt state and refuses.
     fn put_derived_all(&mut self, rows: &[(String, u32, ChangesetId, Vec<u8>)]) -> Result<()> {
         if rows.is_empty() {
             return Ok(());

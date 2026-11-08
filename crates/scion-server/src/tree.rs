@@ -464,8 +464,9 @@ fn store_changeset_impl(
     derived::remove_old::<CommitGraph>(c)?;
     derived::remove_old::<PathHistory>(c)?;
     // The settle's whole write in one statement: the trees, the derived
-    // rows and the repo's blob membership (#1004). The disagreeing-row
-    // check rides the derived arm's inserted count.
+    // rows and the repo's blob membership (#1004). The method checks
+    // the stored rows itself, before its memory write, so a stored
+    // value that differs from the computed one refuses as corrupt.
     let mut puts: Vec<BlobId> = db::puts(cs).map(|(_, blob)| blob).collect();
     puts.sort();
     puts.dedup();
@@ -480,15 +481,7 @@ fn store_changeset_impl(
              }| { (kind.to_owned(), version, cs, value) },
         )
         .collect();
-    let inserted = c.put_settle_rows(&tree_rows, &rows, repo, &puts)?;
-    if inserted != rows.len() as u64 {
-        for (kind, version, cs_row, value) in &rows {
-            if c.get_derived(kind, *version, *cs_row)?.as_deref() != Some(value) {
-                return Err(Error::Corrupt(format!(
-                    "derived {kind} v{version} for {cs_row} differs from the stored value"
-                )));
-            }
-        }
+    c.put_settle_rows(&tree_rows, &rows, repo, &puts)?;
     }
     Ok((id, tree))
 }
@@ -757,6 +750,14 @@ mod tests {
             .unwrap()
     }
 
+    /// A test stand-in for the settle: apply no longer writes the
+    /// trees it built, so a test that reads them back stores them the
+    /// way the settle's one statement does.
+    fn store_trees(c: &mut dyn MetaTx, applied: &Applied) -> TreeId {
+        c.put_settle_rows(&applied.1, &[], RepoId(0), &[]).unwrap();
+        applied.0
+    }
+
     fn files(c: &mut dyn MetaTx, root: TreeId) -> Vec<String> {
         let mut out = Vec::new();
         let mut stack = vec![(String::new(), root)];
@@ -776,20 +777,22 @@ mod tests {
     #[test]
     fn puts_and_deletes_build_the_expected_tree() {
         with_db(|c| {
-            let t1 = apply(
+            let applied = apply(
                 c,
                 None,
                 &changes(&[("a/b/c", Some("1")), ("a/d", Some("2")), ("e", Some("3"))]),
                 &mut lens_none(),
             )?;
-            assert_eq!(files(c, t1.0), ["a/b/c", "a/d", "e"]);
-            let t2 = apply(
+            let t1 = store_trees(c, &applied);
+            assert_eq!(files(c, t1), ["a/b/c", "a/d", "e"]);
+            let applied = apply(
                 c,
-                Some(t1.0),
+                Some(t1),
                 &changes(&[("a/b/c", None), ("f/g", Some("4"))]),
                 &mut lens_none(),
-            )?
-            .0;
+            )?;
+            let t2 = store_trees(c, &applied);
+
             assert_eq!(files(c, t2), ["a/d", "e", "f/g"], "empty a/b is pruned");
             assert_eq!(
                 lookup(c, t2, &path("a/d"))?,
@@ -847,7 +850,7 @@ mod tests {
     #[test]
     fn lookup_tree_entry_answers_what_the_full_decode_answers() {
         with_db(|c| {
-            let t = apply(
+            let applied = apply(
                 c,
                 None,
                 &changes(&[
@@ -861,8 +864,9 @@ mod tests {
                     ("\u{3bb}/\u{3c9}", Some("8")),
                 ]),
                 &mut lens_none(),
-            )?
-            .0;
+            )?;
+            let t = store_trees(c, &applied);
+
             // Every directory level of the tree, with its id.
             let mut dirs = vec![t];
             for p in ["aB", "b", "deep", "deep/x", "\u{3bb}"] {
@@ -893,13 +897,14 @@ mod tests {
     fn same_content_gives_same_tree_id() {
         with_db(|c| {
             let direct = apply(c, None, &changes(&[("x/y", Some("1"))]), &mut lens_none())?.0;
-            let t = apply(
+            let applied = apply(
                 c,
                 None,
                 &changes(&[("x/y", Some("1")), ("z", Some("2"))]),
                 &mut lens_none(),
-            )?
-            .0;
+            )?;
+            let t = store_trees(c, &applied);
+
             let via_delete = apply(c, Some(t), &changes(&[("z", None)]), &mut lens_none())?.0;
             assert_eq!(direct, via_delete);
             Ok(())
@@ -909,22 +914,25 @@ mod tests {
     #[test]
     fn file_and_directory_swap_in_one_changeset() {
         with_db(|c| {
-            let t = apply(c, None, &changes(&[("a", Some("1"))]), &mut lens_none())?.0;
-            let t = apply(
+            let applied = apply(c, None, &changes(&[("a", Some("1"))]), &mut lens_none())?;
+            let t = store_trees(c, &applied);
+            let applied = apply(
                 c,
                 Some(t),
                 &changes(&[("a", None), ("a/b", Some("2"))]),
                 &mut lens_none(),
-            )?
-            .0;
+            )?;
+            let t = store_trees(c, &applied);
+
             assert_eq!(files(c, t), ["a/b"]);
-            let t = apply(
+            let applied = apply(
                 c,
                 Some(t),
                 &changes(&[("a", Some("3")), ("a/b", None)]),
                 &mut lens_none(),
-            )?
-            .0;
+            )?;
+            let t = store_trees(c, &applied);
+
             assert_eq!(files(c, t), ["a"]);
             Ok(())
         });
@@ -933,13 +941,14 @@ mod tests {
     #[test]
     fn structural_conflicts_are_rejected() {
         with_db(|c| {
-            let t = apply(
+            let applied = apply(
                 c,
                 None,
                 &changes(&[("a", Some("1")), ("d/x", Some("2"))]),
                 &mut lens_none(),
-            )?
-            .0;
+            )?;
+            let t = store_trees(c, &applied);
+
             let cases: [(Edits<'_>, ApplyError); 6] = [
                 (
                     &[("a/b", Some("x"))],
@@ -1046,14 +1055,16 @@ mod tests {
                         })
                         .collect();
                     let flat_changes = edits.iter().map(|(p, c)| ((*p).to_owned(), *c)).collect();
+                    let outcome = apply(c, tree, &changes, &mut lens_none());
                     match (
                         apply_flat(&model, &flat_changes),
-                        apply(c, tree, &changes, &mut lens_none()),
+                        outcome,
                     ) {
                         (Some(next), Ok(next_tree)) => {
-                            assert_eq!(snapshot(c, next_tree.0), next);
+                            let next_tree = store_trees(c, &next_tree);
+                            assert_eq!(snapshot(c, next_tree), next);
                             model = next;
-                            tree = Some(next_tree.0);
+                            tree = Some(next_tree);
                         }
                         (None, Err(Error::Apply(_))) => {}
                         (flat, real) => panic!("model {flat:?} but apply {real:?} for {edits:?}"),

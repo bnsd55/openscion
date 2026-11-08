@@ -653,8 +653,9 @@ pub(crate) struct PutRow {
 /// # Errors
 ///
 /// Errors of [`Kind::derive`].
-/// The batched shape of [`put`]: the row waits in `rows` for
-/// [`put_all`], which lands it with the batch in one statement.
+/// The batched shape of [`put`]: the row waits in `rows` for the
+/// batch's one write statement (`MetaTx::put_settle_rows` on the
+/// settle's path).
 pub(crate) fn put_row<K: Kind>(rows: &mut Vec<PutRow>, cs: ChangesetId, value: &K::Value) {
     rows.push(PutRow {
         kind: K::NAME,
@@ -664,8 +665,8 @@ pub(crate) fn put_row<K: Kind>(rows: &mut Vec<PutRow>, cs: ChangesetId, value: &
     });
 }
 
-/// The batched shape of [`on_write`]: the put lands in `rows` for
-/// [`put_all`] instead of its own statement. The stored check and the
+/// The batched shape of [`on_write`]: the put lands in `rows` for the
+/// batch's one write statement instead of its own. The stored check and the
 /// parents' reads keep their shape; both answer from the transaction's
 /// memory on the fold's path. The old-version sweep stays with the
 /// caller, which runs it once for the whole batch.
