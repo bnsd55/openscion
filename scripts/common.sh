@@ -508,16 +508,19 @@ batch() {
   local name=$1 jobs=$2 cmd=$3
   export BIN DAEMON SPARSE_DIR
   mkdir "$WORK/$name"
-  # Each job starts 10 ms after the one before it, round-robin over 20
-  # steps. All jobs starting at once can overflow a server's accept
-  # queue: git daemon listens with a backlog of 5 (daemon.c:
-  # listen(sockfd, 5)), and a connection that completes its handshake
-  # onto a full queue is refused - with tcp_abort_on_overflow=0 the
-  # kernel drops the final ACK and the client's reset comes when it
-  # sends its first bytes, which is why the failure landed mid-run as
-  # "read error: Connection reset by peer". A start every 10 ms keeps
-  # the queue near empty; the half second it adds to a 50-job batch is
-  # inside the noise, and both tools pay it alike. nstat's
+  # Each job starts 10 ms after the one before it, one slot per job.
+  # All jobs starting at once can overflow a server's accept queue:
+  # git daemon listens with a backlog of 5 (daemon.c: listen(sockfd,
+  # 5)), and a connection that completes its handshake onto a full
+  # queue is refused - with tcp_abort_on_overflow=0 the kernel drops
+  # the final ACK and the client's reset comes when it sends its first
+  # bytes, which is why the failure lands mid-run as "read error:
+  # Connection reset by peer". The slots used to round-robin over 20
+  # steps, so a 50-job batch started 2-3 clones in the same 10 ms; on
+  # a slow runner those starts bunch, the queue overflows (24 drops in
+  # one batch), and the batch dies. One slot per job paces the starts
+  # singly; the half second it adds to a 50-job batch is inside the
+  # noise, and both tools pay it alike. nstat's
   # TcpExtListenOverflows and TcpExtListenDrops, taken around every
   # batch, say whether the queue ever overflowed.
   # SHORTCUT: stagger the starts because git daemon's backlog is 5 and
@@ -526,12 +529,17 @@ batch() {
   nstat -az TcpExtListenOverflows TcpExtListenDrops > "$WORK/$name.nstat.0" 2>/dev/null || \
     netstat -s > "$WORK/$name.nstat.0" 2>/dev/null || true
   # The job's number drives the stagger, and its path is the checkout
-  # target, so sh gets both: $3 is the number, $2 the command, and $1 the
-  # path that the command's own "$1" reads.
+  # target, so sh gets all three: $3 is the number, $2 the command, $1
+  # the path that the command's own "$1" reads, and $4 the batch's job
+  # count (the count is a shell local; a child cannot see it, and
+  # without it the sleep line dies and every job starts at once). The
+  # slot form is two decimals, so the count caps at 99: at 100+ the
+  # form folds ("0.100" reads as 0.1 s) and the pace breaks.
+  [ "$jobs" -le 99 ] || die "batch: $jobs jobs breaks the two-decimal stagger cap (99)"
   local rc=0
   seq 1 "$jobs" | /usr/bin/time -p xargs -P "$jobs" -I{} sh -c \
-    'sleep "$(printf "0.%02ds" $(( ($3 - 1) % 20 )))"; eval "$2"' \
-    sh "$WORK/$name/{}" "$cmd" {} \
+    'sleep "$(printf "0.%02d" $(( ($3 - 1) % $4 )))"; eval "$2"' \
+    sh "$WORK/$name/{}" "$cmd" {} "$jobs" \
     > "$WORK/$name.log" 2>&1 || rc=$?
   # The counters land even when the batch failed: an overflow during a
   # failed batch is exactly the evidence the run exists for.
