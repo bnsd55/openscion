@@ -101,6 +101,157 @@ pct() {
   sort -n "$1" | awk -v p="$2" '{ a[NR] = $1 } END { if (NR) print a[int(NR * p + 0.5)] }'
 }
 
+# cpu_ms PID CLK: the process's own CPU time (utime + stime from
+# /proc/<pid>/stat) in milliseconds since the process started. The
+# stat's second field (the name) can hold spaces and brackets, so the
+# numbers parse after the last ')': there, utime and stime are the
+# 11th and 12th fields. A pid that is gone, or whose stat cannot be
+# read, is an empty field - the sampler's gap is data, not a crash.
+cpu_ms() {
+  local pid=$1 clk=$2 ticks
+  [ -n "$pid" ] || return 0
+  ticks=$(awk '{ sub(/^[^)]*\) /, ""); print $11 + $12 }' "/proc/$pid/stat" 2> /dev/null) || return 0
+  [ -n "$ticks" ] || return 0
+  awk -v t="$ticks" -v clk="$clk" 'BEGIN { printf "%d", t * 1000 / clk }'
+}
+
+# pg_cpu_ms CLK: the Postgres service container's CPU milliseconds
+# since boot, from its cgroup's cpu.stat usage_usec. Cumulative, and
+# it keeps the CPU of backends that exited between samples - a sum of
+# /proc/<pid>/stat over the live processes does not (the sampler's own
+# psql opens and closes a backend every second, and every exit would
+# vanish from the next sum, dragging the delta low or negative).
+# Paths, in order: any live postgres pid's /proc/<pid>/cgroup; then
+# the container's scope by its docker id (docker runs on the runner in
+# CI, where this script's cells live). No path names a cpu.stat, no
+# row.
+pg_cpu_ms() {
+  local clk=$1 pid cgroup usec cid
+  pid=$(pgrep -x postgres 2> /dev/null | head -n 1)
+  if [ -n "$pid" ]; then
+    cgroup=$(awk '/^0::/ { print $2 }' "/proc/$pid/cgroup" 2> /dev/null)
+  fi
+  if [ -z "${cgroup:-}" ]; then
+    # The container's own scope, by id: docker sees it from the runner
+    # (this script's home in CI), where the service's processes may
+    # not look like plain postgres to pgrep. The name filter, not the
+    # ancestor one: the service's image is a digested ref, and the
+    # ancestor filter matches image ids, so it never matched. The
+    # scope carries the full 64-char id; docker ps -q gives the short
+    # one.
+    for cid in $(docker ps -q --filter "name=postgres" 2> /dev/null); do
+      full=$(docker inspect -f '{{.Id}}' "$cid" 2> /dev/null) || continue
+      cgroup="/system.slice/docker-$full.scope"
+      usec=$(awk '/^usage_usec / { print $2 }' \
+        "/sys/fs/cgroup$cgroup/cpu.stat" 2> /dev/null)
+      [ -n "$usec" ] && break
+      cgroup=""
+    done
+  fi
+  [ -n "$cgroup" ] || return 0
+  # The container's scope may name a level the mount does not carry a
+  # cpu.stat at; walk up until one has the file. The docker path above
+  # already read its own counter.
+  if [ -z "${usec:-}" ]; then
+    local probe="$cgroup"
+    while [ -n "$probe" ] && [ "$probe" != "/" ]; do
+      usec=$(awk '/^usage_usec / { print $2 }' "/sys/fs/cgroup$probe/cpu.stat" 2> /dev/null)
+      [ -n "$usec" ] && break
+      probe=$(dirname "$probe")
+    done
+  fi
+  [ -n "$usec" ] || return 0
+  awk -v u="$usec" -v clk="$clk" 'BEGIN { printf "%d", u / 1000 }'
+}
+
+# pg_waits: the Postgres's wait-event counts, one `type:count` group
+# per wait type plus `NONE` for the sessions that run, from one
+# pg_stat_activity read. Sessions without a database (the auth and
+# setup backends) ride in too: a sampler that hides them hides the
+# queue.
+pg_waits() {
+  psql "$admin_url" -X -A -t -F '|' \
+    -c "SELECT coalesce(wait_event_type, 'NONE'), count(*)
+        FROM pg_stat_activity GROUP BY 1 ORDER BY 1" 2> /dev/null |
+    awk -F '|' 'NF >= 2 { gsub(/^ +| +$/, "", $1); gsub(/^ +| +$/, "", $2);
+                 printf "%s:%s", $1, $2; if (NR) printf "|" }'
+}
+
+# sample_cell W R: one CSV row per second until the cell's END. The
+# row: the tick, each tier's CPU milliseconds in the past second (the
+# deltas of /proc/<pid>/stat's utime+stime; postgres and the bench are
+# sums over their processes), the runner's 1-minute load, the
+# Postgres's wait-event counts, the work disk's read and write
+# milliseconds in the past second. A tier that died mid-cell carries
+# empty CPU fields from then on: a gap is data, not a crash.
+# probe PROBE CMD...: runs one of the sampler's probes and prints its
+# output; a probe that fails prints an empty line and warns ONCE per
+# cell, naming the probe - the row's field goes empty either way. The
+# once-per-cell warning rides a file the cell deletes at its end.
+probe() {
+  local name=$1 out
+  shift
+  out=$("$@" 2> /dev/null)
+  if [ -n "$out" ]; then
+    printf '%s' "$out"
+  else
+    if [ ! -e "$WORK/.sampler-warned-$SAMPLER_CELL" ]; then
+      touch "$WORK/.sampler-warned-$SAMPLER_CELL"
+      echo "the sampler's probe $name failed; its field is empty for this cell" >&2
+    fi
+  fi
+}
+
+sample_cell() {
+  # The sampler is a best-effort observer and runs its own shell: the
+  # probes are best-effort too, so their failures are gaps (empty
+  # fields), never a death. The parent's set -euo pipefail stays off
+  # in here; a probe that fails leaves the row's field empty.
+  set +euo pipefail
+  local w=$1 r=$2 out="$WORK/samples-w$w-r$r.csv"
+  SAMPLER_CELL=$w-$r
+  local clk
+  clk=$(getconf CLK_TCK)
+  pid_server=$(probe owned-server sed -n 's/^pid=//p' "$WORK/owned/server")
+  pid_cache=$(probe owned-cache sed -n 's/^pid=//p' "$WORK/owned/cache")
+  pid_daemon=$(probe owned-daemon sed -n 's/^pid=//p' "$WORK/owned/daemon")
+  prev_server=$(probe cpu-server cpu_ms "$pid_server" "$clk")
+  prev_cache=$(probe cpu-cache cpu_ms "$pid_cache" "$clk")
+  prev_daemon=$(probe cpu-daemon cpu_ms "$pid_daemon" "$clk")
+  prev_pg=$(probe cpu-postgres pg_cpu_ms "$clk")
+  disk_line=$(probe disk disk_ms)
+  prev_disk_read=${disk_line%% *}
+  prev_disk_write=${disk_line#* }
+  echo "tick,cpu_server_ms,cpu_postgres_ms,cpu_cache_ms,cpu_daemon_ms,load1,pg_waits,disk_read_ms,disk_write_ms" > "$out"
+  while [ "$(date +%s)" -lt "$END" ]; do
+    local tick cur
+    tick=$(date +%s)
+    cur_server=$(probe cpu-server cpu_ms "$pid_server" "$clk")
+    cur_cache=$(probe cpu-cache cpu_ms "$pid_cache" "$clk")
+    cur_daemon=$(probe cpu-daemon cpu_ms "$pid_daemon" "$clk")
+    cur_pg=$(probe cpu-postgres pg_cpu_ms "$clk")
+    disk_line=$(probe disk disk_ms)
+    cur_disk_read=${disk_line%% *}
+    cur_disk_write=${disk_line#* }
+    load1=$(cut -d ' ' -f 1 /proc/loadavg)
+    printf '%s,%s,%s,%s,%s,%s,"%s",%s,%s\n' \
+      "$tick" \
+      "$(awk -v a="$cur_server" -v b="$prev_server" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
+      "$(awk -v a="$cur_pg" -v b="$prev_pg" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
+      "$(awk -v a="$cur_cache" -v b="$prev_cache" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
+      "$(awk -v a="$cur_daemon" -v b="$prev_daemon" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
+      "$load1" \
+      "$(probe pg-waits pg_waits)" \
+      "$(awk -v a="$cur_disk_read" -v b="$prev_disk_read" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
+      "$(awk -v a="$cur_disk_write" -v b="$prev_disk_write" 'BEGIN { print (a != "" && b != "") ? a - b : "" }')" \
+      >> "$out"
+    prev_server=$cur_server; prev_pg=$cur_pg; prev_cache=$cur_cache
+    prev_daemon=$cur_daemon
+    prev_disk_read=$cur_disk_read; prev_disk_write=$cur_disk_write
+    sleep 1
+  done
+}
+
 note "capacity: building"
 if [ -n "${SCION_BIN:-}" ]; then
   BIN=$SCION_BIN
@@ -111,10 +262,13 @@ fi
 : > "$WORK/capacity.csv"
 echo "cell_start,reps,landed" > /dev/null
 
-# The summary's numbers live in one CSV row per repetition:
-# backend,writers,readers,land_p99_ms,checkout_p50_ms,checkout_p99_ms,
-# reader_timeouts,errors,rss_end_kib,landed,blob_growth_kib_per_1k_lands,
-# db_growth_kib_per_1k_lands
+# The summary's numbers live in one CSV row per cell (the cell's last
+# repetition for the percentiles):
+# backend,writers,readers,land_p99_ms,push_p99_ms,checkout_p50_ms,
+# checkout_p99_ms,reader_timeouts,errors,rss_end_kib,landed,
+# lands_per_second,blob_growth_kib_per_1k_lands,db_growth_kib_per_1k_lands
+# (the sampler's own CSV keeps the CPU columns that proved themselves:
+# server, postgres, cache, daemon, plus the disk's read and write ms)
 
 [ -n "${SCION_PG_URL:-}" ] || {
   note "no SCION_PG_URL: the cells are not run"
@@ -170,6 +324,12 @@ for w in $WRITERS; do
     }
     server_pid
     END=$(($(date +%s) + READ_SECONDS * REPS + 60))
+    # The cell's sampler runs beside the work, one row a second, and
+    # the cell's end (below) stops it: the splits the CSV cannot name
+    # - the runner's CPU, Postgres's waits, the disk's milliseconds -
+    # name themselves here.
+    sample_cell "$w" "$r" &
+    SAMPLER_PID=$!
     T0=$(date +%s)
     readers() {
       local n=0 rc t0 t1
@@ -229,7 +389,8 @@ for w in $WRITERS; do
       # carries the land percentiles.
       sleep 10 # the cell's warm start, before bench begins
       if ! "$TIMEOUT" 600 "$BIN/scn" --server "$SERVER" bench --agents "$w" \
-        --lands "$LANDS" --json > "$WORK/bench-w$w-r$r-rep$rep.json" 2> "$WORK/bench-w$w-r$r-rep$rep.log"; then
+        --lands "$LANDS" --json > "$WORK/bench-w$w-r$r-rep$rep.json" \
+        2> "$WORK/bench-w$w-r$r-rep$rep.log"; then
         # A bench that failed is the cell's data, not the run's
         # failure: the envelope's edge is where errors start. The row
         # records it and the grid goes on.
@@ -267,6 +428,22 @@ for w in $WRITERS; do
     stop_scion
     lands_landed=$((lands_end - lands_before))
     note "cell w$w r$r: $lands_landed lands landed (the plan named $((LANDS * REPS)))"
+    kill "$SAMPLER_PID" 2> /dev/null || true
+    wait "$SAMPLER_PID" 2> /dev/null || true
+    # The observer must not fail silently: a cell whose samples CSV
+    # holds fewer rows than half its seconds prints a workflow warning
+    # (the run log's ::warning::), with the row count and the seconds
+    # named. The file may be whole; then the check says nothing.
+    if [ -f "$WORK/samples-w$w-r$r.csv" ]; then
+      rows=$(( $(wc -l < "$WORK/samples-w$w-r$r.csv") - 1 ))
+    else
+      rows=0
+    fi
+    floor=$(( (READ_SECONDS * REPS) / 2 ))
+    if [ "$rows" -lt "$floor" ]; then
+      echo "::warning::cell w$w r$r: the sampler wrote $rows rows; the cell ran $((READ_SECONDS * REPS)) s"
+    fi
+    rm -f "$WORK/.sampler-warned-$w-$r"
     reader_failures=0
     reader_log="$WORK/reads-w$w-r$r.log"
     [ -f "$reader_log" ] || { touch "$reader_log"; }
@@ -281,12 +458,18 @@ for w in $WRITERS; do
     if [ "$bench_fail" -eq 0 ] && [ -f "$last_rep_json" ]; then
       # The last rep's percentiles stand in the table (rep 1 warms the
       # cell, rep 2 is the steady state); the throughput sums every
-      # rep the cell ran.
+      # rep the cell ran. The push p99 rides the same rep: a writer's
+      # whole push (PutBlob, CreateChangeset, Land), the bench's
+      # end-to-end p99 - so the docs table's push column reads from
+      # this CSV, the artifact the table cites, and not from the bench
+      # JSONs a reader would have to fetch separately (#995 F1).
       land_p99=$(jq -r '.land_ms.p99' "$last_rep_json")
+      push_p99=$(jq -r '.end_to_end_ms.p99' "$last_rep_json")
     else
-      # No bench report, no land percentiles: the cell says so in the
-      # errors column, and the land p99 column stays empty.
+      # No bench report, no percentiles: the cell says so in the
+      # errors column, and the percentile columns stay empty.
       land_p99="-"
+      push_p99="-"
     fi
     lands_per_sec=$(cell_throughput "$WORK"/bench-w$w-r$r-rep*.json)
     p50=$(pct "$WORK/read-times.csv" 0.50)
@@ -302,7 +485,7 @@ for w in $WRITERS; do
     db_end_kib=$(psql "$admin_url" -X -A -t \
       -c "SELECT pg_database_size('$pg_db')" | awk '{ print int(($1 + 1023) / 1024) }')
     db_growth=$(kib_per_1k "$db_start_kib" "$db_end_kib" "$lands_landed")
-    echo "postgres,$w,$r,$land_p99,$p50,$p99,$reader_timeouts,$errors,$rss_end,$lands_landed,$lands_per_sec,$blob_growth,$db_growth" \
+    echo "postgres,$w,$r,$land_p99,$push_p99,$p50,$p99,$reader_timeouts,$errors,$rss_end,$lands_landed,$lands_per_sec,$blob_growth,$db_growth" \
       >> "$WORK/capacity.csv"
     if [ "$((errors + reader_timeouts))" -gt 0 ]; then
       note "cell w$w r$r: $reader_timeouts timeouts, $errors errors (readers $reader_failures, bench $bench_fail) - recorded, next cell"
@@ -338,6 +521,7 @@ fi
 cp "$WORK/capacity.csv" "${RUNNER_TEMP:-/tmp}/capacity-artifacts/" 2> /dev/null || true
 cp "$WORK"/*.log "${RUNNER_TEMP:-/tmp}/capacity-artifacts/" 2> /dev/null || true
 cp "$WORK"/bench-*.json "${RUNNER_TEMP:-/tmp}/capacity-artifacts/" 2> /dev/null || true
+cp "$WORK"/samples-*.csv "${RUNNER_TEMP:-/tmp}/capacity-artifacts/" 2> /dev/null || true
 
 row() { printf '%-46s %s\n' "$1" "$2"; }
 echo "capacity envelope: machine $CAPACITY_MACHINE, commit $HEAD_HEX"

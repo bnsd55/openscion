@@ -44,6 +44,10 @@ struct Stats {
     landed: Vec<ChangesetId>,
     conflicts: usize,
     rejected: usize,
+    /// Time of the upload's `PutBlob` alone.
+    put: Vec<Duration>,
+    /// Time of the `CreateChangeset` RPC alone.
+    create: Vec<Duration>,
     /// Time of the Land RPC alone.
     land: Vec<Duration>,
     /// Upload + create + land.
@@ -99,9 +103,11 @@ async fn run_agent(
             Base::Fresh => ctx.resolve("main").await?,
         };
         // Unique per run, so every run pays for new blobs and runs compare.
+        let putting = Instant::now();
         let blob = ctx
             .put_blob(format!("run {start} agent {agent} change {i}\n").into_bytes())
             .await?;
+        let put = putting.elapsed();
         let path = RepoPath::new(format!("bench/agent-{agent:04}/{i:06}.txt"))?;
         let changeset = Changeset::new(
             vec![parent],
@@ -123,7 +129,9 @@ async fn run_agent(
             )]),
         )
         .context("the changeset fields do not fit the format")?;
+        let creating = Instant::now();
         let id = ctx.create_changeset(&changeset).await?;
+        let create = creating.elapsed();
         let landing = Instant::now();
         let reply = ctx
             .client
@@ -135,6 +143,8 @@ async fn run_agent(
             })
             .await?
             .into_inner();
+        stats.put.push(put);
+        stats.create.push(create);
         stats.land.push(landing.elapsed());
         stats.total.push(began.elapsed());
         match reply.state() {
@@ -225,8 +235,12 @@ fn percentiles_ms(sorted: &[Duration]) -> [f64; 3] {
 }
 
 fn report(json: bool, agents: usize, stats: &mut Stats, elapsed: Duration) -> Result<()> {
+    stats.put.sort();
+    stats.create.sort();
     stats.land.sort();
     stats.total.sort();
+    let [put_p50, put_p99, _] = percentiles_ms(&stats.put);
+    let [create_p50, create_p99, _] = percentiles_ms(&stats.create);
     let [land_p50, land_p99, land_max] = percentiles_ms(&stats.land);
     let [total_p50, total_p99, _] = percentiles_ms(&stats.total);
     let landed = stats.landed.len();
@@ -241,6 +255,8 @@ fn report(json: bool, agents: usize, stats: &mut Stats, elapsed: Duration) -> Re
             "seconds": elapsed.as_secs_f64(),
             "lands_per_second": rate,
             "land_ms": { "p50": land_p50, "p99": land_p99, "max": land_max },
+            "put_ms": { "p50": put_p50, "p99": put_p99 },
+            "create_ms": { "p50": create_p50, "p99": create_p99 },
             "end_to_end_ms": { "p50": total_p50, "p99": total_p99 },
             "verified_on_main": true,
         });
@@ -253,6 +269,8 @@ fn report(json: bool, agents: usize, stats: &mut Stats, elapsed: Duration) -> Re
     );
     outln!("conflicts {}, rejected {}", stats.conflicts, stats.rejected);
     outln!("land RPC     p50 {land_p50:.1} ms  p99 {land_p99:.1} ms  max {land_max:.1} ms");
+    outln!("put blob     p50 {put_p50:.1} ms  p99 {put_p99:.1} ms");
+    outln!("create cs    p50 {create_p50:.1} ms  p99 {create_p99:.1} ms");
     outln!("end to end   p50 {total_p50:.1} ms  p99 {total_p99:.1} ms  (upload + create + land)");
     outln!("verified: main gained exactly the {landed} landed changesets");
     Ok(())

@@ -1800,7 +1800,7 @@ checking out through a cache and a daemon beside it.
 | Commit | 70576f1b73da862dc53a37171222fc1f179bb5d1 the main commit the run measured (the run's own HEAD), at [run 42390384979](https://github.com/bnsd55/openscion/actions/runs/42390384979) |
 | Runner | GitHub-hosted `ubuntu-24.04`: 4 vCPU, 16 GiB RAM, ext4 on a ~144 GiB SSD, runner image `ubuntu24 20261101.360.1`, kernel `7.0.0-1017-azure` (the run's `machine.txt` artifact) |
 | Filesystem | the filesystem the run measured, from the run's `machine.txt` artifact (`df -T` on the work directory); the `ubuntu-24.04` class's root disk is ext4 ([support.md](support.md)) |
-| Repetitions | 2 per cell; the table reports the cell's whole run, and the run's raw samples are the workflow run's `capacity.csv` artifact |
+| Repetitions | 2 per cell; the table reports each cell's last repetition (rep 1 warms the cell, rep 2 is the steady state), and the run's raw samples are the workflow run's `capacity.csv` artifact |
 
 | backend | writers | readers | land p99 ms | push p99 ms | checkout p50 ms | checkout p99 ms | timeouts | errors | server RSS MiB | landed | lands per second | blob store KiB per 1k lands | database KiB per 1k lands |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -1815,8 +1815,16 @@ checking out through a cache and a daemon beside it.
 | postgres | 200 | 20 | 4765.6 | 34879.3 | 791 | 1062 | 0 | 0 | 46 | 2000 | 8.6 | 5668 | 62374 |
 
 Push p99 is a writer's whole push - PutBlob, CreateChangeset, Land -
-the bench's end-to-end p99 from the run's `bench-*.json` artifacts
-(the last repetition, the rule the land p99 column follows).
+the bench's end-to-end p99 of the cell's last repetition, from the
+`capacity.csv` artifact, as the land p99 column is.
+
+Readers pay twice in these cells: the checkouts' daemon and its file
+writes run on the same runner and disk as the server and Postgres. The
+sampler of [run 42425935481](https://github.com/bnsd55/openscion/actions/runs/42425935481)
+shows the daemon holding about one CPU core whenever readers run, the
+disk's write time rising with the reader count, and Postgres spending
+about 52 CPU seconds per cell with no readers and 69-84 with them,
+while the Postgres wait-event counts do not grow.
 
 At 50 and 200 writers the queue is in changeset creation, not in the
 land, so the land p99 is small next to the push p99: a writer's whole
