@@ -454,8 +454,7 @@ fn store_changeset_impl(
         }?
     };
     let id = {
-        let _guard =
-            crate::land_profile::Guard::enter(crate::land_profile::Phase::InsertChangeset);
+        let _guard = crate::land_profile::Guard::enter(crate::land_profile::Phase::InsertChangeset);
         c.insert_changeset(repo, cs)?
     };
     {
@@ -503,7 +502,6 @@ fn store_changeset_impl(
                 }
             }
         }
-    }
     }
     Ok((id, tree))
 }
