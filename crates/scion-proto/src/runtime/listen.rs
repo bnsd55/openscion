@@ -1849,6 +1849,9 @@ mod tests {
     async fn a_listener_that_fails_every_accept_is_paced_and_counted() {
         let _log_window = ACCEPT_WARN_LOG.lock().unwrap();
         init_log();
+        // The captured log is process-wide; only this test's own lines
+        // count, so the scan starts at the offset this test begins at.
+        let log_start = log().0.lock().unwrap().len();
         let limits = Limits::default();
         let metrics = Arc::new(Metrics::default());
         let attempts = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1885,7 +1888,7 @@ mod tests {
             line, "scion_accept_errors_total 0",
             "the failed accepts are not counted:\n{text}"
         );
-        let text = String::from_utf8(log().0.lock().unwrap().clone()).unwrap();
+        let text = String::from_utf8(log().0.lock().unwrap()[log_start..].to_vec()).unwrap();
         let warns: Vec<&str> = text
             .lines()
             .filter(|l| {
