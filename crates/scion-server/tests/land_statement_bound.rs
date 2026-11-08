@@ -354,8 +354,8 @@ fn a_record_costs_five_statements() {
 
 #[test]
 fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound() {
-    const BOUND: u64 = 34;
-    const EXACT: u64 = 22;
+    const BOUND: u64 = 30;
+    const EXACT: u64 = 18;
     let _log = LOG_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -387,7 +387,12 @@ fn a_land_costs_a_constant_more_over_a_hundred_paths_and_stays_under_its_bound()
     // run as data-modifying CTEs of the UPDATE lands, from the one
     // trim builder the commit's standalone flush shares, and the
     // flush at the commit finds nothing left - and the land costs 22.
-    // The record with a pending limit pays one more for the quota
+    // The settle's build then folds its writes: the changeset row, its
+    // parents and its repo membership ride one CTE chain, and the
+    // trees, the derived rows and the repo's blob membership ride a
+    // second - each arm keeping its own ON CONFLICT rule (#1004) - and
+    // the land costs 18. The record with a pending limit pays one more
+    // for the quota
     // column's answer; the land's own record passes none (measured
     // with the named test binary on main 506051c).
 
@@ -502,8 +507,8 @@ fn the_lands_trim_runs_inside_the_verdicts_transaction() {
     let count = Backend::test_statement_count();
     assert_eq!(
         count,
-        22,
-        "a land cost {count} statements, not the folded 22:\n{:#?}",
+        18,
+        "a land cost {count} statements, not the folded 18:\n{:#?}",
         Backend::test_statement_log()
     );
     assert_eq!(
@@ -665,14 +670,16 @@ fn a_land_whose_head_tree_is_missing_fills_before_the_write_transaction() {
         .position(|sql| sql == "COMMIT")
         .map(|at| settle_begin + at)
         .expect("the settle transaction commits");
+    // The settle's writes ride one CTE chain since #1004: the trees,
+    // the derived rows and the blob membership are one statement that
+    // opens with the trees arm (the statement log's cut hides the
+    // derived arm's text), so the chain's prefix is the marker.
     let derived_writes = log[settle_begin..settle_end]
         .iter()
-        .filter(|sql| sql.starts_with("INSERT INTO derived"))
+        .filter(|sql| sql.starts_with("WITH tr AS ("))
         .count();
     assert_eq!(
-        derived_writes,
-        1,
-        "the settle transaction writes the land's own derived row alone:\n{:#?}",
-        &log[settle_begin..settle_end]
+        derived_writes, 1,
+        "the settle transaction writes the land's own derived row alone:\n{log:#?}"
     );
 }

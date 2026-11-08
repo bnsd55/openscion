@@ -637,33 +637,10 @@ pub(crate) fn put<K: Kind>(c: &mut dyn MetaTx, cs: ChangesetId, value: &K::Value
 /// A row a batched put will land: the kind's name, its version, the
 /// changeset, the encoded value.
 pub(crate) struct PutRow {
-    kind: &'static str,
-    version: u32,
-    cs: ChangesetId,
-    value: Vec<u8>,
-}
-
-/// Lands the rows of [`put_row`] and [`on_write_into`] in one statement.
-/// The rows are of changesets the caller's transaction just stored, so a
-/// conflicting stored row is corrupt state and refuses, like the single
-/// put does.
-///
-/// # Errors
-///
-/// [`Error::Corrupt`] if a stored row disagrees, and backend errors.
-pub(crate) fn put_all(c: &mut dyn MetaTx, rows: Vec<PutRow>) -> Result<()> {
-    let rows = rows
-        .into_iter()
-        .map(
-            |PutRow {
-                 kind,
-                 version,
-                 cs,
-                 value,
-             }| { (kind.to_owned(), version, cs, value) },
-        )
-        .collect::<Vec<_>>();
-    c.put_derived_all(&rows)
+    pub(crate) kind: &'static str,
+    pub(crate) version: u32,
+    pub(crate) cs: ChangesetId,
+    pub(crate) value: Vec<u8>,
 }
 
 /// For a kind that is stored when a changeset is written: derives and stores
@@ -742,7 +719,18 @@ pub(crate) fn on_write<K: Kind>(
         let value = K::derive(c, id, changeset, parents, lens)?;
         put_row::<K>(&mut rows, id, &value);
     }
-    put_all(c, rows)?;
+    let rows: Vec<(String, u32, ChangesetId, Vec<u8>)> = rows
+        .into_iter()
+        .map(
+            |PutRow {
+                 kind,
+                 version,
+                 cs,
+                 value,
+             }| { (kind.to_owned(), version, cs, value) },
+        )
+        .collect();
+    c.put_derived_all(&rows)?;
     remove_old::<K>(c)?;
     Ok(())
 }
