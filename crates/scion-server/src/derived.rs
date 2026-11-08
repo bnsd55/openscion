@@ -1640,11 +1640,19 @@ mod tests {
         assert_eq!(stored.len(), 3);
         assert!(stored.iter().all(|(_, value)| value.len() == 8));
 
-        // A stored value does not leak to a repo without the changeset.
+        // A stored value does not leak to a repo without the changeset:
+        // the deadline-less read and the deadline read both answer
+        // NotFound - the stored hit is scoped to the repo by require
+        // alone (#1028).
         let other = store.write(|c| c.create_repo("other")).unwrap();
         let tip = ids[2];
         assert!(matches!(
             get_unbounded::<ChangedPathsV1>(&store, other, tip),
+            Err(Error::NotFound(_))
+        ));
+        let deadline = crate::deadline::Deadline::new(Instant::now() + Duration::from_secs(60));
+        assert!(matches!(
+            get_by::<ChangedPathsV1>(&store, other, tip, &deadline),
             Err(Error::NotFound(_))
         ));
         assert!(matches!(
