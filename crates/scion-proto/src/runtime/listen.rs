@@ -2413,6 +2413,61 @@ mod tests {
         assert!(closes_a_peer_that_sends(addr, b"PRI * HT").await);
     }
 
+    /// A TLS reply that outruns the socket's send buffer must still arrive
+    /// in full: rustls' poll_write may return with ciphertext still in the
+    /// session (its own doc says so), and the connection's flush is what
+    /// drives the rest out. A flush that does nothing strands the tail of a
+    /// final reply until the next write, which for a final reply never
+    /// comes - the h2 task never re-registers its waker.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tls_reply_arrives_in_full_even_after_a_socket_pause() {
+        init_log();
+        // The listener's send buffer is small; Linux accepted sockets
+        // inherit it, so the 128 KiB parts cannot leave rustls' session in
+        // one poll and the flush is what empties it.
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        rustix::net::sockopt::set_socket_send_buffer_size(&std_listener, 4096).unwrap();
+        std_listener.set_nonblocking(true).unwrap();
+        let listener = TcpListener::from_std(std_listener).unwrap();
+        let certs = test_certs();
+        let dir = crate::runtime::private_tempdir();
+        let server_tls = server_tls(dir.path(), &certs.server, Some(&certs.authority.cert()));
+        let config = server_tls.config();
+        let addr = listener.local_addr().unwrap();
+        let limits = Limits::default();
+        let metrics = Arc::new(Metrics::default());
+        tokio::spawn(async move {
+            let router = |mut server: Server| server.add_service(ObjectsServer::new(Stalls));
+            let pending = std::future::pending();
+            let _ = limits
+                .serve_with(
+                    &Accepting::of(&limits, &TIMERS),
+                    router,
+                    tcp(listener),
+                    Some(config),
+                    pending,
+                    metrics,
+                )
+                .await;
+        });
+        let mut client = client(addr, &certs.authority.cert(), Some(&certs.client))
+            .await
+            .unwrap();
+        let mut parts = stall(&mut client);
+        let mut got = 0;
+        loop {
+            let part = tokio::time::timeout(Duration::from_secs(30), parts.message())
+                .await
+                .unwrap_or_else(|_| panic!("the reply stalled past 30 s"))
+                .unwrap();
+            match part {
+                Some(_) => got += 1,
+                None => break,
+            }
+        }
+        assert_eq!(got, 10, "the whole reply arrives");
+    }
+
     /// The client preface, then an empty SETTINGS frame: what a real client
     /// sends at once, so a connection that is served would live.
     const PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\x04\0\0\0\0\0";
