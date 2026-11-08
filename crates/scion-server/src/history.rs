@@ -1539,7 +1539,59 @@ mod tests {
                     + before.iter().filter(|(first, _)| !after.contains_key(*first)).count()
                     + after.iter().filter(|(first, _)| !before.contains_key(*first)).count();
 
-                assert!(changed <= 2, "{changed} chunks changed");
+                // The insert must move at least one chunk: an empty
+                // before or after map sees no change at all, and a
+                // level that loads with no chunks lies to every lookup.
+                assert!(changed >= 1 && changed <= 2, "{changed} chunks changed");
+                assert!(
+                    after.contains_key(&PathElem::new("n099").unwrap()),
+                    "a chunk holds the insert's name"
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// A chunked level, loaded from its stored root, answers lookups:
+    /// the leaf chunks the index rows name are reachable. A flatten
+    /// that returns no chunks makes every lookup of a wide level miss,
+    /// and the land path's conflict check with it.
+    #[test]
+    fn a_chunked_level_answers_lookups_after_a_reload() {
+        let (_dir, store, _repo) = open();
+        store
+            .write(|c| {
+                let cut = Cut {
+                    max_bytes: 8192,
+                    bits: 2,
+                };
+                let mut edit = Edit::load(c, None)?;
+                let by = Stamp {
+                    id: ChangesetId::from_bytes([7; 32]),
+                    generation: 1,
+                };
+                for i in 0..500 {
+                    edit.stamp(c, &tree::parts(&path(&format!("d/f{i:04}"))), by)?;
+                }
+                let root = edit.store(c, &cut)?;
+                // The root level holds the one directory; the d level
+                // below it is chunked: its row is an index.
+                let Row::Leaf(root_node) = get_row(c, root)?.0 else {
+                    panic!("the root is one leaf");
+                };
+                let dir_id = root_node[&PathElem::new("d").unwrap()]
+                    .below
+                    .expect("the d level is below the root");
+                match get_row(c, dir_id)?.0 {
+                    Row::Chunks(_) => {}
+                    Row::Leaf(_) => panic!("the d level is one leaf, not chunked"),
+                }
+                let mut edit = Edit::load(c, Some(dir_id))?;
+                let node = edit.entries(c, &PathElem::new("f0250").unwrap())?;
+                assert!(
+                    !node.is_empty(),
+                    "a reloaded chunked level answers its names: the chunk is empty"
+                );
                 Ok(())
             })
             .unwrap();
