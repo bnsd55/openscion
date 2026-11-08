@@ -1064,6 +1064,79 @@ mod tests {
         assert!(cost.visits < 1000, "{cost:?}");
     }
 
+    /// The visit bound bites at the first visit past it, and lets an
+    /// answer that lands exactly on it through: the comparison is
+    /// strictly greater, so a walk whose last move is visit `bound`
+    /// still answers, and one that needs one more dies.
+    #[test]
+    fn the_visit_bound_lets_an_answer_on_it_through() {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let _slot = damage::slot();
+        // 0 the root; 1 and 2 its children; 3 the merge of 1 and 2 (a);
+        // 4 a child of 1; 5 the merge of 4 and 2 (b). The paint walk
+        // between 3 and 5 answers in a handful of visits.
+        let parents = vec![vec![], vec![0], vec![0], vec![1, 2], vec![1], vec![4, 2]];
+        let (_dir, store, repo, ids) = store_graph(&parents);
+        let (a, b) = (
+            At::get_unbounded(&store, repo, ids[3]).unwrap(),
+            At::get_unbounded(&store, repo, ids[5]).unwrap(),
+        );
+        let mut paint = Paint::new(a, b);
+        let unbounded = Steps {
+            reads: 100,
+            visits: 1_000_000,
+        };
+        let (_, cost) = in_steps(
+            &store,
+            &later(),
+            unbounded,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            |index| paint.next(index),
+        )
+        .unwrap();
+        let answer_visits = cost.visits;
+        assert!(answer_visits > 0, "{cost:?}");
+        // The same walk, one visit short of its answer: the bound fires.
+        let mut paint = Paint::new(a, b);
+        let short = Steps {
+            reads: 100,
+            visits: answer_visits - 1,
+        };
+        let got = in_steps(
+            &store,
+            &later(),
+            short,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            |index| paint.next(index),
+        );
+        assert!(
+            matches!(&got, Err(crate::error::Error::ResourceExhausted(text))
+                if text.contains("visit bound")),
+            "{got:?}"
+        );
+        // The answer exactly on the bound goes through: the comparison
+        // is strict, so visit `bound` itself is allowed.
+        let mut paint = Paint::new(a, b);
+        let exact = Steps {
+            reads: 100,
+            visits: answer_visits,
+        };
+        let (bases, cost) = in_steps(
+            &store,
+            &later(),
+            exact,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            |index| paint.next(index),
+        )
+        .unwrap();
+        assert_eq!(bases, [ids[1], ids[2]]);
+        assert_eq!(cost.visits, answer_visits);
+    }
+
     /// A deadline that a test does not reach.
     fn later() -> Deadline {
         Deadline::new(Instant::now() + Duration::from_secs(600))
