@@ -79,6 +79,8 @@ pub async fn bench(ctx: &Ctx, args: BenchArgs) -> Result<()> {
         stats.landed.extend(agent.landed);
         stats.conflicts += agent.conflicts;
         stats.rejected += agent.rejected;
+        stats.put.extend(agent.put);
+        stats.create.extend(agent.create);
         stats.land.extend(agent.land);
         stats.total.extend(agent.total);
     }
