@@ -46,6 +46,9 @@ test-hooks = []
 
 [dev-dependencies]
 rcgen.workspace = true
+# The TLS reply test shrinks the listener's SO_SNDBUF; the crate itself
+# needs no net calls.
+rustix = { workspace = true, features = ["net"] }
 tracing-subscriber.workspace = true
 tempfile.workspace = true
 # The protocol-surface golden decodes the descriptor set the build

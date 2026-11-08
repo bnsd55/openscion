@@ -2453,7 +2453,7 @@ mod tests {
         let mut client = client(addr, &certs.authority.cert(), Some(&certs.client))
             .await
             .unwrap();
-        let mut parts = stall(&mut client);
+        let mut parts = stall(&mut client).await;
         let mut got = 0;
         loop {
             let part = tokio::time::timeout(Duration::from_secs(30), parts.message())
