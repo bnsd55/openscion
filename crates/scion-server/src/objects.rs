@@ -1001,7 +1001,7 @@ mod tests {
     /// it, and the plan must send it RAW, not as a zstd frame that does
     /// not exist. The writer always frames its content, so the file is
     /// emptied by hand: this is the state the arm exists for (only the
-    /// empty blob's file may be 0 bytes; Blobs::verify says so).
+    /// empty blob's file may be 0 bytes; `Blobs::verify` says so).
     #[test]
     fn an_empty_blob_file_plans_raw() {
         let dir = crate::test_support::private_tempdir();
@@ -1053,13 +1053,13 @@ mod tests {
         )]))
         .expect("tree fits the format")
         .encode_with_id();
-        let (leaf, refs, cap) = store
+        let (refs, cap) = store
             .write(|c| {
                 // The bodies the walk decodes are exactly these.
                 c.put_trees(&[(mid_id, mid_body.clone()), (root_id, root_body.clone())])?;
                 let leaf = c.put_tree(&entry("f"))?;
                 let refs = [(Key::Tree(leaf), b"d/m".to_vec())];
-                Ok((leaf, refs, root_body.len() + mid_body.len()))
+                Ok((refs, root_body.len() + mid_body.len()))
             })
             .unwrap();
         let (_, decoded) = prove(&store, *root_id.as_bytes(), &refs, cap, None).unwrap();
@@ -1073,39 +1073,26 @@ mod tests {
     #[test]
     fn a_tree_at_the_object_limit_plans_raw() {
         use scion_core::{Entry, FileEntry, FileState, PathElem, Tree};
-        use std::collections::BTreeMap;
+        use scion_proto::MAX_OBJECT_BYTES;
         let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test(dir.path()).unwrap();
-        use scion_proto::MAX_OBJECT_BYTES;
         let blob = BlobId::of(b"blob");
         // Build the tree, measure, then shave the excess off the tail
         // names, from the last one back, keeping every name at least
         // 1 byte. A name's bytes are the body's bytes one for one.
-        let entry = |name: Vec<u8>| {
-            Tree::new(BTreeMap::from([(
-                PathElem::new(name).unwrap(),
-                Entry::File(FileEntry::new(
-                    FileState::Regular {
-                        content: blob,
-                        executable: false,
-                    },
-                    0,
-                )),
-            )]))
-            .expect("tree fits the format")
-        };
         let wide = 4096_usize;
         let base_count = MAX_OBJECT_BYTES / (wide + 44);
         let mut names: Vec<Vec<u8>> = Vec::new();
         for i in 0..base_count {
             let mut name = vec![b'n'; wide];
-            name[0] = (i % 46 + 1) as u8;
-            name[1] = (i / 46 % 46 + 1) as u8;
-            name[2] = (i / 2_116 % 46 + 1) as u8;
+            let byte = |v: usize| u8::try_from(v % 46 + 1).unwrap();
+            name[0] = byte(i);
+            name[1] = byte(i / 46);
+            name[2] = byte(i / 2_116);
             names.push(name);
         }
         names.push(vec![b'z'; 44]);
-        let (body, id) = {
+        let (body, _id) = {
             let tree = Tree::new(
                 names
                     .iter()
@@ -1191,7 +1178,8 @@ mod tests {
         bytes.extend(vec![b'x'; 1024]);
         std::fs::write(&path, bytes).unwrap();
         let size = store.blobs().size(id).unwrap();
-        assert!(zstd_bound(size) < std::fs::metadata(&path).unwrap().len() as usize);
+        let stored = usize::try_from(std::fs::metadata(&path).unwrap().len()).unwrap();
+        assert!(zstd_bound(size) < stored);
         let err = plan(&store, Key::Blob(id), &HashSet::from([Key::Blob(id)]), true).unwrap_err();
         assert!(matches!(err, Error::Corrupt(_)), "{err:?}");
     }
