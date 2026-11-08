@@ -1073,6 +1073,110 @@ mod tests {
         assert!(decoded > 0, "{decoded}");
     }
 
+    /// The tree-size guard's boundary: a tree whose body is exactly the
+    /// object limit reads; one byte over would be damage. The mutants
+    /// that move the comparison (`>` to `==` or `>=`) refuse the
+    /// exact-limit tree.
+    #[test]
+    fn a_tree_at_the_object_limit_plans_raw() {
+        use scion_core::{Entry, FileEntry, FileState, PathElem, Tree};
+        use std::collections::BTreeMap;
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        use scion_proto::MAX_OBJECT_BYTES;
+        let blob = BlobId::of(b"blob");
+        // Build the tree, measure, then shave the excess off the tail
+        // names, from the last one back, keeping every name at least
+        // 1 byte. A name's bytes are the body's bytes one for one.
+        let entry = |name: Vec<u8>| {
+            Tree::new(BTreeMap::from([(
+                PathElem::new(name).unwrap(),
+                Entry::File(FileEntry::new(
+                    FileState::Regular {
+                        content: blob,
+                        executable: false,
+                    },
+                    0,
+                )),
+            )]))
+            .expect("tree fits the format")
+        };
+        let wide = 4096_usize;
+        let base_count = MAX_OBJECT_BYTES / (wide + 44);
+        let mut names: Vec<Vec<u8>> = Vec::new();
+        for i in 0..base_count {
+            let mut name = vec![b'n'; wide];
+            name[0] = (i % 46 + 1) as u8;
+            name[1] = (i / 46 % 46 + 1) as u8;
+            name[2] = (i / 2_116 % 46 + 1) as u8;
+            names.push(name);
+        }
+        names.push(vec![b'z'; 44]);
+        let (body, id) = {
+            let tree = Tree::new(
+                names
+                    .iter()
+                    .map(|n| {
+                        (
+                            PathElem::new(n.clone()).unwrap(),
+                            Entry::File(FileEntry::new(
+                                FileState::Regular {
+                                    content: blob,
+                                    executable: false,
+                                },
+                                0,
+                            )),
+                        )
+                    })
+                    .collect(),
+            )
+            .expect("tree fits the format");
+            tree.encode_with_id()
+        };
+        let mut over = body.len() - MAX_OBJECT_BYTES;
+        for name in names.iter_mut().rev() {
+            if over == 0 {
+                break;
+            }
+            let shave = over.min(name.len() - 1);
+            name.truncate(name.len() - shave);
+            over -= shave;
+        }
+        assert_eq!(over, 0, "the tail carried the whole excess");
+        let (body, id) = {
+            let tree = Tree::new(
+                names
+                    .iter()
+                    .map(|n| {
+                        (
+                            PathElem::new(n.clone()).unwrap(),
+                            Entry::File(FileEntry::new(
+                                FileState::Regular {
+                                    content: blob,
+                                    executable: false,
+                                },
+                                0,
+                            )),
+                        )
+                    })
+                    .collect(),
+            )
+            .expect("tree fits the format");
+            tree.encode_with_id()
+        };
+        assert_eq!(body.len(), MAX_OBJECT_BYTES, "{}", body.len());
+        let tree_id = TreeId::try_from(id.as_bytes().as_slice()).unwrap();
+        store.write(|c| c.put_trees(&[(tree_id, body)])).unwrap();
+        let plan = plan(
+            &store,
+            Key::Tree(tree_id),
+            &HashSet::from([Key::Tree(tree_id)]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(plan.encoding, Encoding::Raw, "{plan:?}");
+    }
+
     /// The ticket walk pays as it goes: a tree is handed to the walk only
     /// while the bytes it holds fit the reply budget, and an expired
     /// deadline stops the walk before the first tree. The walk reaches a
