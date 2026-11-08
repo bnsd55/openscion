@@ -857,6 +857,74 @@ mod tests {
         Deadline::new(std::time::Instant::now() + std::time::Duration::from_secs(600))
     }
 
+    /// A file put at a directory above the path is a touch: the chain
+    /// makes a/b/c at the base, then puts a FILE a/x - a sibling under
+    /// the directory a - well after the base. The path a/b/c itself is
+    /// unchanged since the base; the touch is only the file above it.
+    /// The land path's conflict check for old bases reads exactly this.
+    /// The mutant that fires only at `above == base_gen` never sees a
+    /// base_gen + 5 and reports nothing.
+    #[test]
+    fn a_file_put_at_a_directory_above_touched_the_path() {
+        let (_dir, store, repo) = open();
+        // The base makes a/b/c; then the directory a/b is replaced by
+        // the FILE a/b (a/b/c deleted, a/b put, one changeset). At the
+        // tip, a/b/c does not exist; its hit is only the file put at the
+        // directory above it. A land on the base must see the conflict.
+        let edits: Vec<Edits> = vec![
+            &[("a/b/c", true)][..],
+            &[("z", true)][..],
+            &[("z", true)][..],
+            &[("z", true)][..],
+            &[("a/b/c", false), ("a/b", true)][..],
+        ];
+        let ids = store_chain(&store, repo, None, &edits, true);
+        let base = ids[0];
+        let base_gen = store.read(|c| c.generation(repo, base)).unwrap();
+        let tip = ids[ids.len() - 1];
+        let root = derived::get_by::<PathHistory>(&store, repo, tip, &later()).unwrap();
+        let touched = store
+            .read(|c| touched_after(c, root, &[path("a/b/c")], base_gen, &later()))
+            .unwrap();
+        assert_eq!(touched, [path("a/b/c")], "a/b was made a file after the base");
+    }
+
+    /// The base changeset's own touch of the path - as the newest
+    /// generation above it, and as the path's last change - is not a
+    /// conflict: touched_after reports paths changed strictly after the
+    /// base. The mutants that count the base itself refuse every land
+    /// whose base touched the path.
+    #[test]
+    fn the_base_touching_the_path_is_not_a_conflict() {
+        let (_dir, store, repo) = open();
+        // gen 1 puts the file a/b; gen 2 changes z. The path a/b/c never
+        // exists; the base of the check is gen 1, which put a/b - the
+        // newest generation above a/b/c. Touched_after must report
+        // nothing: the put is AT the floor, not after it.
+        let edits: Vec<Edits> = vec![&[("a/b", true)][..], &[("z", true)][..]];
+        let ids = store_chain(&store, repo, None, &edits, true);
+        let base_gen = store.read(|c| c.generation(repo, ids[0])).unwrap();
+        let tip = ids[1];
+        let root = derived::get_by::<PathHistory>(&store, repo, tip, &later()).unwrap();
+        let touched = store
+            .read(|c| touched_after(c, root, &[path("a/b/c")], base_gen, &later()))
+            .unwrap();
+        assert!(touched.is_empty(), "{touched:?}");
+
+        // gen 2 creates a/b/c, gen 3 changes z. A floor at the gen that
+        // created a/b/c sees nothing after it - the path's own last
+        // change sits AT the floor.
+        let edits: Vec<Edits> = vec![&[("z", true)][..], &[("a/b/c", true)][..], &[("z", true)][..]];
+        let ids = store_chain(&store, repo, None, &edits, true);
+        let tip = ids[2];
+        let root = derived::get_by::<PathHistory>(&store, repo, tip, &later()).unwrap();
+        let own = store.read(|c| c.generation(repo, ids[1])).unwrap();
+        let touched = store
+            .read(|c| touched_after(c, root, &[path("a/b/c")], own, &later()))
+            .unwrap();
+        assert!(touched.is_empty(), "{touched:?}");
+    }
+
     /// A changeset that puts a file with `blob`, or deletes it, at each path.
     fn changeset(parent: Option<ChangesetId>, edits: &[(&str, Option<BlobId>)]) -> Changeset {
         Changeset::new(
