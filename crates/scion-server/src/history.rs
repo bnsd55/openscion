@@ -863,7 +863,7 @@ mod tests {
     /// unchanged since the base; the touch is only the file above it.
     /// The land path's conflict check for old bases reads exactly this.
     /// The mutant that fires only at `above == base_gen` never sees a
-    /// base_gen + 5 and reports nothing.
+    /// `base_gen` + 5 and reports nothing.
     #[test]
     fn a_file_put_at_a_directory_above_touched_the_path() {
         let (_dir, store, repo) = open();
@@ -886,12 +886,16 @@ mod tests {
         let touched = store
             .read(|c| touched_after(c, root, &[path("a/b/c")], base_gen, &later()))
             .unwrap();
-        assert_eq!(touched, [path("a/b/c")], "a/b was made a file after the base");
+        assert_eq!(
+            touched,
+            [path("a/b/c")],
+            "a/b was made a file after the base"
+        );
     }
 
     /// The base changeset's own touch of the path - as the newest
     /// generation above it, and as the path's last change - is not a
-    /// conflict: touched_after reports paths changed strictly after the
+    /// conflict: `touched_after` reports paths changed strictly after the
     /// base. The mutants that count the base itself refuse every land
     /// whose base touched the path.
     #[test]
@@ -914,7 +918,11 @@ mod tests {
         // gen 2 creates a/b/c, gen 3 changes z. A floor at the gen that
         // created a/b/c sees nothing after it - the path's own last
         // change sits AT the floor.
-        let edits: Vec<Edits> = vec![&[("z", true)][..], &[("a/b/c", true)][..], &[("z", true)][..]];
+        let edits: Vec<Edits> = vec![
+            &[("z", true)][..],
+            &[("a/b/c", true)][..],
+            &[("z", true)][..],
+        ];
         let ids = store_chain(&store, repo, None, &edits, true);
         let tip = ids[2];
         let root = derived::get_by::<PathHistory>(&store, repo, tip, &later()).unwrap();

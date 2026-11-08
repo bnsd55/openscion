@@ -3948,7 +3948,7 @@ mod tests {
     /// is untouched since the base and nothing blocks the apply. Only
     /// the history's `above` stamp sees the touch: the land must be
     /// refused as a conflict. The mutant that fires only at
-    /// `above == base_gen` never sees a base_gen + many and lets the
+    /// `above == base_gen` never sees a `base_gen` + many and lets the
     /// land in.
     #[test]
     fn a_file_at_a_directory_above_the_base_conflicts_an_old_base() {
