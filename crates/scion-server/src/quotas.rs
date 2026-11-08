@@ -50,13 +50,6 @@ impl Quotas {
         Self::new(None, None)
     }
 
-    /// The upload-byte limit, for the checks of the later messages of an
-    /// upload.
-    #[must_use]
-    pub fn upload_bytes(&self) -> Option<usize> {
-        self.upload_bytes
-    }
-
     /// Takes one of the in-flight requests of `caller`, until the [`Call`]
     /// drops.
     ///
@@ -243,6 +236,23 @@ mod tests {
         let mut upload = quotas.upload(&caller("a"), 10).unwrap();
         assert!(upload.add(1).is_err());
         drop(upload);
+        quotas.upload(&caller("a"), 10).unwrap();
+    }
+
+    #[test]
+    fn a_dropped_upload_gives_back_its_own_bytes_only() {
+        let quotas = Quotas::new(None, Some(10));
+        // One call takes 6 and adds 2: its own hold is 8 bytes.
+        let mut first = quotas.upload(&caller("a"), 6).unwrap();
+        first.add(2).unwrap();
+        // A second call takes 1 more while the first is still held.
+        let second = quotas.upload(&caller("a"), 1).unwrap();
+        // The first's drop gives back its own 8; the second's 1 stays
+        // held, so the whole cap does not fit again.
+        drop(first);
+        quotas.upload(&caller("a"), 10).unwrap_err();
+        drop(second);
+        // All of it came back now that both calls are gone.
         quotas.upload(&caller("a"), 10).unwrap();
     }
 

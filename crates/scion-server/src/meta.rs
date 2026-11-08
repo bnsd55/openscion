@@ -452,6 +452,26 @@ pub trait MetaTx {
     /// same value first) is legal.
     fn put_derived_all(&mut self, rows: &[(String, u32, ChangesetId, Vec<u8>)]) -> Result<()>;
 
+    /// The settle's whole write: the trees, the derived rows and the
+    /// repo's blob membership, one statement where the backend can
+    /// (#1004). The method owns the disagreeing-row check
+    /// `put_derived_all` applies: a stored derived row that differs
+    /// from the computed one refuses as corrupt, before the
+    /// transaction's memory follows the writes. The default splits
+    /// into the three calls, the old shape.
+    fn put_settle_rows(
+        &mut self,
+        trees: &[(TreeId, Vec<u8>)],
+        rows: &[(String, u32, ChangesetId, Vec<u8>)],
+        repo: RepoId,
+        blobs: &[BlobId],
+    ) -> Result<()> {
+        self.put_trees(trees)?;
+        self.put_derived_all(rows)?;
+        self.add_repo_blobs(repo, blobs)?;
+        Ok(())
+    }
+
     /// Deletes up to `limit` derived values of `kind` below `version`.
     fn delete_derived_below(&mut self, kind: &str, version: u32, limit: usize) -> Result<usize>;
 

@@ -671,10 +671,16 @@ fn verification_catches_a_tree_that_differs_from_git() {
             executable: false,
         }),
     )]);
-    // A write, not a read: the apply inserts the tree's rows, and the
-    // database refuses an INSERT in a read-only transaction.
+    // A write, not a read: the apply no longer writes the trees it
+    // builds (#1004) - the settle's one statement does - so the test
+    // stores them the way the settle does, and the database refuses an
+    // INSERT in a read-only transaction.
     let bad = store
-        .write(|c| tree::apply(c, Some(root), &extra, &mut |_| Ok(0)))
+        .write(|c| {
+            let applied = tree::apply(c, Some(root), &extra, &mut |_| Ok(0))?;
+            c.put_settle_rows(&applied.1, &[], repo, &[])?;
+            Ok(applied.0)
+        })
         .unwrap();
     let schema = Backend::test_schema(dir.path());
     let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();

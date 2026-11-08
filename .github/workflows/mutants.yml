@@ -41,6 +41,34 @@ on:
         required: false
         default: ""
         type: string
+      shard:
+        description: >-
+          this run's shard index, 0-based (cargo-mutants --shard k/n,
+          valid k: 0..shards-1; k must be less than shards). Set both
+          this and shards for a file whose mutant count cannot fit one
+          job's timeout (#1008, listen.rs); leave both empty for a
+          whole-file run.
+        required: false
+        default: ""
+        type: string
+      shards:
+        description: the number of shards, n in --shard k/n; set with shard
+        required: false
+        default: ""
+        type: string
+      test_package:
+        description: >-
+          run this package's test targets alongside the mutated
+          package's, via cargo-mutants -C --package=<name>, for mutants
+          in one package whose killing tests live in another (#961's
+          Bearer mutant, #1008's listen boundary: the proto's mutants
+          against the server's suites). Empty runs the mutated package's
+          tests only. Note: --test-package alone cannot do this - the
+          baseline is pinned to the mutated package, so the named
+          --test targets fail to resolve.
+        required: false
+        default: ""
+        type: string
       runner:
         description: >-
           the runner: ubuntu-24.04 (the default) with the Postgres service;
@@ -118,6 +146,9 @@ jobs:
           FILES: ${{ inputs.files }}
           MUTANT_TIMEOUT: ${{ inputs.timeout_per_mutant }}
           TEST_ARGS: ${{ inputs.test_args }}
+          SHARD: ${{ inputs.shard }}
+          SHARDS: ${{ inputs.shards }}
+          TEST_PACKAGE: ${{ inputs.test_package }}
         run: |
           # The dispatch names files, one per -f: cargo-mutants examines
           # only those files' functions. Every name must be a file in the
@@ -130,8 +161,20 @@ jobs:
             file_args="$file_args -f $f"
           done
           df -h /
+          if { [ -n "$SHARD" ] && [ -z "$SHARDS" ]; } || { [ -z "$SHARD" ] && [ -n "$SHARDS" ]; }; then
+            echo "error: set both shard and shards, or neither (got one)" >&2
+            exit 1
+          fi
+          shard_args=""
+          if [ -n "$SHARD" ] && [ -n "$SHARDS" ]; then
+            shard_args="--shard $SHARD/$SHARDS"
+          fi
+          mutants_args=""
+          if [ -n "$TEST_PACKAGE" ]; then
+            mutants_args="-C --package=$TEST_PACKAGE"
+          fi
           # shellcheck disable=SC2086
-          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $file_args -- $TEST_ARGS
+          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args -- $TEST_ARGS
           df -h /
       - name: the outcome lists
         if: always()
@@ -192,6 +235,9 @@ jobs:
           FILES: ${{ inputs.files }}
           MUTANT_TIMEOUT: ${{ inputs.timeout_per_mutant }}
           TEST_ARGS: ${{ inputs.test_args }}
+          SHARD: ${{ inputs.shard }}
+          SHARDS: ${{ inputs.shards }}
+          TEST_PACKAGE: ${{ inputs.test_package }}
         run: |
           set -eu
           file_args=""
@@ -201,8 +247,20 @@ jobs:
             file_args="$file_args -f $f"
           done
           df -h /
+          if { [ -n "$SHARD" ] && [ -z "$SHARDS" ]; } || { [ -z "$SHARD" ] && [ -n "$SHARDS" ]; }; then
+            echo "error: set both shard and shards, or neither (got one)" >&2
+            exit 1
+          fi
+          shard_args=""
+          if [ -n "$SHARD" ] && [ -n "$SHARDS" ]; then
+            shard_args="--shard $SHARD/$SHARDS"
+          fi
+          mutants_args=""
+          if [ -n "$TEST_PACKAGE" ]; then
+            mutants_args="-C --package=$TEST_PACKAGE"
+          fi
           # shellcheck disable=SC2086
-          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $file_args -- $TEST_ARGS
+          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args -- $TEST_ARGS
           df -h /
       - name: the outcome lists
         if: always()

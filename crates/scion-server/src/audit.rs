@@ -313,16 +313,9 @@ fn checked_open(path: &Path, dir_syncs: Option<&AtomicU64>) -> io::Result<std::f
     )
     .map_err(io::Error::from)?;
     let stat = rustix::fs::fstat(&file).map_err(io::Error::from)?;
-    // Plain mode bits, no platform raw-mode conversions: a regular
-    // file of the user or root, mode 0600.
-    let is_file = stat.st_mode & 0o170_000 == 0o100_000;
-    let owned = stat.st_uid == me || stat.st_uid == 0;
-    let mode = stat.st_mode & 0o777;
-    if !is_file || !owned || mode != 0o600 {
+    if let Err(why) = refuse_wrong_file_ownership(stat.st_mode, stat.st_uid, me) {
         drop(file);
-        return Err(io::Error::other(
-            "the audit file must be a plain 0600 file of the user or root",
-        ));
+        return Err(why);
     }
     // The file's fsync makes its bytes durable, not its entry in the
     // parent: a crash right after the first start would lose the file
@@ -343,6 +336,24 @@ fn checked_open(path: &Path, dir_syncs: Option<&AtomicU64>) -> io::Result<std::f
         }
     }
     Ok(file.into())
+}
+
+/// The audit file must be a plain file of the user or root, mode
+/// 0600. The check takes the three stat fields it reads, so a test can
+/// drive it for an owner the suite's own uid cannot stage (#1006).
+fn refuse_wrong_file_ownership(st_mode: impl Into<u32>, st_uid: u32, me: u32) -> io::Result<()> {
+    // The stat's mode is u16 in the darwin stat and u32 elsewhere: the
+    // conversion rides the argument, not a cast at the call.
+    let st_mode: u32 = st_mode.into();
+    let is_file = st_mode & 0o170_000 == 0o100_000;
+    let owned = st_uid == me || st_uid == 0;
+    let mode = st_mode & 0o777;
+    if !is_file || !owned || mode != 0o600 {
+        return Err(io::Error::other(
+            "the audit file must be a plain 0600 file of the user or root",
+        ));
+    }
+    Ok(())
 }
 
 /// An append that failed mid-line (an ENOSPC in the middle of a write)
@@ -878,6 +889,28 @@ mod tests {
                 || why.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()),
             "{why:?}"
         );
+    }
+
+    #[test]
+    fn the_ownership_guard_drives_directly() {
+        let me = rustix::process::getuid().as_raw();
+        // Neither the suite's uid nor root, whatever the suite runs as.
+        let foreign = if me == 0 { 1 } else { u32::MAX };
+        // A plain 0600 file of the user: the one shape the guard accepts.
+        refuse_wrong_file_ownership(0o100_600u32, me, me).unwrap();
+        // The root arm: a plain 0600 file of root is accepted too.
+        refuse_wrong_file_ownership(0o100_600u32, 0, me).unwrap();
+        // A plain 0600 file of another uid is refused, whatever the
+        // suite's uid can stage on disk (#1006).
+        let why = refuse_wrong_file_ownership(0o100_600u32, foreign, me).unwrap_err();
+        assert!(why.to_string().contains("0600"), "{why:?}");
+        // A directory with mode 0600 is refused for its kind, not its
+        // mode: the `||` must stay an or.
+        let why = refuse_wrong_file_ownership(0o040_600u32, me, me).unwrap_err();
+        assert!(why.to_string().contains("plain"), "{why:?}");
+        // A plain 0644 file of the user is refused for its mode.
+        let why = refuse_wrong_file_ownership(0o100_644u32, me, me).unwrap_err();
+        assert!(why.to_string().contains("0600"), "{why:?}");
     }
 
     #[test]
