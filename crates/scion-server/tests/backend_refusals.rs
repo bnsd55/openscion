@@ -762,7 +762,13 @@ fn a_first_open_cut_before_its_marker_opens_again() {
             Ok(again) => break again,
             Err(e)
                 if e.to_string().contains("another server holds this store")
-                    && std::time::Instant::now() < deadline => {}
+                    && std::time::Instant::now() < deadline =>
+            {
+                // Each try opens connections, so the pause keeps a slow
+                // release from opening hundreds against the shared
+                // database.
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
             Err(e) => panic!("the first open cut before its marker opens again: {e}"),
         }
     };
