@@ -372,6 +372,79 @@ fn two_pending_lands_sharing_a_request_key_are_named_or_tolerated() {
     }
 }
 
+/// The attack behind the duplicate-key check's own sense: two pending
+/// lands on distinct request keys are two records the replay makes
+/// cleanly, and a sound archive must verify with no damage. A check
+/// that fires on the distinct keys names damage in a backup that is
+/// fine; the check inverted fires on the first key it sees instead of
+/// the collision, and never names a real one.
+#[test]
+fn two_pending_lands_on_distinct_request_keys_verify_clean() {
+    let (_keep, out, main_tip, _second) = sound_archive();
+    let lands_path = section(&out, REPO).join("lands.json");
+    let crafted = serde_json::json!([
+        {"caller": "attacker", "request_key": "key-one", "target_ref": "main",
+         "input_cs": main_tip},
+        {"caller": "attacker", "request_key": "key-two", "target_ref": "main",
+         "input_cs": main_tip},
+    ]);
+    std::fs::write(&lands_path, crafted.to_string()).unwrap();
+
+    let damages = archive::verify(&out).unwrap();
+    assert_eq!(
+        damages,
+        Vec::<String>::new(),
+        "two lands on distinct request keys are a sound archive: {damages:?}"
+    );
+}
+
+/// The attack: a pending land whose `input_cs` names a changeset the
+/// archive does not hold. The format says the input MUST be one the
+/// archive holds, and the replay would record a land the store cannot
+/// make sense of; `verify` - the reader an operator runs without the
+/// store's code - must name it, and the restore must refuse before it
+/// writes a row.
+#[test]
+fn a_pending_land_naming_an_input_the_archive_does_not_hold_is_named_and_refused() {
+    let (_keep, out, main_tip, _second) = sound_archive();
+    // A valid-format changeset id the section does not hold: the tip
+    // with its first hex digit flipped.
+    let ghost: String = main_tip
+        .chars()
+        .enumerate()
+        .map(|(i, c)| {
+            if i == 0 {
+                if c == '0' { '1' } else { '0' }
+            } else {
+                c
+            }
+        })
+        .collect();
+    assert_ne!(ghost, main_tip, "the flip must change the id");
+    let lands_path = section(&out, REPO).join("lands.json");
+    let crafted = serde_json::json!([
+        {"caller": "attacker", "request_key": "one-key", "target_ref": "main",
+         "input_cs": ghost},
+    ]);
+    std::fs::write(&lands_path, crafted.to_string()).unwrap();
+
+    let damages = archive::verify(&out).unwrap();
+    assert!(
+        damages
+            .iter()
+            .any(|d| d.contains("which the archive does not hold")),
+        "a land's missing input must be a named damage: {damages:?}"
+    );
+    let empty = scion_server::test_support::private_tempdir();
+    let restored = archive::restore(&out, empty.path(), &url_of(empty.path()), None);
+    assert!(restored.is_err(), "a named damage must refuse the replay");
+    let written = std::fs::read_dir(empty.path()).unwrap().count();
+    assert_eq!(
+        written, 0,
+        "a refused restore must not leave a half-restored store"
+    );
+}
+
 /// The attack: a changeset whose change names a blob the members.txt
 /// does not list. Nothing else in `verify` looks at the changes'
 /// members, so the reader passed what the replay would die on — the

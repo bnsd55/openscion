@@ -430,6 +430,30 @@ fn snapshot_main_hex(archive: &Path) -> String {
     value[0]["target"].as_str().expect("a target").to_owned()
 }
 
+/// The manifest's counts are the archive's own summary, and the format
+/// doc's table says what each one means: totals over the archive. An
+/// operator reads them without the store's code, so they must be the
+/// sums the sections hold - not a running arithmetic the export could
+/// get wrong on its way through the sections.
+#[test]
+fn the_manifest_counts_what_the_sections_hold() {
+    let data = scion_server::test_support::private_tempdir();
+    let (store, _main) = source(data.path());
+    let out = scion_server::test_support::private_tempdir()
+        .path()
+        .join("archive");
+    archive::export(&store, data.path(), Some(REPO), false, &out).unwrap();
+    drop(store);
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap();
+    let counts = &value["counts"];
+    assert_eq!(counts["repos"], 1, "the one repo the archive holds");
+    assert_eq!(counts["changesets"], 3, "main's three changesets");
+    assert_eq!(counts["refs"], 1, "main's one ref");
+    assert_eq!(counts["pending_lands"], 0, "no land was pending");
+    assert_eq!(counts["blobs"], 3, "main's three blobs");
+}
+
 #[test]
 fn a_changeset_a_parent_points_past_is_named() {
     // Drop a middle changeset's record from the stream: its child names
