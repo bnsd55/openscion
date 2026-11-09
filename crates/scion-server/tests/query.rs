@@ -598,6 +598,64 @@ fn diff_matches_git_name_status_and_resumes_after_any_path() {
     assert_eq!(diff_all(&store, old, old, None, None), []);
 }
 
+/// A diff one entry past the page bound, all in one directory: the
+/// first page holds exactly the bound's entries and names the path to
+/// resume at, the next call answers the rest, and the pages together
+/// hold every entry once, in tree order. The walk's page break and its
+/// resume guard only reach past the bound, and the single directory
+/// puts the resume point inside it, where a seam that repeats or drops
+/// one entry shows.
+#[test]
+fn a_diff_pages_at_the_entry_bound_and_resumes_inside_the_directory() {
+    let (_data, store) = open_store();
+    let files: BTreeMap<RepoPath, Option<FileState>> = (0..=MAX_DIFF_ENTRIES)
+        .map(|i| (path(&format!("d/f{i:04}")), Some(unstored(i))))
+        .collect();
+    let ids = chain(&store, vec![BTreeMap::new(), files]);
+    let (old, new) = (ids[0], ids[1]);
+
+    let first = read::diff(&store, REPO, old, new, None, None, &later()).unwrap();
+    assert_eq!(
+        first.entries.len(),
+        MAX_DIFF_ENTRIES,
+        "the page stops at its bound"
+    );
+    let last = first.entries.last().unwrap().path.clone();
+    assert_eq!(last, path("d/f0999"), "the page ends on the bound's entry");
+    assert_eq!(first.next_after.as_ref(), Some(&last), "the walk continues");
+
+    let rest = read::diff(
+        &store,
+        REPO,
+        old,
+        new,
+        None,
+        first.next_after.as_ref(),
+        &later(),
+    )
+    .unwrap();
+    assert_eq!(
+        rest.entries
+            .iter()
+            .map(|e| e.path.clone())
+            .collect::<Vec<_>>(),
+        vec![path("d/f1000")],
+        "the next call answers the one entry after the seam"
+    );
+    assert_eq!(rest.next_after, None, "the diff ended");
+
+    let want: Vec<RepoPath> = (0..=MAX_DIFF_ENTRIES)
+        .map(|i| path(&format!("d/f{i:04}")))
+        .collect();
+    let got: Vec<RepoPath> = first
+        .entries
+        .iter()
+        .chain(rest.entries.iter())
+        .map(|e| e.path.clone())
+        .collect();
+    assert_eq!(got, want, "every entry once, in tree order, across pages");
+}
+
 #[test]
 fn diff_skips_a_subtree_with_the_same_id_on_both_sides() {
     let (data, store) = open_store();
