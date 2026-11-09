@@ -607,3 +607,32 @@ fn an_export_of_two_repos_that_fold_to_one_is_refused() {
         "the export must name the fold: {error:#}"
     );
 }
+
+/// A section that is a plain file, not a directory and not a symlink:
+/// the reader must name the shape - a section the manifest names has
+/// to be a plain directory - not fall through to a read error that
+/// says only that the section cannot be read.
+#[test]
+fn a_section_that_is_a_plain_file_is_refused() {
+    let data = scion_server::test_support::private_tempdir();
+    let (store, _main) = source(data.path());
+    let out = scion_server::test_support::private_tempdir()
+        .path()
+        .join("archive");
+    archive::export(&store, data.path(), Some(REPO), false, &out).unwrap();
+    drop(store);
+    let section = out.join("repos").join(REPO);
+    std::fs::remove_dir_all(&section).unwrap();
+    std::fs::write(&section, b"not a section\n").unwrap();
+
+    let damages = archive::verify(&out).unwrap();
+    assert!(
+        damages
+            .iter()
+            .any(|d| d.contains(REPO) && d.contains("not a plain directory")),
+        "verify must name the file where a section should be: {damages:?}"
+    );
+    let empty = scion_server::test_support::private_tempdir();
+    let restored = archive::restore(&out, empty.path(), &url_of(empty.path()), None);
+    assert!(restored.is_err(), "a named damage must refuse the replay");
+}

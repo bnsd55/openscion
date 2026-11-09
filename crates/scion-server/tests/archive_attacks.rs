@@ -478,6 +478,42 @@ fn a_changeset_naming_an_unlisted_blob_is_named_and_refused() {
     );
 }
 
+/// The attack: a changeset frame whose body does not hash to the ID
+/// its record names. The re-hash is the one check the file's own names
+/// cannot lie about; a body that still decodes - here one same-length
+/// byte swap in the message - but hashes elsewhere must be a named
+/// damage, and the restore must refuse before it writes a row.
+#[test]
+fn a_changeset_that_does_not_hash_to_its_id_is_named_and_refused() {
+    let (_keep, out, _main, _second) = sound_archive();
+    let bin = section(&out, REPO).join("changesets.bin");
+    let bytes = std::fs::read(&bin).unwrap();
+    let needle = b"change\n";
+    let at = bytes
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .expect("the fixture's message bytes");
+    let mut forged = bytes.clone();
+    forged[at..at + needle.len()].copy_from_slice(b"forge!\n");
+    std::fs::write(&bin, forged).unwrap();
+
+    let damages = archive::verify(&out).unwrap();
+    assert!(
+        damages
+            .iter()
+            .any(|d| d.contains("does not hash to its ID")),
+        "a body that does not hash to its ID must be a named damage: {damages:?}"
+    );
+    let empty = scion_server::test_support::private_tempdir();
+    let restored = archive::restore(&out, empty.path(), &url_of(empty.path()), None);
+    assert!(restored.is_err(), "a named damage must refuse the replay");
+    let written = std::fs::read_dir(empty.path()).unwrap().count();
+    assert_eq!(
+        written, 0,
+        "a refused restore must not leave a half-restored store"
+    );
+}
+
 /// The attack behind the two above: whatever kills the replay halfway
 /// — here the store's own fail seam, armed on the very store the
 /// restore opens — the target must come out as it went in: empty. The
