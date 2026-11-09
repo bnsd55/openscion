@@ -15,6 +15,11 @@ use scion_core::{BlobId, Changeset, ChangesetId, FileState, IdentityTime, RepoPa
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use scion_server::{Backend, archive, fsck, test_support::tree};
 
+/// The restore transaction counter is one process-wide atomic: every
+/// in-process restore here takes this lock while it runs, so a test
+/// that reads a count around its own restore reads only its own work.
+static TX_COUNT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The URL a store on `dir` opens with: the test database, under the
 /// directory's own schema, created first.
 fn url_of(dir: &std::path::Path) -> String {
@@ -159,6 +164,7 @@ fn assert_restore_equals_source(source: &Backend, restored: &Backend) {
 
 #[test]
 fn a_restore_commits_bounded_transactions_and_answers_like_its_source() {
+    let _tx_lock = TX_COUNT_LOCK.lock().unwrap();
     let data = scion_server::test_support::private_tempdir();
     let store = stream_source(data.path());
 
@@ -558,4 +564,130 @@ fn a_stream_cut_after_the_first_batch_fails_and_leaves_no_store() {
         Err(error) => panic!("the target is unreadable: {error}"),
     };
     assert!(left.is_empty(), "the target must be empty: {left:?}");
+}
+
+/// A store whose one repo holds two tiny changesets, one ref, and one
+/// pending land: the receipt fixture.
+fn receipt_source(data: &Path) -> Backend {
+    let store = Backend::open_test(data).unwrap();
+    let content = "the receipt's file\n";
+    let blob = store.blobs().put(content.as_bytes()).unwrap();
+    store
+        .write(|c| {
+            let repo = c.create_repo("receipt")?;
+            let cs = changeset(vec![], &[("docs/f", Some(regular(content)))]);
+            let id = tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0;
+            assert!(c.cas_ref(repo, "main", None, id)?);
+            c.add_repo_blob(repo, blob)?;
+            c.record_land(
+                &scion_server::test_support::auth::Caller("receipt".into()),
+                &scion_server::test_support::land::LandRequest {
+                    repo: "receipt".into(),
+                    changeset: id,
+                    target_ref: "main".into(),
+                    request_key: "the-receipt".into(),
+                    deadline: scion_server::test_support::deadline::Deadline::new(
+                        std::time::Instant::now() + Duration::from_secs(600),
+                    ),
+                },
+                None,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+/// The restore's report is the operator's receipt: the repos it
+/// restored and the refs and pending lands it put back. The counts
+/// name the archive's rows, not a running arithmetic the replay could
+/// get wrong, and a recorded land's deadline is a future instant the
+/// client's retry can still meet.
+#[test]
+fn the_restore_report_counts_what_it_put_back() {
+    let _tx_lock = TX_COUNT_LOCK.lock().unwrap();
+    let data = scion_server::test_support::private_tempdir();
+    let store = receipt_source(&data.path().join("source"));
+    let out = scion_server::test_support::private_tempdir()
+        .path()
+        .join("archive");
+    archive::export(
+        &store,
+        &data.path().join("source"),
+        Some("receipt"),
+        false,
+        &out,
+    )
+    .unwrap();
+    drop(store);
+    let empty = scion_server::test_support::private_tempdir();
+    let report = archive::restore(&out, empty.path(), &url_of(empty.path()), None).unwrap();
+    assert_eq!(report.repos, vec!["receipt".to_string()]);
+    assert_eq!(report.refs, 1, "the ref the archive held");
+    assert_eq!(
+        report.lands, 1,
+        "the pending land the replay recorded again"
+    );
+}
+
+/// The restore's transaction count is the work it says it did: one
+/// transaction for the repo's creation, one per byte budget of bodies,
+/// and one publication transaction per repo. A count that multiplied
+/// or dropped a term names work the store never did.
+#[test]
+fn the_restore_commits_the_transactions_it_counts() {
+    let _tx_lock = TX_COUNT_LOCK.lock().unwrap();
+    let data = scion_server::test_support::private_tempdir();
+    let store = receipt_source(&data.path().join("source"));
+    let out = scion_server::test_support::private_tempdir()
+        .path()
+        .join("archive");
+    archive::export(
+        &store,
+        &data.path().join("source"),
+        Some("receipt"),
+        false,
+        &out,
+    )
+    .unwrap();
+    drop(store);
+    let before = scion_server::test_support::archive::restore_tx_count();
+    let empty = scion_server::test_support::private_tempdir();
+    archive::restore_with_budget(
+        &out,
+        empty.path(),
+        &url_of(empty.path()),
+        None,
+        1_000_000,
+        Backend::open,
+    )
+    .unwrap_or_else(|e| panic!("the restore failed: {e:#}"));
+    assert_eq!(
+        scion_server::test_support::archive::restore_tx_count() - before,
+        3,
+        "create_repo + one body batch + the publication"
+    );
+}
+
+/// An empty archive is a complete store: the restore commits the mark
+/// clear in a transaction of its own - one transaction, said once.
+#[test]
+fn the_restore_of_an_empty_archive_commits_one_transaction() {
+    let _tx_lock = TX_COUNT_LOCK.lock().unwrap();
+    let data = scion_server::test_support::private_tempdir();
+    let store = Backend::open_test(&data.path().join("source")).unwrap();
+    let out = scion_server::test_support::private_tempdir()
+        .path()
+        .join("archive");
+    archive::export(&store, &data.path().join("source"), None, true, &out).unwrap();
+    drop(store);
+    let before = scion_server::test_support::archive::restore_tx_count();
+    let empty = scion_server::test_support::private_tempdir();
+    archive::restore(&out, empty.path(), &url_of(empty.path()), None)
+        .unwrap_or_else(|e| panic!("the empty archive's restore failed: {e:#}"));
+    assert_eq!(
+        scion_server::test_support::archive::restore_tx_count() - before,
+        1,
+        "the mark clear that publishes the empty store"
+    );
 }
