@@ -2055,21 +2055,22 @@ mod tests {
     fn a_backfill_report_counts_what_it_stored_and_removed() {
         let (_dir, store, repo, ids) = store_with(&chain(7));
         let tip = ids[6];
-        // Version 1 rows first: the version 2 backfill then derives every
-        // row of its own version and removes every row of the older one,
-        // and its report must count both.
+        // A fresh store: the backfill derives every row of its version and
+        // removes nothing (no older row exists yet).
+        let report = backfill::<ChangedPathsV2>(&store, "r", tip).unwrap();
+        assert_eq!(report.name, ChangedPathsV2::NAME);
+        assert_eq!(report.written, 7, "one stored row per derived changeset");
+        assert_eq!(report.removed, 0);
+        // Rows of an older version, then a second backfill: every row of
+        // its own version is stored, so it derives nothing, and its own
+        // sweep removes every row of the older one.
         assert_eq!(
             get_unbounded::<ChangedPathsV1>(&store, repo, tip).unwrap(),
             7
         );
-        let report = backfill::<ChangedPathsV2>(&store, "r", tip).unwrap();
-        assert_eq!(report.name, ChangedPathsV2::NAME);
-        assert_eq!(report.written, 7, "one stored row per derived changeset");
-        assert_eq!(report.removed, 7, "every row of the older version removed");
-        // A second run stores nothing and removes nothing.
         let again = backfill::<ChangedPathsV2>(&store, "r", tip).unwrap();
         assert_eq!(again.written, 0);
-        assert_eq!(again.removed, 0);
+        assert_eq!(again.removed, 7, "every row of the older version removed");
     }
 
     #[test]
