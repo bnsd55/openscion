@@ -697,7 +697,7 @@ fn a_land_whose_head_tree_is_missing_fills_before_the_write_transaction() {
 /// log window (the `LOG_LOCK`) and its own process: no other test
 /// speaks SQL in it, so the count cannot pick up a neighbor's walks.
 #[test]
-fn a_bounded_advance_reads_one_page_not_the_chain() {
+fn a_bounded_advance_stops_at_the_depth_bound_not_the_chain() {
     let _log = LOG_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
