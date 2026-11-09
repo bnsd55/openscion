@@ -1329,7 +1329,17 @@ mod tests {
         let mut checkout = start(&dest, Some(Nfs::Plain), true).unwrap();
         checkout.file(&path("f"), false, b"f\n").unwrap();
         checkout.finish().unwrap();
-        assert_eq!(mode(&dest.join("f")) & 0o777, 0o644);
+        // The tree stores 0o666 for a non-executable file, and the copy
+        // up's create applies the umask to it like any create: the
+        // copied-up file must land with the mode a plain create of those
+        // bits gets, whatever the umask, and never an execute bit.
+        let at = tmp.path().join("plain-f");
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true).mode(0o666);
+        options.open(&at).unwrap();
+        let plain = mode(&at);
+        assert_eq!(mode(&dest.join("f")), plain);
+        assert_eq!(plain & 0o111, 0);
     }
 
     #[test]
