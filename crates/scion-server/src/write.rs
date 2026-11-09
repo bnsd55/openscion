@@ -165,6 +165,16 @@ pub fn create_changeset(
     // that gave up leaves the committed steps, and the next create or
     // land resumes from them instead of running to the end.
     tree::fill_root_tree_by(store, repo_id, parent, deadline)?;
+    // The reads the write transaction would run, run here first, on a
+    // reader: the derived values of the parents and the changeset, the
+    // stored trees on the changed paths, and the history node the build
+    // reads first. Every row is committed - the parent's own transaction
+    // wrote it - and content-addressed or written once at its own
+    // changeset's settle, so a pre-transaction answer cannot be stale; a
+    // miss re-reads in the transaction. The generation rides no pre-read:
+    // the transaction reads the generation itself (the insert's own
+    // read), so the pre-read carries none.
+    let pre = store.read(|c| tree::pre_read(c, repo_id, &cs))?;
     store.write(|c| {
         // The rules re-checked inside the transaction, one statement for
         // the repo and both membership questions: the parent's, and the
@@ -197,8 +207,15 @@ pub fn create_changeset(
                 return Err(bad_blob(blob, path, "is not stored", repo));
             }
         }
-        tree::store_changeset_within(c, repo_id, &cs, &mut tree::lens_from(&lens), deadline)
-            .map(|(id, _)| id)
+        tree::store_changeset_within(
+            c,
+            repo_id,
+            &cs,
+            &mut tree::lens_from(&lens),
+            deadline,
+            Some(pre),
+        )
+        .map(|(id, _)| id)
     })
 }
 

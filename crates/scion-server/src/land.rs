@@ -948,8 +948,8 @@ fn settle(
     // transaction, so the write connection does no file I/O.
     let lens = tree::lens_of_puts(store, crate::meta::puts(&rebased).map(|(_, blob)| blob))?;
     let landed = store.write_slot_holder(|c| {
-        let (id, _) =
-            tree::store_changeset_within(c, repo, &rebased, &mut tree::lens_from(&lens), deadline)?;
+        let mut lens = tree::lens_from(&lens);
+        let (id, _) = tree::store_changeset_within(c, repo, &rebased, &mut lens, deadline, None)?;
         if !c.cas_ref(repo, target, Some(head.version), id)? {
             // The error rolls back the transaction, rebased changeset included.
             return Err(Error::Aborted(format!(
@@ -3938,5 +3938,70 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(f.main().version, 3, "the refused CAS moved nothing");
+    }
+
+    /// The land path's conflict check for old bases: a base deeper than
+    /// [`MAX_DEPTH`] is checked in the head's path history
+    /// ([`check_history`]), because the index does not reach that far
+    /// back. After the base, the file `a/b` was put at the directory
+    /// above the land's path and was deleted again, so the path itself
+    /// is untouched since the base and nothing blocks the apply. Only
+    /// the history's `above` stamp sees the touch: the land must be
+    /// refused as a conflict. The mutant that fires only at
+    /// `above == base_gen` never sees a `base_gen` + many and lets the
+    /// land in.
+    #[test]
+    fn a_file_at_a_directory_above_the_base_conflicts_an_old_base() {
+        let _slot = damage::slot();
+        let f = fixture();
+        // The base is the root. The fillers push it past MAX_DEPTH, so
+        // the check reads the head's path history, not the index.
+        let mut head = f.root;
+        for i in 0..18 {
+            head = f.commit(head, &[put(&format!("f{i}.txt"), "x")]);
+            f.move_main(head);
+        }
+        // The file a/b is put, then deleted. Both stamps sit above the
+        // base; a/b/c itself has no history at all.
+        let file = f.commit(head, &[put("a/b", "x")]);
+        f.move_main(file);
+        let gone = f.commit(file, &[del("a/b")]);
+        f.move_main(gone);
+        // A land on the base that creates a/b/c: the apply is clean (no
+        // a/b at the head), but the file sat above the path after the
+        // base.
+        let cs = f.commit(f.root, &[put("a/b/c", "new")]);
+        let out = f.land(cs, "k");
+        assert_eq!(out.state, LandState::Conflict, "{}", out.detail);
+        assert_eq!(out.conflict_paths, [RepoPath::new("a/b/c").unwrap()]);
+    }
+
+    /// The base's own touch of the land's path is not a conflict: the
+    /// base created `c` and nothing changed it after. A refusal there
+    /// would refuse every land that edits a file its base created.
+    ///
+    /// A land-path test for the `>=` mutant of the `above` clause cannot
+    /// exist: the only shape with `above == base_gen` is a file alive at
+    /// the head, and the land's apply then refuses it anyway
+    /// (the apply error `ApplyError::FileInTheWay` in tree.rs - a recorded
+    /// Conflict, the same verdict), so the unit test
+    /// `the_base_touching_the_path_is_not_a_conflict` in
+    /// crates/scion-server/src/history.rs pins that clause instead.
+    #[test]
+    fn the_base_touching_the_path_does_not_conflict_an_old_base() {
+        let _slot = damage::slot();
+        let f = fixture();
+        // The base is the root, which created `c`. The fillers push it
+        // past MAX_DEPTH.
+        let mut head = f.root;
+        for i in 0..18 {
+            head = f.commit(head, &[put(&format!("f{i}.txt"), "x")]);
+            f.move_main(head);
+        }
+        // A land on the base that edits `c`, the path its own base
+        // created.
+        let cs = f.commit(f.root, &[put("c", "new")]);
+        let out = f.land(cs, "k");
+        assert_eq!(out.state, LandState::Landed, "{}", out.detail);
     }
 }
