@@ -960,4 +960,119 @@ mod tests {
         assert_eq!(pairs, uncapped);
         assert_eq!(pairs.len(), 1);
     }
+
+    /// A pair count at git's limit still gets its inexact search: the
+    /// bound is for counts past it, not on it. A search that refuses
+    /// the exact count silently drops the renames of a diff at the
+    /// limit.
+    #[test]
+    fn a_pair_count_at_the_limit_still_gets_its_search() {
+        let _slot = damage::slot();
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let added_blob = store.blobs().put(&lines(0..60)).unwrap();
+        let added_path = RepoPath::new("new").unwrap();
+        // One deleted file 90% like the added file.
+        let like = store
+            .blobs()
+            .put(&[lines(0..54), lines(1000..1006)].concat())
+            .unwrap();
+        let deleted_path = RepoPath::new("old").unwrap();
+        let added = [(&added_path, file(added_blob))];
+        let deleted = [(&deleted_path, file(like))];
+        let read = |_: &RepoPath, blob, _| Ok(Some(Chunks::read(&store, blob)?));
+        let mut cost = 0;
+        let budget = Budget {
+            cost: &mut cost,
+            cap: usize::MAX,
+            progress: false,
+        };
+        let from = Progress::default();
+        // One added times one deleted: a count of one, at the limit.
+        let found = renames(&store, &added, &deleted, read, 1, from, budget).unwrap();
+        assert_eq!(found.pairs.len(), 1);
+        assert_eq!(found.stopped, None);
+    }
+
+    /// The same-name search's cost reaches the budget: the run stops
+    /// once a pair look has charged both tables, and the pairs found so
+    /// far stand. A cost that shrinks or multiplies moves the stop and
+    /// the pairs with it.
+    #[test]
+    fn the_same_name_search_stops_at_its_budget() {
+        let _slot = damage::slot();
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        // Two same-name pairs, each side 90% like its other side, so
+        // the exact step pairs nothing and each look scores at or above
+        // the name threshold.
+        let a_one = store.blobs().put(&lines(0..60)).unwrap();
+        let d_one = store
+            .blobs()
+            .put(&[lines(0..54), lines(1000..1006)].concat())
+            .unwrap();
+        let a_two = store.blobs().put(&lines(100..160)).unwrap();
+        let d_two = store
+            .blobs()
+            .put(&[lines(100..154), lines(2000..2006)].concat())
+            .unwrap();
+        let added_paths = ["new/one", "new/two"].map(|p| RepoPath::new(p).unwrap());
+        let added = [
+            (&added_paths[0], file(a_one)),
+            (&added_paths[1], file(a_two)),
+        ];
+        let deleted_paths = ["old/one", "old/two"].map(|p| RepoPath::new(p).unwrap());
+        let deleted = [
+            (&deleted_paths[0], file(d_one)),
+            (&deleted_paths[1], file(d_two)),
+        ];
+        let read = |_: &RepoPath, blob, _| Ok(Some(Chunks::read(&store, blob)?));
+        let mut cost = 0;
+        let budget = Budget {
+            cost: &mut cost,
+            cap: 300,
+            progress: false,
+        };
+        let from = Progress::default();
+        let found = renames(&store, &added, &deleted, read, MAX_PAIRS, from, budget).unwrap();
+        assert_eq!(found.pairs.len(), 1, "pairs {:?}", found.pairs);
+        assert_eq!(found.pairs[0].added, 0);
+        assert_eq!(found.pairs[0].score, 54000);
+        assert_eq!(found.stopped, Some(1));
+        // The bound: the run's cost, 432, stays under the cap plus one
+        // pair look of two 60-chunk tables.
+        assert!(cost <= 300 + 180, "cost {cost} over the bound");
+    }
+
+
+    /// The same-name look charges both tables, so a deleted file with
+    /// more chunks than its same-named added file costs, not refunds.
+    /// A cost that subtracts goes under zero and breaks the run.
+    #[test]
+    fn the_same_name_look_counts_both_tables() {
+        let _slot = damage::slot();
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        // The deleted file has the longer table: 70 chunks against 60.
+        let added_blob = store.blobs().put(&lines(0..60)).unwrap();
+        let like = store
+            .blobs()
+            .put(&[lines(0..64), lines(2000..2006)].concat())
+            .unwrap();
+        let added_path = RepoPath::new("new").unwrap();
+        let deleted_path = RepoPath::new("old").unwrap();
+        let added = [(&added_path, file(added_blob))];
+        let deleted = [(&deleted_path, file(like))];
+        let read = |_: &RepoPath, blob, _| Ok(Some(Chunks::read(&store, blob)?));
+        let mut cost = 0;
+        let budget = Budget {
+            cost: &mut cost,
+            cap: usize::MAX,
+            progress: false,
+        };
+        let from = Progress::default();
+        let found = renames(&store, &added, &deleted, read, MAX_PAIRS, from, budget).unwrap();
+        assert_eq!(found.pairs.len(), 1);
+        assert_eq!(found.stopped, None);
+    }
 }
