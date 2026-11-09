@@ -1168,6 +1168,44 @@ fn make_repo(store: &Backend) {
 }
 
 #[test]
+fn the_plan_verifies_every_root_and_merge_and_samples_the_rest() {
+    let git = Git::init();
+    git.write("one.txt", "one\n");
+    git.commit("root");
+    git.write("two.txt", "two\n");
+    git.commit("one");
+    git.run(&["checkout", "-q", "-b", "side"]);
+    git.write("side.txt", "side\n");
+    git.commit("side");
+    git.run(&["checkout", "-q", "main"]);
+    git.write("three.txt", "three\n");
+    git.commit("two");
+    git.run(&["merge", "-q", "--no-ff", "side", "-m", "merge side"]);
+    let rev = git.head();
+
+    let (_dir, store) = open_store();
+    let report = import_git(
+        &store,
+        "r",
+        git.path(),
+        &ImportOptions {
+            rev: rev.clone(),
+            target_ref: "main".to_owned(),
+            verify_sample: 1,
+        },
+    )
+    .unwrap();
+    // Five commits: a root, a merge and three single-parent commits. The
+    // plan always verifies the root and the merge and samples the rest,
+    // so a sample of one verifies three commits. A merge that fell out of
+    // the always-verify set (or a root that joined the sample) changes
+    // the count.
+    assert_eq!(report.commits, 5);
+    assert_eq!(report.imported, 5);
+    assert_eq!(report.verified, 3);
+}
+
+#[test]
 fn an_import_that_stays_busy_fails_with_the_busy_error() {
     let git = Git::init();
     let rev = git.fast_commits(0, 60);
@@ -1375,6 +1413,13 @@ fn a_rolled_back_import_batch_verifies_again_when_it_reruns() {
     // batch, or that re-ran a committed one, lands outside.
     let walks = CHECKS.get();
     let retried = ROLLED_CHECKS.get();
+    // The failed batch had checks, and the reset makes the retry pay
+    // them again: a retry that re-verified nothing ran on the rolled
+    // back transaction's cache, not from scratch.
+    assert!(
+        retried > 0,
+        "the rolled-back batch had checks to run again: {retried}"
+    );
     assert_eq!(
         walks,
         one_pass + retried,
