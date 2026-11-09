@@ -30,7 +30,7 @@ certificates and a real token for anything that matters.
 ## The pieces
 
 - `Dockerfile` (repo root): multi-stage build, pinned to the MSRV image
-  `rust:1.88-bookworm` (the same one the `check (MSRV)` CI job checks, so
+  `rust:1.89-bookworm` (the same one the `check (MSRV)` CI job checks, so
   the image always builds with a supported toolchain). The runtime is
   `debian:bookworm-slim` with `ca-certificates`, running as the non-root
   user `scion` (uid 10001); data lives under `/data`, which a named volume
