@@ -1371,3 +1371,53 @@ fn a_failed_restore_resets_a_quoted_schema_as_itself() {
         .batch_execute(&format!("DROP DATABASE {name}"))
         .unwrap();
 }
+
+/// The attack: a provenance row whose `cs` names a changeset the
+/// section does not hold. The format says the provenance's changeset
+/// MUST be one the archive holds; the replay dies on the store's
+/// foreign key - after the store is open, with an error that names the
+/// key, not the archive. `verify` must name the row the way it names a
+/// ref or a land that points past, and the restore must refuse before
+/// it writes a row.
+#[test]
+fn a_provenance_row_naming_a_foreign_changeset_is_named_and_refused() {
+    let (_keep, out, _main, _second) = sound_archive();
+    let ghost: String = {
+        let refs = std::fs::read_to_string(section(&out, SECOND).join("refs.json")).unwrap();
+        let rows: serde_json::Value = serde_json::from_str(&refs).unwrap();
+        let tip = rows[0]["target"].as_str().unwrap().to_owned();
+        tip.chars()
+            .enumerate()
+            .map(|(i, c)| {
+                if i == 0 {
+                    if c == '0' { '1' } else { '0' }
+                } else {
+                    c
+                }
+            })
+            .collect()
+    };
+    let path = section(&out, SECOND).join("provenance.json");
+    let crafted = serde_json::json!([
+        {"oid": "0123456789abcdef0123456789abcdef01234567", "cs": ghost}
+    ]);
+    std::fs::write(&path, crafted.to_string()).unwrap();
+
+    let damages = archive::verify(&out).unwrap();
+    assert!(
+        damages.iter().any(|d| d.contains(SECOND)
+            && d.contains("the provenance row for git commit")
+            && d.contains("which the archive does not hold")),
+        "a provenance row naming a foreign changeset must be a named damage: {damages:?}"
+    );
+    let empty = scion_server::test_support::private_tempdir();
+    let target = empty.path().join("restored");
+    std::fs::create_dir_all(&target).unwrap();
+    let restored = archive::restore(&out, &target, &url_of(empty.path()), None);
+    assert!(restored.is_err(), "a named damage must refuse the replay");
+    let written = std::fs::read_dir(&target).unwrap().count();
+    assert_eq!(
+        written, 0,
+        "a refused restore must not leave a half-restored store"
+    );
+}
