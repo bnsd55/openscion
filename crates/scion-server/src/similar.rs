@@ -737,6 +737,37 @@ mod tests {
         assert_eq!(counted as usize, text.len() - 900);
     }
 
+    /// The score of a pair meets the two files' chunk tables by hash,
+    /// so which unequal chunks collide is part of the answer. The two
+    /// accumulators' mixing is pinned here: one changed operator moves
+    /// these values and needs a deliberate diff against git's
+    /// diffcore-delta.c.
+    #[test]
+    fn the_chunk_hashes_hold_gits_diffcore_delta_values() {
+        let mut text = vec![b'x'; 64];
+        text.push(b'\n');
+        text.extend(vec![b'y'; 64]);
+        text.push(b'\n');
+        text.extend_from_slice(b"tail");
+        let chunks = Chunks::of(&text);
+        assert_eq!(chunks.count, 5);
+        assert_eq!(chunks.table, [(10, 2), (12233, 128), (93992, 4)]);
+    }
+
+    /// A finish emits exactly the chunks its bytes fed: none for an
+    /// empty file, one for a tail under 64 bytes with no newline. A
+    /// finish that ends the empty accumulators again adds a zero-byte
+    /// chunk and a lie about the count, which the budget reads.
+    #[test]
+    fn a_finish_emits_only_the_chunks_its_bytes_fed() {
+        let empty = Chunks::of(b"");
+        assert_eq!(empty.count, 0);
+        assert!(empty.table.is_empty());
+        let tail = Chunks::of(b"abc");
+        assert_eq!(tail.count, 1);
+        assert_eq!(tail.table, [(90913, 3)]);
+    }
+
     /// Lines of 8 bytes, one for each number of `range`.
     fn lines(range: std::ops::Range<usize>) -> Vec<u8> {
         range
