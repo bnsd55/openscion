@@ -249,6 +249,18 @@ pub fn verify(archive: &Path) -> Result<Vec<String>> {
                 ));
             }
         }
+        // The git provenance replays into the store's foreign key on
+        // the changesets it names: a row whose changeset the archive
+        // does not hold passes here and dies mid-replay, after the
+        // store is open. Name it here, where the reader reads, the way
+        // the refs and the lands name theirs.
+        for (commit, cs) in read_provenance(&dir.join("provenance.json"))? {
+            if !ids.contains(&cs) {
+                damages.push(format!(
+                    "repo {name}: the provenance row for git commit {commit} names {cs}, which the archive does not hold"
+                ));
+            }
+        }
         for member in &members {
             let path = blob_path(archive, member);
             match fs::File::open(&path) {
