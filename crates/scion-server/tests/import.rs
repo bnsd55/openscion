@@ -247,6 +247,59 @@ fn fixture() -> (Git, History) {
 /// import must refuse it, not store history that differs from its
 /// source without saying so. `git commit-tree` normalizes `-0000` to
 /// `+0000`; fast-import writes the date header verbatim.
+/// A zone of five digits (`-010000`) is a shape git never writes: the
+/// minutes hold three digits, the length check refuses it, and the
+/// arithmetic after it would accept the same bytes. The refusal must
+/// fire on the shape alone.
+#[test]
+fn a_five_digit_zone_is_refused() {
+    // fast-import refuses the shape itself, so the fixture is a raw
+    // object: the tree of a real commit, and a committer line whose zone
+    // holds three minute digits.
+    let git = Git::init();
+    let mut stream = Vec::new();
+    writeln!(
+        stream,
+        "commit refs/heads/main\ncommitter B <b@x> 1717000000 +0000\ndata 2\nt\nM 100644 inline f\ndata 2\n1\n"
+    )
+    .unwrap();
+    git.run_with(&["fast-import", "--quiet"], &stream);
+    let tree = git.run(&["rev-parse", "main^{tree}"]);
+    let bad_commit = format!(
+        "tree {tree}\nauthor A <a@x> 1717000000 +0000\ncommitter B <b@x> 1717000000 -010000\n\nt\n"
+    );
+    let bad = String::from_utf8(git.raw(
+        &[
+            "hash-object",
+            "-t",
+            "commit",
+            "-w",
+            "--stdin",
+            "--literally",
+        ],
+        bad_commit.as_bytes(),
+    ))
+    .unwrap()
+    .trim_end()
+    .to_owned();
+    git.run(&["update-ref", "refs/heads/main", &bad]);
+    // git really wrote the malformed zone.
+    assert!(
+        git.raw(&["cat-file", "commit", &bad], b"")
+            .windows(7)
+            .any(|w| w == b"-010000"),
+        "the fixture's commit carries the five-digit zone"
+    );
+
+    let dir = scion_server::test_support::private_tempdir();
+    let store = Backend::open_test_shared(dir.path()).unwrap();
+    let err = try_import(&store, &git, &bad).unwrap_err();
+    assert!(
+        err.to_string().contains("is not a date git can write"),
+        "the refusal names the date: {err}"
+    );
+}
+
 #[test]
 fn an_unknown_timezone_date_is_refused() {
     let git = Git::init();
