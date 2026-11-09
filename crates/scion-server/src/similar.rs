@@ -762,7 +762,7 @@ mod tests {
     fn a_finish_emits_only_the_chunks_its_bytes_fed() {
         let empty = Chunks::of(b"");
         assert_eq!(empty.count, 0);
-        assert!(empty.table.is_empty());
+        assert_eq!(empty.table, [] as [(u32, u32); 0]);
         let tail = Chunks::of(b"abc");
         assert_eq!(tail.count, 1);
         assert_eq!(tail.table, [(90913, 3)]);
