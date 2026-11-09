@@ -30,7 +30,7 @@ change the dataset.
 ## Requirements
 
 - Linux or macOS, and network access to GitHub.
-- Rust 1.88 or newer and `protoc`, as for the build.
+- Rust 1.89 or newer and `protoc`, as for the build.
 - Git 2.28 or newer, with `git daemon`.
 - `/usr/bin/time` (on Debian and Ubuntu: `apt install time`).
 - `curl` and `pkill` (on Debian and Ubuntu: `apt install curl procps`):

@@ -3270,6 +3270,66 @@ mod tests {
     }
 
     #[test]
+    fn an_advance_that_needs_room_evicts_the_lru_ref_and_keeps_its_own_index() {
+        use LandState::Landed;
+        // One wide land's index is about a third of the test budget, so
+        // two refs fill two thirds and a third wide land on the first ref
+        // does not fit in what is free. The eviction must drop the other
+        // ref's index - the least recently used - and keep the landing
+        // ref's own: the cache shape an operator can see, and the shape
+        // the next land's reads ride.
+        const WIDE: usize = 320;
+        let _slot = damage::slot();
+        let f = fixture();
+        for name in ["r0", "r1"] {
+            assert!(
+                f.store
+                    .write(|c| c.cas_ref(f.repo, name, None, f.root))
+                    .unwrap()
+            );
+        }
+        let changes = wide("w", WIDE).into_iter().collect();
+        let one = PathIndex::at(f.root, 0, &Arc::default()).cost([(1, &changes)]);
+        assert!(
+            3 * one > MAX_INDEX_BYTES,
+            "the third wide land must need an eviction"
+        );
+        assert!(2 * one <= MAX_INDEX_BYTES, "the first two indexes must fit");
+        let first = f.commit(f.root, &wide("a2", WIDE));
+        assert_eq!(f.land_on("r0", first, "r0 wide").state, Landed);
+        let second = f.commit(f.root, &wide("b2", WIDE));
+        assert_eq!(f.land_on("r1", second, "r1 wide").state, Landed);
+        let held = f.held();
+        assert_eq!(
+            held,
+            BTreeMap::from([("r0".to_owned(), true), ("r1".to_owned(), true)])
+        );
+        let tip = f
+            .store
+            .read(|c| c.get_ref(f.repo, "r0"))
+            .unwrap()
+            .unwrap()
+            .target;
+        let third = f.commit(tip, &wide("c2", WIDE));
+        let out = f.land_on("r0", third, "r0 again");
+        assert_eq!(out.state, Landed, "{out:?}");
+        let held = f.held();
+        assert_eq!(
+            held.get("r1"),
+            Some(&false),
+            "the least recently used ref's index was evicted"
+        );
+        let mine = f.slot("r0");
+        let bytes = mine
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("r0 keeps an index")
+            .bytes;
+        assert!(bytes >= 2 * one, "the landing ref's index kept its entries");
+    }
+
+    #[test]
     fn an_advance_starts_over_when_a_busy_ref_holds_the_budget() {
         let _slot = damage::slot();
         let f = fixture();
@@ -3611,6 +3671,28 @@ mod tests {
         landed.sort();
         assert_eq!(results, landed);
         assert!(f.file(f.main().target, "t15/f24").is_some());
+    }
+
+    /// The retention window is a promise the docs make, in the doc's own
+    /// terms: a finished land still answers a week minus an hour after
+    /// it finished, and is swept a week plus an hour later. The seconds
+    /// are literals, not the constant, so a changed expression moves the
+    /// sweep against this test instead of moving the tests with it.
+    #[test]
+    fn a_land_sweeps_a_week_after_it_finished() {
+        let _slot = damage::slot();
+        let f = fixture();
+        let fresh = f.land(f.commit(f.root, &[put("a/x", "1")]), "fresh");
+        let old = f.land(f.root, "old");
+        // Six days 23 hours old: inside the week, still answerable.
+        f.age(fresh.land_id, 6 * 86_400 + 23 * 3_600);
+        // Seven days one hour old: outside it, swept.
+        f.age(old.land_id, 7 * 86_400 + 3_600);
+        // The next land runs the sweep. The batch takes the oldest two,
+        // and only one land is outside the week.
+        let _ = f.land(f.commit(f.root, &[put("a/z", "1")]), "trigger");
+        assert!(f.get(fresh.land_id).is_ok(), "a land inside the week stays");
+        assert!(f.gone(&old), "a land a week old is swept");
     }
 
     #[test]
