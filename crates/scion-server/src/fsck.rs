@@ -926,6 +926,30 @@ mod tests {
         assert!(report.old.is_empty());
     }
 
+    /// A history whose level is wide enough to chunk is checked row by
+    /// row: the level's index row and every leaf chunk must decode. A
+    /// decode that refuses one kind of row calls a clean store damaged;
+    /// one that accepts every body calls a damaged store clean.
+    #[test]
+    fn a_chunked_history_level_is_checked_row_by_row() {
+        let _slot = damage::slot();
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let names: Vec<String> = (0..500).map(|i| format!("d/f{i:03}")).collect();
+        let files: Vec<(&str, Option<FileState>)> = names
+            .iter()
+            .map(|name| (name.as_str(), Some(file(&store, b"one\n"))))
+            .collect();
+        let id = land(&store, &cs(None, &files));
+        let repo = store.write(|c| c.create_repo(REPO)).unwrap();
+        let deadline = crate::deadline::Deadline::new(
+            std::time::Instant::now() + std::time::Duration::from_secs(600),
+        );
+        crate::derived::get_by::<PathHistory>(&store, repo, id, &deadline).unwrap();
+        let report = run(&store, 1, &mut |_| {}).unwrap();
+        assert!(report.is_clean(), "{:?}", kinds(&report));
+    }
+
     /// A file that vanished while it was being checked is damage only
     /// when a row names the blob: the collector runs beside the check
     /// and owns the files no row names.

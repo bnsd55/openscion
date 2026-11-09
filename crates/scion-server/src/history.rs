@@ -1491,6 +1491,49 @@ mod tests {
             .unwrap();
     }
 
+    /// The cuts of a fixed wide level hold their names: a cut hangs on
+    /// the gear hash of one name, and the backstop on the real entry
+    /// bytes, so the chunks' first names are the same on every machine
+    /// and in every edit order. A changed hash, a changed mask, or a
+    /// wrong byte count moves a boundary, and a stored level reloads
+    /// under an index whose chunks are not the ones on disk.
+    #[test]
+    fn the_cuts_of_a_fixed_wide_level_hold_their_names() {
+        let mut node = BTreeMap::new();
+        for i in 0..300 {
+            node.insert(PathElem::new(format!("n{i:03}")).unwrap(), i);
+        }
+        let cut = Cut {
+            max_bytes: 8192,
+            bits: 4,
+        };
+        let firsts: Vec<String> = split(node.iter(), &cut)
+            .iter()
+            .map(|c| String::from_utf8_lossy(c[0].0.as_bytes()).into_owned())
+            .collect();
+        assert_eq!(
+            firsts,
+            [
+                "n000", "n009", "n036", "n043", "n050", "n053", "n060", "n114", "n122", "n131",
+                "n166", "n175", "n183", "n190", "n193", "n200", "n203", "n210", "n211", "n228",
+                "n249", "n257", "n288", "n298",
+            ]
+        );
+
+        // The backstop cuts on the real entry bytes: this level draws no
+        // hash cut, so every cut is the cap crossing, and the boundary
+        // names the byte count chose. A wrong byte count moves one.
+        let cut = Cut {
+            max_bytes: 8192,
+            bits: 20,
+        };
+        let firsts: Vec<String> = split(node.iter(), &cut)
+            .iter()
+            .map(|c| String::from_utf8_lossy(c[0].0.as_bytes()).into_owned())
+            .collect();
+        assert_eq!(firsts, ["n000", "n093", "n186", "n279"]);
+    }
+
     /// Inserting a name into a wide level re-stores only the chunk that
     /// holds it: a cut hangs on one name, so the boundaries of the later
     /// chunks hold. A cut at a byte count would move the boundary after
@@ -1542,7 +1585,7 @@ mod tests {
                 // The insert must move at least one chunk: an empty
                 // before or after map sees no change at all, and a
                 // level that loads with no chunks lies to every lookup.
-                assert!(changed >= 1 && changed <= 2, "{changed} chunks changed");
+                assert!((1..=2).contains(&changed), "{changed} chunks changed");
                 assert!(
                     after.contains_key(&PathElem::new("n099").unwrap()),
                     "a chunk holds the insert's name"
