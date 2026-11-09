@@ -1921,6 +1921,49 @@ mod tests {
         assert_eq!(rows_of(&store, Ancestry::NAME, Ancestry::VERSION).len(), 12);
     }
 
+    /// The walk's step cost is a size, not only a shape: a chain of 12
+    /// takes six takes of the real `walk_step_bytes` (5 units of 40 bytes
+    /// each at the test [`STEP`] of 2, 1200 bytes in all), so a literal
+    /// budget of 1080 stops it busy, and the same walk under a budget a
+    /// hundred times larger finishes. A step cost of 3 or 4 units instead
+    /// of 5 (the `+` to `-` and `+` to `*` mutants of the formula) fits six
+    /// steps in 1080 and answers, so this test fails under either. The
+    /// `*` to `+` mutant is the same 5 units at [`STEP`] 2 and only
+    /// differs at the production [`STEP`] of 100, so no test-scale budget
+    /// separates it.
+    #[test]
+    fn a_walks_byte_budget_stops_a_walk_that_the_real_step_cost_overruns() {
+        let _slot = damage::slot();
+        let deadline = Deadline::new(Instant::now() + Duration::from_secs(60));
+        // Over the budget: six real steps need 1200 bytes, the pool has
+        // 1080, so the sixth take is refused and the call answers busy.
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test_with_walks(
+            dir.path(),
+            DERIVE_WALKS_CAP,
+            crate::memory::Bytes::named(1_080, "derive walk"),
+        )
+        .unwrap();
+        let (repo, ids) = store.write(|c| store_chain(c, &chain(12))).unwrap();
+        let busy = get_by::<Ancestry>(&store, repo, ids[11], &deadline);
+        assert!(
+            matches!(&busy, Err(Error::Unavailable(why)) if why.contains("byte budget")),
+            "not busy: {busy:?}"
+        );
+        // Far under the budget: the same history answers, so the stop
+        // above is the budget's doing, not the history's.
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test_with_walks(
+            dir.path(),
+            DERIVE_WALKS_CAP,
+            crate::memory::Bytes::named(120_000, "derive walk"),
+        )
+        .unwrap();
+        let (repo, ids) = store.write(|c| store_chain(c, &chain(12))).unwrap();
+        get_by::<Ancestry>(&store, repo, ids[11], &deadline).unwrap();
+        assert_eq!(rows_of(&store, Ancestry::NAME, Ancestry::VERSION).len(), 12);
+    }
+
     /// The unbounded forms (fsck, import, the derive command) take no
     /// bytes: a history the budget cannot hold still derives.
     #[test]
