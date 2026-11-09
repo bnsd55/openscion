@@ -13,7 +13,7 @@ idea, and agree on the approach before writing a large change.
 
 ## Development setup
 
-You need Rust 1.88 or newer, `protoc` (the Protocol Buffers compiler, for the
+You need Rust 1.89 or newer, `protoc` (the Protocol Buffers compiler, for the
 gRPC code) and `git` (the import tests build small git repositories). For fuzzing you also need a nightly toolchain and
 `cargo-fuzz`.
 
@@ -59,7 +59,7 @@ cargo test --workspace
 
 CI runs them again, and adds: `cargo deny check` (supply chain), the
 power-loss suite, the grpcurl conformance check, the docker demo, the
-publish check, the MSRV build on 1.88, the fuzz smoke test, the release
+publish check, the MSRV build on 1.89, the fuzz smoke test, the release
 smoke test, and the same tests on macOS. Run one test file or one
 test directly:
 
