@@ -251,5 +251,37 @@ async fn log_paging_with_a_path_matches_one_full_walk() {
     paged(&mut client, &tip, &positions, 4, b"d/f.txt").await;
 }
 
+/// The same walk over a history whose tip changed the other file: the
+/// window seam then falls on the walk's hit branch, where a guard that
+/// fires one entry early, or an end check that fires one link early,
+/// ends a page mid-history. The pages must still cover every entry
+/// once, in order, and the walk must end only at the root.
+#[tokio::test]
+async fn log_paging_with_a_path_from_the_other_tip_matches_one_full_walk() {
+    let count = 3 * 1000 + 2;
+    let (dir, store, ids) = chain(count);
+    let tip = *ids.last().unwrap();
+    let url = serve(store, dir.path()).await;
+    let mut client = client(&url).await;
+
+    let mut full: Vec<(usize, scion_core::ChangesetId)> = Vec::new();
+    let mut from = tip;
+    let mut pages = 0;
+    loop {
+        pages += 1;
+        assert!(pages <= count, "the walk never left {from:?}");
+        let (ids, next) = call(&mut client, &from, 1_000, b"d/f.txt").await;
+        full.extend(ids);
+        if next.is_empty() {
+            break;
+        }
+        from = scion_core::ChangesetId::try_from(next.as_slice()).unwrap();
+    }
+    assert_eq!(full.len(), count.div_ceil(2), "every second changeset");
+    let positions: Vec<usize> = full.iter().map(|(i, _)| *i).collect();
+    paged(&mut client, &tip, &positions, 7, b"d/f.txt").await;
+    paged(&mut client, &tip, &positions, 4, b"d/f.txt").await;
+}
+
 #[path = "common/mod.rs"]
 mod common;
