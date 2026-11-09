@@ -1044,7 +1044,6 @@ mod tests {
         assert!(cost <= 300 + 180, "cost {cost} over the bound");
     }
 
-
     /// The same-name look charges both tables, so a deleted file with
     /// more chunks than its same-named added file costs, not refunds.
     /// A cost that subtracts goes under zero and breaks the run.
