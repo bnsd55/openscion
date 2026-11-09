@@ -682,3 +682,82 @@ fn a_land_whose_head_tree_is_missing_fills_before_the_write_transaction() {
         "the settle window holds a plain derived INSERT: {log:#?}"
     );
 }
+
+/// The depth stop bounds the advance's walk on a deep history: a ref
+/// that moved past the index's tip by more than [`MAX_DEPTH`] changesets
+/// stops the walk at the bound and starts the index over at the head,
+/// instead of reading the whole first-parent chain. This binary is an
+/// integration test, so the lib's test-profile depth (16) does not
+/// apply: [`MAX_DEPTH`] here is one prune cycle (10,000). One page
+/// carries its anchor row plus 1,000 recursive rows, so ten pages hold
+/// 10,010 rows and the stop at 10,001 lands inside the tenth page. The
+/// chain below is 12,000 empty changesets off the root, so a walk that
+/// reads the chain to its root reads 12 pages (12,001 rows). The
+/// page-statement count separates the two. The test owns the binary's
+/// log window (the `LOG_LOCK`) and its own process: no other test
+/// speaks SQL in it, so the count cannot pick up a neighbor's walks.
+#[test]
+fn a_bounded_advance_stops_at_the_depth_bound_not_the_chain() {
+    let _log = LOG_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (_dir, store) = store_with_root(&[]);
+    let lands = Lands::default();
+    let repo = store.read(|c| c.repo_id(REPO)).unwrap();
+    let root = store
+        .read(|c| {
+            Ok(c.get_ref(repo, "main")?
+                .expect("the root ref exists")
+                .target)
+        })
+        .unwrap();
+    // Land once at the root: the index exists, its tip is the seed.
+    let seed = changeset_on(&store, root, &[]);
+    let outcome = land_once(&store, &lands, seed);
+    assert_eq!(outcome.state, LandState::Landed, "{}", outcome.detail);
+    // A first-parent chain of 12,000 empty changesets off the root:
+    // each is one row of the walk, and an empty changeset's byte
+    // estimate is entry_bytes(&[]) = 64, so 12,000 of them cost ~750
+    // KiB: under the budget, so only the depth stop can end the walk.
+    let head = store
+        .write(|c| {
+            let mut head = root;
+            for _ in 0..12_000 {
+                let cs = Changeset::new(
+                    vec![head],
+                    identity(),
+                    None,
+                    b"chain\n".to_vec(),
+                    BTreeMap::new(),
+                )
+                .unwrap();
+                head = c.insert_changeset(repo, &cs)?;
+            }
+            Ok(head)
+        })
+        .unwrap();
+    store
+        .write(|c| {
+            let head_ref = c
+                .get_ref(repo, "main")?
+                .expect("main exists: the seed land set it");
+            c.cas_ref(repo, "main", Some(head_ref.version), head)
+        })
+        .unwrap();
+    // The land walks from the chain's head down to the tip: the depth
+    // stop ends it at the bound, 10,001 rows in, inside the tenth page.
+    let trigger = changeset_on(&store, head, &[]);
+    Backend::test_reset_statement_count();
+    let outcome = land_once(&store, &lands, trigger);
+    assert_eq!(outcome.state, LandState::Landed, "{}", outcome.detail);
+    let pages = Backend::test_statement_log()
+        .iter()
+        .filter(|sql| sql.starts_with("WITH RECURSIVE walk"))
+        .count();
+    assert_eq!(
+        pages,
+        10,
+        "the bounded walk stops at the bound (10 pages), not the chain's 12: {:#?}",
+        Backend::test_statement_log()
+    );
+}

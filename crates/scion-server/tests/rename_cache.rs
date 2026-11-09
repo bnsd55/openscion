@@ -698,3 +698,79 @@ fn a_diff_past_its_rename_byte_bound_says_renames_may_be_missing() {
     }
     scion_server::test_support::read::test_clear_rename_cache();
 }
+
+/// A repo whose diff is exactly the added paths: the old side is empty,
+/// so the walk's entry list is the adds alone, at `2 * path bytes + 160`
+/// bytes per entry against the byte bound, one entry per add against the
+/// count bound.
+fn seeded_adds(
+    added: &[&str],
+) -> (
+    tempfile::TempDir,
+    Backend,
+    scion_core::ChangesetId,
+    scion_core::ChangesetId,
+) {
+    let dir = scion_server::test_support::private_tempdir();
+    let store = Backend::open_test(dir.path()).unwrap();
+    let repo = store.write(|c| c.create_repo(REPO)).unwrap();
+    let blob = store.blobs().put(b"content\n").unwrap();
+    let mut new_files = BTreeMap::new();
+    for name in added {
+        new_files.insert(
+            RepoPath::new(*name).unwrap(),
+            Some(FileState::Regular {
+                content: blob,
+                executable: false,
+            }),
+        );
+    }
+    let old = Changeset::new(vec![], identity(), None, b"old\n".to_vec(), BTreeMap::new()).unwrap();
+    let new = Changeset::new(vec![], identity(), None, b"new\n".to_vec(), new_files).unwrap();
+    let ids = store
+        .write(|c| {
+            let old = tree::store_changeset(c, repo, &old, &mut |_| Ok(0))?.0;
+            let new = tree::store_changeset(c, repo, &new, &mut |_| Ok(0))?.0;
+            Ok((old, new))
+        })
+        .unwrap();
+    (dir, store, ids.0, ids.1)
+}
+
+/// Both rename bounds answer at their exact edges. The walk's per-entry
+/// cost is `2 * path bytes + 160`, and the count bound is the byte bound
+/// in entries, so one added file of a 3-byte path costs 166 bytes: a
+/// bound of 163 or 165 puts it past the byte bound, 166 exactly on it,
+/// 959 far under both bounds with the count bound at 5 entries, and 319
+/// puts the count exactly on its bound (one entry) with the bytes far
+/// under. Two added files double the vector: 332 bytes, 2 entries.
+#[test]
+fn the_rename_bounds_answer_at_their_exact_edges() {
+    let _log = log_guard();
+    let (_dir, store, old, new) = seeded_adds(&["abc"]);
+    let (_dir2, store2, old2, new2) = seeded_adds(&["abc", "abd"]);
+    let cases = [
+        (163, true, true),
+        (165, true, true),
+        (166, false, true),
+        (959, false, false),
+        (319, false, true),
+    ];
+    for (bound, one, two) in cases {
+        scion_server::test_support::read::test_clear_rename_cache();
+        {
+            let _small = scion_server::test_support::read::test_set_rename_byte_bound(bound);
+            let one_entry = page(&store, old, new, None);
+            assert_eq!(
+                one_entry.renames_incomplete, one,
+                "the one-entry diff at the bound {bound}"
+            );
+            let two_entries = page(&store2, old2, new2, None);
+            assert_eq!(
+                two_entries.renames_incomplete, two,
+                "the two-entry diff at the bound {bound}"
+            );
+        }
+    }
+    scion_server::test_support::read::test_clear_rename_cache();
+}

@@ -98,7 +98,7 @@ fn parse(at: &Path, text: &str) -> Transcript {
             panic!("{}:{} has no `:`: {line}", at.display(), n + 1);
         };
         let (key, value) = (key.trim(), value.trim());
-        // `if let` guards need a newer Rust than the minimum (1.88), so the
+        // `if let` guards need a newer Rust than the minimum (1.89), so the
         // prefixed keys are handled before the match.
         if let Some(rest) = key.strip_prefix("request.") {
             request.push((rest.to_owned(), value.to_owned()));

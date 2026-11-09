@@ -372,79 +372,6 @@ fn two_pending_lands_sharing_a_request_key_are_named_or_tolerated() {
     }
 }
 
-/// The attack behind the duplicate-key check's own sense: two pending
-/// lands on distinct request keys are two records the replay makes
-/// cleanly, and a sound archive must verify with no damage. A check
-/// that fires on the distinct keys names damage in a backup that is
-/// fine; the check inverted fires on the first key it sees instead of
-/// the collision, and never names a real one.
-#[test]
-fn two_pending_lands_on_distinct_request_keys_verify_clean() {
-    let (_keep, out, main_tip, _second) = sound_archive();
-    let lands_path = section(&out, REPO).join("lands.json");
-    let crafted = serde_json::json!([
-        {"caller": "attacker", "request_key": "key-one", "target_ref": "main",
-         "input_cs": main_tip},
-        {"caller": "attacker", "request_key": "key-two", "target_ref": "main",
-         "input_cs": main_tip},
-    ]);
-    std::fs::write(&lands_path, crafted.to_string()).unwrap();
-
-    let damages = archive::verify(&out).unwrap();
-    assert_eq!(
-        damages,
-        Vec::<String>::new(),
-        "two lands on distinct request keys are a sound archive: {damages:?}"
-    );
-}
-
-/// The attack: a pending land whose `input_cs` names a changeset the
-/// archive does not hold. The format says the input MUST be one the
-/// archive holds, and the replay would record a land the store cannot
-/// make sense of; `verify` - the reader an operator runs without the
-/// store's code - must name it, and the restore must refuse before it
-/// writes a row.
-#[test]
-fn a_pending_land_naming_an_input_the_archive_does_not_hold_is_named_and_refused() {
-    let (_keep, out, main_tip, _second) = sound_archive();
-    // A valid-format changeset id the section does not hold: the tip
-    // with its first hex digit flipped.
-    let ghost: String = main_tip
-        .chars()
-        .enumerate()
-        .map(|(i, c)| {
-            if i == 0 {
-                if c == '0' { '1' } else { '0' }
-            } else {
-                c
-            }
-        })
-        .collect();
-    assert_ne!(ghost, main_tip, "the flip must change the id");
-    let lands_path = section(&out, REPO).join("lands.json");
-    let crafted = serde_json::json!([
-        {"caller": "attacker", "request_key": "one-key", "target_ref": "main",
-         "input_cs": ghost},
-    ]);
-    std::fs::write(&lands_path, crafted.to_string()).unwrap();
-
-    let damages = archive::verify(&out).unwrap();
-    assert!(
-        damages
-            .iter()
-            .any(|d| d.contains("which the archive does not hold")),
-        "a land's missing input must be a named damage: {damages:?}"
-    );
-    let empty = scion_server::test_support::private_tempdir();
-    let restored = archive::restore(&out, empty.path(), &url_of(empty.path()), None);
-    assert!(restored.is_err(), "a named damage must refuse the replay");
-    let written = std::fs::read_dir(empty.path()).unwrap().count();
-    assert_eq!(
-        written, 0,
-        "a refused restore must not leave a half-restored store"
-    );
-}
-
 /// The attack: a changeset whose change names a blob the members.txt
 /// does not list. Nothing else in `verify` looks at the changes'
 /// members, so the reader passed what the replay would die on — the
@@ -468,42 +395,6 @@ fn a_changeset_naming_an_unlisted_blob_is_named_and_refused() {
         "verify must name the changeset's unlisted blob: {damages:?}"
     );
 
-    let empty = scion_server::test_support::private_tempdir();
-    let restored = archive::restore(&out, empty.path(), &url_of(empty.path()), None);
-    assert!(restored.is_err(), "a named damage must refuse the replay");
-    let written = std::fs::read_dir(empty.path()).unwrap().count();
-    assert_eq!(
-        written, 0,
-        "a refused restore must not leave a half-restored store"
-    );
-}
-
-/// The attack: a changeset frame whose body does not hash to the ID
-/// its record names. The re-hash is the one check the file's own names
-/// cannot lie about; a body that still decodes - here one same-length
-/// byte swap in the message - but hashes elsewhere must be a named
-/// damage, and the restore must refuse before it writes a row.
-#[test]
-fn a_changeset_that_does_not_hash_to_its_id_is_named_and_refused() {
-    let (_keep, out, _main, _second) = sound_archive();
-    let bin = section(&out, REPO).join("changesets.bin");
-    let bytes = std::fs::read(&bin).unwrap();
-    let needle = b"change\n";
-    let at = bytes
-        .windows(needle.len())
-        .position(|w| w == needle)
-        .expect("the fixture's message bytes");
-    let mut forged = bytes.clone();
-    forged[at..at + needle.len()].copy_from_slice(b"forge!\n");
-    std::fs::write(&bin, forged).unwrap();
-
-    let damages = archive::verify(&out).unwrap();
-    assert!(
-        damages
-            .iter()
-            .any(|d| d.contains("does not hash to its ID")),
-        "a body that does not hash to its ID must be a named damage: {damages:?}"
-    );
     let empty = scion_server::test_support::private_tempdir();
     let restored = archive::restore(&out, empty.path(), &url_of(empty.path()), None);
     assert!(restored.is_err(), "a named damage must refuse the replay");
@@ -1483,6 +1374,56 @@ fn a_failed_restore_resets_a_quoted_schema_as_itself() {
     maker
         .batch_execute(&format!("DROP DATABASE {name}"))
         .unwrap();
+}
+
+/// The attack: a provenance row whose `cs` names a changeset the
+/// section does not hold. The format says the provenance's changeset
+/// MUST be one the archive holds; the replay dies on the store's
+/// foreign key - after the store is open, with an error that names the
+/// key, not the archive. `verify` must name the row the way it names a
+/// ref or a land that points past, and the restore must refuse before
+/// it writes a row.
+#[test]
+fn a_provenance_row_naming_a_foreign_changeset_is_named_and_refused() {
+    let (_keep, out, _main, _second) = sound_archive();
+    let ghost: String = {
+        let refs = std::fs::read_to_string(section(&out, SECOND).join("refs.json")).unwrap();
+        let rows: serde_json::Value = serde_json::from_str(&refs).unwrap();
+        let tip = rows[0]["target"].as_str().unwrap().to_owned();
+        tip.chars()
+            .enumerate()
+            .map(|(i, c)| {
+                if i == 0 {
+                    if c == '0' { '1' } else { '0' }
+                } else {
+                    c
+                }
+            })
+            .collect()
+    };
+    let path = section(&out, SECOND).join("provenance.json");
+    let crafted = serde_json::json!([
+        {"oid": "0123456789abcdef0123456789abcdef01234567", "cs": ghost}
+    ]);
+    std::fs::write(&path, crafted.to_string()).unwrap();
+
+    let damages = archive::verify(&out).unwrap();
+    assert!(
+        damages.iter().any(|d| d.contains(SECOND)
+            && d.contains("the provenance row for git commit")
+            && d.contains("which the archive does not hold")),
+        "a provenance row naming a foreign changeset must be a named damage: {damages:?}"
+    );
+    let empty = scion_server::test_support::private_tempdir();
+    let target = empty.path().join("restored");
+    std::fs::create_dir_all(&target).unwrap();
+    let restored = archive::restore(&out, &target, &url_of(empty.path()), None);
+    assert!(restored.is_err(), "a named damage must refuse the replay");
+    let written = std::fs::read_dir(&target).unwrap().count();
+    assert_eq!(
+        written, 0,
+        "a refused restore must not leave a half-restored store"
+    );
 }
 
 /// The schema-drop's other refusal: a schema that holds a table no

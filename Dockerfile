@@ -1,9 +1,9 @@
-# The builder is pinned to the MSRV, 1.88, the exact version the `check
+# The builder is pinned to the MSRV, 1.89, the exact version the `check
 # (MSRV)` CI job checks. The image then always builds with a toolchain the
 # project supports, and a fixed tag cannot drift the way `rust:1` does.
 # Bump this line together with the MSRV in ci.yml. The digest pins the
-# multi-arch image index (verified 2026-10-21); the tag names it.
-FROM rust:1.88-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 AS build
+# multi-arch image index (verified 2026-11-09); the tag names it.
+FROM rust:1.89-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff AS build
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends protobuf-compiler \
