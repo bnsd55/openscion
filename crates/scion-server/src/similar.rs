@@ -1074,4 +1074,40 @@ mod tests {
         assert_eq!(found.pairs.len(), 1);
         assert_eq!(found.stopped, None);
     }
+
+    /// A search whose cap crosses at a target's slot stops before it
+    /// reads the deleted file: the pairs of a capped run are the pairs
+    /// found up to the cap, not the whole search's. A bound that lets
+    /// the walk slip past the cap pairs files the capped run must not.
+    #[test]
+    fn a_search_that_crosses_its_cap_at_a_target_stops_before_its_read() {
+        let _slot = damage::slot();
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        // Two added files; the deleted file is 90% like the second, and
+        // named differently, so step 2 leaves no known score.
+        let a1 = store.blobs().put(&lines(0..60)).unwrap();
+        let a2 = store.blobs().put(&lines(100..160)).unwrap();
+        let d2 = store
+            .blobs()
+            .put(&[lines(100..154), lines(2000..2006)].concat())
+            .unwrap();
+        let added_paths = ["new/one", "new/two"].map(|p| RepoPath::new(p).unwrap());
+        let added = [(&added_paths[0], file(a1)), (&added_paths[1], file(a2))];
+        let deleted_path = RepoPath::new("old/x").unwrap();
+        let deleted = [(&deleted_path, file(d2))];
+        let read = |_: &RepoPath, blob, _| Ok(Some(Chunks::read(&store, blob)?));
+        let mut cost = 0;
+        let budget = Budget {
+            cost: &mut cost,
+            cap: 300,
+            progress: false,
+        };
+        let from = Progress::default();
+        let found = renames(&store, &added, &deleted, read, MAX_PAIRS, from, budget).unwrap();
+        assert_eq!(found.pairs, []);
+        assert_eq!(found.stopped, Some(0));
+        // The bound: the cap plus one slot, 60, plus one read, 60.
+        assert!(cost <= 300 + 120, "cost {cost} over the bound");
+    }
 }
