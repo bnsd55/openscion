@@ -466,5 +466,5 @@ async fn a_server_on_the_compiled_budget_still_serves_a_reply() {
         (None, end) => end,
         (other, _) => other,
     };
-    assert_eq!(whole.as_deref(), Some("0"), "the reply is whole");
+    assert_eq!(whole, Some("0"), "the reply is whole");
 }
