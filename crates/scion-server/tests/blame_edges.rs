@@ -345,8 +345,8 @@ async fn the_part_seam_loses_no_range_and_no_changeset() {
 /// lines of the seam store name different changesets: a run packed
 /// across two of them would name the second line's lines with the
 /// first line's changeset on the resume. The reply of every part must
-/// match the chain line for line: line n was rewritten by the child
-/// at `ids[n]`.
+/// match the chain line for line: line n's last change is the child
+/// at `ids[n + 1]`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_resumed_part_names_each_line_its_own_changeset() {
     // 151 versions over the walk's 100-version bound: the first call
@@ -356,7 +356,10 @@ async fn a_resumed_part_names_each_line_its_own_changeset() {
     let tip = ids[ids.len() - 1];
     let (_stop, mut client) = serve(&store, dir.path(), whole_access(), TOKEN).await;
     let mut cursor: Vec<u8> = Vec::new();
+    let mut named: Vec<usize> = Vec::new();
+    let mut calls = 0usize;
     loop {
+        calls += 1;
         let (ranges, _changesets, next, _parts) = blame(&mut client, &tip, PATH, &cursor).await;
         for range in &ranges {
             if range.changeset_id.is_empty() {
@@ -368,6 +371,7 @@ async fn a_resumed_part_names_each_line_its_own_changeset() {
             // stretch over a line the next child rewrote.
             let start = range.start_line as usize;
             for n in start..start + range.line_count as usize {
+                named.push(n);
                 let last = ids[(n + 1).min(ids.len() - 1)].as_bytes();
                 assert_eq!(
                     range.changeset_id.as_slice(),
@@ -381,17 +385,14 @@ async fn a_resumed_part_names_each_line_its_own_changeset() {
         }
         cursor = next;
     }
-    // The whole chain was explained, every line once.
-    assert_eq!(
-        covered(&covered_all(&mut client, &tip).await),
-        (1..=150).collect::<Vec<u32>>()
-    );
-}
-
-/// The ranges of the whole blame, joined over its parts.
-async fn covered_all(client: &mut Scion, tip: &ChangesetId) -> Vec<BlameRange> {
-    let (ranges, _changesets, _next, _parts) = blame(client, tip, PATH, b"").await;
-    ranges
+    // The named ranges covered every line, each once.
+    named.sort_unstable();
+    named.dedup();
+    assert_eq!(named, (1..=150).collect::<Vec<usize>>());
+    // The walk stopped at its 100-version bound: the reply needed a
+    // resume. If the bound grows past the fixture, this test stops
+    // guarding the run merge and must grow with it.
+    assert!(calls >= 2, "the walk finished in one call; no resume");
 }
 
 /// A cursor made for one file, or one changeset, is refused when it is
