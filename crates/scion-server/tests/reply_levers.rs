@@ -127,6 +127,13 @@ fn spawn_server_with(
     // The child needs the test database, under the data directory's
     // own schema.
     command.env("SCION_POSTGRES_URL", common::postgres_url(data));
+    // The child serves with the scenario's token and lever, never the
+    // parent process's: a SCION_TOKEN in a developer's shell or a CI
+    // job would change which token the child checks, and a lever
+    // exported in the parent would arm a mutation in every child that
+    // asked for none (#1089's review).
+    command.env_remove("SCION_TOKEN");
+    command.env_remove("SCION_TEST_REPLY_MUTATION");
     if let Some(budget) = budget {
         command.env("SCION_TEST_REPLY_BUDGET", budget);
     } else {
