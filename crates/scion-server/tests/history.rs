@@ -17,6 +17,7 @@ use scion_server::test_support::blame::{
     self, Blame, BlameRange, Line, MAX_BLAME_DIFF_LINES, MAX_BLAME_VERSIONS, RenameSearch, Resume,
 };
 use scion_server::test_support::deadline::Deadline;
+use scion_server::test_support::memory::BYTES_PER_LINE;
 use scion_server::test_support::memory::Bytes;
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use scion_server::test_support::read::{self, MAX_SCAN};
@@ -1525,6 +1526,214 @@ fn chain_in<S: Into<Option<FileState>>>(
             Ok(ids)
         })
         .unwrap()
+}
+
+/// The decode takes exactly the cursor's bytes, one window line each,
+/// and 32 bytes per table name: a share one byte short refuses the
+/// decode, the exact share decodes. Pinned at two budgets, so a mutant
+/// that under- or over-counts the share lands on the wrong side of one
+/// of them.
+#[test]
+fn a_cursor_decode_takes_its_exact_memory_share() {
+    let (_data, store) = open_store();
+    let put = |data: &[u8]| regular(store.blobs().put(data).unwrap());
+    // Four changesets, and a window that names each once: the cursor's
+    // table holds four names.
+    let ids = chain(
+        &store,
+        vec![
+            vec![("f", put(b"a\n"))],
+            vec![("f", put(b"b\n"))],
+            vec![("f", put(b"c\n"))],
+            vec![("f", put(b"d\n"))],
+        ],
+    );
+    let resume = Resume {
+        next: Some((ids[3], path("f"))),
+        counted: 4,
+        window: ids.iter().map(|id| Line::Named(*id)).collect(),
+        ..Resume::default()
+    };
+    let bytes = cursor_bytes(&resume, ids[3], "f");
+    // The decode's share: the cursor's bytes, one Line each for the 4
+    // open lines (32 bytes of changeset or 8 of place, plus the tag),
+    // and 32 bytes per table name.
+    let open = 4usize;
+    let table = 4usize;
+    let size_of_line = 40usize;
+    let share = bytes.len() + open * size_of_line + table * 32;
+    let err = blame::decode_cursor(
+        &store,
+        REPO,
+        &bytes,
+        ids[3],
+        &path("f"),
+        &Bytes::new(share - 1),
+        None,
+    )
+    .expect_err("a share one byte short must refuse the decode");
+    assert!(
+        matches!(err, Error::ResourceExhausted(_)),
+        "a short share refuses as exhausted: {err}"
+    );
+    let (decoded, _hold) = blame::decode_cursor(
+        &store,
+        REPO,
+        &bytes,
+        ids[3],
+        &path("f"),
+        &Bytes::new(share),
+        None,
+    )
+    .expect("the exact share decodes");
+    assert_eq!(decoded.window, resume.window);
+}
+
+/// A cursor with bytes past its fields is refused: the decoder must
+/// consume the cursor exactly, so a client cannot smuggle bytes past a
+/// field the server does not read yet.
+#[test]
+fn a_cursor_with_bytes_past_its_fields_is_refused() {
+    let (_data, store) = open_store();
+    let put = |data: &[u8]| regular(store.blobs().put(data).unwrap());
+    let ids = chain(&store, vec![vec![("f", put(b"a\n"))]]);
+    let resume = Resume {
+        next: Some((ids[0], path("f"))),
+        counted: 1,
+        window: vec![Line::Named(ids[0])],
+        ..Resume::default()
+    };
+    let mut bytes = cursor_bytes(&resume, ids[0], "f");
+    bytes.push(0xff);
+    let err = blame::decode_cursor(
+        &store,
+        REPO,
+        &bytes,
+        ids[0],
+        &path("f"),
+        &Bytes::new(1 << 30),
+        None,
+    )
+    .expect_err("bytes past the fields must refuse the decode");
+    assert!(
+        matches!(err, Error::InvalidArgument(ref msg) if msg.contains("past its fields")),
+        "the refusal names the trailing bytes: {err}"
+    );
+}
+
+/// A file of exactly the diff cap's lines blames its older lines: the
+/// older version reads (the cap check is past the cap, not at it), the
+/// diff names the tip's changed line, and the kept lines keep the
+/// root's name. A cap check at the cap would call the root's version
+/// unreadable, name every line with the tip, and steal the root's
+/// lines.
+#[test]
+fn a_file_of_exactly_the_diff_cap_blames_its_older_lines() {
+    let (_data, store) = open_store();
+    let cap = MAX_BLAME_DIFF_LINES;
+    let tail: Vec<u8> = vec![&b"x\n"[..]; cap - 1].concat();
+    let root_body: Vec<u8> = b"a\n".iter().copied().chain(tail.iter().copied()).collect();
+    let tip_body: Vec<u8> = b"b\n".iter().copied().chain(tail).collect();
+    let ids = chain(
+        &store,
+        vec![
+            vec![("f", regular(store.blobs().put(&root_body).unwrap()))],
+            vec![("f", regular(store.blobs().put(&tip_body).unwrap()))],
+        ],
+    );
+    let b = blame(&store, ids[1], "f");
+    assert!(b.resume.is_none(), "the blame finished in one call");
+    assert_eq!(
+        b.ranges,
+        vec![
+            range(1, 1, Some(ids[1]), 1),
+            range(2, cap - 1, Some(ids[0]), 2),
+        ]
+    );
+}
+
+/// A version whose bytes land in the band the call's own shares leave
+/// free - past what is free, inside the budget - can never be blamed:
+/// the cap check lets the read through at the band's top (size == cap),
+/// the take fails at once because the call already holds its own shares,
+/// and the call answers `RESOURCE_EXHAUSTED`. The retry holds the same
+/// shares, so it fails the same way: the file is never blamed. Pins
+/// today's answer; #1081's fix makes this version absent, and this
+/// assert flips.
+#[test]
+fn a_version_whose_bytes_landed_in_the_calls_free_gap_is_refused_and_stays_refused() {
+    let (_data, store) = open_store();
+    let cap = 100_000usize;
+    // The root's blob is exactly the budget. The tip's text is tiny: the
+    // walk holds it, and whatever the walk's own shares take, nothing
+    // like the root's size is free when the root's read takes.
+    let root_body = vec![b'a'; cap];
+    let ids = chain(
+        &store,
+        vec![
+            vec![("f", regular(store.blobs().put(&root_body).unwrap()))],
+            vec![("f", regular(store.blobs().put(b"b\n").unwrap()))],
+        ],
+    );
+    for _ in 0..2 {
+        let pool = Bytes::new(cap);
+        let err = blame::blame(
+            &store,
+            REPO,
+            ids[1],
+            &path("f"),
+            &Resume::default(),
+            &pool,
+            None,
+        )
+        .expect_err("a version in the free gap refuses");
+        assert!(
+            matches!(err, Error::ResourceExhausted(_)),
+            "the refusal is the budget's: {err}"
+        );
+    }
+}
+
+/// The diff's need lands in the same free-gap band: the walk holds the
+/// tip's text and both versions' shares, so a diff whose need is exactly
+/// the budget can never take, and the call answers `RESOURCE_EXHAUSTED`
+/// today. The mutant that calls the diff absent at the equality would
+/// answer instead - the pin kills it. Pins today's answer; #1081's fix
+/// makes this diff absent, and this assert flips.
+#[test]
+fn a_diff_whose_need_landed_in_the_calls_free_gap_is_refused_and_stays_refused() {
+    let (_data, store) = open_store();
+    let cap = BYTES_PER_LINE * 800;
+    // The tip keeps one line of the root's 801: the diff's need is
+    // (801 - 1) lines, exactly the budget, and the root's bytes (1,602)
+    // read fine inside what the walk's shares leave free.
+    let root_lines = cap / BYTES_PER_LINE;
+    let root_body: Vec<u8> = vec![&b"a\n"[..]; root_lines + 1].concat();
+    let tip_body = b"b\n".to_vec();
+    let ids = chain(
+        &store,
+        vec![
+            vec![("f", regular(store.blobs().put(&root_body).unwrap()))],
+            vec![("f", regular(store.blobs().put(&tip_body).unwrap()))],
+        ],
+    );
+    for _ in 0..2 {
+        let pool = Bytes::new(cap);
+        let err = blame::blame(
+            &store,
+            REPO,
+            ids[1],
+            &path("f"),
+            &Resume::default(),
+            &pool,
+            None,
+        )
+        .expect_err("a diff in the free gap refuses");
+        assert!(
+            matches!(err, Error::ResourceExhausted(_)),
+            "the refusal is the budget's: {err}"
+        );
+    }
 }
 
 /// Cursor bytes for `resume`, made for a blame of `p` at `cs` in `r`.
