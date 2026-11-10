@@ -192,9 +192,14 @@ fn a_restore_commits_bounded_transactions_and_answers_like_its_source() {
     .unwrap_or_else(|e| panic!("restore failed: {e:#}"));
     let txs = scion_server::test_support::archive::restore_tx_count() - before;
     println!("the restore committed {txs} transactions");
-    assert!(
-        txs > 2,
-        "the restore committed {txs} transactions; the stream did not split"
+    // The exact count, not just a bound: the fixture's bodies and the
+    // budget are fixed, so the batching is too - two repositories, six
+    // body batches and the publications between them. A batch loop that
+    // commits one changeset per transaction, or that forgets to count a
+    // batch, moves this number even though every answer stays right.
+    assert_eq!(
+        txs, 12,
+        "create + six body batches + publication, per two repositories"
     );
 
     // Every read equals the source's, and both stores are clean.
@@ -592,6 +597,11 @@ fn receipt_source(data: &Path) -> Backend {
                 },
                 None,
             )?;
+            // A second changeset, held but unreferenced and empty: the
+            // replay's batching needs two frames to split, and the
+            // report's counts stay one ref and one pending land.
+            let second = changeset(vec![], &[]);
+            tree::store_changeset(c, repo, &second, &mut |_| Ok(0))?;
             Ok(())
         })
         .unwrap();
@@ -669,8 +679,6 @@ fn the_restore_commits_the_transactions_it_counts() {
     );
 }
 
-/// An empty archive is a complete store: the restore commits the mark
-/// clear in a transaction of its own - one transaction, said once.
 #[test]
 fn the_restore_of_an_empty_archive_commits_one_transaction() {
     let _tx_lock = TX_COUNT_LOCK.lock().unwrap();

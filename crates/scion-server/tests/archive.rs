@@ -586,6 +586,10 @@ fn a_section_that_is_a_symlink_to_another_is_refused() {
 fn an_export_of_two_repos_that_fold_to_one_is_refused() {
     let data = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(&data.path().join("store")).unwrap();
+    // The blob is really put: the export copies every member blob, and
+    // a missing blob file would fail the export before the fold ever
+    // gets its turn.
+    let blob = store.blobs().put(b"a").unwrap();
     for name in ["main", "MAIN"] {
         store
             .write(|c| {
@@ -593,7 +597,7 @@ fn an_export_of_two_repos_that_fold_to_one_is_refused() {
                 let cs = changeset(vec![], &[("a", Some(regular("a")))]);
                 let id = tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0;
                 assert!(c.cas_ref(repo, "main", None, id)?);
-                c.add_repo_blob(repo, BlobId::of(b"a"))?;
+                c.add_repo_blob(repo, blob)?;
                 Ok(())
             })
             .unwrap();
@@ -601,9 +605,11 @@ fn an_export_of_two_repos_that_fold_to_one_is_refused() {
     let out = scion_server::test_support::private_tempdir()
         .path()
         .join("archive");
-    let error = archive::export(&store, data.path(), None, true, &out).unwrap_err();
+    let error = archive::export(&store, &data.path().join("store"), None, true, &out).unwrap_err();
     assert!(
-        error.to_string().contains("fold"),
+        error
+            .to_string()
+            .contains("fold to one directory on this disk"),
         "the export must name the fold: {error:#}"
     );
 }
