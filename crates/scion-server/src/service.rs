@@ -3146,6 +3146,91 @@ mod tests {
         assert!(lines[0].contains("rpc=\"GetLand\""), "{}", lines[0]);
     }
 
+    /// A `get_changeset` whose stored body cannot fit what is left of the
+    /// read pool is not served: the whole reply's share is taken before
+    /// the object is read, and a take that can never fit parks the call,
+    /// instead of building a reply that holds memory it did not pay for.
+    /// Kills the mutant whose length find misses (len 0, no share,
+    /// served at once). With the pool freed, the same call is served:
+    /// contention, not absence.
+    #[test]
+    fn a_changeset_whose_body_does_not_fit_the_read_pool_is_not_served() {
+        let (_dir, store, _, _) = file_store(b"x");
+        let big = Changeset::new(
+            vec![],
+            IdentityTime::new(b"t".to_vec(), b"t@x".to_vec(), 0, 0)
+                .expect("identity fits the format"),
+            None,
+            vec![b'b'; 2_000],
+            [].into(),
+        )
+        .expect("changeset fits the format");
+        let id = store
+            .write(|c| {
+                let repo = c.repo_id("r")?;
+                c.insert_changeset(repo, &big)
+            })
+            .unwrap();
+        let stored = store
+            .read(|c| c.stored_changeset_body_lengths(&[id.as_bytes().to_vec()]))
+            .unwrap();
+        let len = stored.first().map(|(_, len)| *len).unwrap_or_default();
+        assert!(len >= 2_000, "the seeded body's stored length: {stored:?}");
+        let service = test_service(store);
+        let reads = Arc::clone(&service.reads);
+        let hold = block_on(reads.acquire_many(u32::try_from(READ_BUDGET_BYTES - 1_000).unwrap()))
+            .expect("the pool is whole");
+        let request = as_default(GetChangesetRequest {
+            repo: "r".to_owned(),
+            changeset_id: id.as_bytes().to_vec(),
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let got = block_on(service.get_changeset(request));
+            let _ = tx.send(got.is_ok());
+        });
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(
+            rx.try_recv().is_err(),
+            "an over-pool body is not served: {rx:?}"
+        );
+        drop(hold);
+        let served = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the reply lands once the pool frees");
+        assert!(served, "the body is served once the pool frees");
+    }
+
+    /// A `get_changeset` whose stored body is over the object cap is
+    /// refused, not served: the reply's share is checked against the cap
+    /// before any of the object's bytes are read.
+    #[test]
+    fn a_changeset_over_the_object_cap_is_refused() {
+        let (_dir, store, _, _) = file_store(b"x");
+        let big = Changeset::new(
+            vec![],
+            IdentityTime::new(b"t".to_vec(), b"t@x".to_vec(), 0, 0)
+                .expect("identity fits the format"),
+            None,
+            vec![b'b'; MAX_OBJECT_BYTES + 1],
+            [].into(),
+        )
+        .expect("changeset fits the format");
+        let id = store
+            .write(|c| {
+                let repo = c.repo_id("r")?;
+                c.insert_changeset(repo, &big)
+            })
+            .unwrap();
+        let service = test_service(store);
+        let request = as_default(GetChangesetRequest {
+            repo: "r".to_owned(),
+            changeset_id: id.as_bytes().to_vec(),
+        });
+        let status = block_on(service.get_changeset(request)).expect_err("over the cap");
+        assert_eq!(status.code(), Code::ResourceExhausted, "{status:?}");
+    }
+
     #[tokio::test]
     async fn a_read_file_reply_of_many_parts_stays_exactly_the_file() {
         let data = content(3);
