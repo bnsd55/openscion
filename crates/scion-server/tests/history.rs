@@ -2112,22 +2112,28 @@ fn the_worst_cursor_stays_small() {
 #[test]
 fn a_call_that_holds_budget_never_waits_for_more() {
     let (_data, store) = open_store();
-    // The tip is short and its rows fit the budget, but another call holds
-    // most of it: the file's line share does not fit what is free. The call
-    // must fail at once with `RESOURCE_EXHAUSTED`, not wait for bytes that
+    // Contention at the take this change guards: another call holds most
+    // of the budget, so the older version's bytes do not fit what is free,
+    // though they fit an idle pool beside what the call itself holds. The
+    // headroom check passes (it sums only this call's shares), and the
+    // take must fail at once with `RESOURCE_EXHAUSTED`, not wait for bytes
     // only the other call can free: with a waiting take and no deadline,
-    // this test would hang forever. Contention between calls is what a
-    // retry can clear, so it stays a refusal; a version that cannot fit
-    // what the call itself holds counts as absent instead (see the
-    // free-gap pins above).
-    let put_short = Some(regular(store.blobs().put(b"a\nb\n").unwrap()));
-    let ids = chain(&store, vec![vec![("f", put_short)]]);
-    let pool = Bytes::new(600);
-    let keeper = pool.try_take(500).unwrap();
+    // this test would hang forever. The retry after the keeper frees
+    // answers with the exact blame: contention can clear, absence cannot.
+    let root_body = vec![b'a'; 1_000];
+    let ids = chain(
+        &store,
+        vec![
+            vec![("f", regular(store.blobs().put(&root_body).unwrap()))],
+            vec![("f", regular(store.blobs().put(b"a\nb\n").unwrap()))],
+        ],
+    );
+    let pool = Bytes::new(4_000);
+    let keeper = pool.try_take(3_000).unwrap();
     let err = blame::blame(
         &store,
         REPO,
-        ids[0],
+        ids[1],
         &path("f"),
         &Resume::default(),
         0,
@@ -2140,4 +2146,20 @@ fn a_call_that_holds_budget_never_waits_for_more() {
         "a held budget never waits: {err:?}"
     );
     drop(keeper);
+    let retried = blame::blame(
+        &store,
+        REPO,
+        ids[1],
+        &path("f"),
+        &Resume::default(),
+        0,
+        &pool,
+        None,
+    )
+    .expect("the retry answers once the keeper frees its bytes");
+    assert_eq!(
+        retried.ranges,
+        vec![range(1, 2, Some(ids[1]), 1)],
+        "the retry names each line its own change, not the absence's answer"
+    );
 }
