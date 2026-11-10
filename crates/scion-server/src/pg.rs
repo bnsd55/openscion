@@ -7853,6 +7853,81 @@ pub(crate) mod pool_tests {
         assert!(stored, "the settle's blob is in the store");
     }
 
+    /// A land's state moves once: the recorded land takes its verdict,
+    /// and a second transition on the same land is refused - the UPDATE
+    /// matches only a pending land, so a gate that admits the second
+    /// write lets a finished land change its answer.
+    #[test]
+    fn a_land_s_state_moves_once() {
+        let data = crate::test_support::private_tempdir();
+        let store = crate::Backend::open_test(data.path()).unwrap();
+        let (cs, land_id) = store
+            .commit(|c| {
+                let repo = c.create_repo("r")?;
+                let cs = c.insert_changeset(
+                    repo,
+                    &Changeset::new(
+                        vec![],
+                        scion_core::IdentityTime::new(
+                            b"Ada".to_vec(),
+                            b"ada@example.com".to_vec(),
+                            0,
+                            0,
+                        )
+                        .expect("identity fits the format"),
+                        None,
+                        b"root".to_vec(),
+                        std::collections::BTreeMap::new(),
+                    )
+                    .expect("changeset fits the format"),
+                )?;
+                assert!(c.cas_ref(repo, "main", None, cs)?);
+                let req = LandRequest {
+                    repo: "r".into(),
+                    changeset: cs,
+                    target_ref: "main".into(),
+                    request_key: "k".into(),
+                    deadline: crate::deadline::Deadline::new(
+                        Instant::now() + Duration::from_secs(60),
+                    ),
+                };
+                let (_, recorded) = c.record_land(&Caller("t".into()), &req, None)?;
+                Ok((cs, recorded.land_id))
+            })
+            .unwrap();
+        store
+            .commit(|c| {
+                let repo = c.repo_id("r")?;
+                c.set_land_state(
+                    repo,
+                    land_id,
+                    LandState::Landed,
+                    Some(cs),
+                    "the ref moved".into(),
+                    vec![],
+                    LandRejectReason::Unspecified,
+                )
+            })
+            .unwrap();
+        let again = store.commit(|c| {
+            let repo = c.repo_id("r")?;
+            c.set_land_state(
+                repo,
+                land_id,
+                LandState::Rejected,
+                None,
+                "a second verdict".into(),
+                vec![],
+                LandRejectReason::Unspecified,
+            )
+        });
+        let err = again.unwrap_err();
+        assert!(
+            matches!(err, Error::Corrupt(ref m) if m.contains("no longer pending")),
+            "the second transition answers {err}"
+        );
+    }
+
     /// A store's second open moves nothing and runs clean: the version
     /// gate refuses only a database newer than this build, the current
     /// version answers no migration, and a creation is not a move. A
