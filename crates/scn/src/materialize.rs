@@ -75,6 +75,13 @@ const CLAIM_MODE: Mode = Mode::RWXU;
 /// checkout at a time.
 static REMOVING: Mutex<Option<PathBuf>> = Mutex::new(None);
 
+/// Serializes the tests that touch the removal marker (#1082): in a test
+/// build a dropped checkout takes this gate for its removal, so its marker
+/// write cannot land between the marker test's own set and read. nextest
+/// runs each test in its own process and never needs it.
+#[cfg(test)]
+static REMOVAL_TESTS: Mutex<()> = Mutex::new(());
+
 /// The temp directory that a dropped [`Checkout`] is removing now, if any.
 pub(crate) fn removing() -> Option<PathBuf> {
     REMOVING
@@ -931,6 +938,8 @@ impl Drop for Checkout {
         if self.finished {
             return;
         }
+        #[cfg(test)]
+        let _removal = REMOVAL_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
         set_removing(Some(self.temp_path()));
         // In reverse path order, a directory comes after everything in it.
         let (mut first, mut failed) = (None, 0);
@@ -1163,9 +1172,12 @@ mod tests {
     }
 
     /// The exit message names the temp directory a dropped checkout is
-    /// removing: `removing` reads what `set_removing` wrote (#1014).
+    /// removing: `removing` reads what `set_removing` wrote (#1014). The
+    /// gate holds a dropping checkout's marker write outside this test's
+    /// set-and-read window (#1082).
     #[test]
     fn the_removal_marker_names_the_temp_directory() {
+        let _removal = REMOVAL_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
         let marker = tmp.path().join("scn-temp-x");
         set_removing(Some(marker.clone()));
