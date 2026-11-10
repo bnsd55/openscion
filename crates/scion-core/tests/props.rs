@@ -116,8 +116,8 @@ proptest! {
         let body = t.encode();
         let mut names: Vec<Vec<u8>> = t
             .entries()
-            .iter()
-            .map(|(elem, _)| elem.as_bytes().to_vec())
+            .keys()
+            .map(|elem| elem.as_bytes().to_vec())
             .collect();
         names.push(stray);
         for name in names {
