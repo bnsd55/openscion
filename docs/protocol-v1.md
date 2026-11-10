@@ -598,9 +598,10 @@ file has no lines and gets no ranges.
 - `next_cursor` is set when the call stopped at a bound before every line
   had a changeset. It is opaque: the client sends it back unchanged, as
   `cursor`, with the same repo, changeset and path, and the reply continues
-  the blame. A call resumed at a bound answers the same window again from
-  its first line: a line an earlier call named keeps that name, and the new
-  reply fills the lines that had none. The ranges of a reply cover the
+  the blame. A call resumed at a bound answers the same window again, from its first
+  line, so a client joins calls by line, not by appending ranges: it keeps
+  the name an earlier call gave a line, and takes from the new reply only
+  the lines that had none. The ranges of a reply cover the
   window that call answered, once each. An empty `next_cursor` ends the
   blame. The server refuses, with `INVALID_ARGUMENT`, a cursor that was not
   made for the repo, changeset and path of the request.
