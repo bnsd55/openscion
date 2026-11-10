@@ -719,6 +719,10 @@ fn a_restore_at_a_stopped_stores_url_refuses_and_leaves_it_whole() {
         why.contains("refuses to drop"),
         "the refusal must say what it protects: {why}"
     );
+    assert!(
+        why.contains("complete store that no data directory names"),
+        "the refusal must carry the stopped-restore advice: {why}"
+    );
     let repos_after: i64 = check
         .query_one("SELECT count(*) FROM public.repos", &[])
         .unwrap()
@@ -1419,5 +1423,137 @@ fn a_provenance_row_naming_a_foreign_changeset_is_named_and_refused() {
     assert_eq!(
         written, 0,
         "a refused restore must not leave a half-restored store"
+    );
+}
+
+/// The schema-drop's other refusal: a schema that holds a table no
+/// store and no restore made. The enrichment - the stopped-restore
+/// advice - is for the complete-store case only: a foreign table's
+/// refusal must come back as it was, without advice about a store it
+/// does not name.
+#[test]
+fn a_restore_at_a_foreign_tables_schema_refuses_without_the_stopped_advice() {
+    let Ok(base) = std::env::var("SCION_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let name = format!("scion_restore_foreign_{}", std::process::id());
+    let mut maker = postgres::Client::connect(&base, postgres::NoTls).unwrap();
+    maker
+        .batch_execute(&format!("DROP DATABASE IF EXISTS {name}"))
+        .unwrap();
+    maker
+        .batch_execute(&format!("CREATE DATABASE {name}"))
+        .unwrap();
+    let url = format!(
+        "{}/{}",
+        base.rsplit_once('/')
+            .map_or(base.as_str(), |(rest, _)| rest),
+        name
+    );
+    let mut check = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    check
+        .batch_execute("CREATE TABLE stranger (x int)")
+        .unwrap();
+    drop(check);
+
+    let (_keep, out, _main, _second) = sound_archive();
+    let empty = scion_server::test_support::private_tempdir();
+    let target = empty.path().join("restored");
+    std::fs::create_dir_all(&target).unwrap();
+    let restored = archive::restore(&out, &target, &url, None);
+    let why = format!("{:#}", restored.unwrap_err());
+    assert!(
+        why.contains("no store and no restore made"),
+        "the foreign table's refusal must say what it protects: {why}"
+    );
+    assert!(
+        !why.contains("a restore may have stopped after its last transaction"),
+        "the stopped-restore advice is for a complete store only: {why}"
+    );
+    maker
+        .batch_execute(&format!("DROP DATABASE {name}"))
+        .unwrap();
+}
+
+/// The carry-back: a run whose replay fails after the audit file moved
+/// into the staging store must carry the audit back to the target -
+/// the failed run's evidence lives in that file, and the scratch must
+/// not take it. The replay fails on a provenance row whose changeset
+/// the section does not hold: valid JSON the reader passes (verify has
+/// no provenance cross-check) and the store's foreign key refuses.
+#[test]
+fn a_failed_replay_carries_the_audit_back_to_the_target() {
+    let (_keep, out, _main, _second) = sound_archive();
+    let ghost: String = {
+        let refs = std::fs::read_to_string(section(&out, SECOND).join("refs.json")).unwrap();
+        let rows: serde_json::Value = serde_json::from_str(&refs).unwrap();
+        let tip = rows[0]["target"].as_str().unwrap().to_owned();
+        tip.chars()
+            .enumerate()
+            .map(|(i, c)| {
+                if i == 0 {
+                    if c == '0' { '1' } else { '0' }
+                } else {
+                    c
+                }
+            })
+            .collect()
+    };
+    let path = section(&out, SECOND).join("provenance.json");
+    let crafted = serde_json::json!([
+        {"oid": "0123456789abcdef0123456789abcdef01234567", "cs": ghost}
+    ]);
+    std::fs::write(&path, crafted.to_string()).unwrap();
+
+    let empty = scion_server::test_support::private_tempdir();
+    let target = empty.path().join("restored");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("audit.log"), b"the run's intent line\n").unwrap();
+
+    let restored = archive::restore(&out, &target, &url_of(empty.path()), None);
+    assert!(
+        restored.is_err(),
+        "a provenance row naming a foreign changeset must fail the replay"
+    );
+    assert!(
+        target.join("audit.log").exists(),
+        "the failed run's audit file must come back to the target"
+    );
+    assert!(
+        !empty.path().join("restored.restoring").exists(),
+        "the scratch must not outlive the failed run"
+    );
+}
+
+/// The publish's half of the carry-back: the replay commits whole, and
+/// the rename into the target fails because the target is not empty.
+/// The audit file must come back, and the refusal must name the place
+/// the restored store waits - not the audit's failure, which did not
+/// happen.
+#[test]
+fn a_restore_that_cannot_take_the_target_s_place_carries_the_audit_back() {
+    let (_keep, out, _main, _second) = sound_archive();
+    let empty = scion_server::test_support::private_tempdir();
+    let target = empty.path().join("restored");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("audit.log"), b"the run's intent line\n").unwrap();
+    // A file that is no store's: the preflight passes, and the rename
+    // that publishes cannot replace a directory that is not empty.
+    std::fs::write(target.join("the operator's notes.txt"), b"keep\n").unwrap();
+
+    let error = archive::restore(&out, &target, &url_of(empty.path()), None)
+        .expect_err("the rename into a non-empty target must fail");
+    let why = format!("{error:#}");
+    assert!(
+        why.contains("could not take"),
+        "the refusal must name the rename that failed: {why}"
+    );
+    assert!(
+        !why.contains("could not move back"),
+        "the audit moved back, so the refusal must not say it could not: {why}"
+    );
+    assert!(
+        target.join("audit.log").exists(),
+        "the audit must be back in the target"
     );
 }
