@@ -190,4 +190,41 @@ mod tests {
         );
         assert_eq!(Status::from(err).code(), Code::DeadlineExceeded);
     }
+
+    /// The guard-drop delay hook holds the window between an abort and
+    /// the job's next check open: armed, a guard's drop takes as long as
+    /// `SCION_TEST_GUARD_DROP_MS` says. The hook reads the env once per
+    /// process and this repo bans unsafe, so the test that arms it runs
+    /// this same binary again in a child with the env set from birth;
+    /// the child is what must see the drop take the armed delay.
+    #[test]
+    fn a_guard_drop_delay_holds_the_window_open() {
+        if std::env::var("SCION_TEST_GUARD_DROP_MS").is_err() {
+            let exe = std::env::current_exe().expect("this test binary");
+            let out = std::process::Command::new(exe)
+                .args([
+                    "deadline::tests::a_guard_drop_delay_holds_the_window_open",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env("SCION_TEST_GUARD_DROP_MS", "150")
+                .output()
+                .expect("the armed child runs");
+            assert!(
+                out.status.success(),
+                "the armed child must see the drop take the delay: {}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+            return;
+        }
+        let deadline = Deadline::new(Instant::now() + Duration::from_secs(600));
+        let guard = deadline.guard();
+        let started = Instant::now();
+        drop(guard);
+        let took = started.elapsed();
+        assert!(
+            took >= Duration::from_millis(150),
+            "the armed drop took only {took:?}"
+        );
+    }
 }
