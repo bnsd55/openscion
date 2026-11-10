@@ -108,10 +108,33 @@ fn token_file(dir: &Path) -> PathBuf {
 /// bound by the 256 streams one connection may open, whose parked
 /// replies hold about 65 KB each.
 fn spawn_server(data: &Path, token: &Path, lever: Option<&str>) -> (Child, String) {
+    spawn_server_with(data, token, lever, Some("600000"))
+}
+
+/// The same child on the compiled budget: no `SCION_TEST_REPLY_BUDGET`
+/// in the env, so the server runs on the const the release build ships.
+fn spawn_server_compiled_budget(data: &Path, token: &Path) -> (Child, String) {
+    spawn_server_with(data, token, None, None)
+}
+
+fn spawn_server_with(
+    data: &Path,
+    token: &Path,
+    lever: Option<&str>,
+    budget: Option<&str>,
+) -> (Child, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_scion-server"));
     // The child needs the test database, under the data directory's
     // own schema.
     command.env("SCION_POSTGRES_URL", common::postgres_url(data));
+    if let Some(budget) = budget {
+        command.env("SCION_TEST_REPLY_BUDGET", budget);
+    } else {
+        command.env_remove("SCION_TEST_REPLY_BUDGET");
+    }
+    if let Some(lever) = lever {
+        command.env("SCION_TEST_REPLY_MUTATION", lever);
+    }
     command
         .arg("--data")
         .arg(data)
@@ -122,13 +145,7 @@ fn spawn_server(data: &Path, token: &Path, lever: Option<&str>) -> (Child, Strin
             "--listen",
             "127.0.0.1:0",
         ])
-        .env_remove("SCION_TOKEN")
-        .env_remove("SCION_TEST_REPLY_MUTATION")
-        .env("SCION_TEST_REPLY_BUDGET", "600000")
         .stderr(Stdio::piped());
-    if let Some(lever) = lever {
-        command.env("SCION_TEST_REPLY_MUTATION", lever);
-    }
     let mut child = command.spawn().expect("the server binary runs");
     let stderr = child.stderr.take().expect("stderr is piped");
     let mut reader = std::io::BufReader::new(stderr);
@@ -410,4 +427,44 @@ async fn a_client_that_parks_unread_replies_is_refused() {
     let (at, code) = refused.expect("the budget never bound");
     assert_eq!(code, "8", "the refusal is the budget's, not another's");
     let _ = at;
+}
+
+/// A server without `SCION_TEST_REPLY_BUDGET` runs on the compiled
+/// budget, and the compiled budget still serves a reply: the const's
+/// shift is the shipped 128 MiB, and a const that folds to zero
+/// refuses every reply a handler builds (#1086).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_on_the_compiled_budget_still_serves_a_reply() {
+    let data = scion_server::test_support::private_tempdir();
+    let secrets = scion_server::test_support::private_tempdir();
+    let token = token_file(secrets.path());
+    let (root_id, head_id) = seed(data.path());
+    let (mut child, addr) = spawn_server_compiled_budget(data.path(), &token);
+    let request = scion_proto::v1::DiffRequest {
+        repo: REPO.into(),
+        old_changeset_id: root_id.as_bytes().to_vec(),
+        new_changeset_id: head_id.as_bytes().to_vec(),
+        path: Vec::new(),
+        after: Vec::new(),
+    };
+    let tcp = TcpStream::connect(&addr).await.unwrap();
+    let (mut h2, connection) = h2::client::handshake(tcp).await.unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let (status, body, _send) = open_unread(&mut h2, &request).await;
+    let end = status_of(body).await;
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_ne!(
+        status.as_deref(),
+        Some("8"),
+        "the compiled budget refused a reply that fits"
+    );
+    let whole = match (status.as_deref(), end.as_deref()) {
+        // A big reply rides its status in the trailers.
+        (None, end) => end,
+        (other, _) => other,
+    };
+    assert_eq!(whole.as_deref(), Some("0"), "the reply is whole");
 }
