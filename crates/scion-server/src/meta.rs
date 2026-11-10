@@ -417,10 +417,9 @@ pub trait MetaTx {
     /// Writes a test seed: `css` oldest first, every parent before its
     /// children, file-less (no tree entries, no blobs), and the derived
     /// values to store beside them. One statement per batch, not per
-    /// changeset, where the backend can. The default writes them one by
-    /// one through the ordinary path; backends where a round trip costs
-    /// real time override it. The rows must find an empty schema: the
-    /// bulk write does not replay the ordinary write's conflict checks.
+    /// changeset, where the backend can. The rows must find an empty
+    /// schema: the bulk write does not replay the ordinary write's
+    /// conflict checks.
     ///
     /// Returns the ids, in `css` order.
     #[cfg(any(test, feature = "test-hooks"))]
@@ -429,16 +428,7 @@ pub trait MetaTx {
         repo: RepoId,
         css: &[scion_core::Changeset],
         derived: &[(&'static str, u32, ChangesetId, Vec<u8>)],
-    ) -> Result<Vec<ChangesetId>> {
-        let mut ids = Vec::with_capacity(css.len());
-        for cs in css {
-            ids.push(self.insert_changeset(repo, cs)?);
-        }
-        for (kind, version, cs, value) in derived {
-            self.put_derived(kind, *version, *cs, value)?;
-        }
-        Ok(ids)
-    }
+    ) -> Result<Vec<ChangesetId>>;
 
     /// Records a derived value. A second write must agree with the first.
     fn put_derived(
@@ -461,20 +451,14 @@ pub trait MetaTx {
     /// (#1004). The method owns the disagreeing-row check
     /// `put_derived_all` applies: a stored derived row that differs
     /// from the computed one refuses as corrupt, before the
-    /// transaction's memory follows the writes. The default splits
-    /// into the three calls, the old shape.
+    /// transaction's memory follows the writes.
     fn put_settle_rows(
         &mut self,
         trees: &[(TreeId, Vec<u8>)],
         rows: &[(String, u32, ChangesetId, Vec<u8>)],
         repo: RepoId,
         blobs: &[BlobId],
-    ) -> Result<()> {
-        self.put_trees(trees)?;
-        self.put_derived_all(rows)?;
-        self.add_repo_blobs(repo, blobs)?;
-        Ok(())
-    }
+    ) -> Result<()>;
 
     /// Deletes up to `limit` derived values of `kind` below `version`.
     fn delete_derived_below(&mut self, kind: &str, version: u32, limit: usize) -> Result<usize>;
@@ -484,9 +468,7 @@ pub trait MetaTx {
     /// the row of a changeset the transaction inserted can only have
     /// been written by the transaction itself, and the transaction's
     /// memory of its derived writes answers that read instead.
-    fn inserted_this_tx(&self, _cs: ChangesetId) -> bool {
-        false
-    }
+    fn inserted_this_tx(&self, cs: ChangesetId) -> bool;
     /// Reads the derived values of the named kinds, at the kind's own
     /// version, for the named changesets into the transaction's own
     /// memory, one statement, so the write path's per-value reads answer
@@ -533,12 +515,10 @@ pub trait MetaTx {
     /// Database errors.
     fn read_derived_preload(
         &mut self,
-        _repo: RepoId,
-        _kinds: &[(&'static str, u32)],
-        _css: &[ChangesetId],
-    ) -> Result<DerivedValues> {
-        Ok(DerivedValues::new())
-    }
+        repo: RepoId,
+        kinds: &[(&'static str, u32)],
+        css: &[ChangesetId],
+    ) -> Result<DerivedValues>;
 
     /// Installs a pre-transaction read's results on the transaction:
     /// the derived values, and the history-node bodies the build's
@@ -597,19 +577,7 @@ pub trait MetaTx {
     /// however deep the tree chain was; a store that has no batch form
     /// stores the rows one by one. No id may differ from its body's
     /// hash: the callers take each id from `encode_with_id`.
-    fn put_trees(&mut self, trees: &[(TreeId, Vec<u8>)]) -> Result<()> {
-        for (id, body) in trees {
-            let (tree, body_id) = Tree::decode_with_id(body)
-                .map_err(|e| Error::Corrupt(format!("tree {id}: {e}")))?;
-            if body_id != *id {
-                return Err(Error::Corrupt(format!(
-                    "tree {id} does not match its body's id {body_id}"
-                )));
-            }
-            self.put_tree(&tree)?;
-        }
-        Ok(())
-    }
+    fn put_trees(&mut self, trees: &[(TreeId, Vec<u8>)]) -> Result<()>;
 
     /// Reads a tree, and checks it against its ID.
     fn get_tree(&mut self, id: TreeId) -> Result<Tree>;
@@ -646,12 +614,7 @@ pub trait MetaTx {
     /// one round trip on Postgres, however many blobs the changeset
     /// puts; a store that has no batch form adds them one by one. Each
     /// blob that is already there stays as it is.
-    fn add_repo_blobs(&mut self, repo: RepoId, blobs: &[BlobId]) -> Result<()> {
-        for blob in blobs {
-            self.add_repo_blob(repo, *blob)?;
-        }
-        Ok(())
-    }
+    fn add_repo_blobs(&mut self, repo: RepoId, blobs: &[BlobId]) -> Result<()>;
 
     /// Inserts a land, or finds the land for the same request key. Returns
     /// the repo and the land's outcome, pending or final. `pending_limit`
