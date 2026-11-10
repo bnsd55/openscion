@@ -137,11 +137,6 @@ impl Paths {
     }
 }
 
-/// A test's override of the production paths, behind the test hooks: the
-/// check has one caller per process, so a plain static needs no ordering.
-#[cfg(any(test, feature = "test-hooks"))]
-static TEST_PATHS: std::sync::Mutex<Option<Paths>> = std::sync::Mutex::new(None);
-
 /// A test's override of the host's memory limit itself, behind the test
 /// hooks: the number every OS reads, so a test's floor answer never
 /// depends on the runner's own memory - the file paths above name
@@ -162,18 +157,6 @@ pub fn test_set_host_limit(bytes: Option<u64>) {
         .expect("the host limit override lock is not poisoned") = bytes;
 }
 
-/// Points the start-up check at a test's paths. Pass `None` to reset.
-///
-/// # Panics
-///
-/// Panics if the paths override lock is poisoned.
-#[cfg(any(test, feature = "test-hooks"))]
-pub fn test_set_paths(paths: Option<Paths>) {
-    *TEST_PATHS
-        .lock()
-        .expect("the paths override lock is not poisoned") = paths;
-}
-
 /// The paths the start-up check reads: a test's override, or the
 /// production paths of a Linux host.
 ///
@@ -182,16 +165,6 @@ pub fn test_set_paths(paths: Option<Paths>) {
 /// Panics if the paths override lock is poisoned.
 #[must_use]
 pub fn production_paths() -> Paths {
-    #[cfg(any(test, feature = "test-hooks"))]
-    {
-        let override_ = TEST_PATHS
-            .lock()
-            .expect("the paths override lock is not poisoned")
-            .clone();
-        if let Some(paths) = override_ {
-            return paths;
-        }
-    }
     Paths::production()
 }
 
