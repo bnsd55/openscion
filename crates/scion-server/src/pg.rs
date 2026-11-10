@@ -1715,7 +1715,7 @@ impl Pg {
 
     /// Sets how many of the next commits fail as a database out of
     /// space: the transaction runs and rolls back, so the retry re-runs
-    /// it whole. The audit's why reads disk_full, not busy.
+    /// it whole. The audit's why reads `disk_full`, not `busy`.
     #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn fail_next_commits_disk_full(&self, n: u32) {
         self.inner
