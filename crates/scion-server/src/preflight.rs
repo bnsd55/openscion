@@ -121,7 +121,10 @@ fn database_checks(
         .map(|row| row.get::<_, String>(0).parse().unwrap_or(0))
     {
         Ok(num) if (16..=18).contains(&(num / 10000)) => {
-            let (major, minor) = (num / 10000, num % 10000 / 100);
+            // Since PostgreSQL 10 the number is major * 10000 + minor:
+            // 17.11 reads 170011, so the minor is the whole rest, not
+            // the two digits the pre-10 layout gave it (#1072).
+            let (major, minor) = (num / 10000, num % 10000);
             Answer::Ok(format!("PostgreSQL {major}.{minor} is supported"))
         }
         Ok(num) => Answer::Fail(format!(
@@ -1339,9 +1342,10 @@ mod tests {
 
     /// The version line names the server's own major and minor: a
     /// major the build supports, with the minor the server reports.
-    /// The version math in the check is pinned against the live
-    /// server's own number, so a changed fold prints a version no
-    /// server runs.
+    /// The oracle is independent of the check's own math: the server's
+    /// `server_version` string names the release itself, so a wrong
+    /// fold in the check's number reading prints a version no server
+    /// runs (the number's layout changed at PostgreSQL 10, #1072).
     #[test]
     fn the_version_line_names_the_server_major_and_minor() {
         let lock = TEST_LOCK
@@ -1350,19 +1354,19 @@ mod tests {
         let (_memory, ()) = MemoryOverride::set(&lock);
         let (dir, url) = ready_store();
         let url_text = std::fs::read_to_string(&url).unwrap();
-        let num: u32 = postgres::Client::connect(url_text.as_str(), postgres::NoTls)
+        let official: String = postgres::Client::connect(url_text.as_str(), postgres::NoTls)
             .unwrap()
-            .query_one("SHOW server_version_num", &[])
+            .query_one("SHOW server_version", &[])
             .unwrap()
-            .get::<_, String>(0)
-            .parse()
-            .unwrap();
-        let (major, minor) = (num / 10000, num % 10000 / 100);
+            .get::<_, String>(0);
+        // The release's own words: the leading major.minor, whatever
+        // points and packaging follow.
+        let release = official.split_whitespace().next().unwrap().to_owned();
         let report = run_cli(dir.path(), Some(&url));
         let version = line(&report, "Postgres version");
         assert!(
-            version.contains(&format!("PostgreSQL {major}.{minor} is supported")),
-            "the version line names the server's own {major}.{minor}:\n{version}"
+            version.contains(&format!("PostgreSQL {release} is supported")),
+            "the version line names the server's own {release}:\n{version}"
         );
     }
 
