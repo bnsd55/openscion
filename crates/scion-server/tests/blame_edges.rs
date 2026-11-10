@@ -356,11 +356,11 @@ async fn a_resumed_part_names_each_line_its_own_changeset() {
     let tip = ids[ids.len() - 1];
     let (_stop, mut client) = serve(&store, dir.path(), whole_access(), TOKEN).await;
     let mut cursor: Vec<u8> = Vec::new();
-    let mut named: Vec<usize> = Vec::new();
     let mut calls = 0usize;
     loop {
         calls += 1;
         let (ranges, _changesets, next, _parts) = blame(&mut client, &tip, PATH, &cursor).await;
+        let mut named: Vec<usize> = Vec::new();
         for range in &ranges {
             if range.changeset_id.is_empty() {
                 continue;
@@ -381,14 +381,16 @@ async fn a_resumed_part_names_each_line_its_own_changeset() {
             }
         }
         if next.is_empty() {
+            // A resumed call answers the same window again (scion.proto;
+            // #1070 asks for that in the proto doc), so it re-names the
+            // lines an earlier call named: the once-each check is on
+            // this, the last call's reply.
+            named.sort_unstable();
+            assert_eq!(named, (1..=150).collect::<Vec<usize>>());
             break;
         }
         cursor = next;
     }
-    // The named ranges covered every line, each once.
-    named.sort_unstable();
-    named.dedup();
-    assert_eq!(named, (1..=150).collect::<Vec<usize>>());
     // The walk stopped at its 100-version bound: the reply needed a
     // resume. If the bound grows past the fixture, this test stops
     // guarding the run merge and must grow with it.
