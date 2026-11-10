@@ -865,7 +865,7 @@ async fn a_busy_commit_records_the_busy_why() {
     assert_eq!(failed[0]["why"], "busy", "{:?}", failed[0]);
 }
 
-/// A commit that fails as out of space records why disk_full: the word
+/// A commit that fails as out of space records why `disk_full`: the word
 /// tells the operator what to clear before the run goes again. A why
 /// that folds it into failed sends the operator hunting (#1090).
 #[tokio::test]
