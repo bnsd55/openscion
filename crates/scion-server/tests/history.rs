@@ -1657,8 +1657,9 @@ fn a_file_of_exactly_the_diff_cap_blames_its_older_lines() {
 /// the cap check lets the read through at the band's top (size == cap),
 /// the take fails at once because the call already holds its own shares,
 /// and the call answers `RESOURCE_EXHAUSTED`. The retry holds the same
-/// shares, so it fails the same way: the file is never blamed. Pinned
-/// today, before the band gets fixed.
+/// shares, so it fails the same way: the file is never blamed. Pins
+/// today's answer; #1081's fix makes this version absent, and this
+/// assert flips.
 #[test]
 fn a_version_whose_bytes_landed_in_the_calls_free_gap_is_refused_and_stays_refused() {
     let (_data, store) = open_store();
@@ -1697,7 +1698,8 @@ fn a_version_whose_bytes_landed_in_the_calls_free_gap_is_refused_and_stays_refus
 /// tip's text and both versions' shares, so a diff whose need is exactly
 /// the budget can never take, and the call answers `RESOURCE_EXHAUSTED`
 /// today. The mutant that calls the diff absent at the equality would
-/// answer instead - the pin kills it.
+/// answer instead - the pin kills it. Pins today's answer; #1081's fix
+/// makes this diff absent, and this assert flips.
 #[test]
 fn a_diff_whose_need_landed_in_the_calls_free_gap_is_refused_and_stays_refused() {
     let (_data, store) = open_store();
