@@ -238,8 +238,9 @@ fn step_hold() -> Duration {
 /// budget is refused: see [`memory`](crate::memory). A file of more than
 /// [`MAX_BLAME_DIFF_LINES`] lines is refused too: one diff reads two whole
 /// versions, and the walk checks the deadline between steps, so one diff
-/// at the cap stays within a fair share of a call. A version past the cap
-/// counts as absent, as one whose bytes do not fit the budget does.
+/// at the cap stays within a fair share of a call. A version that cannot
+/// be read within what the call's shares leave of the budget counts as
+/// absent, as one whose bytes do not fit the whole budget does.
 ///
 /// # Errors
 ///
@@ -257,6 +258,7 @@ pub fn blame(
     cs: ChangesetId,
     path: &RepoPath,
     resume: &Resume,
+    held: usize,
     memory: &Bytes,
     until: Option<Instant>,
 ) -> Result<Blame> {
@@ -311,7 +313,7 @@ pub fn blame(
     // count is the client's word, so its product with the per-line cost
     // is checked: a count that overflows is a bad cursor, not a wrap that
     // takes no bytes and reads an unbounded window.
-    let _state_hold = memory.try_take(counted.checked_mul(BYTES_PER_LINE).ok_or_else(|| {
+    let state_hold = memory.try_take(counted.checked_mul(BYTES_PER_LINE).ok_or_else(|| {
         Error::InvalidArgument(format!("bad blame cursor: {counted} lines is too many"))
     })?)?;
     if resume.after_line > counted {
@@ -487,7 +489,7 @@ pub fn blame(
                         cap: left,
                         progress: always,
                     };
-                    older_version(store, c, root, &changeset, newer, budget, &search, memory)?
+                    older_version(store, c, root, &changeset, newer, budget, &search, memory, held_by_call(held, &state_hold, &text_hold, &node_holds))?
                 }
                 None => Older::Found(None, RenameSearch::default()),
             };
@@ -500,17 +502,20 @@ pub fn blame(
                     break;
                 }
             };
-            // The state of this step's diff, past the share that `_state_hold`
-            // reserves for the blamed file's lines. A diff that does not fit
-            // the whole budget leaves the version absent, so the walk goes on:
-            // the read still cost its size, as a refused read did.
+            // The state of this step's diff, past the share that `state_hold`
+            // reserves for the blamed file's lines. A diff that cannot fit
+            // within what the call's shares leave of the budget leaves the
+            // version absent, so the walk goes on: the read still cost its
+            // size, as a refused read did.
             let mut diff_hold = None;
             let mut absent_read = 0;
             let older = match older {
                 Some((older_path, older_blob, Some(older_text))) => {
                     let both = byte_lines(&older_text).count().max(counted);
                     let need = both.saturating_sub(counted) * BYTES_PER_LINE;
-                    if need > memory.cap() {
+                    let held = held_by_call(held, &state_hold, &text_hold, &node_holds)
+                        + older_text.hold.len();
+                    if need + held > memory.cap() {
                         absent_read = older_text.len().div_ceil(64);
                         None
                     } else {
@@ -686,7 +691,7 @@ fn give_lines(
 
 /// A text that blame read, and the bytes it holds. Dropping it gives the
 /// bytes back.
-struct HeldText {
+pub struct HeldText {
     text: Vec<u8>,
     hold: Held,
 }
@@ -700,21 +705,32 @@ impl std::ops::Deref for HeldText {
 }
 
 /// Reads the text of `blob`, the file at `path`, with its bytes taken from
-/// `memory`. `None` if the bytes do not fit the whole budget: the version
-/// counts as absent, so the walk goes on.
+/// `memory`. `held` is what this call holds on the pool at the take, its
+/// own shares included. `None` if the bytes cannot be read within what
+/// those shares leave of the budget: the version counts as absent, so the
+/// walk goes on.
 ///
 /// # Errors
 ///
 /// [`Error::ResourceExhausted`] if a take waited past `until`.
-fn read_version(store: &Backend, blob: BlobId, memory: &Bytes) -> Result<Option<HeldText>> {
+pub fn read_version(
+    store: &Backend,
+    blob: BlobId,
+    memory: &Bytes,
+    held: usize,
+) -> Result<Option<HeldText>> {
     let size = store.blobs().size(blob)?;
-    if size > memory.cap() {
+    // These shares do not free until the call ends, so a take that passes
+    // the budget with them held never succeeds, however often the call
+    // retries: the version counts as absent instead of refusing a retry
+    // that repeats.
+    if size + held > memory.cap() {
         return Ok(None);
     }
     // The call holds its shares already, so this take never waits; the
     // bytes come free when a concurrent call ends, or the call fails with
     // `RESOURCE_EXHAUSTED` and the client retries.
-    let hold = memory.try_take(size)?;
+    let take = memory.try_take(size)?;
     let text = store.blobs().get(blob)?;
     // A version past the line cap counts as absent, as one whose bytes do
     // not fit the budget does: one diff of it would run past the walk's
@@ -724,7 +740,16 @@ fn read_version(store: &Backend, blob: BlobId, memory: &Bytes) -> Result<Option<
     if byte_lines(&text).count() > MAX_BLAME_DIFF_LINES {
         return Ok(None);
     }
-    Ok(Some(HeldText { text, hold }))
+    Ok(Some(HeldText { text, hold: take }))
+}
+
+/// The bytes one blame call holds on the pool at a take: the shares its
+/// caller brought (`held`, the cursor's decode share), the rows of the
+/// answer and the diff state, the text being explained, and the
+/// path-history nodes. Summed from the guards the call owns, so it cannot
+/// drift from what the pool holds for it.
+fn held_by_call(held: usize, state: &Held, text: &Held, nodes: &[Held]) -> usize {
+    held + state.len() + text.len() + nodes.iter().map(Held::len).sum::<usize>()
 }
 
 /// What diffing `text` costs against [`MAX_BLAME_DIFF_LINES`]: one per line,
@@ -753,6 +778,7 @@ fn older_version(
     budget: Budget<'_>,
     search: &RenameSearch,
     memory: &Bytes,
+    held: usize,
 ) -> Result<Older> {
     // The walk's held transaction: the lookup rides it, like every other
     // read of the walk.
@@ -770,7 +796,7 @@ fn older_version(
                 Some((newer.path.clone(), content, None))
             }
             FileState::Regular { content, .. } => {
-                let text = read_version(store, content, memory)?;
+                let text = read_version(store, content, memory, held)?;
                 text.map(|text| (newer.path.clone(), content, Some(text)))
             }
             // A symlink or a submodule is not a file that could have been
@@ -780,7 +806,9 @@ fn older_version(
         // As in git, only a path with no file before can be a rename. A
         // symlink or submodule that becomes a regular file is not one.
         None | Some(Entry::Dir(_)) => {
-            return renamed_from(store, c, root, changeset, newer, budget, search, memory);
+            return renamed_from(
+                store, c, root, changeset, newer, budget, search, memory, held,
+            );
         }
     };
     Ok(Older::Found(older, RenameSearch::default()))
@@ -817,6 +845,7 @@ fn renamed_from(
     budget: Budget<'_>,
     search: &RenameSearch,
     memory: &Bytes,
+    held: usize,
 ) -> Result<Older> {
     let Budget {
         cost,
@@ -854,17 +883,17 @@ fn renamed_from(
             if other_blob == newer.blob {
                 return Ok(Some(Chunks::of(newer.text)));
             }
-            if size > memory.cap() {
+            if size + held > memory.cap() {
                 return Ok(None);
             }
             // The bytes are taken only while the text is read: the chunks
             // hold the lines, and their cost counts against the diff-line
             // budget above.
-            let hold = memory.try_take(size)?;
+            let take = memory.try_take(size)?;
             let text = store.blobs().get(other_blob)?;
             let chunks = Chunks::of(&text);
             drop(text);
-            Held::release(hold);
+            Held::release(take);
             Ok(Some(chunks))
         };
         let from = Progress {
@@ -908,7 +937,7 @@ fn renamed_from(
     }
     // The search kept only its chunks, so read it again to diff it. Its
     // bytes stay taken for the step that diffs it.
-    let text = read_version(store, other_blob, memory)?;
+    let text = read_version(store, other_blob, memory, held)?;
     Ok(Older::Found(
         text.map(|text| (other.clone(), other_blob, Some(text))),
         at,
