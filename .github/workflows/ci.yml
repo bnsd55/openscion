@@ -1054,12 +1054,16 @@ jobs:
       - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
         with:
           tool: protoc
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
+        with:
+          tool: cargo-nextest
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: |
           df -h /
-          cargo test -p open-scion-server
+          cargo nextest run -p open-scion-server --profile ci-full
+          cargo test --doc -p open-scion-server
           df -h /
         env:
           PROPTEST_CASES: "256"
