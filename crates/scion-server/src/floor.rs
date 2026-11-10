@@ -546,6 +546,10 @@ mod tests {
         std::fs::write(leaf.join("memory.max"), "18446744073709551615\n").unwrap();
         let limit = host_limit(&paths, || None).unwrap();
         assert_eq!(limit.source, "/proc/meminfo MemTotal");
+
+        std::fs::write(leaf.join("memory.max"), "4611686018427387904\n").unwrap();
+        let limit = host_limit(&paths, || None).unwrap();
+        assert_eq!(limit.source, "/proc/meminfo MemTotal");
     }
 
     /// An under-floor host is named in the log: the operator's one
