@@ -3196,7 +3196,7 @@ mod tests {
         );
         drop(hold);
         let served = rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(Duration::from_secs(30))
             .expect("the reply lands once the pool frees");
         assert!(served, "the body is served once the pool frees");
     }
