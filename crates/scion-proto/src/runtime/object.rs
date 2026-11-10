@@ -401,6 +401,36 @@ mod tests {
         }
     }
 
+    /// The zstd-bomb guard: `frame_size` reads a frame's window descriptor
+    /// and refuses a window above [`MAX_WINDOW_BYTES`]. A real frame of 8
+    /// MiB carries the descriptor 0x68 (base 8 MiB, mantissa 0), whose
+    /// window is exactly the limit and must pass; one mantissa step past
+    /// it (0x69, 9 MiB) and a top-exponent descriptor (0x7f, base 32 MiB
+    /// with mantissa 7, 60 MiB) must fail with the window named; the
+    /// largest descriptor 0xff (exponent 31, 15/8 of 2 TiB) is refused by
+    /// the frame parser itself, still a safe refusal, no overflow.
+    #[test]
+    fn a_window_past_the_limit_is_refused_and_the_limit_passes() {
+        let data: Vec<u8> = (0..8 << 20).map(|i| (i % 251) as u8).collect();
+        let frame = pack(&data).unwrap();
+        assert_eq!(frame[4] & 0b10_0000, 0, "the frame carries a window byte");
+        let mut at_limit = frame.clone();
+        at_limit[5] = 0x68;
+        assert_eq!(frame_size(&at_limit).unwrap(), data.len());
+        for descriptor in [0x69u8, 0x7f] {
+            let mut bomb = frame.clone();
+            bomb[5] = descriptor;
+            let err = frame_size(&bomb).unwrap_err();
+            assert!(
+                err.contains("window"),
+                "descriptor {descriptor:#04x}: {err}"
+            );
+        }
+        let mut widest = frame.clone();
+        widest[5] = 0xff;
+        assert!(frame_size(&widest).is_err());
+    }
+
     #[test]
     fn an_object_goes_in_parts_of_one_chunk_but_the_last() {
         for len in [0, 1, CHUNK_BYTES, CHUNK_BYTES + 1, 3 * CHUNK_BYTES + 5] {
