@@ -2411,28 +2411,83 @@ mod tests {
         );
         // A count with no new event: only the flusher can carry it out.
         warn.since.fetch_add(1, Ordering::Relaxed);
-        tokio::time::sleep(Duration::from_millis(60)).await;
         // The flusher's line goes through the caller's closure - here a
         // no-op - so the observable is the limiter's own state: the count
-        // left the limiter, which only the flusher's flush does.
-        assert_eq!(
-            warn.since.load(Ordering::Relaxed),
-            0,
-            "the flusher carried the interval's count out"
-        );
+        // left the limiter, which only the flusher's flush does. A loaded
+        // runner may not give the flusher a turn inside any fixed sleep,
+        // so the test polls the condition and names the count it saw.
+        wait_until(
+            Duration::from_secs(5),
+            || warn.since.load(Ordering::Relaxed) == 0,
+            "the flusher carried the interval's count out",
+            || {
+                format!(
+                    "the count still reads {}",
+                    warn.since.load(Ordering::Relaxed)
+                )
+            },
+        )
+        .await;
         // The end: what is left is written and the task stops. The count
         // goes in before `over` is set: a flusher tick between the two
         // stores would otherwise see an empty count, take `over`, and
-        // stop - the count would sit forever, and the test would depend
-        // on the scheduler's mood.
+        // stop - the count would sit forever. And `over` goes in only
+        // once the interval gate cannot refuse the next tick: `write`
+        // passes on "the last write is a full interval old", so a tick
+        // landing just under the interval after the phase's write would
+        // refuse the count and break on the same pass. Waiting for the
+        // gate pins both stores to the same clock `write` reads.
         warn.since.fetch_add(2, Ordering::Relaxed);
+        wait_until(
+            Duration::from_secs(5),
+            || {
+                let last = warn.last.load(Ordering::Relaxed);
+                last != 0 && now_millis().saturating_sub(last) >= warn.interval_millis
+            },
+            "the interval gate opened for the end count",
+            || {
+                format!(
+                    "last write {}ms ago, interval {}ms",
+                    now_millis().saturating_sub(warn.last.load(Ordering::Relaxed)),
+                    warn.interval_millis
+                )
+            },
+        )
+        .await;
         over.store(true, Ordering::Relaxed);
-        tokio::time::sleep(Duration::from_millis(60)).await;
-        assert_eq!(
-            warn.since.load(Ordering::Relaxed),
-            0,
-            "the flusher wrote what was left at the end"
-        );
+        wait_until(
+            Duration::from_secs(5),
+            || warn.since.load(Ordering::Relaxed) == 0,
+            "the flusher wrote what was left at the end",
+            || {
+                format!(
+                    "the count still reads {}",
+                    warn.since.load(Ordering::Relaxed)
+                )
+            },
+        )
+        .await;
+    }
+
+    /// Polls `done` every few milliseconds until it holds, up to `cap`:
+    /// a condition wait, not a fixed sleep, so a loaded runner that
+    /// starves the flusher for a while still passes - and a flusher
+    /// that never flushes fails the cap with the count it last saw.
+    async fn wait_until(
+        cap: Duration,
+        done: impl Fn() -> bool,
+        what: &str,
+        seen: impl Fn() -> String,
+    ) {
+        let started = tokio::time::Instant::now();
+        while !done() {
+            assert!(
+                started.elapsed() < cap,
+                "{what}: gave up after {cap:?}, {}",
+                seen()
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     /// `spawn_cap_flushers` spawns both flushers: the waits line and the
