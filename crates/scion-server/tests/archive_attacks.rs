@@ -22,10 +22,15 @@ fn url_of(dir: &std::path::Path) -> String {
 
 /// The test database's URL, under a schema of its own that no store
 /// uses: a refused restore opens nothing, but the open still needs a
-/// URL to refuse against.
-fn url_of_data() -> String {
+/// URL to refuse against. The schema is registered against the temp
+/// directory it is named for, and the sweep keeps it only while that
+/// directory exists - so the caller holds the directory with the URL,
+/// or a concurrent test process's sweep drops the schema before the
+/// restore opens.
+fn url_of_data() -> (tempfile::TempDir, String) {
     let dir = scion_server::test_support::private_tempdir();
-    url_of(dir.path())
+    let url = url_of(dir.path());
+    (dir, url)
 }
 
 static LOG: std::sync::LazyLock<Captured> = std::sync::LazyLock::new(Captured::default);
@@ -1046,7 +1051,8 @@ fn an_archive_of_an_unknown_version_or_format_is_refused() {
     assert_ne!(future, manifest, "the manifest's shape moved upstream");
     std::fs::write(&manifest_path, future).unwrap();
     let keep2 = scion_server::test_support::private_tempdir();
-    let error = archive::restore(&out, keep2.path(), &url_of_data(), None)
+    let (_url_dir, url) = url_of_data();
+    let error = archive::restore(&out, keep2.path(), &url, None)
         .expect_err("a version-2 archive must not restore");
     assert!(
         error.to_string().contains("version 2 is not 1"),
@@ -1067,12 +1073,31 @@ fn an_archive_of_an_unknown_version_or_format_is_refused() {
     assert_ne!(foreign, manifest, "the manifest's shape moved upstream");
     std::fs::write(&manifest_path, foreign).unwrap();
     let keep2 = scion_server::test_support::private_tempdir();
-    let error = archive::restore(&out, keep2.path(), &url_of_data(), None)
+    let (_url_dir, url) = url_of_data();
+    let error = archive::restore(&out, keep2.path(), &url, None)
         .expect_err("a foreign archive must not restore");
     assert!(
         error.to_string().contains("not a scion archive"),
         "the refusal must name the format rule: {error}"
     );
+}
+
+/// The sweep another test process runs at its first open: a schema the
+/// URL names must survive it while the URL's directory is held. The
+/// sweep between the URL's making and the restore's open turns the race
+/// into a certainty: on the old code (the directory dropped with the
+/// URL's return) the sweep drops the schema and the restore meets a
+/// missing schema; on the fixed code the directory is held and the
+/// restore opens.
+#[test]
+fn the_url_of_data_survives_a_sweep_while_its_directory_is_held() {
+    let (_keep, out, _main, _second) = sound_archive();
+    let keep2 = scion_server::test_support::private_tempdir();
+    let (_url_dir, url) = url_of_data();
+    Backend::sweep_stale_test_schemas().expect("the sweep runs");
+    let report = archive::restore(&out, keep2.path(), &url, None)
+        .expect("the schema survived the sweep: the restore opens");
+    assert!(!report.repos.is_empty(), "the restore restored the archive");
 }
 
 /// F2: the mark clears once, in the LAST repo's publication
