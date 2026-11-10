@@ -335,6 +335,51 @@ async fn writer(url: &str, request_id: &str) -> Writer {
     ScionClient::with_interceptor(channel, WriteCall(request_id.to_owned()))
 }
 
+/// A multi-chunk upload is one write whose intent line says the true
+/// total of every chunk's bytes. Kills the mutant that subtracts (or
+/// multiplies) instead of adding the later chunks - the line then names
+/// a wrapped or wrong count - and the mutant that flips the only-the-
+/// first-message-names-the-repo check, which refuses every upload whose
+/// later chunk arrives.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_multi_chunk_upload_records_the_true_total_of_its_bytes() {
+    use scion_proto::v1::PutBlobRequest;
+
+    let dir = scion_server::test_support::private_tempdir();
+    let store = store(dir.path());
+    let audit_path = dir.path().join("audit.log");
+    let audit = Audit::open(&audit_path).unwrap();
+    let (stop, url) = serve_with_audit(&store, dir.path(), write_access(), audit).await;
+    let mut ci = writer(&url, "t-chunks").await;
+
+    // Three chunks: the first names the repo, the later two do not.
+    let chunks = vec![b"aaa".to_vec(), b"bbbbb".to_vec(), b"c".to_vec()];
+    let total: usize = chunks.iter().map(Vec::len).sum();
+    let reqs = chunks
+        .into_iter()
+        .enumerate()
+        .map(|(i, data)| PutBlobRequest {
+            repo: if i == 0 { REPO.into() } else { String::new() },
+            data,
+        })
+        .collect::<Vec<_>>();
+    ci.put_blob(tokio_stream::iter(reqs))
+        .await
+        .expect("the multi-chunk upload is allowed");
+
+    stop.send(()).unwrap();
+    wait_for_lines(&audit_path, 2).await;
+
+    let lines = read_lines(&audit_path);
+    let writes = pairs(&lines, "write");
+    assert_eq!(writes.len(), 1, "one upload pair: {lines:?}");
+    assert_eq!(writes[0].0["rpc"], "PutBlob", "the pair is the upload's");
+    assert_eq!(
+        writes[0].0["bytes"], total,
+        "the intent line says the true total: {lines:?}"
+    );
+}
+
 /// Every state change records an intent line before it runs and a
 /// result line after, and the pair joins by the request ID. No line
 /// names a blob or a tree.
