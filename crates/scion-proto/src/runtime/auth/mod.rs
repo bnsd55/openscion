@@ -1411,6 +1411,43 @@ mod tests {
         let _ = me;
     }
 
+    /// The interceptor is what puts the token on every request: a call
+    /// through [`Interceptor::call`] must come out with the
+    /// `authorization` header carrying `Bearer <token>`, or the server
+    /// refuses a client whose token is fine.
+    #[test]
+    fn the_bearer_interceptor_stamps_the_token_on_the_request() {
+        let mut bearer = Bearer::new("t0ken").expect("the token is visible ASCII");
+        let stamped =
+            Interceptor::call(&mut bearer, Request::new(())).expect("the stamping never refuses");
+        assert_eq!(
+            stamped
+                .metadata()
+                .get("authorization")
+                .expect("the header is set"),
+            "Bearer t0ken"
+        );
+    }
+
+    /// A refused read keeps its own text - the mode and owner rules name
+    /// the fix - and every other failure gains the `cannot read <path>`
+    /// context, so an operator can tell which file failed. A sense flip
+    /// would swap the two.
+    #[test]
+    fn the_checked_read_error_keeps_the_refusal_and_contexts_the_rest() {
+        let denied = io::Error::new(io::ErrorKind::PermissionDenied, "mode rule text");
+        let err = checked_read_error(Path::new("k"), denied).to_string();
+        assert!(err.contains("mode rule text"), "{err}");
+        assert!(!err.contains("cannot read"), "{err}");
+
+        let err = checked_read_error(
+            Path::new("k"),
+            io::Error::new(io::ErrorKind::NotFound, "gone"),
+        )
+        .to_string();
+        assert!(err.contains("cannot read k"), "{err}");
+    }
+
     /// The digest comparison must notice every differing byte, not fold
     /// to "some bit differs": an XOR fold cancels a delta that two
     /// positions share, so two digests differing at two positions by the
