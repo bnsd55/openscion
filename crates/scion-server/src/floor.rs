@@ -368,7 +368,7 @@ pub(crate) fn check_startup_memory(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     fn paths(dir: &Path) -> Paths {
         Paths {
@@ -504,7 +504,7 @@ mod tests {
         });
     }
 
-    /// A host_memory that answers from the files the paths name, the
+    /// A `host_memory` that answers from the files the paths name, the
     /// same read the start-up check makes: a constant body - None, a
     /// zero, or a wrong source - answers a host it did not read.
     #[test]
@@ -517,7 +517,7 @@ mod tests {
         assert_eq!(source, "/proc/meminfo MemTotal");
     }
 
-    /// A MemTotal of zero is not a memory reading: the reader falls
+    /// A `MemTotal` of zero is not a memory reading: the reader falls
     /// through, so the start-up line says the limit is unknown instead
     /// of warning about a zero-byte host.
     #[test]
