@@ -107,7 +107,15 @@ fn a_restore_of_many_commits_flushes_its_history_buffer_at_the_bound() {
     let peak = test_history_pending_peak_bytes();
     // The buffer may pass the bound by the bodies of one commit's
     // derive - two small nodes here - never by the whole replay's
-    // nodes.
+    // nodes. The floor pins the counter to the fixture: the replay's
+    // last commit holds its two nodes together before the flush, so the
+    // peak is their real byte size, not a constant. A counter stuck at
+    // 0 or 1 answers nothing about what the restore held.
+    assert!(
+        peak >= 32,
+        "the restore's peak was {peak} bytes: the pending counter never \
+         saw the two nodes the last commit held before its flush"
+    );
     assert!(
         peak <= bound + (2 << 10),
         "the restore held {peak} bytes of history nodes, bound {bound}: \\
