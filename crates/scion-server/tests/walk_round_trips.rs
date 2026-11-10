@@ -314,6 +314,7 @@ fn a_blame_rides_windows_between_its_node_reads() {
         at,
         &file,
         &blame::Resume::default(),
+        0,
         &Bytes::new(1 << 30),
         None,
     )
@@ -330,6 +331,7 @@ fn a_blame_rides_windows_between_its_node_reads() {
         at,
         &file,
         &blame::Resume::default(),
+        0,
         &Bytes::new(1 << 30),
         None,
     )
@@ -388,6 +390,7 @@ fn eight_walks_leave_a_reader_for_a_plain_read() {
         at,
         &file,
         &blame::Resume::default(),
+        0,
         &Bytes::new(1 << 30),
         None,
     )
@@ -411,6 +414,7 @@ fn eight_walks_leave_a_reader_for_a_plain_read() {
                             at,
                             &file,
                             &blame::Resume::default(),
+                            0,
                             &Bytes::new(1 << 30),
                             None,
                         )
@@ -450,6 +454,7 @@ fn a_shrunk_step_hold_answers_the_same() {
         at,
         &file,
         &blame::Resume::default(),
+        0,
         &Bytes::new(1 << 30),
         None,
     )
@@ -463,6 +468,7 @@ fn a_shrunk_step_hold_answers_the_same() {
         at,
         &file,
         &blame::Resume::default(),
+        0,
         &Bytes::new(1 << 30),
         None,
     )
@@ -504,6 +510,7 @@ fn a_cold_blame_answers_like_a_warm_one() {
         at,
         &file,
         &blame::Resume::default(),
+        0,
         &Bytes::new(1 << 30),
         None,
     )
@@ -514,6 +521,7 @@ fn a_cold_blame_answers_like_a_warm_one() {
         at,
         &file,
         &blame::Resume::default(),
+        0,
         &Bytes::new(1 << 30),
         None,
     )
@@ -551,6 +559,7 @@ fn a_blame_call_holds_one_reader_and_returns_it() {
         at,
         &file,
         &blame::Resume::default(),
+        0,
         &Bytes::new(1 << 30),
         None,
     )
@@ -564,6 +573,7 @@ fn a_blame_call_holds_one_reader_and_returns_it() {
         at,
         &file,
         &blame::Resume::default(),
+        0,
         &Bytes::new(1 << 30),
         None,
     )
@@ -592,6 +602,7 @@ fn a_blame_call_holds_one_reader_and_returns_it() {
         at,
         &file,
         &blame::Resume::default(),
+        0,
         &Bytes::new(1 << 30),
         Some(Instant::now()),
     )
@@ -666,6 +677,7 @@ fn a_blame_crosses_its_window_and_names_every_version() {
         *ids.last().unwrap(),
         &path("file.txt"),
         &blame::Resume::default(),
+        0,
         &Bytes::new(1 << 30),
         None,
     )
