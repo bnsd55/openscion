@@ -1620,6 +1620,37 @@ fn a_cursor_with_bytes_past_its_fields_is_refused() {
     );
 }
 
+/// A file of exactly the diff cap's lines blames its older lines: the
+/// older version reads (the cap check is past the cap, not at it), the
+/// diff names the tip's changed line, and the kept lines keep the
+/// root's name. A cap check at the cap would call the root's version
+/// unreadable, name every line with the tip, and steal the root's
+/// lines.
+#[test]
+fn a_file_of_exactly_the_diff_cap_blames_its_older_lines() {
+    let (_data, store) = open_store();
+    let cap = MAX_BLAME_DIFF_LINES;
+    let tail: Vec<u8> = vec![&b"x\n"[..]; cap - 1].concat();
+    let root_body: Vec<u8> = b"a\n".iter().copied().chain(tail.iter().copied()).collect();
+    let tip_body: Vec<u8> = b"b\n".iter().copied().chain(tail).collect();
+    let ids = chain(
+        &store,
+        vec![
+            vec![("f", regular(store.blobs().put(&root_body).unwrap()))],
+            vec![("f", regular(store.blobs().put(&tip_body).unwrap()))],
+        ],
+    );
+    let b = blame(&store, ids[1], "f");
+    assert!(b.resume.is_none(), "the blame finished in one call");
+    assert_eq!(
+        b.ranges,
+        vec![
+            range(1, 1, Some(ids[1]), 1),
+            range(2, cap - 1, Some(ids[0]), 2),
+        ]
+    );
+}
+
 /// Cursor bytes for `resume`, made for a blame of `p` at `cs` in `r`.
 fn cursor_bytes(resume: &Resume, cs: ChangesetId, p: &str) -> Vec<u8> {
     blame::encode_cursor(resume, REPO, cs, &path(p))
