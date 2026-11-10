@@ -1377,8 +1377,8 @@ jobs:
           # the libtest list; the ignored tests neither runs, and the
           # doc tests the next line covers), and nextest names any test
           # that hangs instead of holding the nightly to its limit.
-          cargo nextest run --workspace --profile ci \
-            -E 'not (test(land::tests::a_check_in_the_path_history_matches_the_index_and_a_walk) or test(history::tests::a_path_log_matches_a_walk_of_first_parents) or test(graph::tests::queries_match_the_graph))'
+          cargo nextest run --workspace --profile ci-full \
+            -E 'not (test(=land::tests::a_check_in_the_path_history_matches_the_index_and_a_walk) or test(=history::tests::a_path_log_matches_a_walk_of_first_parents) or test(=graph::tests::queries_match_the_graph))'
           cargo test --doc --workspace
           df -h /
         env:

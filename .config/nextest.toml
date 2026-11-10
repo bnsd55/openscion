@@ -7,7 +7,24 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 # the log names it, instead of the job dying at its limit with no
 # test named. A flake stays visible: no retries, and one hang does
 # not hide other failures (fail-fast off).
+#
+# The cap is sized from the suite's real slow tests (three nightlies
+# and three main pushes, 2026-11-06 to 2026-11-10): the slowest is
+# land::tests::a_check_in_the_path_history_matches_the_index_and_a_walk
+# at 379 s in the test job, so the kill sits at 60 s x 20 = 1200 s,
+# above three times that, and the same profile covers the Postgres
+# cells (187 s), umask 002 (280 s) and macOS (222 s).
 [profile.ci]
 retries = 0
 fail-fast = false
-slow-timeout = { period = "60s", terminate-after = 5 }
+slow-timeout = { period = "60s", terminate-after = 20 }
+
+# The nightly's 2000-case run runs the same suite with a budget the
+# fast lanes never see: its slowest test,
+# history::tests::the_same_names_cut_the_same_way_in_any_edit_order,
+# took 1109 s, so its kill sits at 60 s x 56 = 3360 s, above three
+# times that.
+[profile.ci-full]
+retries = 0
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 56 }
