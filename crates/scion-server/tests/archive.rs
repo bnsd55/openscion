@@ -430,6 +430,30 @@ fn snapshot_main_hex(archive: &Path) -> String {
     value[0]["target"].as_str().expect("a target").to_owned()
 }
 
+/// The manifest's counts are the archive's own summary, and the format
+/// doc's table says what each one means: totals over the archive. An
+/// operator reads them without the store's code, so they must be the
+/// sums the sections hold - not a running arithmetic the export could
+/// get wrong on its way through the sections.
+#[test]
+fn the_manifest_counts_what_the_sections_hold() {
+    let data = scion_server::test_support::private_tempdir();
+    let (store, _main) = source(data.path());
+    let out = scion_server::test_support::private_tempdir()
+        .path()
+        .join("archive");
+    archive::export(&store, data.path(), Some(REPO), false, &out).unwrap();
+    drop(store);
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("manifest.json")).unwrap()).unwrap();
+    let counts = &value["counts"];
+    assert_eq!(counts["repos"], 1, "the one repo the archive holds");
+    assert_eq!(counts["changesets"], 3, "main's three changesets");
+    assert_eq!(counts["refs"], 1, "main's one ref");
+    assert_eq!(counts["pending_lands"], 0, "no land was pending");
+    assert_eq!(counts["blobs"], 3, "main's three blobs");
+}
+
 #[test]
 fn a_changeset_a_parent_points_past_is_named() {
     // Drop a middle changeset's record from the stream: its child names
@@ -562,6 +586,10 @@ fn a_section_that_is_a_symlink_to_another_is_refused() {
 fn an_export_of_two_repos_that_fold_to_one_is_refused() {
     let data = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(&data.path().join("store")).unwrap();
+    // The blob is really put: the export copies every member blob, and
+    // a missing blob file would fail the export before the fold ever
+    // gets its turn.
+    let blob = store.blobs().put(b"a").unwrap();
     for name in ["main", "MAIN"] {
         store
             .write(|c| {
@@ -569,7 +597,7 @@ fn an_export_of_two_repos_that_fold_to_one_is_refused() {
                 let cs = changeset(vec![], &[("a", Some(regular("a")))]);
                 let id = tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0;
                 assert!(c.cas_ref(repo, "main", None, id)?);
-                c.add_repo_blob(repo, BlobId::of(b"a"))?;
+                c.add_repo_blob(repo, blob)?;
                 Ok(())
             })
             .unwrap();
@@ -577,9 +605,134 @@ fn an_export_of_two_repos_that_fold_to_one_is_refused() {
     let out = scion_server::test_support::private_tempdir()
         .path()
         .join("archive");
-    let error = archive::export(&store, data.path(), None, true, &out).unwrap_err();
+    let error = archive::export(&store, &data.path().join("store"), None, true, &out).unwrap_err();
     assert!(
-        error.to_string().contains("fold"),
-        "the export must name the fold: {error:#}"
+        error
+            .to_string()
+            .contains("the repos main and MAIN fold to one directory on this disk"),
+        "the export must name the fold and both names, the first repo the partner: {error:#}"
+    );
+}
+
+/// A section that is a plain file, not a directory and not a symlink:
+/// the reader must name the shape - a section the manifest names has
+/// to be a plain directory - not fall through to a read error that
+/// says only that the section cannot be read.
+#[test]
+fn a_section_that_is_a_plain_file_is_refused() {
+    let data = scion_server::test_support::private_tempdir();
+    let (store, _main) = source(data.path());
+    let out = scion_server::test_support::private_tempdir()
+        .path()
+        .join("archive");
+    archive::export(&store, data.path(), Some(REPO), false, &out).unwrap();
+    drop(store);
+    let section = out.join("repos").join(REPO);
+    std::fs::remove_dir_all(&section).unwrap();
+    std::fs::write(&section, b"not a section\n").unwrap();
+
+    let damages = archive::verify(&out).unwrap();
+    assert!(
+        damages
+            .iter()
+            .any(|d| d.contains(REPO) && d.contains("not a plain directory")),
+        "verify must name the file where a section should be: {damages:?}"
+    );
+    let empty = scion_server::test_support::private_tempdir();
+    let restored = archive::restore(&out, empty.path(), &url_of(empty.path()), None);
+    assert!(restored.is_err(), "a named damage must refuse the replay");
+}
+
+/// The cap's exact edge: the store accepts an object of exactly
+/// `MAX_OBJECT_BYTES`, so the archive holds one, and the reader must
+/// decode it back. A reader that refuses the cap's own edge - the
+/// comparison past the cap, not at it - names a damage in a complete
+/// store, and an archive with the largest legal file fails to restore.
+/// One byte more and the store itself refuses the put.
+#[test]
+fn a_blob_at_the_cap_passes_verify_and_one_past_it_is_refused() {
+    let data = scion_server::test_support::private_tempdir();
+    let store = Backend::open_test(&data.path().join("store")).unwrap();
+    let cap = scion_server::test_support::store::MAX_OBJECT_BYTES;
+    let at_cap = vec![0u8; cap];
+    let blob = store.blobs().put(&at_cap).unwrap();
+    store
+        .write(|c| {
+            let repo = c.create_repo("cap")?;
+            let cs = changeset(
+                vec![],
+                &[(
+                    "the-big-file",
+                    Some(FileState::Regular {
+                        content: blob,
+                        executable: false,
+                    }),
+                )],
+            );
+            let id = tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0;
+            assert!(c.cas_ref(repo, "main", None, id)?);
+            c.add_repo_blob(repo, blob)?;
+            Ok(())
+        })
+        .unwrap();
+    let out = scion_server::test_support::private_tempdir()
+        .path()
+        .join("archive");
+    archive::export(&store, &data.path().join("store"), None, true, &out).unwrap();
+
+    // One byte more: the store's own guard refuses the put, so the
+    // archive can never hold it.
+    let past = vec![0u8; cap + 1];
+    let refused = store.blobs().put(&past);
+    assert!(
+        refused.is_err(),
+        "the store must refuse an object past the cap"
+    );
+    drop(store);
+
+    let damages = archive::verify(&out).unwrap();
+    assert!(
+        damages.is_empty(),
+        "the cap's own edge is sound: {damages:?}"
+    );
+}
+
+/// A member line that is hex but the wrong length: an ID's hex is
+/// always 64 chars, and a line one longer parses, under a shape check
+/// that only refuses when both the length and the alphabet are wrong,
+/// to the same ID the first 64 chars spell - the archive would verify
+/// with a malformed members file. The shape check refuses either
+/// wrongness on its own.
+#[test]
+fn a_members_line_of_the_wrong_length_is_refused() {
+    let data = scion_server::test_support::private_tempdir();
+    let (store, _main) = source(data.path());
+    let out = scion_server::test_support::private_tempdir()
+        .path()
+        .join("archive");
+    archive::export(&store, data.path(), Some(REPO), false, &out).unwrap();
+    drop(store);
+    let members = out.join("repos").join(REPO).join("members.txt");
+    let text = std::fs::read_to_string(&members).unwrap();
+    let tampered: String = text
+        .lines()
+        .map(|line| {
+            if line.len() == 64 {
+                format!("{line}0")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&members, tampered).unwrap();
+
+    // The shape refusal is hard: the reader fails, it does not name a
+    // damage - an archive whose member lines are not blob IDs is not
+    // readable at all.
+    let error = archive::verify(&out).unwrap_err();
+    assert!(
+        error.to_string().contains("not a blob ID"),
+        "verify must refuse a member line that is not a blob ID: {error:#}"
     );
 }
