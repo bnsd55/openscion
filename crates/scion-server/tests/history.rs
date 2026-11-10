@@ -1527,6 +1527,99 @@ fn chain_in<S: Into<Option<FileState>>>(
         .unwrap()
 }
 
+/// The decode takes exactly the cursor's bytes, one window line each,
+/// and 32 bytes per table name: a share one byte short refuses the
+/// decode, the exact share decodes. Pinned at two budgets, so a mutant
+/// that under- or over-counts the share lands on the wrong side of one
+/// of them.
+#[test]
+fn a_cursor_decode_takes_its_exact_memory_share() {
+    let (_data, store) = open_store();
+    let put = |data: &[u8]| regular(store.blobs().put(data).unwrap());
+    // Four changesets, and a window that names each once: the cursor's
+    // table holds four names.
+    let ids = chain(
+        &store,
+        vec![
+            vec![("f", put(b"a\n"))],
+            vec![("f", put(b"b\n"))],
+            vec![("f", put(b"c\n"))],
+            vec![("f", put(b"d\n"))],
+        ],
+    );
+    let resume = Resume {
+        next: Some((ids[3], path("f"))),
+        counted: 4,
+        window: ids.iter().map(|id| Line::Named(*id)).collect(),
+        ..Resume::default()
+    };
+    let bytes = cursor_bytes(&resume, ids[3], "f");
+    // The decode's share: the cursor's bytes, one Line each for the 4
+    // open lines (32 bytes of changeset or 8 of place, plus the tag),
+    // and 32 bytes per table name.
+    let open = 4usize;
+    let table = 4usize;
+    let size_of_line = 40usize;
+    let share = bytes.len() + open * size_of_line + table * 32;
+    let err = blame::decode_cursor(
+        &store,
+        REPO,
+        &bytes,
+        ids[3],
+        &path("f"),
+        &Bytes::new(share - 1),
+        None,
+    )
+    .expect_err("a share one byte short must refuse the decode");
+    assert!(
+        matches!(err, Error::ResourceExhausted(_)),
+        "a short share refuses as exhausted: {err}"
+    );
+    let (decoded, _hold) = blame::decode_cursor(
+        &store,
+        REPO,
+        &bytes,
+        ids[3],
+        &path("f"),
+        &Bytes::new(share),
+        None,
+    )
+    .expect("the exact share decodes");
+    assert_eq!(decoded.window, resume.window);
+}
+
+/// A cursor with bytes past its fields is refused: the decoder must
+/// consume the cursor exactly, so a client cannot smuggle bytes past a
+/// field the server does not read yet.
+#[test]
+fn a_cursor_with_bytes_past_its_fields_is_refused() {
+    let (_data, store) = open_store();
+    let put = |data: &[u8]| regular(store.blobs().put(data).unwrap());
+    let ids = chain(&store, vec![vec![("f", put(b"a\n"))]]);
+    let resume = Resume {
+        next: Some((ids[0], path("f"))),
+        counted: 1,
+        window: vec![Line::Named(ids[0])],
+        ..Resume::default()
+    };
+    let mut bytes = cursor_bytes(&resume, ids[0], "f");
+    bytes.push(0xff);
+    let err = blame::decode_cursor(
+        &store,
+        REPO,
+        &bytes,
+        ids[0],
+        &path("f"),
+        &Bytes::new(1 << 30),
+        None,
+    )
+    .expect_err("bytes past the fields must refuse the decode");
+    assert!(
+        matches!(err, Error::InvalidArgument(ref msg) if msg.contains("past its fields")),
+        "the refusal names the trailing bytes: {err}"
+    );
+}
+
 /// Cursor bytes for `resume`, made for a blame of `p` at `cs` in `r`.
 fn cursor_bytes(resume: &Resume, cs: ChangesetId, p: &str) -> Vec<u8> {
     blame::encode_cursor(resume, REPO, cs, &path(p))
