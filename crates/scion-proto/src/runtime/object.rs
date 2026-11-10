@@ -411,7 +411,9 @@ mod tests {
     /// the frame parser itself, still a safe refusal, no overflow.
     #[test]
     fn a_window_past_the_limit_is_refused_and_the_limit_passes() {
-        let data: Vec<u8> = (0..8 << 20).map(|i| u8::try_from(i % 251).unwrap()).collect();
+        let data: Vec<u8> = (0..8 << 20)
+            .map(|i| u8::try_from(i % 251).unwrap())
+            .collect();
         let frame = pack(&data).unwrap();
         assert_eq!(frame[4] & 0b10_0000, 0, "the frame carries a window byte");
         let mut at_limit = frame.clone();
