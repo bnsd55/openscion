@@ -287,6 +287,8 @@ struct PgInner {
     txes: std::sync::atomic::AtomicU64,
     #[cfg(any(test, feature = "test-hooks"))]
     fail_commits: std::sync::atomic::AtomicU64,
+    #[cfg(any(test, feature = "test-hooks"))]
+    fail_commits_disk_full: std::sync::atomic::AtomicU64,
     /// The operator metrics, set once by the server before it serves: a
     /// commit's wait for the collector's advisory key records how long
     /// it waited. Empty in import, fsck and gc, which export none.
@@ -1294,6 +1296,8 @@ impl Pg {
             txes: std::sync::atomic::AtomicU64::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
             fail_commits: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(any(test, feature = "test-hooks"))]
+            fail_commits_disk_full: std::sync::atomic::AtomicU64::new(0),
             metrics: std::sync::OnceLock::new(),
         });
         // The probe of a server that lost its lock: once a minute the
@@ -1608,6 +1612,21 @@ impl Pg {
                 let unflushed = tx.cs_pending.as_deref().is_some_and(|p| !p.is_empty())
                     || tx.derived_pending.as_deref().is_some_and(|p| !p.is_empty());
                 #[cfg(any(test, feature = "test-hooks"))]
+                if self.inner.fail_commits_disk_full.load(Ordering::Relaxed) > 0 {
+                    self.inner
+                        .fail_commits_disk_full
+                        .fetch_sub(1, Ordering::Relaxed);
+                    // Counted as ended, as a real failed commit is: the
+                    // transaction rolls back below, nothing was written,
+                    // exactly as an out-of-space commit ends.
+                    self.inner.committed.fetch_add(1, Ordering::Release);
+                    let _ = tx.rollback();
+                    let fail = std::io::Error::other(
+                        "the commit was made to fail as out of space by the test hook",
+                    );
+                    return Err(Error::Storage(Storage::disk_full(fail)));
+                }
+                #[cfg(any(test, feature = "test-hooks"))]
                 if self.inner.fail_commits.load(Ordering::Relaxed) > 0 {
                     self.inner.fail_commits.fetch_sub(1, Ordering::Relaxed);
                     // Counted as ended, as a real failed commit is: the
@@ -1691,6 +1710,16 @@ impl Pg {
     pub(crate) fn fail_next_commits(&self, n: u32) {
         self.inner
             .fail_commits
+            .store(u64::from(n), Ordering::Relaxed);
+    }
+
+    /// Sets how many of the next commits fail as a database out of
+    /// space: the transaction runs and rolls back, so the retry re-runs
+    /// it whole. The audit's why reads `disk_full`, not `busy`.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) fn fail_next_commits_disk_full(&self, n: u32) {
+        self.inner
+            .fail_commits_disk_full
             .store(u64::from(n), Ordering::Relaxed);
     }
 
