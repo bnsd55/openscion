@@ -442,6 +442,9 @@ jobs:
       - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
         with:
           tool: protoc
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
+        with:
+          tool: cargo-nextest
       # The test job and the pg cells build the same target (Linux
       # x64, the same features), so one shared entry serves both, which
       # keeps the repo under its 10 GB cache limit.
@@ -469,7 +472,8 @@ jobs:
       - name: the real-ACL case has setfacl
         run: scripts/ci-ensure-setfacl.sh
       - run: |
-          cargo test --workspace
+          cargo nextest run --workspace --profile ci
+          cargo test --doc --workspace
           df -h /
         env:
           # The fast tier: a pull request runs 64 cases, main, the
@@ -686,6 +690,9 @@ jobs:
       - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
         with:
           tool: protoc
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
+        with:
+          tool: cargo-nextest
       # The matrix cells share the test job's entry: same target (Linux
       # x64), so one entry serves all four.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -712,7 +719,8 @@ jobs:
       - name: the real-ACL case has setfacl
         run: scripts/ci-ensure-setfacl.sh
       - run: |
-          cargo test --workspace
+          cargo nextest run --workspace --profile ci
+          cargo test --doc --workspace
           df -h /
         env:
           # The Postgres majors prove version parity, not more cases;
@@ -827,6 +835,9 @@ jobs:
       - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
         with:
           tool: protoc
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
+        with:
+          tool: cargo-nextest
       # Same target (Linux x64, the same features) as the test job, so
       # one shared entry serves both.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -844,7 +855,8 @@ jobs:
         run: |
           umask 002
           umask  # one line of proof in the log: the run's mask is 0002
-          cargo test --workspace
+          cargo nextest run --workspace --profile ci
+          cargo test --doc --workspace
         env:
           PROPTEST_CASES: "128"
           SCION_TEST_REQUIRE_SETFACL: "1"
@@ -924,6 +936,9 @@ jobs:
       - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
         with:
           tool: protoc
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
+        with:
+          tool: cargo-nextest
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -955,7 +970,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: |
           df -h /
-          cargo test --workspace
+          cargo nextest run --workspace --profile ci
+          cargo test --doc --workspace
           df -h /
         env:
           # A pull request runs 64 cases, main and the nightly 128;
@@ -1090,12 +1106,16 @@ jobs:
       - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
         with:
           tool: protoc
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
+        with:
+          tool: cargo-nextest
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: |
           df -h /
-          cargo test --workspace --exclude open-scion-server
+          cargo nextest run --workspace --exclude open-scion-server --profile ci
+          cargo test --doc --workspace --exclude open-scion-server
           df -h /
         env:
           PROPTEST_CASES: "256"
@@ -1331,6 +1351,9 @@ jobs:
       - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
         with:
           tool: protoc
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
+        with:
+          tool: cargo-nextest
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -1349,10 +1372,14 @@ jobs:
           done
       - run: |
           df -h /
-          cargo test --workspace -- --exact \
-            --skip land::tests::a_check_in_the_path_history_matches_the_index_and_a_walk \
-            --skip history::tests::a_path_log_matches_a_walk_of_first_parents \
-            --skip graph::tests::queries_match_the_graph
+          # The same three skips as the proof jobs above, as a nextest
+          # filter: both selectors run the same set (verified against
+          # the libtest list; the ignored tests neither runs, and the
+          # doc tests the next line covers), and nextest names any test
+          # that hangs instead of holding the nightly to its limit.
+          cargo nextest run --workspace --profile ci \
+            -E 'not (test(land::tests::a_check_in_the_path_history_matches_the_index_and_a_walk) or test(history::tests::a_path_log_matches_a_walk_of_first_parents) or test(graph::tests::queries_match_the_graph))'
+          cargo test --doc --workspace
           df -h /
         env:
           PROPTEST_CASES: "2000"
