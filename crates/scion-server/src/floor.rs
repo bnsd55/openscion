@@ -368,7 +368,7 @@ pub(crate) fn check_startup_memory(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     fn paths(dir: &Path) -> Paths {
         Paths {
@@ -466,7 +466,13 @@ mod tests {
     /// observable: a writer the tests read, so an under-floor host is
     /// seen to be named.
     #[derive(Clone)]
-    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl Captured {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
 
     impl std::io::Write for Captured {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -486,22 +492,19 @@ mod tests {
         }
     }
 
-    fn captured_log() -> Captured {
-        static LOG: std::sync::OnceLock<Captured> = std::sync::OnceLock::new();
-        LOG.get_or_init(|| Captured(Arc::new(std::sync::Mutex::new(Vec::new()))))
-            .clone()
-    }
-
-    fn init_log() {
-        static INIT: std::sync::Once = std::sync::Once::new();
-        INIT.call_once(|| {
-            let subscriber = tracing_subscriber::fmt()
-                .with_ansi(false)
-                .with_max_level(tracing::level_filters::LevelFilter::ERROR)
-                .with_writer(captured_log())
-                .finish();
-            tracing::subscriber::set_global_default(subscriber).unwrap();
-        });
+    /// Runs `check` with a thread-local log subscriber writing into a
+    /// fresh buffer, and answers the buffer's text. The subscriber is
+    /// scoped, not global: the crate's other log tests set the one
+    /// global subscriber, and two setters race.
+    fn logged(check: impl FnOnce()) -> String {
+        let log = Captured(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::level_filters::LevelFilter::ERROR)
+            .with_writer(log.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, check);
+        log.text()
     }
 
     /// A `host_memory` that answers from the files the paths name, the
@@ -557,37 +560,31 @@ mod tests {
     /// exactly at the floor is met, not warned.
     #[test]
     fn an_under_floor_host_is_named_in_the_log_and_an_at_floor_one_is_not() {
-        init_log();
-        let log = captured_log();
         let dir = tempfile::tempdir().unwrap();
         let paths = paths(dir.path());
         // 1 GiB against a 7504 MiB floor: under, and named.
         std::fs::write(&paths.meminfo, "MemTotal:       1048576 kB\n").unwrap();
-        let metrics = scion_proto::runtime::metrics::Metrics::default();
-        check_startup_memory(&metrics, &paths);
-        {
-            let buf = log.0.lock().unwrap();
-            let text = String::from_utf8_lossy(&buf);
-            assert!(
-                text.contains("less memory than the server's floor"),
-                "the under-floor warning must be in the log: {text}"
-            );
-        }
-        // Exactly the floor: met, not warned. The log is process-wide,
-        // so this test clears what it wrote before reading again.
-        log.0.lock().unwrap().clear();
+        let under = logged(|| {
+            let metrics = scion_proto::runtime::metrics::Metrics::default();
+            check_startup_memory(&metrics, &paths);
+        });
+        assert!(
+            under.contains("less memory than the server's floor"),
+            "the under-floor warning must be in the log: {under}"
+        );
+
+        // Exactly the floor: met, not warned. Each phase reads a log
+        // of its own, so the phases cannot see each other's lines.
         let at_floor = FLOOR / 1024;
         std::fs::write(&paths.meminfo, format!("MemTotal:       {at_floor} kB\n")).unwrap();
-        let metrics = scion_proto::runtime::metrics::Metrics::default();
-        check_startup_memory(&metrics, &paths);
-        {
-            let buf = log.0.lock().unwrap();
-            let text = String::from_utf8_lossy(&buf);
-            assert!(
-                !text.contains("less memory than the server's floor"),
-                "a host exactly at the floor must not warn: {text}"
-            );
-        }
+        let at = logged(|| {
+            let metrics = scion_proto::runtime::metrics::Metrics::default();
+            check_startup_memory(&metrics, &paths);
+        });
+        assert!(
+            !at.contains("less memory than the server's floor"),
+            "a host exactly at the floor must not warn: {at}"
+        );
     }
 
     #[test]
