@@ -368,6 +368,7 @@ pub(crate) fn check_startup_memory(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     fn paths(dir: &Path) -> Paths {
         Paths {
@@ -459,6 +460,130 @@ mod tests {
         assert_eq!(limit.bytes, 8_589_934_592);
         assert_eq!(limit.source, "hw.memsize");
         assert!(host_limit(&paths, || None).is_none());
+    }
+
+    /// The check's refusal is a log line, and the log must be
+    /// observable: a writer the tests read, so an under-floor host is
+    /// seen to be named.
+    #[derive(Clone)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Captured;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn captured_log() -> Captured {
+        static LOG: std::sync::OnceLock<Captured> = std::sync::OnceLock::new();
+        LOG.get_or_init(|| Captured(Arc::new(std::sync::Mutex::new(Vec::new()))))
+            .clone()
+    }
+
+    fn init_log() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::level_filters::LevelFilter::ERROR)
+                .with_writer(captured_log())
+                .finish();
+            tracing::subscriber::set_global_default(subscriber).unwrap();
+        });
+    }
+
+    /// A host_memory that answers from the files the paths name, the
+    /// same read the start-up check makes: a constant body - None, a
+    /// zero, or a wrong source - answers a host it did not read.
+    #[test]
+    fn the_host_memory_reads_the_files_it_was_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        std::fs::write(&paths.meminfo, "MemTotal:       1048576 kB\n").unwrap();
+        let (bytes, source) = host_memory(&paths).unwrap();
+        assert_eq!(bytes, 1_048_576 * 1024);
+        assert_eq!(source, "/proc/meminfo MemTotal");
+    }
+
+    /// A MemTotal of zero is not a memory reading: the reader falls
+    /// through, so the start-up line says the limit is unknown instead
+    /// of warning about a zero-byte host.
+    #[test]
+    fn a_zero_meminfo_is_not_a_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        std::fs::write(&paths.meminfo, "MemTotal:       0 kB\n").unwrap();
+        assert!(host_limit(&paths, || None).is_none());
+    }
+
+    /// The cgroup read's bounds: a limit of zero and a limit past the
+    /// u64 range are not readings - the reader falls through to the
+    /// next source instead of answering a host it cannot have.
+    #[test]
+    fn the_cgroup_bounds_are_enforced() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        std::fs::write(&paths.self_cgroup, "0::/system.slice/scion.service\n").unwrap();
+        let leaf = paths.cgroup_root.join("system.slice/scion.service");
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::write(leaf.join("memory.max"), "0\n").unwrap();
+        std::fs::write(&paths.meminfo, "MemTotal:       1048576 kB\n").unwrap();
+        let limit = host_limit(&paths, || None).unwrap();
+        assert_eq!(limit.source, "/proc/meminfo MemTotal");
+
+        std::fs::write(leaf.join("memory.max"), "18446744073709551615\n").unwrap();
+        let limit = host_limit(&paths, || None).unwrap();
+        assert_eq!(limit.source, "/proc/meminfo MemTotal");
+    }
+
+    /// An under-floor host is named in the log: the operator's one
+    /// chance to move the server before the OOM killer does. A host
+    /// exactly at the floor is met, not warned.
+    #[test]
+    fn an_under_floor_host_is_named_in_the_log_and_an_at_floor_one_is_not() {
+        init_log();
+        let log = captured_log();
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        // 1 GiB against a 7504 MiB floor: under, and named.
+        std::fs::write(&paths.meminfo, "MemTotal:       1048576 kB\n").unwrap();
+        let metrics = scion_proto::runtime::metrics::Metrics::default();
+        check_startup_memory(&metrics, &paths);
+        {
+            let buf = log.0.lock().unwrap();
+            let text = String::from_utf8_lossy(&buf);
+            assert!(
+                text.contains("less memory than the server's floor"),
+                "the under-floor warning must be in the log: {text}"
+            );
+        }
+        // Exactly the floor: met, not warned. The log is process-wide,
+        // so this test clears what it wrote before reading again.
+        log.0.lock().unwrap().clear();
+        let at_floor = FLOOR / 1024;
+        std::fs::write(&paths.meminfo, format!("MemTotal:       {at_floor} kB\n")).unwrap();
+        let metrics = scion_proto::runtime::metrics::Metrics::default();
+        check_startup_memory(&metrics, &paths);
+        {
+            let buf = log.0.lock().unwrap();
+            let text = String::from_utf8_lossy(&buf);
+            assert!(
+                !text.contains("less memory than the server's floor"),
+                "a host exactly at the floor must not warn: {text}"
+            );
+        }
     }
 
     #[test]
