@@ -609,8 +609,8 @@ fn an_export_of_two_repos_that_fold_to_one_is_refused() {
     assert!(
         error
             .to_string()
-            .contains("fold to one directory on this disk"),
-        "the export must name the fold: {error:#}"
+            .contains("the repos main and MAIN fold to one directory on this disk"),
+        "the export must name the fold and both names, the first repo the partner: {error:#}"
     );
 }
 
@@ -694,5 +694,45 @@ fn a_blob_at_the_cap_passes_verify_and_one_past_it_is_refused() {
     assert!(
         damages.is_empty(),
         "the cap's own edge is sound: {damages:?}"
+    );
+}
+
+/// A member line that is hex but the wrong length: an ID's hex is
+/// always 64 chars, and a line one longer parses, under a shape check
+/// that only refuses when both the length and the alphabet are wrong,
+/// to the same ID the first 64 chars spell - the archive would verify
+/// with a malformed members file. The shape check refuses either
+/// wrongness on its own.
+#[test]
+fn a_members_line_of_the_wrong_length_is_refused() {
+    let data = scion_server::test_support::private_tempdir();
+    let (store, _main) = source(data.path());
+    let out = scion_server::test_support::private_tempdir()
+        .path()
+        .join("archive");
+    archive::export(&store, data.path(), Some(REPO), false, &out).unwrap();
+    drop(store);
+    let members = out.join("repos").join(REPO).join("members.txt");
+    let text = std::fs::read_to_string(&members).unwrap();
+    let tampered: String = text
+        .lines()
+        .map(|line| {
+            if line.len() == 64 {
+                format!("{line}0")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&members, tampered).unwrap();
+
+    // The shape refusal is hard: the reader fails, it does not name a
+    // damage - an archive whose member lines are not blob IDs is not
+    // readable at all.
+    let error = archive::verify(&out).unwrap_err();
+    assert!(
+        error.to_string().contains("not a blob ID"),
+        "verify must refuse a member line that is not a blob ID: {error:#}"
     );
 }
