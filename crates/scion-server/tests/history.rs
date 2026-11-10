@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use scion_core::{BlobId, Changeset, ChangesetId, FileState, IdentityTime, RepoPath};
 use scion_server::test_support::blame::{
     self, Blame, BlameRange, Line, MAX_BLAME_DIFF_LINES, MAX_BLAME_VERSIONS, RenameSearch, Resume,
+    read_version,
 };
 use scion_server::test_support::deadline::Deadline;
 use scion_server::test_support::memory::BYTES_PER_LINE;
@@ -238,6 +239,7 @@ fn blame(store: &Backend, cs: ChangesetId, p: &str) -> Blame {
         cs,
         &path(p),
         &Resume::default(),
+        0,
         &Bytes::new(1 << 30),
         None,
     )
@@ -263,6 +265,7 @@ fn blame_bounded(
         cs,
         &path(p),
         &Resume::default(),
+        0,
         &Bytes::new(cap),
         None,
     )
@@ -400,6 +403,7 @@ fn blame_refuses_what_it_cannot_diff() {
             cs,
             &path(p),
             &Resume::default(),
+            0,
             &Bytes::new(1 << 30),
             None,
         );
@@ -414,6 +418,7 @@ fn blame_refuses_what_it_cannot_diff() {
         cs,
         &path("missing"),
         &Resume::default(),
+        0,
         &Bytes::new(1 << 30),
         None,
     );
@@ -461,6 +466,7 @@ fn blame_calls(
             cs,
             &path(p),
             &resume,
+            0,
             &Bytes::new(1 << 30),
             None,
         )
@@ -1111,6 +1117,7 @@ fn a_rename_search_goes_on_where_a_call_stopped() {
             ids[1],
             &path("new"),
             &resume,
+            0,
             &Bytes::new(1 << 30),
             None,
         )
@@ -1131,6 +1138,7 @@ fn a_rename_search_goes_on_where_a_call_stopped() {
         ids[1],
         &path("new"),
         &resume,
+        0,
         &Bytes::new(1 << 30),
         None,
     )
@@ -1158,6 +1166,7 @@ fn a_rename_search_goes_on_where_a_call_stopped() {
         ids[1],
         &path("new"),
         &Resume::default(),
+        0,
         &Bytes::new(1 << 30),
         None,
     )
@@ -1177,6 +1186,7 @@ fn a_rename_search_goes_on_where_a_call_stopped() {
             ids[1],
             &path("new"),
             &resume,
+            0,
             &Bytes::new(1 << 30),
             None,
         );
@@ -1220,6 +1230,7 @@ fn a_rename_search_moves_on_every_call() {
             ids[1],
             &path("new"),
             &resume,
+            0,
             &Bytes::new(1 << 30),
             None,
         )
@@ -1239,6 +1250,7 @@ fn a_rename_search_moves_on_every_call() {
         ids[1],
         &path("new"),
         &resume,
+        0,
         &Bytes::new(1 << 30),
         None,
     )
@@ -1653,21 +1665,20 @@ fn a_file_of_exactly_the_diff_cap_blames_its_older_lines() {
 }
 
 /// A version whose bytes land in the band the call's own shares leave
-/// free - past what is free, inside the budget - can never be blamed:
-/// the cap check lets the read through at the band's top (size == cap),
-/// the take fails at once because the call already holds its own shares,
-/// and the call answers `RESOURCE_EXHAUSTED`. The retry holds the same
-/// shares, so it fails the same way: the file is never blamed. Pins
-/// today's answer; #1081's fix makes this version absent, and this
-/// assert flips.
+/// free - past what is free, inside the budget - counts as absent, not
+/// refused: those shares do not free until the call ends, so a retry with
+/// them held would fail the same way, and the walk goes on. The mutant
+/// that tests the size alone (size >= cap) reads the version at the
+/// band's interior, and its take fails: the call refuses where the fixed
+/// code answers - the pin kills it.
 #[test]
-fn a_version_whose_bytes_landed_in_the_calls_free_gap_is_refused_and_stays_refused() {
+fn a_version_in_the_calls_free_gap_counts_as_absent() {
     let (_data, store) = open_store();
     let cap = 100_000usize;
-    // The root's blob is exactly the budget. The tip's text is tiny: the
-    // walk holds it, and whatever the walk's own shares take, nothing
-    // like the root's size is free when the root's read takes.
-    let root_body = vec![b'a'; cap];
+    // The root's blob is one byte past what the walk's own shares leave
+    // free, and inside the budget: the version cannot be read within the
+    // call's fair share, but it fits the budget alone.
+    let root_body = vec![b'a'; cap - 1];
     let ids = chain(
         &store,
         vec![
@@ -1677,38 +1688,42 @@ fn a_version_whose_bytes_landed_in_the_calls_free_gap_is_refused_and_stays_refus
     );
     for _ in 0..2 {
         let pool = Bytes::new(cap);
-        let err = blame::blame(
+        let b = blame::blame(
             &store,
             REPO,
             ids[1],
             &path("f"),
             &Resume::default(),
+            0,
             &pool,
             None,
         )
-        .expect_err("a version in the free gap refuses");
-        assert!(
-            matches!(err, Error::ResourceExhausted(_)),
-            "the refusal is the budget's: {err}"
+        .expect("a version in the free gap counts as absent");
+        assert!(b.resume.is_none(), "the walk finished in one call");
+        assert_eq!(
+            b.ranges,
+            vec![range(1, 1, Some(ids[1]), 1)],
+            "the absent version's lines name the change that introduced the text"
         );
     }
 }
 
 /// The diff's need lands in the same free-gap band: the walk holds the
-/// tip's text and both versions' shares, so a diff whose need is exactly
-/// the budget can never take, and the call answers `RESOURCE_EXHAUSTED`
-/// today. The mutant that calls the diff absent at the equality would
-/// answer instead - the pin kills it. Pins today's answer; #1081's fix
-/// makes this diff absent, and this assert flips.
+/// tip's text and both versions' shares, so a diff whose need is one line
+/// under the budget can never take. The fix counts it absent instead:
+/// the walk goes on, and the lines name the tip. The mutant that calls
+/// the diff absent at the equality alone (need >= cap) takes the diff at
+/// the band's interior and its take fails: the call refuses where the
+/// fixed code answers - the pin kills it.
 #[test]
-fn a_diff_whose_need_landed_in_the_calls_free_gap_is_refused_and_stays_refused() {
+fn a_diff_in_the_calls_free_gap_counts_as_absent() {
     let (_data, store) = open_store();
     let cap = BYTES_PER_LINE * 800;
-    // The tip keeps one line of the root's 801: the diff's need is
-    // (801 - 1) lines, exactly the budget, and the root's bytes (1,602)
-    // read fine inside what the walk's shares leave free.
+    // The tip keeps one line of the root's 800: the diff's need is
+    // (800 - 1) lines, one line under the budget, and the root's bytes
+    // (1,600) read fine inside what the walk's shares leave free.
     let root_lines = cap / BYTES_PER_LINE;
-    let root_body: Vec<u8> = vec![&b"a\n"[..]; root_lines + 1].concat();
+    let root_body: Vec<u8> = vec![&b"a\n"[..]; root_lines].concat();
     let tip_body = b"b\n".to_vec();
     let ids = chain(
         &store,
@@ -1719,20 +1734,115 @@ fn a_diff_whose_need_landed_in_the_calls_free_gap_is_refused_and_stays_refused()
     );
     for _ in 0..2 {
         let pool = Bytes::new(cap);
-        let err = blame::blame(
+        let b = blame::blame(
             &store,
             REPO,
             ids[1],
             &path("f"),
             &Resume::default(),
+            0,
             &pool,
             None,
         )
-        .expect_err("a diff in the free gap refuses");
-        assert!(
-            matches!(err, Error::ResourceExhausted(_)),
-            "the refusal is the budget's: {err}"
+        .expect("a diff in the free gap counts as absent");
+        assert!(b.resume.is_none(), "the walk finished in one call");
+        assert_eq!(
+            b.ranges,
+            vec![range(1, 1, Some(ids[1]), 1)],
+            "the absent diff's lines name the change that introduced the text"
         );
+    }
+}
+
+/// The edge of the headroom check: a version whose bytes fill exactly what
+/// the call's shares leave reads; one held byte more counts it absent. The
+/// check is `size + held > cap`, so the equality reads: on an idle server,
+/// a call whose version fills its whole headroom is answered, not skipped.
+#[test]
+fn a_version_that_fills_its_headroom_exactly_reads() {
+    let (_data, store) = open_store();
+    let cap = 1_000usize;
+    // One line of `cap` bytes: past the byte edge, and clear of the line
+    // cap that counts a version absent for its own reason.
+    let blob = store.blobs().put(&vec![b'a'; cap]).unwrap();
+    let held = read_version(&store, blob, &Bytes::new(cap), 0)
+        .unwrap()
+        .expect("the equality reads");
+    drop(held);
+    let absent = read_version(&store, blob, &Bytes::new(cap), 1).unwrap();
+    assert!(absent.is_none(), "one held byte past the edge is absent");
+}
+
+/// Contention between calls stays retryable: two calls whose shares
+/// together pass the budget, each of which fits alone, answer right or
+/// are refused with `RESOURCE_EXHAUSTED` - never a wrong name. The
+/// headroom check sums only what the call itself holds, so a call never
+/// counts another call's shares as its own absence.
+#[test]
+fn two_calls_whose_shares_together_pass_the_budget_answer_right_or_are_refused() {
+    let (_data, store) = open_store();
+    let lines = 60;
+    let root_body: Vec<u8> = vec![&b"a\n"[..]; lines].concat();
+    let tip_body: Vec<u8> = vec![&b"b\n"[..]; lines].concat();
+    let ids = chain(
+        &store,
+        vec![
+            vec![("f", regular(store.blobs().put(&root_body).unwrap()))],
+            vec![("f", regular(store.blobs().put(&tip_body).unwrap()))],
+        ],
+    );
+    // One line's state share short of both calls' rows and texts: together
+    // they pass the budget, each alone fits, and the nodes' bytes widen the
+    // gap. The first take of each call waits for the other, or the call is
+    // refused - both are the budget's answer.
+    let cap = BYTES_PER_LINE * lines * 2 + 128 - 1;
+    let pool = Bytes::new(cap);
+    let barrier = std::sync::Barrier::new(2);
+    let results: Vec<Result<Blame, _>> = std::thread::scope(|s| {
+        let calls: Vec<(ChangesetId, Vec<u8>)> =
+            vec![(ids[1], b"b\n".to_vec()), (ids[0], b"a\n".to_vec())];
+        calls
+            .into_iter()
+            .map(|(cs, _want)| {
+                let store = &store;
+                let pool = &pool;
+                let barrier = &barrier;
+                s.spawn(move || {
+                    barrier.wait();
+                    blame::blame(
+                        store,
+                        REPO,
+                        cs,
+                        &path("f"),
+                        &Resume::default(),
+                        0,
+                        pool,
+                        None,
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect()
+    });
+    for (i, got) in results.iter().enumerate() {
+        match got {
+            Ok(b) => {
+                let want = if i == 0 { ids[1] } else { ids[0] };
+                assert_eq!(
+                    b.ranges,
+                    vec![range(1, lines, Some(want), 1)],
+                    "the answer names every line its own call's changeset"
+                );
+            }
+            Err(err) => {
+                assert!(
+                    matches!(err, Error::ResourceExhausted(_)),
+                    "contention refuses with the budget's code: {err}"
+                );
+            }
+        }
     }
 }
 
@@ -2002,25 +2112,26 @@ fn the_worst_cursor_stays_small() {
 #[test]
 fn a_call_that_holds_budget_never_waits_for_more() {
     let (_data, store) = open_store();
-    // The older version is long, the blamed one short: the call takes the
-    // short text and the file's line share first, and the long older text
-    // does not fit what is left. The call must fail at once with
-    // `RESOURCE_EXHAUSTED`, not wait for bytes that only it can free: with
-    // a waiting take and no deadline, this test would hang forever.
-    let long = store.blobs().put("line\n".repeat(100).as_bytes()).unwrap();
-    let put_long = Some(regular(long));
+    // The tip is short and its rows fit the budget, but another call holds
+    // most of it: the file's line share does not fit what is free. The call
+    // must fail at once with `RESOURCE_EXHAUSTED`, not wait for bytes that
+    // only the other call can free: with a waiting take and no deadline,
+    // this test would hang forever. Contention between calls is what a
+    // retry can clear, so it stays a refusal; a version that cannot fit
+    // what the call itself holds counts as absent instead (see the
+    // free-gap pins above).
     let put_short = Some(regular(store.blobs().put(b"a\nb\n").unwrap()));
-    let ids = chain(&store, vec![vec![("f", put_long)], vec![("f", put_short)]]);
-    // 6 bytes of text + 2 lines x 128 bytes of state leave 338 of 600,
-    // and the 500 bytes of the older version do not fit them. The cap is
-    // above 500, so the version is not absent: the take is what misses.
+    let ids = chain(&store, vec![vec![("f", put_short)]]);
+    let pool = Bytes::new(600);
+    let keeper = pool.try_take(500).unwrap();
     let err = blame::blame(
         &store,
         REPO,
-        ids[1],
+        ids[0],
         &path("f"),
         &Resume::default(),
-        &Bytes::new(600),
+        0,
+        &pool,
         None,
     )
     .unwrap_err();
@@ -2028,4 +2139,5 @@ fn a_call_that_holds_budget_never_waits_for_more() {
         matches!(err, Error::ResourceExhausted(_)),
         "a held budget never waits: {err:?}"
     );
+    drop(keeper);
 }

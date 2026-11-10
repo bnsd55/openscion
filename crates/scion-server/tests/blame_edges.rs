@@ -840,6 +840,7 @@ fn a_rename_search_goes_on_across_calls() {
             ids[1],
             &RepoPath::new("new").unwrap(),
             &resume,
+            0,
             &scion_server::test_support::memory::Bytes::new(scion_server::REPLY_MEMORY_BUDGET),
             Some(std::time::Instant::now() + std::time::Duration::from_secs(600)),
         )
@@ -887,6 +888,7 @@ fn a_rename_search_at_a_root_changeset_is_refused() {
         root,
         &RepoPath::new(PATH).unwrap(),
         &resume,
+        0,
         &scion_server::test_support::memory::Bytes::new(scion_server::REPLY_MEMORY_BUDGET),
         Some(std::time::Instant::now() + std::time::Duration::from_secs(600)),
     )
