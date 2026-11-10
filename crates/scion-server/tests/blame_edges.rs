@@ -340,6 +340,60 @@ async fn the_part_seam_loses_no_range_and_no_changeset() {
     }
 }
 
+/// A resumed part names each line its own changeset. The cursor's
+/// window carries the named runs across the part seam, and adjacent
+/// lines of the seam store name different changesets: a run packed
+/// across two of them would name the second line's lines with the
+/// first line's changeset on the resume. The reply of every part must
+/// match the chain line for line: line n was rewritten by the child
+/// at `ids[n]`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resumed_part_names_each_line_its_own_changeset() {
+    // 151 versions over the walk's 100-version bound: the first call
+    // stops mid-file and hands a cursor whose window carries the named
+    // lines - adjacent lines of different changesets.
+    let (dir, store, ids) = seam_store(1_000, 150);
+    let tip = ids[ids.len() - 1];
+    let (_stop, mut client) = serve(&store, dir.path(), whole_access(), TOKEN).await;
+    let mut cursor: Vec<u8> = Vec::new();
+    loop {
+        let (ranges, _changesets, next, _parts) = blame(&mut client, &tip, PATH, &cursor).await;
+        for range in &ranges {
+            if range.changeset_id.is_empty() {
+                continue;
+            }
+            // Child i rewrites line i+1 and reverts line i, so line n's
+            // last change is the child at ids[n + 1] - the tip for the
+            // last line. A range names one changeset, so it must not
+            // stretch over a line the next child rewrote.
+            let start = range.start_line as usize;
+            for n in start..start + range.line_count as usize {
+                let last = ids[(n + 1).min(ids.len() - 1)].as_bytes();
+                assert_eq!(
+                    range.changeset_id.as_slice(),
+                    last,
+                    "line {n} names the wrong changeset: {range:?}"
+                );
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        cursor = next;
+    }
+    // The whole chain was explained, every line once.
+    assert_eq!(
+        covered(&covered_all(&mut client, &tip).await),
+        (1..=150).collect::<Vec<u32>>()
+    );
+}
+
+/// The ranges of the whole blame, joined over its parts.
+async fn covered_all(client: &mut Scion, tip: &ChangesetId) -> Vec<BlameRange> {
+    let (ranges, _changesets, _next, _parts) = blame(client, tip, PATH, b"").await;
+    ranges
+}
+
 /// A cursor made for one file, or one changeset, is refused when it is
 /// sent for another: a confused or hostile client gets `INVALID_ARGUMENT`,
 /// never the ranges of a blame it did not ask for.
