@@ -17,6 +17,7 @@ use scion_server::test_support::blame::{
     self, Blame, BlameRange, Line, MAX_BLAME_DIFF_LINES, MAX_BLAME_VERSIONS, RenameSearch, Resume,
 };
 use scion_server::test_support::deadline::Deadline;
+use scion_server::test_support::memory::BYTES_PER_LINE;
 use scion_server::test_support::memory::Bytes;
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use scion_server::test_support::read::{self, MAX_SCAN};
@@ -1649,6 +1650,88 @@ fn a_file_of_exactly_the_diff_cap_blames_its_older_lines() {
             range(2, cap - 1, Some(ids[0]), 2),
         ]
     );
+}
+
+/// A version whose bytes land in the band the call's own shares leave
+/// free - past what is free, inside the budget - can never be blamed:
+/// the cap check lets the read through at the band's top (size == cap),
+/// the take fails at once because the call already holds its own shares,
+/// and the call answers `RESOURCE_EXHAUSTED`. The retry holds the same
+/// shares, so it fails the same way: the file is never blamed. Pinned
+/// today, before the band gets fixed.
+#[test]
+fn a_version_whose_bytes_landed_in_the_calls_free_gap_is_refused_and_stays_refused() {
+    let (_data, store) = open_store();
+    let cap = 100_000usize;
+    // The root's blob is exactly the budget. The tip's text is tiny: the
+    // walk holds it, and whatever the walk's own shares take, nothing
+    // like the root's size is free when the root's read takes.
+    let root_body = vec![b'a'; cap];
+    let ids = chain(
+        &store,
+        vec![
+            vec![("f", regular(store.blobs().put(&root_body).unwrap()))],
+            vec![("f", regular(store.blobs().put(b"b\n").unwrap()))],
+        ],
+    );
+    for _ in 0..2 {
+        let pool = Bytes::new(cap);
+        let err = blame::blame(
+            &store,
+            REPO,
+            ids[1],
+            &path("f"),
+            &Resume::default(),
+            &pool,
+            None,
+        )
+        .expect_err("a version in the free gap refuses");
+        assert!(
+            matches!(err, Error::ResourceExhausted(_)),
+            "the refusal is the budget's: {err}"
+        );
+    }
+}
+
+/// The diff's need lands in the same free-gap band: the walk holds the
+/// tip's text and both versions' shares, so a diff whose need is exactly
+/// the budget can never take, and the call answers `RESOURCE_EXHAUSTED`
+/// today. The mutant that calls the diff absent at the equality would
+/// answer instead - the pin kills it.
+#[test]
+fn a_diff_whose_need_landed_in_the_calls_free_gap_is_refused_and_stays_refused() {
+    let (_data, store) = open_store();
+    let cap = BYTES_PER_LINE * 800;
+    // The tip keeps one line of the root's 801: the diff's need is
+    // (801 - 1) lines, exactly the budget, and the root's bytes (1,602)
+    // read fine inside what the walk's shares leave free.
+    let root_lines = cap / BYTES_PER_LINE;
+    let root_body: Vec<u8> = vec![&b"a\n"[..]; root_lines + 1].concat();
+    let tip_body = b"b\n".to_vec();
+    let ids = chain(
+        &store,
+        vec![
+            vec![("f", regular(store.blobs().put(&root_body).unwrap()))],
+            vec![("f", regular(store.blobs().put(&tip_body).unwrap()))],
+        ],
+    );
+    for _ in 0..2 {
+        let pool = Bytes::new(cap);
+        let err = blame::blame(
+            &store,
+            REPO,
+            ids[1],
+            &path("f"),
+            &Resume::default(),
+            &pool,
+            None,
+        )
+        .expect_err("a diff in the free gap refuses");
+        assert!(
+            matches!(err, Error::ResourceExhausted(_)),
+            "the refusal is the budget's: {err}"
+        );
+    }
 }
 
 /// Cursor bytes for `resume`, made for a blame of `p` at `cs` in `r`.

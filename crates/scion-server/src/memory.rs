@@ -376,4 +376,76 @@ mod tests {
         let rest = bytes.try_take(40).expect("fits");
         drop((held, rest));
     }
+
+    /// A try that succeeds spends what it took: the pool's free bytes
+    /// go down by exactly the take. A take that adds to the free bytes
+    /// lends the pool bytes nobody gave back, and the next take of the
+    /// whole pool fits while the first holder still holds its share.
+    #[test]
+    fn a_try_take_spends_what_it_took() {
+        let bytes = Bytes::new(100);
+        let held = bytes.try_take(60).expect("fits");
+        // The free bytes are 40 now: 50 do not fit.
+        let err = bytes.try_take(50).expect_err("only 40 are free");
+        assert!(matches!(err, Error::ResourceExhausted(_)), "{err:?}");
+        drop(held);
+        assert!(bytes.try_take(100).is_ok(), "the whole pool came back");
+    }
+
+    /// Keeping part of a hold gives back exactly the rest: the pool's
+    /// free bytes grow by the kept take's remainder, never by more. A
+    /// keep that mints bytes lets the whole pool fit while the keeper
+    /// still holds its share.
+    #[test]
+    fn keep_gives_back_only_the_rest() {
+        let bytes = Bytes::new(100);
+        let mut held = bytes.take(60, None).expect("fits");
+        held.keep(10);
+        // The keeper holds 10; the pool's free bytes are 90. The whole
+        // pool does not fit while the keeper holds its share.
+        let err = bytes.try_take(100).expect_err("the keeper holds 10");
+        assert!(matches!(err, Error::ResourceExhausted(_)), "{err:?}");
+        drop(held);
+        assert!(bytes.try_take(100).is_ok(), "the whole pool came back");
+    }
+
+    /// A wake that does not fill the need is not a refusal: a waiter
+    /// woken by a partial give sees the budget still short and waits
+    /// on, until its deadline or the bytes. A take that reads one short
+    /// wake as past the deadline refuses a call whose time had not run
+    /// out and whose bytes were about to free.
+    #[test]
+    fn a_wake_that_does_not_fill_the_need_waits_on() {
+        let bytes = Arc::new(Bytes::new(100));
+        let mut held = bytes.take(100, None).expect("fits");
+        let waiter = {
+            let bytes = Arc::clone(&bytes);
+            std::thread::spawn(move || {
+                let until = Instant::now() + Duration::from_secs(5);
+                bytes.take(50, Some(until))
+            })
+        };
+        let blocked = (0..2000).any(|_| {
+            if bytes.0.waiting.load(std::sync::atomic::Ordering::SeqCst) >= 1 {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+            false
+        });
+        assert!(blocked, "the waiter never blocked on the empty budget");
+        // A partial give: the holder keeps 60 of its 100, so only 40
+        // free - well short of the 50 the waiter needs, long before its
+        // deadline. The waiter must wait on.
+        held.keep(60);
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            bytes.0.waiting.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the waiter is still waiting after a short give"
+        );
+        // The rest frees: the waiter takes its 50.
+        held.keep(0);
+        let got = waiter.join().unwrap().expect("the rest filled the need");
+        drop((held, got));
+    }
 }
