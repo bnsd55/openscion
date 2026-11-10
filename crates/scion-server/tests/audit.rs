@@ -8,7 +8,7 @@ use scion_proto::v1::ResolveRefRequest;
 use scion_proto::v1::objects_client::ObjectsClient;
 use scion_proto::v1::scion_client::ScionClient;
 
-use scion_core::ChangesetId;
+use scion_core::{BlobId, ChangesetId};
 use scion_server::test_support::audit::{Audit, Event};
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use scion_server::test_support::service;
@@ -356,6 +356,7 @@ async fn a_multi_chunk_upload_records_the_true_total_of_its_bytes() {
     let chunks = vec![b"aaa".to_vec(), b"bbbbb".to_vec(), b"c".to_vec()];
     let total: usize = chunks.iter().map(Vec::len).sum();
     let reqs = chunks
+        .clone()
         .into_iter()
         .enumerate()
         .map(|(i, data)| PutBlobRequest {
@@ -363,9 +364,20 @@ async fn a_multi_chunk_upload_records_the_true_total_of_its_bytes() {
             data,
         })
         .collect::<Vec<_>>();
-    ci.put_blob(tokio_stream::iter(reqs))
+    let reply = ci
+        .put_blob(tokio_stream::iter(reqs))
         .await
-        .expect("the multi-chunk upload is allowed");
+        .expect("the multi-chunk upload is allowed")
+        .into_inner();
+
+    // The blob reads back whole: the loop carried every chunk's data.
+    let blob_id = BlobId::try_from(reply.blob_id.as_slice()).expect("the reply names a blob");
+    let whole = chunks.concat();
+    assert_eq!(
+        &*store.blobs().get(blob_id).unwrap(),
+        &whole,
+        "the chunks together are the blob"
+    );
 
     stop.send(()).unwrap();
     wait_for_lines(&audit_path, 2).await;
