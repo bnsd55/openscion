@@ -7,6 +7,7 @@ use std::sync::Arc;
 use scion_core::{BlobId, Changeset, ChangesetId, FileState, IdentityTime, RepoPath, Tree};
 use scion_proto::CHUNK_BYTES;
 use scion_proto::runtime::auth::token_digest;
+use scion_proto::runtime::check::MAX_NAME_BYTES;
 use scion_proto::runtime::listen::Limits;
 use scion_proto::v1::scion_client::ScionClient;
 use scion_proto::v1::{ListDirRequest, ReadFileRequest};
@@ -278,6 +279,34 @@ async fn a_path_over_the_cap_is_refused_as_invalid_argument() {
                 .await
                 .unwrap_err()
         };
+        assert_eq!(err.code(), Code::InvalidArgument, "{note}: {err}");
+    }
+}
+
+/// A repo name that breaks the name rules - empty, a control character,
+/// or one byte over the cap - is refused at the door: the call answers
+/// `INVALID_ARGUMENT` before the store sees it. Kills the mutant that
+/// skips `check_name` (every RPC then takes whatever name it is sent).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bad_repo_name_is_refused_as_invalid_argument() {
+    let (dir, store, root) = store(&[(b"file.txt".to_vec(), b"body\n")]);
+    let (_stop, mut client) = serve(&store, dir.path()).await;
+    let over_cap = "x".repeat(MAX_NAME_BYTES + 1);
+    for note in ["empty", "newline", "escape", "over the cap"] {
+        let repo = match note {
+            "empty" => "",
+            "newline" => "a\nb",
+            "escape" => "\u{1b}[31m",
+            _ => over_cap.as_str(),
+        };
+        let err = client
+            .read_file(ReadFileRequest {
+                repo: repo.to_string(),
+                changeset_id: root.as_bytes().to_vec(),
+                path: b"file.txt".to_vec(),
+            })
+            .await
+            .unwrap_err();
         assert_eq!(err.code(), Code::InvalidArgument, "{note}: {err}");
     }
 }
