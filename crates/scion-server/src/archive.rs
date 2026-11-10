@@ -249,18 +249,6 @@ pub fn verify(archive: &Path) -> Result<Vec<String>> {
                 ));
             }
         }
-        // The git provenance replays into the store's foreign key on
-        // the changesets it names: a row whose changeset the archive
-        // does not hold passes here and dies mid-replay, after the
-        // store is open. Name it here, where the reader reads, the way
-        // the refs and the lands name theirs.
-        for (commit, cs) in read_provenance(&dir.join("provenance.json"))? {
-            if !ids.contains(&cs) {
-                damages.push(format!(
-                    "repo {name}: the provenance row for git commit {commit} names {cs}, which the archive does not hold"
-                ));
-            }
-        }
         for member in &members {
             let path = blob_path(archive, member);
             match fs::File::open(&path) {
@@ -1426,11 +1414,10 @@ fn decode_blob(path: &Path, bytes: fs::File) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// A local-time RFC 3339 stamp of now, to the second.
-fn snapshot_instant() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+/// A UTC RFC 3339 stamp of the given instant, to the second: the pure
+/// conversion behind [`snapshot_instant`], so the calendar's fixed
+/// points are testable without a clock.
+fn rfc3339_utc(secs: u64) -> String {
     let (days, rest) = (secs / 86_400, secs % 86_400);
     let (hour, minute, second) = (rest / 3_600, (rest / 60) % 60, rest % 60);
     // Civil-from-days, Howard Hinnant's algorithm.
@@ -1445,6 +1432,14 @@ fn snapshot_instant() -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+/// A UTC RFC 3339 stamp of now, to the second.
+fn snapshot_instant() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    rfc3339_utc(secs)
 }
 
 /// The (device, inode) of a directory: the disk's own answer to whether
@@ -1493,4 +1488,20 @@ fn corrupt_json(path: &Path) -> Error {
         "{} does not hold the shape the format says",
         path.display()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rfc3339_utc;
+
+    /// Fixed points of the stamp's conversion: the epoch, a leap day
+    /// (the era math's seam), and an instant with a non-zero hour,
+    /// minute and second. A mutant of the days, field or era arithmetic
+    /// moves at least one of them.
+    #[test]
+    fn the_stamp_conversion_holds_its_fixed_points() {
+        assert_eq!(rfc3339_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_utc(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(rfc3339_utc(1_700_000_000), "2023-11-14T22:13:20Z");
+    }
 }

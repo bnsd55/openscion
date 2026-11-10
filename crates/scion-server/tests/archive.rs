@@ -642,3 +642,57 @@ fn a_section_that_is_a_plain_file_is_refused() {
     let restored = archive::restore(&out, empty.path(), &url_of(empty.path()), None);
     assert!(restored.is_err(), "a named damage must refuse the replay");
 }
+
+/// The cap's exact edge: the store accepts an object of exactly
+/// `MAX_OBJECT_BYTES`, so the archive holds one, and the reader must
+/// decode it back. A reader that refuses the cap's own edge - the
+/// comparison past the cap, not at it - names a damage in a complete
+/// store, and an archive with the largest legal file fails to restore.
+/// One byte more and the store itself refuses the put.
+#[test]
+fn a_blob_at_the_cap_passes_verify_and_one_past_it_is_refused() {
+    let data = scion_server::test_support::private_tempdir();
+    let store = Backend::open_test(&data.path().join("store")).unwrap();
+    let cap = scion_server::test_support::store::MAX_OBJECT_BYTES;
+    let at_cap = vec![0u8; cap];
+    let blob = store.blobs().put(&at_cap).unwrap();
+    store
+        .write(|c| {
+            let repo = c.create_repo("cap")?;
+            let cs = changeset(
+                vec![],
+                &[(
+                    "the-big-file",
+                    Some(FileState::Regular {
+                        content: blob,
+                        executable: false,
+                    }),
+                )],
+            );
+            let id = tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0;
+            assert!(c.cas_ref(repo, "main", None, id)?);
+            c.add_repo_blob(repo, blob)?;
+            Ok(())
+        })
+        .unwrap();
+    let out = scion_server::test_support::private_tempdir()
+        .path()
+        .join("archive");
+    archive::export(&store, &data.path().join("store"), None, true, &out).unwrap();
+
+    // One byte more: the store's own guard refuses the put, so the
+    // archive can never hold it.
+    let past = vec![0u8; cap + 1];
+    let refused = store.blobs().put(&past);
+    assert!(
+        refused.is_err(),
+        "the store must refuse an object past the cap"
+    );
+    drop(store);
+
+    let damages = archive::verify(&out).unwrap();
+    assert!(
+        damages.is_empty(),
+        "the cap's own edge is sound: {damages:?}"
+    );
+}
