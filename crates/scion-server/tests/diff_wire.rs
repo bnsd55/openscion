@@ -98,7 +98,9 @@ async fn whole_diff(
 ) -> Vec<DiffEntry> {
     let mut after: Vec<u8> = Vec::new();
     let mut entries = Vec::new();
-    loop {
+    // A 1004-entry diff pages twice; more pages than that is a cursor
+    // that loops, so the walk is bounded and the bound is the answer.
+    for _ in 0..5 {
         let page = client
             .diff(DiffRequest {
                 repo: REPO.into(),
@@ -114,12 +116,12 @@ async fn whole_diff(
         entries.extend(page.entries);
         if page.next_after.is_empty() {
             assert!(came > 0 || entries.is_empty(), "the last page has entries");
-            break;
+            return entries;
         }
         assert!(came > 0, "a page before the end has entries");
         after = page.next_after;
     }
-    entries
+    panic!("the diff pages never end: the cursor loops");
 }
 
 #[tokio::test(flavor = "multi_thread")]
