@@ -1411,6 +1411,43 @@ mod tests {
         let _ = me;
     }
 
+    /// The ancestor open's contract, pinned without winning a race: the
+    /// open is `O_NOFOLLOW | O_DIRECTORY`, so a symlink at the walk's
+    /// answer is refused (ELOOP) and a non-directory is refused
+    /// (ENOTDIR). A fold that drops `NOFOLLOW` follows the link and
+    /// reads another directory's ACLs; one that drops `DIRECTORY` opens
+    /// a file as if it were the checked directory. Either way the fd is
+    /// not the directory the walk checked.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_ancestor_open_takes_a_directory_and_no_symlink() {
+        let (tmp, me) = tempdir();
+        let dir = tmp.path().join("private");
+        mkdir(&dir, 0o700);
+        fs::write(dir.join("child"), b"").unwrap();
+
+        // A symlink where the directory should be: ELOOP, not the
+        // target's ACLs.
+        symlink(&dir, tmp.path().join("link")).unwrap();
+        let err = ancestor_has_hidden_acl(&tmp.path().join("link"), me).unwrap_err();
+        assert_eq!(
+            err.raw_os_error(),
+            Some(rustix::io::Errno::LOOP.raw_os_error()),
+            "{err}"
+        );
+
+        // A regular file where the directory should be: ENOTDIR.
+        let err = ancestor_has_hidden_acl(&dir.join("child"), me).unwrap_err();
+        assert_eq!(
+            err.raw_os_error(),
+            Some(rustix::io::Errno::NOTDIR.raw_os_error()),
+            "{err}"
+        );
+
+        // The real directory passes, and answers no hidden ACL.
+        assert_eq!(ancestor_has_hidden_acl(&dir, me).unwrap(), None);
+    }
+
     /// The interceptor is what puts the token on every request: a call
     /// through [`Interceptor::call`] must come out with the
     /// `authorization` header carrying `Bearer <token>`, or the server
