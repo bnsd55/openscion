@@ -843,3 +843,45 @@ fn the_start_line_counts_the_access_file_s_tokens() {
         "the start line counts the access file's tokens"
     );
 }
+
+/// A commit that fails as busy records the failed line's why as busy:
+/// the word tells the operator the run may go again as it is. A why
+/// that folds every storage class into failed hides that (#1090).
+#[tokio::test]
+async fn a_busy_commit_records_the_busy_why() {
+    let dir = scion_server::test_support::private_tempdir();
+    let audit =
+        scion_server::test_support::audit::Audit::open(&dir.path().join("audit.log")).unwrap();
+    let store = scion_server::Backend::open_test(dir.path()).unwrap();
+    store.fail_next_commits(1);
+    scion_server::admin::create_repo(audit, store, "busy-why".into(), "trunk".into())
+        .await
+        .expect_err("the commit was made to fail");
+    let failed: Vec<_> = audit_lines(dir.path())
+        .into_iter()
+        .filter(|line| line["event"] == "admin" && line["outcome"] == "failed")
+        .collect();
+    assert_eq!(failed.len(), 1, "one failed line: {failed:?}");
+    assert_eq!(failed[0]["why"], "busy", "{:?}", failed[0]);
+}
+
+/// A commit that fails as out of space records why disk_full: the word
+/// tells the operator what to clear before the run goes again. A why
+/// that folds it into failed sends the operator hunting (#1090).
+#[tokio::test]
+async fn a_disk_full_commit_records_the_disk_full_why() {
+    let dir = scion_server::test_support::private_tempdir();
+    let audit =
+        scion_server::test_support::audit::Audit::open(&dir.path().join("audit.log")).unwrap();
+    let store = scion_server::Backend::open_test(dir.path()).unwrap();
+    store.fail_next_commits_disk_full(1);
+    scion_server::admin::create_repo(audit, store, "disk-full-why".into(), "trunk".into())
+        .await
+        .expect_err("the commit was made to fail");
+    let failed: Vec<_> = audit_lines(dir.path())
+        .into_iter()
+        .filter(|line| line["event"] == "admin" && line["outcome"] == "failed")
+        .collect();
+    assert_eq!(failed.len(), 1, "one failed line: {failed:?}");
+    assert_eq!(failed[0]["why"], "disk_full", "{:?}", failed[0]);
+}
