@@ -749,6 +749,16 @@ impl WaitWarn {
                     line(waited);
                 }
                 if over() {
+                    // The serve has ended: what is left goes out ungated
+                    // and the task stops. The gated flush above may have
+                    // refused the last count - the interval not yet
+                    // elapsed since the last write - and the doc
+                    // promises the end write carries it. flush_all
+                    // swaps the count, so warn_the_last at the serve's
+                    // end finds nothing left and no line doubles.
+                    if let Some(waited) = warn.flush_all() {
+                        line(waited);
+                    }
                     break;
                 }
             }
@@ -2431,29 +2441,10 @@ mod tests {
         // The end: what is left is written and the task stops. The count
         // goes in before `over` is set: a flusher tick between the two
         // stores would otherwise see an empty count, take `over`, and
-        // stop - the count would sit forever. And `over` goes in only
-        // once the interval gate cannot refuse the next tick: `write`
-        // passes on "the last write is a full interval old", so a tick
-        // landing just under the interval after the phase's write would
-        // refuse the count and break on the same pass. Waiting for the
-        // gate pins both stores to the same clock `write` reads.
+        // stop - the count would sit forever. The end write itself is
+        // ungated (flush_all on the end tick), so the count goes out no
+        // matter where in the interval the stores land.
         warn.since.fetch_add(2, Ordering::Relaxed);
-        wait_until(
-            Duration::from_secs(5),
-            || {
-                let last = warn.last.load(Ordering::Relaxed);
-                last != 0 && now_millis().saturating_sub(last) >= warn.interval_millis
-            },
-            "the interval gate opened for the end count",
-            || {
-                format!(
-                    "last write {}ms ago, interval {}ms",
-                    now_millis().saturating_sub(warn.last.load(Ordering::Relaxed)),
-                    warn.interval_millis
-                )
-            },
-        )
-        .await;
         over.store(true, Ordering::Relaxed);
         wait_until(
             Duration::from_secs(5),
