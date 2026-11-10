@@ -282,6 +282,32 @@ async fn a_path_over_the_cap_is_refused_as_invalid_argument() {
     }
 }
 
+/// A repo name that breaks the name rules - empty, a control character,
+/// or over the cap - is refused at the door: the call answers
+/// `INVALID_ARGUMENT` before the store sees it. Kills the mutant that
+/// skips `check_name` (every RPC then takes whatever name it is sent).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bad_repo_name_is_refused_as_invalid_argument() {
+    let (dir, store, root) = store(&[(b"file.txt".to_vec(), b"body\n")]);
+    let (_stop, mut client) = serve(&store, dir.path()).await;
+    for note in ["empty", "newline", "escape"] {
+        let repo = match note {
+            "empty" => "",
+            "newline" => "a\nb",
+            _ => "\u{1b}[31m",
+        };
+        let err = client
+            .read_file(ReadFileRequest {
+                repo: repo.to_string(),
+                changeset_id: root.as_bytes().to_vec(),
+                path: b"file.txt".to_vec(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument, "{note}: {err}");
+    }
+}
+
 /// A file of zero bytes is a reply with no message; a file of exactly one
 /// part arrives in one part; one byte more arrives in two. The parts
 /// together are the content, byte for byte.
