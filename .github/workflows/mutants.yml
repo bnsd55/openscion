@@ -143,6 +143,10 @@ jobs:
       - name: the mutation run
         env:
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+          # A suite that dumps the live metadata (storage's restore runbook)
+          # does it with this job's own Postgres, so its tools match the
+          # server (#1099).
+          SCION_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
           FILES: ${{ inputs.files }}
           MUTANT_TIMEOUT: ${{ inputs.timeout_per_mutant }}
           TEST_ARGS: ${{ inputs.test_args }}
