@@ -5,8 +5,13 @@
 //! answer, and the tables of one diff. [`Bytes`] is a pool of bytes that
 //! calls take from, so that together they hold no more than the budget. A
 //! call that cannot take its share waits, until the budget frees up or its
-//! deadline passes. A file whose share is more than the whole budget is
-//! refused: a wrong blame is worse than a refused one.
+//! deadline passes. A version that cannot be read within what a call's
+//! own shares leave of the budget counts as absent, so the walk goes on:
+//! those shares do not free until the call ends, so a retry with them
+//! held would fail the same way, and the lines the version held name the
+//! change that introduced the text the walk read. A file whose share is
+//! more than the whole budget is refused: a wrong blame is worse than a
+//! refused one.
 
 // Every pub item of this module is re-exported by the test seam
 // (`test_support` in lib.rs), and unreachable_pub does not see
@@ -206,6 +211,13 @@ pub struct Held {
 }
 
 impl Held {
+    /// The bytes this guard holds.
+    #[must_use]
+    #[allow(clippy::len_without_is_empty)] // a held guard is never empty by construction
+    pub fn len(&self) -> usize {
+        self.n
+    }
+
     /// Gives the bytes back before the guard drops.
     pub fn release(this: Self) {
         drop(this);
