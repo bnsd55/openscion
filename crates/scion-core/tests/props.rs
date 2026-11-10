@@ -106,4 +106,29 @@ proptest! {
             prop_assert_eq!(decoded.encode(), bytes);
         }
     }
+
+    /// The scan-only lookup answers what the full decoder answers: for a
+    /// name from the tree's own entries (a hit) and for a random name (a
+    /// miss), `find_entry` gives the same entry the decoder does, file
+    /// length included. The fast path must agree with the decoder.
+    #[test]
+    fn find_entry_matches_the_decoder(t in tree(), stray in part()) {
+        let body = t.encode();
+        let mut names: Vec<Vec<u8>> = t
+            .entries()
+            .iter()
+            .map(|(elem, _)| elem.as_bytes().to_vec())
+            .collect();
+        names.push(stray);
+        for name in names {
+            let found = Tree::find_entry(&body, &name).unwrap();
+            let expected = Tree::decode(&body)
+                .unwrap()
+                .entries()
+                .iter()
+                .find(|(elem, _)| elem.as_bytes() == name.as_slice())
+                .map(|(_, entry)| *entry);
+            prop_assert_eq!(found, expected, "name {:?}", name);
+        }
+    }
 }
