@@ -574,8 +574,7 @@ pub trait MetaTx {
 
     /// Stores pre-encoded trees, whose ids are their content hashes. Safe
     /// to repeat. The batch is one round trip per table on Postgres,
-    /// however deep the tree chain was; a store that has no batch form
-    /// stores the rows one by one. No id may differ from its body's
+    /// however deep the tree chain was. No id may differ from its body's
     /// hash: the callers take each id from `encode_with_id`.
     fn put_trees(&mut self, trees: &[(TreeId, Vec<u8>)]) -> Result<()>;
 
@@ -612,8 +611,7 @@ pub trait MetaTx {
 
     /// Adds every blob to the blobs that `repo` may name. The batch is
     /// one round trip on Postgres, however many blobs the changeset
-    /// puts; a store that has no batch form adds them one by one. Each
-    /// blob that is already there stays as it is.
+    /// puts. Each blob that is already there stays as it is.
     fn add_repo_blobs(&mut self, repo: RepoId, blobs: &[BlobId]) -> Result<()>;
 
     /// Inserts a land, or finds the land for the same request key. Returns
