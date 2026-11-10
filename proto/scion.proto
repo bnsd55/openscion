@@ -260,6 +260,10 @@ message BlameResponse {
   // joins the parts' ranges in order and unions the changesets by ID.
   // Line ranges in file order. Together they cover the lines of the
   // window this call answered, from after_line to its end, once each.
+  // A call resumed at a bound answers the same window again, from its
+  // first line, so a client joins calls by line, not by appending
+  // ranges: it keeps the name an earlier call gave a line, and takes
+  // from the new reply only the lines that had none.
   repeated BlameRange ranges = 1;
   // The author of each changeset that a range names, once each.
   repeated BlameChangeset changesets = 2;

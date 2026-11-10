@@ -215,3 +215,25 @@ fn a_bad_ticket_key_fails_the_binary_preflight() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("fail serve flags"), "{text}");
 }
+
+/// An empty `SCION_POSTGRES_URL` counts as no URL: the check asks for
+/// one, with the same words the missing variable uses, not the parse
+/// error the empty string would trip.
+#[test]
+fn an_empty_url_variable_asks_for_a_url() {
+    let dir = private_tempdir();
+    let out = Command::new(env!("CARGO_BIN_EXE_scion-server"))
+        .arg("--data")
+        .arg(dir.path())
+        .arg("preflight")
+        .env("NO_COLOR", "1")
+        .env("SCION_POSTGRES_URL", "")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "exit {:?}", out.status.code());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("no Postgres URL"),
+        "the empty variable asks for a URL:\n{text}"
+    );
+}

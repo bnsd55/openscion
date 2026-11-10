@@ -340,6 +340,132 @@ async fn the_part_seam_loses_no_range_and_no_changeset() {
     }
 }
 
+/// A resumed part names each line its own changeset. The cursor's
+/// window carries the named runs across the part seam, and adjacent
+/// lines of the seam store name different changesets: a run packed
+/// across two of them would name the second line's lines with the
+/// first line's changeset on the resume. The reply of every part must
+/// match the chain line for line: line n's last change is the child
+/// at `ids[n + 1]`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resumed_part_names_each_line_its_own_changeset() {
+    // 151 versions over the walk's 100-version bound: the first call
+    // stops mid-file and hands a cursor whose window carries the named
+    // lines - adjacent lines of different changesets.
+    let (dir, store, ids) = seam_store(1_000, 150);
+    let tip = ids[ids.len() - 1];
+    let (_stop, mut client) = serve(&store, dir.path(), whole_access(), TOKEN).await;
+    let mut cursor: Vec<u8> = Vec::new();
+    let mut calls = 0usize;
+    loop {
+        calls += 1;
+        let (ranges, _changesets, next, _parts) = blame(&mut client, &tip, PATH, &cursor).await;
+        let mut named: Vec<usize> = Vec::new();
+        for range in &ranges {
+            if range.changeset_id.is_empty() {
+                continue;
+            }
+            // Child i rewrites line i+1 and reverts line i, so line n's
+            // last change is the child at ids[n + 1] - the tip for the
+            // last line. A range names one changeset, so it must not
+            // stretch over a line the next child rewrote.
+            let start = range.start_line as usize;
+            for n in start..start + range.line_count as usize {
+                named.push(n);
+                let last = ids[(n + 1).min(ids.len() - 1)].as_bytes();
+                assert_eq!(
+                    range.changeset_id.as_slice(),
+                    last,
+                    "line {n} names the wrong changeset: {range:?}"
+                );
+            }
+        }
+        if next.is_empty() {
+            // A resumed call answers the same window again (scion.proto;
+            // #1070 asks for that in the proto doc), so it re-names the
+            // lines an earlier call named: the once-each check is on
+            // this, the last call's reply.
+            named.sort_unstable();
+            assert_eq!(named, (1..=150).collect::<Vec<usize>>());
+            break;
+        }
+        cursor = next;
+    }
+    // The walk stopped at its 100-version bound: the reply needed a
+    // resume. If the bound grows past the fixture, this test stops
+    // guarding the run merge and must grow with it.
+    assert!(calls >= 2, "the walk finished in one call; no resume");
+}
+
+/// The window's unnamed lines carry their place in the version the walk
+/// stopped at. A line the tip lost - the last child deleted it - sits
+/// between two of them, so their places skip one. The cursor must carry
+/// each line's own place: a run that packed across the seam would point
+/// the resume at the deleted line, and the reply would name the wrong
+/// origin line.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resumed_walk_reads_each_unnamed_line_at_its_own_place() {
+    // The root puts 150 unique lines. The next 99 children flip the
+    // executable bit only: the walk counts them as versions, names no
+    // line, and keeps every place. The tip deletes line 75. The walk's
+    // 100-version bound stops it at the root, with the window's places
+    // 1..=74 and 76..=150 - the seam skips the deleted line.
+    let count = 150;
+    let seed: Vec<u8> = (1..=count)
+        .map(|line| format!("line {line}\n"))
+        .collect::<Vec<_>>()
+        .concat()
+        .into_bytes();
+    let (dir, store, root) = store(&seed);
+    let tip = store
+        .write(|c| {
+            let repo = c.repo_id(REPO)?;
+            let seed_blob = store.blobs().put(&seed).unwrap();
+            let mut parent = root;
+            for i in 0..100 {
+                let state = if i == 99 {
+                    let body: Vec<u8> = (1..=count)
+                        .filter(|line| *line != 75)
+                        .map(|line| format!("line {line}\n"))
+                        .collect::<Vec<_>>()
+                        .concat()
+                        .into_bytes();
+                    let blob = store.blobs().put(&body).unwrap();
+                    c.add_repo_blob(repo, blob)?;
+                    regular(blob)
+                } else {
+                    FileState::Regular {
+                        content: seed_blob,
+                        executable: i % 2 == 0,
+                    }
+                };
+                let cs = commit(vec![parent], PATH, Some(state), 1_000);
+                parent = c.insert_changeset(repo, &cs)?;
+            }
+            Ok(parent)
+        })
+        .unwrap();
+    let (_stop, mut client) = serve(&store, dir.path(), whole_access(), TOKEN).await;
+    let (ranges, _cs, next, _parts) = blame(&mut client, &tip, PATH, b"").await;
+    // The bound stopped the walk: the reply names nothing yet.
+    assert!(
+        !next.is_empty(),
+        "the walk finished in one call; the resume is not exercised"
+    );
+    assert!(ranges.iter().all(|r| r.changeset_id.is_empty()));
+    let (ranges, _cs, next, _parts) = blame(&mut client, &tip, PATH, &next).await;
+    assert!(next.is_empty(), "the resume did not finish the blame");
+    for range in &ranges {
+        assert_eq!(range.changeset_id.as_slice(), root.as_bytes());
+        let start = range.start_line as usize;
+        for n in start..start + range.line_count as usize {
+            let origin = range.origin_line as usize + (n - start);
+            let want = if n >= 75 { n + 1 } else { n };
+            assert_eq!(origin, want, "line {n} points at the wrong root line");
+        }
+    }
+}
+
 /// A cursor made for one file, or one changeset, is refused when it is
 /// sent for another: a confused or hostile client gets `INVALID_ARGUMENT`,
 /// never the ranges of a blame it did not ask for.
@@ -714,6 +840,7 @@ fn a_rename_search_goes_on_across_calls() {
             ids[1],
             &RepoPath::new("new").unwrap(),
             &resume,
+            0,
             &scion_server::test_support::memory::Bytes::new(scion_server::REPLY_MEMORY_BUDGET),
             Some(std::time::Instant::now() + std::time::Duration::from_secs(600)),
         )
@@ -761,6 +888,7 @@ fn a_rename_search_at_a_root_changeset_is_refused() {
         root,
         &RepoPath::new(PATH).unwrap(),
         &resume,
+        0,
         &scion_server::test_support::memory::Bytes::new(scion_server::REPLY_MEMORY_BUDGET),
         Some(std::time::Instant::now() + std::time::Duration::from_secs(600)),
     )

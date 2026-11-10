@@ -425,6 +425,114 @@ fn a_symlink_stores_its_target_bytes() {
     assert!(!git.path().join("etc").exists());
 }
 
+/// A tree whose entry estimate sits exactly on the cap imports: the
+/// estimate divides the header's bytes by the smallest bytes one entry
+/// can take (a 5-byte mode, one a real file entry never has), so a tree
+/// of real one-byte-named entries runs one entry behind the estimate,
+/// and the boundary lands at 97 entries: 90 one-byte names and 7
+/// two-byte names, 90 x 29 + 7 x 30 = 2820 bytes, which the estimate
+/// reads as exactly 100. The entry cap rides the seam.
+#[test]
+fn a_tree_at_the_entry_estimate_imports() {
+    let git = Git::init();
+    let blob = blob(&git);
+    let mut tree = Vec::new();
+    for name in &one_byte_names(90) {
+        tree.extend_from_slice(&entry("100644", name, &blob));
+    }
+    for i in 0..7u8 {
+        tree.extend_from_slice(&entry("100644", &[b'q', b'a' + i], &blob));
+    }
+    let tree = git.object("tree", &tree);
+    let head = committer_line(&tree, "ninety seven entries\n");
+    let head = git.object("commit", &head);
+    git.force_main(&head);
+    STRUCTURE_CAPS.with(|caps| caps.set(Some((u64::MAX, 100))));
+    match verdict(&git) {
+        Ok(commits) => assert_eq!(commits, 1),
+        Err(e) => panic!("a tree of exactly the estimated cap imported nothing: {e:?}"),
+    }
+    STRUCTURE_CAPS.with(|caps| caps.set(None));
+}
+
+/// A tree one entry past the estimate is refused, and the refusal names
+/// the division's answer: the count is the size over the smallest bytes
+/// one entry can take, so a changed divisor changes the number the
+/// message names. The entries share one name, because the refusal comes
+/// before any entry is read.
+#[test]
+fn a_tree_one_entry_past_the_estimate_is_refused_naming_its_count() {
+    STRUCTURE_CAPS.with(|caps| caps.set(Some((u64::MAX, 100))));
+    let git = Git::init();
+    let blob = blob(&git);
+    let mut tree = Vec::new();
+    for _ in 0..101 {
+        tree.extend_from_slice(&entry("100644", b"n", &blob));
+    }
+    let tree = git.object("tree", &tree);
+    let head = committer_line(&tree, "one entry past\n");
+    let head = git.object("commit", &head);
+    git.force_main(&head);
+    match verdict(&git) {
+        Ok(commits) => panic!("a tree past the entry cap imported {commits} commits"),
+        Err(Error::Git(e)) => {
+            let why = e.to_string();
+            assert!(
+                why.contains("is 2929 bytes"),
+                "the refusal names the size: {why}"
+            );
+            assert!(
+                why.contains("about 104 entries"),
+                "the refusal names the estimate: {why}"
+            );
+            assert!(
+                why.contains("limit of 100 entries"),
+                "the refusal names the cap: {why}"
+            );
+        }
+        Err(other) => panic!("refused as {other:?}"),
+    }
+    STRUCTURE_CAPS.with(|caps| caps.set(None));
+}
+
+/// A tree exactly at the byte cap imports: the byte cap rides the same
+/// seam, and its boundary is `size > cap`, so a tree the size of the cap
+/// is not refused.
+#[test]
+fn a_tree_at_the_byte_cap_imports() {
+    let git = Git::init();
+    let blob = blob(&git);
+    // The same 2820-byte tree the entry-estimate leg uses: its estimate
+    // is exactly the cap of 100, and its size is exactly the byte cap.
+    let mut tree = Vec::new();
+    for name in &one_byte_names(90) {
+        tree.extend_from_slice(&entry("100644", name, &blob));
+    }
+    for i in 0..7u8 {
+        tree.extend_from_slice(&entry("100644", &[b'q', b'a' + i], &blob));
+    }
+    let tree = git.object("tree", &tree);
+    let head = committer_line(&tree, "at the byte cap\n");
+    let head = git.object("commit", &head);
+    git.force_main(&head);
+    STRUCTURE_CAPS.with(|caps| caps.set(Some((2820, u64::MAX))));
+    match verdict(&git) {
+        Ok(commits) => assert_eq!(commits, 1),
+        Err(other) => panic!("a tree at the byte cap imported nothing: {other:?}"),
+    }
+    STRUCTURE_CAPS.with(|caps| caps.set(None));
+}
+
+/// The first `n` printable ASCII bytes that make one-byte tree names a
+/// path the import stores: no separator, no quote, no dot.
+fn one_byte_names(n: usize) -> Vec<Vec<u8>> {
+    (b'!'..=b'~')
+        .filter(|b| !b"/\".\"".contains(b))
+        .take(n)
+        .map(|b| vec![b])
+        .collect()
+}
+
 /// A gitlink stores the submodule's commit name as an opaque pointer; the
 /// commit it names is never fetched, so a name from nowhere imports.
 #[test]

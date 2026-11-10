@@ -226,23 +226,27 @@ mod tests {
         );
     }
 
-    /// A 200 ms deadline through three processes: each keeps its margin,
-    /// capped at half of what it got, so the deepest answers with 50 ms
-    /// of the caller's 200 ms still ahead of it.
+    /// A 200 ms deadline through three processes: each hop keeps the
+    /// rule's margin out of the time left it itself saw, so the deepest
+    /// answers with time ahead of it.
     ///
-    /// Each hop reads the clock once: the header's value and the hop's
-    /// deadline both come from that one `now` (`Until::after_at`), so a
-    /// pause anywhere inside the hop moves the header and the deadline
-    /// together and changes no margin. Only a pause between the hops
-    /// moves the instants apart, and the margins are read as deltas
-    /// between them, which such a pause cannot change either.
+    /// The rule has two ends this test pins, per hop, from that hop's
+    /// own `now` and its own left (the same `now` its header and its
+    /// deadline come from, via `Until::after_at`): the half cap - a hop
+    /// passes on at least half of what it saw - and the floor - what it
+    /// keeps is `MIN_MARGIN`, unless the half cap binds first. Both
+    /// hold whatever a pause between the hops does to the next hop's
+    /// left: less left, less kept, the same rule. One 30 ms pause rides
+    /// between the second and third hop to hold that shape in the test
+    /// itself (the old wall-clock window went red on it: 38 kept, not
+    /// 40-60).
     #[test]
     fn a_200ms_deadline_reaches_the_deepest_of_three_with_time_to_spare() {
-        let pass = |left: Option<Instant>| {
-            let now = Instant::now();
+        let hop = |at: Option<Instant>, pause: Duration| {
+            let now = Instant::now().checked_add(pause).unwrap();
             let mut request = Request::new(());
-            let left = left.map(|at| {
-                let left = at.saturating_duration_since(now);
+            let left = at.map(|deadline| {
+                let left = deadline.saturating_duration_since(now);
                 let value = format!("{}m", left.as_millis());
                 request
                     .metadata_mut()
@@ -253,26 +257,43 @@ mod tests {
                 // header's, which took the pause out of the margin.
                 grpc_timeout(request.metadata()).expect("the header parses back")
             });
-            left.map_or(Until::NONE, |left| Until::after_at(left, now))
-                .at()
+            let out = left
+                .map_or(Until::NONE, |left| Until::after_at(left, now))
+                .at();
+            (now, left, out)
         };
         let first = Until::after(Duration::from_millis(200)).at();
-        let second = pass(first);
-        let third = pass(second);
-        // What each hop kept: the daemon 50 ms, the cache 50 ms, the
-        // deepest 50 ms (its half cap). The margins are read as deltas
-        // between the instants, so a scheduler slice between the hops
-        // moves them all and changes no margin.
-        let between = |a: Option<Instant>, b: Option<Instant>| {
-            a.unwrap().saturating_duration_since(b.unwrap()).as_millis()
+        let (now1, left1, out1) = hop(first, Duration::ZERO);
+        let (now2, left2, out2) = hop(out1, Duration::ZERO);
+        // The pause that broke the old window: the third hop starts
+        // 30 ms late, sees less left, keeps less (its half cap binds).
+        let (now3, left3, out3) = hop(out2, Duration::from_millis(30));
+        let pinned = |now: Instant, left: Option<Duration>, out: Option<Instant>| {
+            let left = left.expect("the caller's deadline reaches this hop");
+            let passed_on = out.unwrap().saturating_duration_since(now);
+            // The half cap: the hop passes on at least half of what it
+            // saw, so it kept at most half. Exact: the deadline is
+            // `now + (left - margin)`, and `margin <= left / 2`.
+            assert!(
+                passed_on * 2 >= left,
+                "the hop kept more than half of {left:?}"
+            );
+            // The floor: what it kept is `MIN_MARGIN`, unless the half
+            // cap binds first. One ms of slack absorbs the header's
+            // millisecond truncation of the left it read.
+            let margin = left.saturating_sub(passed_on);
+            assert!(
+                margin + Duration::from_millis(1) >= MIN_MARGIN.min(left / 2),
+                "the hop kept {margin:?}, under the floor of {:?}, for {left:?}",
+                MIN_MARGIN.min(left / 2)
+            );
         };
-        let kept1 = between(first, second);
-        let kept2 = between(second, third);
-        assert!((40..=60).contains(&kept1), "{}", kept1);
-        assert!((40..=60).contains(&kept2), "{}", kept2);
+        pinned(now1, left1, out1);
+        pinned(now2, left2, out2);
+        pinned(now3, left3, out3);
         // The deepest still has its margin ahead of it: the caller's
-        // 200 ms is not spent by the two hops above it.
-        assert!(third.unwrap() > Instant::now());
+        // 200 ms is not spent by the two hops above it and the pause.
+        assert!(out3.unwrap() > Instant::now());
     }
 
     #[test]

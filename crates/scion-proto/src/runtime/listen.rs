@@ -749,6 +749,16 @@ impl WaitWarn {
                     line(waited);
                 }
                 if over() {
+                    // The serve has ended: what is left goes out ungated
+                    // and the task stops. The gated flush above may have
+                    // refused the last count - the interval not yet
+                    // elapsed since the last write - and the doc
+                    // promises the end write carries it. flush_all
+                    // swaps the count, so warn_the_last at the serve's
+                    // end finds nothing left and no line doubles.
+                    if let Some(waited) = warn.flush_all() {
+                        line(waited);
+                    }
                     break;
                 }
             }
@@ -2411,28 +2421,64 @@ mod tests {
         );
         // A count with no new event: only the flusher can carry it out.
         warn.since.fetch_add(1, Ordering::Relaxed);
-        tokio::time::sleep(Duration::from_millis(60)).await;
         // The flusher's line goes through the caller's closure - here a
         // no-op - so the observable is the limiter's own state: the count
-        // left the limiter, which only the flusher's flush does.
-        assert_eq!(
-            warn.since.load(Ordering::Relaxed),
-            0,
-            "the flusher carried the interval's count out"
-        );
+        // left the limiter, which only the flusher's flush does. A loaded
+        // runner may not give the flusher a turn inside any fixed sleep,
+        // so the test polls the condition and names the count it saw.
+        wait_until(
+            Duration::from_secs(5),
+            || warn.since.load(Ordering::Relaxed) == 0,
+            "the flusher carried the interval's count out",
+            || {
+                format!(
+                    "the count still reads {}",
+                    warn.since.load(Ordering::Relaxed)
+                )
+            },
+        )
+        .await;
         // The end: what is left is written and the task stops. The count
         // goes in before `over` is set: a flusher tick between the two
         // stores would otherwise see an empty count, take `over`, and
-        // stop - the count would sit forever, and the test would depend
-        // on the scheduler's mood.
+        // stop - the count would sit forever. The end write itself is
+        // ungated (flush_all on the end tick), so the count goes out no
+        // matter where in the interval the stores land.
         warn.since.fetch_add(2, Ordering::Relaxed);
         over.store(true, Ordering::Relaxed);
-        tokio::time::sleep(Duration::from_millis(60)).await;
-        assert_eq!(
-            warn.since.load(Ordering::Relaxed),
-            0,
-            "the flusher wrote what was left at the end"
-        );
+        wait_until(
+            Duration::from_secs(5),
+            || warn.since.load(Ordering::Relaxed) == 0,
+            "the flusher wrote what was left at the end",
+            || {
+                format!(
+                    "the count still reads {}",
+                    warn.since.load(Ordering::Relaxed)
+                )
+            },
+        )
+        .await;
+    }
+
+    /// Polls `done` every few milliseconds until it holds, up to `cap`:
+    /// a condition wait, not a fixed sleep, so a loaded runner that
+    /// starves the flusher for a while still passes - and a flusher
+    /// that never flushes fails the cap with the count it last saw.
+    async fn wait_until(
+        cap: Duration,
+        done: impl Fn() -> bool,
+        what: &str,
+        seen: impl Fn() -> String,
+    ) {
+        let started = tokio::time::Instant::now();
+        while !done() {
+            assert!(
+                started.elapsed() < cap,
+                "{what}: gave up after {cap:?}, {}",
+                seen()
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     /// `spawn_cap_flushers` spawns both flushers: the waits line and the

@@ -121,7 +121,10 @@ fn database_checks(
         .map(|row| row.get::<_, String>(0).parse().unwrap_or(0))
     {
         Ok(num) if (16..=18).contains(&(num / 10000)) => {
-            let (major, minor) = (num / 10000, num % 10000 / 100);
+            // Since PostgreSQL 10 the number is major * 10000 + minor:
+            // 17.11 reads 170011, so the minor is the whole rest, not
+            // the two digits the pre-10 layout gave it (#1072).
+            let (major, minor) = (num / 10000, num % 10000);
             Answer::Ok(format!("PostgreSQL {major}.{minor} is supported"))
         }
         Ok(num) => Answer::Fail(format!(
@@ -1335,5 +1338,177 @@ mod tests {
             "the gone filesystem fails:\n{:#?}",
             report.lines
         );
+    }
+
+    /// The version line names the server's own major and minor: a
+    /// major the build supports, with the minor the server reports.
+    /// The oracle is independent of the check's own math: the server's
+    /// `server_version` string names the release itself, so a wrong
+    /// fold in the check's number reading prints a version no server
+    /// runs (the number's layout changed at PostgreSQL 10, #1072).
+    #[test]
+    fn the_version_line_names_the_server_major_and_minor() {
+        let lock = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_memory, ()) = MemoryOverride::set(&lock);
+        let (dir, url) = ready_store();
+        let url_text = std::fs::read_to_string(&url).unwrap();
+        let official: String = postgres::Client::connect(url_text.as_str(), postgres::NoTls)
+            .unwrap()
+            .query_one("SHOW server_version", &[])
+            .unwrap()
+            .get::<_, String>(0);
+        // The release's own words: the leading major.minor, whatever
+        // points and packaging follow.
+        let release = official.split_whitespace().next().unwrap().to_owned();
+        let report = run_cli(dir.path(), Some(&url));
+        let version = line(&report, "Postgres version");
+        assert!(
+            version.contains(&format!("PostgreSQL {release} is supported")),
+            "the version line names the server's own {release}:\n{version}"
+        );
+    }
+
+    /// A database that holds repos but whose directory carries no
+    /// marker refuses: the first open must not adopt a store the
+    /// schema already serves. The repos probe is what turns the
+    /// adopt-cut window into a refusal, so its answer is pinned in the
+    /// direction that keeps the refusal.
+    #[test]
+    fn a_database_with_repos_but_no_marker_refuses() {
+        let lock = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_memory, ()) = MemoryOverride::set(&lock);
+        let (_store_dir, url) = ready_store();
+        let mut raw = postgres::Client::connect(
+            std::fs::read_to_string(&url).unwrap().as_str(),
+            postgres::NoTls,
+        )
+        .unwrap();
+        raw.execute("INSERT INTO repos (name) VALUES ('a repo')", &[])
+            .unwrap();
+        drop(raw);
+        // A directory with no marker at all, against that database.
+        let dir = private_tempdir();
+        let report = run_cli(dir.path(), Some(&url));
+        assert!(
+            line(&report, "store pairing").starts_with("fail"),
+            "a served database with an unmarked directory refuses:\n{:#?}",
+            report.lines
+        );
+    }
+
+    /// A marked directory over a database that holds repos but no
+    /// store row: the first open takes the directory's marker, and the
+    /// line says so - not the minting words a first boot uses.
+    #[test]
+    fn a_marked_directory_over_a_storeless_database_takes_the_marker() {
+        let lock = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_memory, ()) = MemoryOverride::set(&lock);
+        let (dir, url) = ready_store();
+        let mut raw = postgres::Client::connect(
+            std::fs::read_to_string(&url).unwrap().as_str(),
+            postgres::NoTls,
+        )
+        .unwrap();
+        raw.execute("DELETE FROM store_uuid", &[]).unwrap();
+        raw.execute("INSERT INTO repos (name) VALUES ('a repo')", &[])
+            .unwrap();
+        drop(raw);
+        let report = run_cli(dir.path(), Some(&url));
+        let pairing = line(&report, "store pairing");
+        assert!(
+            pairing.contains("takes the directory's marker"),
+            "the marked directory's marker is the store:\n{pairing}"
+        );
+    }
+
+    /// A first boot - no marker, no store, no repos - names itself:
+    /// the open mints the marker and the store. The line the check
+    /// prints is the minting one, not the marker-taking words of a
+    /// directory that already carries a marker.
+    #[test]
+    fn a_first_boot_names_itself() {
+        let lock = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_memory, ()) = MemoryOverride::set(&lock);
+        let (_store_dir, url) = ready_store();
+        let mut raw = postgres::Client::connect(
+            std::fs::read_to_string(&url).unwrap().as_str(),
+            postgres::NoTls,
+        )
+        .unwrap();
+        raw.execute("DELETE FROM store_uuid", &[]).unwrap();
+        raw.execute("DELETE FROM repos", &[]).unwrap();
+        drop(raw);
+        // A directory with no marker against that empty database.
+        let dir = private_tempdir();
+        let report = run_cli(dir.path(), Some(&url));
+        let pairing = line(&report, "store pairing");
+        assert!(
+            pairing.contains("a first boot"),
+            "a first boot says so:\n{pairing}"
+        );
+    }
+
+    /// The floor warns below itself, not at it: a host with exactly
+    /// the floor's bytes is enough, and the line says so as ok.
+    #[test]
+    fn the_memory_floor_warns_only_below_it() {
+        let lock = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_memory, ()) = MemoryOverride::set(&lock);
+        let (dir, url) = ready_store();
+        // A host of exactly the floor's bytes: not below it.
+        crate::floor::test_set_host_limit(Some(crate::floor::FLOOR));
+        let report = run_cli(dir.path(), Some(&url));
+        crate::floor::test_set_host_limit(None);
+        assert!(
+            line(&report, "memory floor").starts_with("ok"),
+            "a host at the floor passes:\n{:#?}",
+            report.lines
+        );
+    }
+
+    /// The disk margin warns below itself, not at it: a filesystem
+    /// with exactly the margin's bytes free is enough headroom, and
+    /// the line says so as ok.
+    #[test]
+    fn the_disk_margin_warns_only_below_it() {
+        let lock = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_memory, ()) = MemoryOverride::set(&lock);
+        let (dir, url) = ready_store();
+        // Exactly the margin's bytes free, through the store's own
+        // test hook: the real filesystem's free space is the runner's.
+        crate::store::test_set_free_bytes(Some(DISK_MARGIN));
+        let report = run_cli(dir.path(), Some(&url));
+        crate::store::test_set_free_bytes(None);
+        assert!(
+            line(&report, "disk and inodes").starts_with("ok"),
+            "a filesystem at the margin has headroom:\n{:#?}",
+            report.lines
+        );
+    }
+
+    /// The bytes read at a glance: the unit changes at the mebibyte
+    /// and gibibyte bounds, and small counts stay in bytes. The bounds
+    /// themselves are pinned, so a flipped comparison or a shifted
+    /// unit prints the wrong unit on a value the operator reads.
+    #[test]
+    fn human_bytes_names_the_unit_an_operator_reads() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(500), "500 B");
+        assert_eq!(human_bytes(1 << 20), "1 MiB");
+        assert_eq!(human_bytes(3 << 20), "3 MiB");
+        assert_eq!(human_bytes(1 << 30), "1 GiB");
+        assert_eq!(human_bytes(7 << 30), "7 GiB");
     }
 }

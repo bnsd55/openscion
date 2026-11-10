@@ -353,6 +353,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_not_ready_inner_holds_the_layer_back() {
+        struct NeverReady;
+        impl tower::Service<http::Request<tonic::body::Body>> for NeverReady {
+            type Response = http::Response<FullBody>;
+            type Error = Infallible;
+            type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+            fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+                Poll::Pending
+            }
+
+            fn call(&mut self, _request: http::Request<tonic::body::Body>) -> Self::Future {
+                unreachable!("the layer must not call an inner that is not ready")
+            }
+        }
+        let mut service = ReplyMemoryLayer {
+            budget: Arc::new(Semaphore::new(1_000)),
+            metrics: Arc::new(Metrics::default()),
+        }
+        .layer(NeverReady);
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        assert!(
+            matches!(service.poll_ready(&mut cx), Poll::Pending),
+            "the layer answers ready while its inner cannot take a call"
+        );
+    }
+
+    #[tokio::test]
     async fn a_unary_reply_holds_its_bytes_until_its_body_ends() {
         let budget = Arc::new(Semaphore::new(1_000));
         let mut service = ReplyMemoryLayer {

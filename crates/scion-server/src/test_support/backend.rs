@@ -401,6 +401,14 @@ impl Backend {
     pub fn fail_next_commits(&self, n: u32) {
         self.pg.fail_next_commits(n);
     }
+    /// Sets how many of the next commits fail as a database out of
+    /// space: the transaction ran and rolled back, so the retry re-runs
+    /// it whole. The audit's why reads disk_full, not busy.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn fail_next_commits_disk_full(&self, n: u32) {
+        self.pg.fail_next_commits_disk_full(n);
+    }
     /// The import's test hooks and busy-retry count.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-hooks"))]

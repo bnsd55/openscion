@@ -2353,8 +2353,9 @@ impl Scion for ScionService {
                     )?;
                     (resume, Some(hold))
                 };
+                let held = cursor.as_ref().map_or(0, crate::memory::Held::len);
                 let _cursor = cursor;
-                blame::blame(&store, &repo, id, &walk_path, &resume, &memory, until)
+                blame::blame(&store, &repo, id, &walk_path, &resume, held, &memory, until)
             })
             .await?;
         let ranges = blame

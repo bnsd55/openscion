@@ -737,6 +737,37 @@ mod tests {
         assert_eq!(counted as usize, text.len() - 900);
     }
 
+    /// The score of a pair meets the two files' chunk tables by hash,
+    /// so which unequal chunks collide is part of the answer. The two
+    /// accumulators' mixing is pinned here: one changed operator moves
+    /// these values and needs a deliberate diff against git's
+    /// diffcore-delta.c.
+    #[test]
+    fn the_chunk_hashes_hold_gits_diffcore_delta_values() {
+        let mut text = vec![b'x'; 64];
+        text.push(b'\n');
+        text.extend(vec![b'y'; 64]);
+        text.push(b'\n');
+        text.extend_from_slice(b"tail");
+        let chunks = Chunks::of(&text);
+        assert_eq!(chunks.count, 5);
+        assert_eq!(chunks.table, [(10, 2), (12233, 128), (93992, 4)]);
+    }
+
+    /// A finish emits exactly the chunks its bytes fed: none for an
+    /// empty file, one for a tail under 64 bytes with no newline. A
+    /// finish that ends the empty accumulators again adds a zero-byte
+    /// chunk and a lie about the count, which the budget reads.
+    #[test]
+    fn a_finish_emits_only_the_chunks_its_bytes_fed() {
+        let empty = Chunks::of(b"");
+        assert_eq!(empty.count, 0);
+        assert_eq!(empty.table, [] as [(u32, u32); 0]);
+        let tail = Chunks::of(b"abc");
+        assert_eq!(tail.count, 1);
+        assert_eq!(tail.table, [(90913, 3)]);
+    }
+
     /// Lines of 8 bytes, one for each number of `range`.
     fn lines(range: std::ops::Range<usize>) -> Vec<u8> {
         range
@@ -928,5 +959,155 @@ mod tests {
         }
         assert_eq!(pairs, uncapped);
         assert_eq!(pairs.len(), 1);
+    }
+
+    /// A pair count at git's limit still gets its inexact search: the
+    /// bound is for counts past it, not on it. A search that refuses
+    /// the exact count silently drops the renames of a diff at the
+    /// limit.
+    #[test]
+    fn a_pair_count_at_the_limit_still_gets_its_search() {
+        let _slot = damage::slot();
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let added_blob = store.blobs().put(&lines(0..60)).unwrap();
+        let added_path = RepoPath::new("new").unwrap();
+        // One deleted file 90% like the added file.
+        let like = store
+            .blobs()
+            .put(&[lines(0..54), lines(1000..1006)].concat())
+            .unwrap();
+        let deleted_path = RepoPath::new("old").unwrap();
+        let added = [(&added_path, file(added_blob))];
+        let deleted = [(&deleted_path, file(like))];
+        let read = |_: &RepoPath, blob, _| Ok(Some(Chunks::read(&store, blob)?));
+        let mut cost = 0;
+        let budget = Budget {
+            cost: &mut cost,
+            cap: usize::MAX,
+            progress: false,
+        };
+        let from = Progress::default();
+        // One added times one deleted: a count of one, at the limit.
+        let found = renames(&store, &added, &deleted, read, 1, from, budget).unwrap();
+        assert_eq!(found.pairs.len(), 1);
+        assert_eq!(found.stopped, None);
+    }
+
+    /// The same-name search's cost reaches the budget: the run stops
+    /// once a pair look has charged both tables, and the pairs found so
+    /// far stand. A cost that shrinks or multiplies moves the stop and
+    /// the pairs with it.
+    #[test]
+    fn the_same_name_search_stops_at_its_budget() {
+        let _slot = damage::slot();
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        // Two same-name pairs, each side 90% like its other side, so
+        // the exact step pairs nothing and each look scores at or above
+        // the name threshold.
+        let a_one = store.blobs().put(&lines(0..60)).unwrap();
+        let d_one = store
+            .blobs()
+            .put(&[lines(0..54), lines(1000..1006)].concat())
+            .unwrap();
+        let a_two = store.blobs().put(&lines(100..160)).unwrap();
+        let d_two = store
+            .blobs()
+            .put(&[lines(100..154), lines(2000..2006)].concat())
+            .unwrap();
+        let added_paths = ["new/one", "new/two"].map(|p| RepoPath::new(p).unwrap());
+        let added = [
+            (&added_paths[0], file(a_one)),
+            (&added_paths[1], file(a_two)),
+        ];
+        let deleted_paths = ["old/one", "old/two"].map(|p| RepoPath::new(p).unwrap());
+        let deleted = [
+            (&deleted_paths[0], file(d_one)),
+            (&deleted_paths[1], file(d_two)),
+        ];
+        let read = |_: &RepoPath, blob, _| Ok(Some(Chunks::read(&store, blob)?));
+        let mut cost = 0;
+        let budget = Budget {
+            cost: &mut cost,
+            cap: 300,
+            progress: false,
+        };
+        let from = Progress::default();
+        let found = renames(&store, &added, &deleted, read, MAX_PAIRS, from, budget).unwrap();
+        assert_eq!(found.pairs.len(), 1, "pairs {:?}", found.pairs);
+        assert_eq!(found.pairs[0].added, 0);
+        assert_eq!(found.pairs[0].score, 54000);
+        assert_eq!(found.stopped, Some(1));
+        // The bound: the run's cost, 432, stays under the cap plus one
+        // pair look of two 60-chunk tables.
+        assert!(cost <= 300 + 180, "cost {cost} over the bound");
+    }
+
+    /// The same-name look charges both tables, so a deleted file with
+    /// more chunks than its same-named added file costs, not refunds.
+    /// A cost that subtracts goes under zero and breaks the run.
+    #[test]
+    fn the_same_name_look_counts_both_tables() {
+        let _slot = damage::slot();
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        // The deleted file has the longer table: 70 chunks against 60.
+        let added_blob = store.blobs().put(&lines(0..60)).unwrap();
+        let like = store
+            .blobs()
+            .put(&[lines(0..64), lines(2000..2006)].concat())
+            .unwrap();
+        let added_path = RepoPath::new("new").unwrap();
+        let deleted_path = RepoPath::new("old").unwrap();
+        let added = [(&added_path, file(added_blob))];
+        let deleted = [(&deleted_path, file(like))];
+        let read = |_: &RepoPath, blob, _| Ok(Some(Chunks::read(&store, blob)?));
+        let mut cost = 0;
+        let budget = Budget {
+            cost: &mut cost,
+            cap: usize::MAX,
+            progress: false,
+        };
+        let from = Progress::default();
+        let found = renames(&store, &added, &deleted, read, MAX_PAIRS, from, budget).unwrap();
+        assert_eq!(found.pairs.len(), 1);
+        assert_eq!(found.stopped, None);
+    }
+
+    /// A search whose cap crosses at a target's slot stops before it
+    /// reads the deleted file: the pairs of a capped run are the pairs
+    /// found up to the cap, not the whole search's. A bound that lets
+    /// the walk slip past the cap pairs files the capped run must not.
+    #[test]
+    fn a_search_that_crosses_its_cap_at_a_target_stops_before_its_read() {
+        let _slot = damage::slot();
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        // Two added files; the deleted file is 90% like the second, and
+        // named differently, so step 2 leaves no known score.
+        let a1 = store.blobs().put(&lines(0..60)).unwrap();
+        let a2 = store.blobs().put(&lines(100..160)).unwrap();
+        let d2 = store
+            .blobs()
+            .put(&[lines(100..154), lines(2000..2006)].concat())
+            .unwrap();
+        let added_paths = ["new/one", "new/two"].map(|p| RepoPath::new(p).unwrap());
+        let added = [(&added_paths[0], file(a1)), (&added_paths[1], file(a2))];
+        let deleted_path = RepoPath::new("old/x").unwrap();
+        let deleted = [(&deleted_path, file(d2))];
+        let read = |_: &RepoPath, blob, _| Ok(Some(Chunks::read(&store, blob)?));
+        let mut cost = 0;
+        let budget = Budget {
+            cost: &mut cost,
+            cap: 300,
+            progress: false,
+        };
+        let from = Progress::default();
+        let found = renames(&store, &added, &deleted, read, MAX_PAIRS, from, budget).unwrap();
+        assert_eq!(found.pairs, []);
+        assert_eq!(found.stopped, Some(0));
+        // The bound: the cap plus one slot, 60, plus one read, 60.
+        assert!(cost <= 300 + 120, "cost {cost} over the bound");
     }
 }
