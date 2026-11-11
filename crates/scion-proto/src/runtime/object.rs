@@ -617,6 +617,14 @@ mod tests {
     }
 
     #[test]
+    fn unpack_bytes_is_the_nine_mib_the_architecture_doc_promises() {
+        // docs/architecture.md, the fetch-budget paragraph: "a blob's codec
+        // (9 MiB: a zstd window is at most 8 MiB)". The window plus the
+        // 1 MiB block: changing either breaks the documented reserve.
+        assert_eq!(UNPACK_BYTES, (8 << 20) + (1 << 20));
+    }
+
+    #[test]
     fn a_frame_with_a_window_over_8_mib_is_refused() {
         // A window of 8 MiB is the largest accepted, in a frame larger than
         // it (not single-segment), and in a single-segment frame of 8 MiB.
