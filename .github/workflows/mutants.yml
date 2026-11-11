@@ -184,6 +184,7 @@ jobs:
             done
             pkg_args="--manifest-path=$crate_dir/Cargo.toml"
           fi
+          mkdir -p mutants-measure
           # shellcheck disable=SC2086
           cargo test $pkg_args $TEST_ARGS --no-run --message-format=json \
             > mutants-measure/build.json
