@@ -1931,6 +1931,15 @@ mod tests {
         };
         assert_eq!(chunks.len(), 1);
         assert_eq!(tier.cache_hits_and_misses(), (1, 1));
+        // The metrics getter hands back the tier's own counters, not a
+        // fresh default: the daemon's /metrics endpoint reads through
+        // it, so a swapped Arc would serve all-zero counts while the
+        // tier kept counting into a dropped one.
+        assert_eq!(
+            tier.metrics().cache_counts(),
+            (1, 1),
+            "the getter reads the counters the tier just wrote"
+        );
     }
 
     #[tokio::test]
