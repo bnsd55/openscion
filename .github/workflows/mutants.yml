@@ -177,6 +177,7 @@ jobs:
           else
             first_file=$(echo "$FILES" | cut -d' ' -f1)
             crate_dir=$(dirname "$(dirname "$first_file")")
+            crate_dir=${crate_dir%/src}
             pkg_args="--package=$(cargo metadata --no-deps --format-version=1 \
               | jq -r --arg dir "$crate_dir" \
               '.packages[] | select(.manifest_path | startswith($dir)) | .name' | head -1)"
