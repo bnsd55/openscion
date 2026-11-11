@@ -2948,4 +2948,165 @@ mod tests {
         .unwrap()
             != 0
     }
+
+    /// The snapshot keeps the most recent objects the limit names: two of
+    /// three fit, and a store that records nothing records nothing.
+    #[test]
+    fn a_snapshot_keeps_the_recent_objects_the_limit_names() {
+        let (a, b, c) = (blob(b"aaaa"), blob(b"bbbb"), blob(b"cccc"));
+        let n = a.1.len();
+        let store = MemoryStore::new(1 << 20).recording(&["r".to_owned()]);
+        for (key, bytes) in [&a, &b, &c] {
+            store.put(*key, bytes).unwrap();
+        }
+        store.served("r", c.0);
+        store.served("r", b.0);
+        store.served("r", a.0);
+        // Room for two of the three, most recent first: `c` does not fit.
+        let snap = store.snapshot("r", 2 * n + 1);
+        assert_eq!(snap.len(), 2, "{snap:?}");
+        assert_eq!(snap[0].0, b.0, "least recently used first");
+        assert_eq!(snap[1].0, a.0);
+        assert_eq!(store.snapshot("other", 1 << 20).len(), 0);
+        let plain = MemoryStore::new(1 << 20);
+        plain.put(a.0, &a.1).unwrap();
+        plain.served("r", a.0);
+        assert_eq!(plain.snapshot("r", 1 << 20).len(), 0);
+    }
+
+    /// Replacing the object that fills the limit drops nothing: the
+    /// store is at its limit, not over it.
+    #[test]
+    fn a_replace_at_the_exact_limit_drops_nothing() {
+        let (a, b) = (blob(b"aaaa"), blob(b"bbbb"));
+        let n = a.1.len();
+        let store = MemoryStore::new(2 * n);
+        store.put(a.0, &a.1).unwrap();
+        store.put(b.0, &b.1).unwrap();
+        // The replace leaves the store at exactly its limit.
+        store.put(a.0, &a.1).unwrap();
+        assert_eq!(
+            store.get(b.0, n).unwrap(),
+            Some(b.1.clone()),
+            "the limit's own byte keeps its object"
+        );
+        assert_eq!(store.get(a.0, n).unwrap(), Some(a.1.clone()));
+    }
+
+    /// A drop record in the old index drops the object and its bytes:
+    /// the imported store counts only what it kept.
+    #[test]
+    fn a_drop_record_in_the_old_index_drops_its_bytes() {
+        let dir = crate::private_tempdir();
+        let data = dir.path().join("data");
+        let (a, b) = (blob(b"aaaa"), blob(b"bbbb"));
+        let n = a.1.len();
+        {
+            let store = DiskStore::open(&data, 1 << 20).unwrap();
+            store.put(a.0, &a.1).unwrap();
+            store.put(b.0, &b.1).unwrap();
+            set_written_in_order(&store, &[a.0, b.0]);
+        }
+        remove_db(&data);
+        // The file names `a`, then `b`, then drops `a`.
+        let mut rows = Vec::new();
+        push_record(&mut rows, a.0, Some(a.1.len()));
+        push_record(&mut rows, b.0, Some(b.1.len()));
+        push_record(&mut rows, a.0, None);
+        put_old_back(&data, &old_index(CLEAN, &rows));
+        let store = reopen(&data, 1 << 20);
+        assert_eq!(store.size(a.0).unwrap(), None, "the drop record dropped it");
+        assert_eq!(store.size(b.0).unwrap(), Some(n));
+        assert_eq!(order(&store), [b.0]);
+        // The dropped bytes left the count with the object.
+        assert_eq!(
+            usize::try_from(lock(&store.disk).bytes).unwrap(),
+            n,
+            "the store counts only the kept object"
+        );
+    }
+
+    /// A start whose walk finds a tree file knows it as a tree, and its
+    /// order names the tree: the kinds of the rows are the keys'.
+    #[test]
+    fn a_walk_knows_a_tree_by_its_kind() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::private_tempdir();
+        let data = dir.path().join("data");
+        let tree = Key::Tree(TreeId::from_bytes([7_u8; 32]));
+        let strayed = Key::Blob(BlobId::from_bytes([9_u8; 32]));
+        fs::create_dir_all(&data).unwrap();
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
+        // A crashed stop asks the next start to walk.
+        DiskStore::open(&data, 1 << 20).unwrap().crash();
+        for (key, bytes) in [(tree, b"tree bytes".to_vec()), (strayed, b"blob".to_vec())] {
+            let path = object_path(&data.join("objects"), key);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, bytes).unwrap();
+        }
+        let store = reopen(&data, 1 << 20);
+        until(|| store.walk_state().is_some_and(|(_, _, done)| done));
+        store.flush();
+        assert_eq!(store.size(tree).unwrap(), Some(10));
+        assert_eq!(store.size(strayed).unwrap(), Some(4));
+        // Both keys come back through the db with their own kinds.
+        let mut names = order(&store);
+        names.sort_by_key(|key| key.id());
+        let mut wanted = vec![tree, strayed];
+        wanted.sort_by_key(|key| key.id());
+        assert_eq!(names, wanted, "both kinds read back as their keys");
+    }
+
+    /// A start that scans (the old index is dirty) knows a tree file by
+    /// its kind too.
+    #[test]
+    fn a_scan_knows_a_tree_by_its_kind() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::private_tempdir();
+        let data = dir.path().join("data");
+        let tree = Key::Tree(TreeId::from_bytes([7_u8; 32]));
+        let strayed = Key::Blob(BlobId::from_bytes([9_u8; 32]));
+        fs::create_dir_all(&data).unwrap();
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
+        for (key, bytes) in [(tree, b"tree bytes".to_vec()), (strayed, b"blob".to_vec())] {
+            let path = object_path(&data.join("objects"), key);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, bytes).unwrap();
+        }
+        remove_db(&data);
+        put_old_back(&data, &old_index(DIRTY, b""));
+        let store = reopen(&data, 1 << 20);
+        assert_eq!(store.size(tree).unwrap(), Some(10));
+        assert_eq!(store.size(strayed).unwrap(), Some(4));
+        let mut names = order(&store);
+        names.sort_by_key(|key| key.id());
+        let mut wanted = vec![tree, strayed];
+        wanted.sort_by_key(|key| key.id());
+        assert_eq!(names, wanted);
+    }
+
+    /// An old index that cannot be read refuses the start: a damaged
+    /// file is not silently treated as no file.
+    #[test]
+    fn an_unreadable_old_index_refuses_the_start() {
+        use std::os::unix::fs::PermissionsExt as _;
+        if rustix::process::geteuid().as_raw() == 0 {
+            return;
+        }
+        let dir = crate::private_tempdir();
+        let data = dir.path().join("data");
+        let a = blob(b"aaaa");
+        {
+            let store = DiskStore::open(&data, 1 << 20).unwrap();
+            store.put(a.0, &a.1).unwrap();
+            set_written_in_order(&store, &[a.0]);
+        }
+        remove_db(&data);
+        let mut rows = Vec::new();
+        push_record(&mut rows, a.0, Some(a.1.len()));
+        put_old_back(&data, &old_index(CLEAN, &rows));
+        fs::set_permissions(data.join(OLD_INDEX), fs::Permissions::from_mode(0o0)).unwrap();
+        let opened = DiskStore::open(&data, 1 << 20);
+        assert!(opened.is_err(), "an unreadable index is not a missing one");
+    }
 }
