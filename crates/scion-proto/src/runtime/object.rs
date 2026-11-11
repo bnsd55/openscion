@@ -510,12 +510,35 @@ mod tests {
             change(&mut part);
             assert!(start().push(&part).is_err());
         }
+        // A part that sets exactly one field of the first part: each one
+        // alone must refuse, so no arm of the check leans on another.
+        for change in [
+            (|p: &mut ObjectPart| p.id = b"x".to_vec()) as fn(&mut ObjectPart),
+            |p| p.encoding = Encoding::Zstd.into(),
+            |p| p.encoded_size = 1,
+        ] {
+            let mut part = parts[0].clone();
+            change(&mut part);
+            let why = start().push(&part).unwrap_err();
+            assert!(why.contains("sets a field"), "{why}");
+        }
         // Not done before the last part, and nothing after it.
         let mut object = start();
         assert!(!object.is_done());
         object.push(&parts[0]).unwrap();
         assert!(object.is_done());
         assert!(object.push(&parts[0]).is_err());
+    }
+
+    #[test]
+    fn a_raw_decode_of_the_wrong_length_is_refused() {
+        // The Raw arm's guard is the only length check at decode time: a
+        // header that lies about its size must not hand out short bytes.
+        let header = header(Encoding::Raw, 3, 3);
+        let why = decode(&header, b"ab".to_vec()).unwrap_err();
+        assert!(why.contains("2 raw bytes for 3"), "{why}");
+        let why = decode(&header, b"abcd".to_vec()).unwrap_err();
+        assert!(why.contains("4 raw bytes for 3"), "{why}");
     }
 
     /// `data` packed at `level` with a window of 2^`window_log` bytes.
