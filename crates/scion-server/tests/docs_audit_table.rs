@@ -27,11 +27,13 @@ fn the_mutation_table_has_no_blank_line_between_its_rows() {
         + section;
     // The table's last row: the last line of section 10 that starts with
     // a pipe (the next `## ` heading ends the section).
-    let section_end = lines[header..]
+    let section_end = match lines[header..]
         .iter()
         .position(|line| line.starts_with("## "))
-        .map(|at| at + header)
-        .unwrap_or(lines.len());
+    {
+        Some(at) => at + header,
+        None => lines.len(),
+    };
     let last_row = lines[header..section_end]
         .iter()
         .rposition(|line| line.starts_with('|'))
