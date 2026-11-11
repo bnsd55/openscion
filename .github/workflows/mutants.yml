@@ -203,10 +203,6 @@ jobs:
           # does it with this job's own Postgres, so its tools match the
           # server (#1099).
           SCION_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: >-
-            ${{
-              inputs.as_cap_kb != '' && format('prlimit --as={0}KiB', inputs.as_cap_kb) || ''
-            }}
           FILES: ${{ inputs.files }}
           MUTANT_TIMEOUT: ${{ inputs.timeout_per_mutant }}
           TEST_ARGS: ${{ inputs.test_args }}
