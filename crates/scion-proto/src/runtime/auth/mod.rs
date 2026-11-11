@@ -1426,14 +1426,16 @@ mod tests {
         mkdir(&dir, 0o700);
         fs::write(dir.join("child"), b"").unwrap();
 
-        // A symlink where the directory should be: ELOOP, not the
-        // target's ACLs.
+        // A symlink where the directory should be: refused, not
+        // followed. Linux answers ENOTDIR here (O_DIRECTORY bites
+        // before ELOOP would); the mutants this pins open the link and
+        // answer Ok, so either errno still turns them red.
         symlink(&dir, tmp.path().join("link")).unwrap();
         let err = ancestor_has_hidden_acl(&tmp.path().join("link"), me).unwrap_err();
-        assert_eq!(
-            err.raw_os_error(),
-            Some(rustix::io::Errno::LOOP.raw_os_error()),
-            "{err}"
+        assert!(
+            err.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error())
+                || err.raw_os_error() == Some(rustix::io::Errno::NOTDIR.raw_os_error()),
+            "the symlink answer must be refused: {err}"
         );
 
         // A regular file where the directory should be: ENOTDIR.
