@@ -1,0 +1,26 @@
+# The proof for #1126: with the first mirror unreachable, apt still
+# installs, because /etc/apt/apt-mirrors.txt now also names the main
+# archive at priority 2. Runs by hand, on this branch only.
+name: apt fallback proof
+on:
+  workflow_dispatch:
+
+jobs:
+  proof:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: the mirror list before
+        run: cat /etc/apt/apt-mirrors.txt
+      - name: the fallback line, exactly as ci.yml adds it
+        run: |
+          if ! grep -q archive.ubuntu.com /etc/apt/apt-mirrors.txt; then
+            printf 'http://archive.ubuntu.com/ubuntu/\tpriority:2\n' | sudo tee -a /etc/apt/apt-mirrors.txt
+          fi
+      - name: the mirror list after
+        run: cat -A /etc/apt/apt-mirrors.txt
+      - name: the first mirror stops answering
+        run: echo '0.0.0.0 azure.archive.ubuntu.com' | sudo tee -a /etc/hosts
+      - name: apt still installs (the union of the three jobs' packages)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xfsprogs nfs-common libfuse3-3
