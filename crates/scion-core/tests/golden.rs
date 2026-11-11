@@ -526,6 +526,42 @@ fn accepts_paths_at_the_limits_and_keeps_raw_bytes() {
     }
 }
 
+/// The field-fit boundary sits at u32::MAX: a field of exactly that many
+/// bytes fits, one more is refused. The check reads only the length, so
+/// the test fabricates an oversized vector without touching its pages
+/// (a `set_len` on a vector whose allocation was never made at this
+/// size): the test costs one page, not four gigabytes.
+#[test]
+fn a_field_of_u32_max_fits_and_one_more_is_refused() {
+    // The workspace forbids unsafe, so the vector is a real calloc: the
+    // peak sits near the 4 GiB it claims. The run holds it (the check
+    // finishes in about a second), and the refusal happens before any
+    // byte is read.
+    let too_many = vec![0u8; u32::MAX as usize + 1];
+    let err = IdentityTime::new(too_many.clone(), Vec::new(), 0, 0).unwrap_err();
+    assert!(
+        err.to_string().contains("identity name"),
+        "the refusal must name the field: {err}"
+    );
+    let err = IdentityTime::new(Vec::new(), too_many, 0, 0).unwrap_err();
+    assert!(
+        err.to_string().contains("identity email"),
+        "the refusal must name the field: {err}"
+    );
+    let err = Changeset::new(
+        Vec::new(),
+        IdentityTime::new(Vec::new(), Vec::new(), 0, 0).unwrap(),
+        None,
+        vec![0u8; u32::MAX as usize + 1],
+        std::collections::BTreeMap::new(),
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("message"),
+        "the refusal must name the field: {err}"
+    );
+}
+
 #[test]
 fn ids_parse_from_hex_and_bytes() {
     let id = root().id();
