@@ -558,6 +558,21 @@ fn a_field_of_u32_max_fits_and_one_more_is_refused() {
         err.to_string().contains("message"),
         "the refusal must name the field: {err}"
     );
+
+    // The fit side: a field of exactly u32::MAX bytes is accepted, and
+    // the vector moves into the value - its pages are never read here
+    // either. A `>` to `>=` flip in the fit check would refuse it.
+    let name = vec![0u8; u32::MAX as usize];
+    IdentityTime::new(name, vec![0u8; u32::MAX as usize], 0, 0).unwrap();
+    let cs = Changeset::new(
+        Vec::new(),
+        IdentityTime::new(Vec::new(), Vec::new(), 0, 0).unwrap(),
+        None,
+        vec![0u8; u32::MAX as usize],
+        std::collections::BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(cs.message().len(), u32::MAX as usize);
 }
 
 #[test]
