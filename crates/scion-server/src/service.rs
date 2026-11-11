@@ -4797,28 +4797,36 @@ mod tests {
             Arc::clone(&metrics),
             stop_rx,
         ));
-        // The sample's first tick fires at once; the parked read's age
-        // shows on the second.
         assert!(
             arrived.recv_timeout(Duration::from_secs(10)).is_ok(),
             "the read parked"
         );
-        tokio::time::sleep(TX_AGE_PERIOD + Duration::from_secs(1)).await;
-        let text = metrics.render();
-        let line = text
-            .lines()
-            .find(|l| l.starts_with("scion_pg_tx_age_seconds "))
-            .expect("the gauge renders");
-        let age: f64 = line
-            .rsplit(' ')
-            .next()
-            .unwrap()
-            .parse()
-            .expect("the gauge renders a number");
-        assert!(
-            age >= 1.0,
-            "the oldest open read's age shows in the gauge: {line}"
-        );
+        // The gauge moves on the sample's own ticks: poll it, every
+        // 200 ms, until the parked read's age crosses a second - a
+        // sample that never runs would answer zero for ever.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let age = loop {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the gauge never showed the parked read's age"
+            );
+            let text = metrics.render();
+            let line = text
+                .lines()
+                .find(|l| l.starts_with("scion_pg_tx_age_seconds "))
+                .expect("the gauge renders");
+            let age: f64 = line
+                .rsplit(' ')
+                .next()
+                .unwrap()
+                .parse()
+                .expect("the gauge renders a number");
+            if age >= 1.0 {
+                break age;
+            }
+        };
+        assert!(age >= 1.0, "the oldest open read's age shows: {age}");
         for (blocker, release) in blockers {
             let _ = release.send(());
             let _ = blocker.join();
