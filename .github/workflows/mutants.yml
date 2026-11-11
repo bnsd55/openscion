@@ -77,6 +77,14 @@ on:
         required: false
         default: ""
         type: string
+      as_cap_kb:
+        description: >-
+          each test binary's address-space cap in KiB, via prlimit --as on
+          the Linux job (#1112): a runaway mutant then fails its own test
+          instead of starving the runner. Empty runs without the cap.
+        required: false
+        default: ""
+        type: string
       runner:
         description: >-
           the runner: ubuntu-24.04 (the default) with the Postgres service;
@@ -148,6 +156,46 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: the test binaries' peak address space
+        if: inputs.as_cap_kb != ''
+        env:
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+          SCION_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
+          TEST_ARGS: ${{ inputs.test_args }}
+          TEST_PACKAGE: ${{ inputs.test_package }}
+          FILES: ${{ inputs.files }}
+        run: |
+          # The cap in #1112 must sit well above a normal test binary's
+          # peak address space (glibc's arenas reserve a lot of it), so
+          # the baseline is measured on this runner, with each test
+          # binary the run will use, before the cap is picked.
+          pkg_args=""
+          if [ -n "$TEST_PACKAGE" ]; then
+            pkg_args="--package=$TEST_PACKAGE"
+          else
+            first_file=$(echo "$FILES" | cut -d' ' -f1)
+            crate_dir=$(dirname "$(dirname "$first_file")")
+            pkg_args="--package=$(cargo metadata --no-deps --format-version=1 \
+              | jq -r --arg dir "$crate_dir" \
+              '.packages[] | select(.manifest_path | startswith($dir)) | .name' | head -1)"
+          fi
+          # shellcheck disable=SC2086
+          cargo test $pkg_args $TEST_ARGS --no-run --message-format=json \
+            | jq -r 'select(.executable != null) | .executable' | sort -u > mutants-measure/bins.txt
+          while IFS= read -r bin; do
+            [ -n "$bin" ] || continue
+            bash -c '
+              "$1" > /dev/null 2>&1 & p=$!
+              peak=0
+              while kill -0 $p 2>/dev/null; do
+                v=$(awk "/VmPeak/{print \$2}" /proc/$p/status 2>/dev/null)
+                [ -n "$v" ] && peak=$v
+                sleep 0.5
+              done
+              wait $p; rc=$?
+              echo "$(basename "$1"): VmPeak ${peak} KiB (exit $rc)"
+            ' _ "$bin"
+          done < mutants-measure/bins.txt
       - name: the mutation run
         env:
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
@@ -155,6 +203,10 @@ jobs:
           # does it with this job's own Postgres, so its tools match the
           # server (#1099).
           SCION_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: >-
+            ${{
+              inputs.as_cap_kb != '' && format('prlimit --as={0}KiB', inputs.as_cap_kb) || ''
+            }}
           FILES: ${{ inputs.files }}
           MUTANT_TIMEOUT: ${{ inputs.timeout_per_mutant }}
           TEST_ARGS: ${{ inputs.test_args }}
@@ -162,6 +214,7 @@ jobs:
           SHARDS: ${{ inputs.shards }}
           EXCLUDE_RE: ${{ inputs.exclude_re }}
           TEST_PACKAGE: ${{ inputs.test_package }}
+          AS_CAP_KB: ${{ inputs.as_cap_kb }}
         run: |
           # The dispatch names files, one per -f: cargo-mutants examines
           # only those files' functions. Every name must be a file in the
@@ -189,6 +242,12 @@ jobs:
           exclude_args=()
           if [ -n "$EXCLUDE_RE" ]; then
             exclude_args=(--exclude-re "$EXCLUDE_RE")
+          fi
+          # A test binary whose address space the cap ends fails its own
+          # test, instead of starving the runner until GitHub cancels the
+          # job (#1112). prlimit exists on the Linux runner only.
+          if [ -n "$AS_CAP_KB" ]; then
+            export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="prlimit --as=${AS_CAP_KB}KiB"
           fi
           # shellcheck disable=SC2086
           # An empty array under `set -u` reads as unbound on bash 3.2.
@@ -257,6 +316,7 @@ jobs:
           SHARDS: ${{ inputs.shards }}
           EXCLUDE_RE: ${{ inputs.exclude_re }}
           TEST_PACKAGE: ${{ inputs.test_package }}
+          AS_CAP_KB: ${{ inputs.as_cap_kb }}
         run: |
           set -eu
           file_args=""
