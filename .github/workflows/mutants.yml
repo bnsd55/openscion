@@ -77,6 +77,24 @@ on:
         required: false
         default: ""
         type: string
+      as_cap_kb:
+        description: >-
+          each test binary's address-space cap in KiB, via prlimit --as on
+          the Linux job (#1112): a runaway mutant then fails its own test
+          instead of starving the runner. Default 8388608 (8 GiB): about
+          3.7x the largest measured test binary (2.1 GiB) and half the
+          runner's memory. An explicitly empty value runs without the cap.
+        required: false
+        default: "8388608"
+        type: string
+      measure_peak:
+        description: >-
+          measure each test binary's peak address space before the mutants
+          start (#1112, for picking as_cap_kb). Off by default: an uncapped
+          run does exactly what main does.
+        required: false
+        default: "false"
+        type: boolean
       runner:
         description: >-
           the runner: ubuntu-24.04 (the default) with the Postgres service;
@@ -148,6 +166,54 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: the test binaries' peak address space
+        # The peaks are measured before there is a cap; once the cap is
+        # set, this step has nothing left to say.
+        if: inputs.measure_peak
+        env:
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+          SCION_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
+          TEST_ARGS: ${{ inputs.test_args }}
+          TEST_PACKAGE: ${{ inputs.test_package }}
+          FILES: ${{ inputs.files }}
+        run: |
+          # The cap in #1112 must sit well above a normal test binary's
+          # peak address space (glibc's arenas reserve a lot of it), so
+          # the baseline is measured on this runner, with each test
+          # binary the run will use, before the cap is picked.
+          pkg_args=""
+          if [ -n "$TEST_PACKAGE" ]; then
+            pkg_args="--package=$TEST_PACKAGE"
+          else
+            first_file=$(echo "$FILES" | cut -d' ' -f1)
+            # The file's crate: walk up to the nearest Cargo.toml, whatever
+            # the depth under src/.
+            crate_dir=$(dirname "$first_file")
+            while [ ! -f "$crate_dir/Cargo.toml" ]; do
+              crate_dir=$(dirname "$crate_dir")
+            done
+            pkg_args="--manifest-path=$crate_dir/Cargo.toml"
+          fi
+          mkdir -p mutants-measure
+          # shellcheck disable=SC2086
+          cargo test $pkg_args $TEST_ARGS --no-run --message-format=json \
+            > mutants-measure/build.json
+          jq -r 'select(.executable != null) | .executable' mutants-measure/build.json \
+            | sort -u > mutants-measure/bins.txt
+          while IFS= read -r bin; do
+            [ -n "$bin" ] || continue
+            bash -c '
+              "$1" > /dev/null 2>&1 & p=$!
+              peak=0
+              while kill -0 $p 2>/dev/null; do
+                v=$(awk "/VmPeak/{print \$2}" /proc/$p/status 2>/dev/null)
+                [ -n "$v" ] && peak=$v
+                sleep 0.5
+              done
+              wait $p; rc=$?
+              echo "$(basename "$1"): VmPeak ${peak} KiB (exit $rc)"
+            ' _ "$bin"
+          done < mutants-measure/bins.txt
       - name: the mutation run
         env:
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
@@ -162,6 +228,7 @@ jobs:
           SHARDS: ${{ inputs.shards }}
           EXCLUDE_RE: ${{ inputs.exclude_re }}
           TEST_PACKAGE: ${{ inputs.test_package }}
+          AS_CAP_KB: ${{ inputs.as_cap_kb }}
         run: |
           # The dispatch names files, one per -f: cargo-mutants examines
           # only those files' functions. Every name must be a file in the
@@ -186,12 +253,24 @@ jobs:
           if [ -n "$TEST_PACKAGE" ]; then
             mutants_args="-C --package=$TEST_PACKAGE"
           fi
-          exclude_args=""
+          exclude_args=()
           if [ -n "$EXCLUDE_RE" ]; then
-            exclude_args="--exclude-re $EXCLUDE_RE"
+            exclude_args=(--exclude-re "$EXCLUDE_RE")
           fi
+          # A test binary whose address space the cap ends fails its own
+          # test, instead of starving the runner until GitHub cancels the
+          # job (#1112). prlimit exists on the Linux runner only. --as
+          # reads bytes, not the KiB the input names.
+          case "$AS_CAP_KB" in
+            '') ;;
+            *[!0-9]*) echo "as_cap_kb must be digits" >&2; exit 1 ;;
+            *) cap_bytes=$((AS_CAP_KB * 1024))
+              echo "the test runner's address-space cap: $cap_bytes bytes"
+              export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="prlimit --as=$cap_bytes" ;;
+          esac
           # shellcheck disable=SC2086
-          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args $exclude_args -- $TEST_ARGS
+          # An empty array under `set -u` reads as unbound on bash 3.2.
+          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args ${exclude_args[@]+"${exclude_args[@]}"} -- $TEST_ARGS
           df -h /
       - name: the outcome lists
         if: always()
@@ -277,12 +356,13 @@ jobs:
           if [ -n "$TEST_PACKAGE" ]; then
             mutants_args="-C --package=$TEST_PACKAGE"
           fi
-          exclude_args=""
+          exclude_args=()
           if [ -n "$EXCLUDE_RE" ]; then
-            exclude_args="--exclude-re $EXCLUDE_RE"
+            exclude_args=(--exclude-re "$EXCLUDE_RE")
           fi
           # shellcheck disable=SC2086
-          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args $exclude_args -- $TEST_ARGS
+          # An empty array under `set -u` reads as unbound on bash 3.2.
+          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args ${exclude_args[@]+"${exclude_args[@]}"} -- $TEST_ARGS
           df -h /
       - name: the outcome lists
         if: always()

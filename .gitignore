@@ -10,3 +10,4 @@ target/
 /docker/work/
 /.scn-drills/
 tmp/
+mutants-measure/
