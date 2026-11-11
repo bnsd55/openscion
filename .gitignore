@@ -9,5 +9,4 @@ target/
 /docker/certs/
 /docker/work/
 /.scn-drills/
-tmp/
 mutants-measure/
