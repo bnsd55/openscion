@@ -157,7 +157,9 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: the test binaries' peak address space
-        if: inputs.as_cap_kb != ''
+        # The peaks are measured before there is a cap; once the cap is
+        # set, this step has nothing left to say.
+        if: inputs.as_cap_kb == '''
         env:
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           SCION_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
