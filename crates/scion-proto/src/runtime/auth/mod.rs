@@ -1411,6 +1411,86 @@ mod tests {
         let _ = me;
     }
 
+    /// The ancestor open's contract, pinned without winning a race: the
+    /// open is `O_NOFOLLOW` (and `O_DIRECTORY` where the platform has
+    /// it), so a symlink at the walk's answer is refused, not followed -
+    /// a fold that drops `NOFOLLOW` opens the link and reads another
+    /// directory's ACLs, and one that drops `DIRECTORY` (Linux) opens a
+    /// file as if it were the checked directory. Either way the fd is
+    /// not the directory the walk checked. The regular-file case is
+    /// Linux-only: macOS has no `O_DIRECTORY`, and opens a file.
+    #[test]
+    fn the_ancestor_open_takes_a_directory_and_no_symlink() {
+        let (tmp, me) = tempdir();
+        let dir = tmp.path().join("private");
+        mkdir(&dir, 0o700);
+        fs::write(dir.join("child"), b"").unwrap();
+
+        // A symlink where the directory should be: refused, not
+        // followed. Linux answers ENOTDIR here (O_DIRECTORY bites
+        // before ELOOP would); macOS answers ELOOP (O_NOFOLLOW). The
+        // mutants this pins open the link and answer Ok, so either
+        // errno still turns them red.
+        symlink(&dir, tmp.path().join("link")).unwrap();
+        let err = ancestor_has_hidden_acl(&tmp.path().join("link"), me).unwrap_err();
+        assert!(
+            err.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error())
+                || err.raw_os_error() == Some(rustix::io::Errno::NOTDIR.raw_os_error()),
+            "the symlink answer must be refused: {err}"
+        );
+
+        #[cfg(target_os = "linux")]
+        {
+            // A regular file where the directory should be: ENOTDIR.
+            let err = ancestor_has_hidden_acl(&dir.join("child"), me).unwrap_err();
+            assert_eq!(
+                err.raw_os_error(),
+                Some(rustix::io::Errno::NOTDIR.raw_os_error()),
+                "{err}"
+            );
+        }
+
+        // The real directory passes, and answers no hidden ACL.
+        assert_eq!(ancestor_has_hidden_acl(&dir, me).unwrap(), None);
+    }
+
+    /// The interceptor is what puts the token on every request: a call
+    /// through [`Interceptor::call`] must come out with the
+    /// `authorization` header carrying `Bearer <token>`, or the server
+    /// refuses a client whose token is fine.
+    #[test]
+    fn the_bearer_interceptor_stamps_the_token_on_the_request() {
+        let mut bearer = Bearer::new("t0ken").expect("the token is visible ASCII");
+        let stamped =
+            Interceptor::call(&mut bearer, Request::new(())).expect("the stamping never refuses");
+        assert_eq!(
+            stamped
+                .metadata()
+                .get("authorization")
+                .expect("the header is set"),
+            "Bearer t0ken"
+        );
+    }
+
+    /// A refused read keeps its own text - the mode and owner rules name
+    /// the fix - and every other failure gains the `cannot read <path>`
+    /// context, so an operator can tell which file failed. A sense flip
+    /// would swap the two.
+    #[test]
+    fn the_checked_read_error_keeps_the_refusal_and_contexts_the_rest() {
+        let denied = io::Error::new(io::ErrorKind::PermissionDenied, "mode rule text");
+        let err = checked_read_error(Path::new("k"), denied).to_string();
+        assert!(err.contains("mode rule text"), "{err}");
+        assert!(!err.contains("cannot read"), "{err}");
+
+        let err = checked_read_error(
+            Path::new("k"),
+            io::Error::new(io::ErrorKind::NotFound, "gone"),
+        )
+        .to_string();
+        assert!(err.contains("cannot read k"), "{err}");
+    }
+
     /// The digest comparison must notice every differing byte, not fold
     /// to "some bit differs": an XOR fold cancels a delta that two
     /// positions share, so two digests differing at two positions by the
