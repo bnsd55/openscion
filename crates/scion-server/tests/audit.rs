@@ -8,7 +8,7 @@ use scion_proto::v1::ResolveRefRequest;
 use scion_proto::v1::objects_client::ObjectsClient;
 use scion_proto::v1::scion_client::ScionClient;
 
-use scion_core::ChangesetId;
+use scion_core::{BlobId, ChangesetId};
 use scion_server::test_support::audit::{Audit, Event};
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use scion_server::test_support::service;
@@ -333,6 +333,63 @@ async fn writer(url: &str, request_id: &str) -> Writer {
         .await
         .unwrap();
     ScionClient::with_interceptor(channel, WriteCall(request_id.to_owned()))
+}
+
+/// A multi-chunk upload is one write whose intent line says the true
+/// total of every chunk's bytes. Kills the mutant that subtracts (or
+/// multiplies) instead of adding the later chunks - the line then names
+/// a wrapped or wrong count - and the mutant that flips the only-the-
+/// first-message-names-the-repo check, which refuses every upload whose
+/// later chunk arrives.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_multi_chunk_upload_records_the_true_total_of_its_bytes() {
+    use scion_proto::v1::PutBlobRequest;
+
+    let dir = scion_server::test_support::private_tempdir();
+    let store = store(dir.path());
+    let audit_path = dir.path().join("audit.log");
+    let audit = Audit::open(&audit_path).unwrap();
+    let (stop, url) = serve_with_audit(&store, dir.path(), write_access(), audit).await;
+    let mut ci = writer(&url, "t-chunks").await;
+
+    // Three chunks: the first names the repo, the later two do not.
+    let chunks = vec![b"aaa".to_vec(), b"bbbbb".to_vec(), b"c".to_vec()];
+    let total: usize = chunks.iter().map(Vec::len).sum();
+    let reqs = chunks
+        .clone()
+        .into_iter()
+        .enumerate()
+        .map(|(i, data)| PutBlobRequest {
+            repo: if i == 0 { REPO.into() } else { String::new() },
+            data,
+        })
+        .collect::<Vec<_>>();
+    let reply = ci
+        .put_blob(tokio_stream::iter(reqs))
+        .await
+        .expect("the multi-chunk upload is allowed")
+        .into_inner();
+
+    // The blob reads back whole: the loop carried every chunk's data.
+    let blob_id = BlobId::try_from(reply.blob_id.as_slice()).expect("the reply names a blob");
+    let whole = chunks.concat();
+    assert_eq!(
+        &*store.blobs().get(blob_id).unwrap(),
+        &whole,
+        "the chunks together are the blob"
+    );
+
+    stop.send(()).unwrap();
+    wait_for_lines(&audit_path, 2).await;
+
+    let lines = read_lines(&audit_path);
+    let writes = pairs(&lines, "write");
+    assert_eq!(writes.len(), 1, "one upload pair: {lines:?}");
+    assert_eq!(writes[0].0["rpc"], "PutBlob", "the pair is the upload's");
+    assert_eq!(
+        writes[0].0["bytes"], total,
+        "the intent line says the true total: {lines:?}"
+    );
 }
 
 /// Every state change records an intent line before it runs and a
