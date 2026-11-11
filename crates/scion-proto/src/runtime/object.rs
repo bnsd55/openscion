@@ -642,10 +642,12 @@ mod tests {
         let why = frame_size(&wide).unwrap_err();
         assert!(why.contains("window"), "{why}");
         // A fractional descriptor: the window is base + base/8*fraction, so
-        // log 22 with fraction 4 is 4 MiB + 512 KiB, accepted; log 23 with
-        // fraction 4 is 8 MiB + 1 MiB, refused. Both pins read the exact
-        // formula: a wrong divisor or multiplier moves one of the two.
-        let mut half_under = pack_with(&vec![0; 4 << 20], 1, 22);
+        // log 23 with fraction 4 is 8 MiB + 1 MiB, refused; the same frame
+        // shape with the window byte of log 22 fraction 4 is 4 MiB + 512 KiB,
+        // accepted. Both pins read the exact formula: a wrong divisor or
+        // multiplier moves one of the two. (The single-segment bit of the
+        // frame header stays off, so the byte at 5 is the window's.)
+        let mut half_under = pack_with(&vec![0; (8 << 20) + 1], 1, 23);
         half_under[5] = ((22 - 10) << 3) | 4;
         assert!(frame_size(&half_under).is_ok(), "4.5 MiB window fits");
         let mut half_over = pack_with(&vec![0; (8 << 20) + 1], 1, 23);
