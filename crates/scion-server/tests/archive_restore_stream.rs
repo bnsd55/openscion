@@ -20,6 +20,15 @@ use scion_server::{Backend, archive, fsck, test_support::tree};
 /// that reads a count around its own restore reads only its own work.
 static TX_COUNT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Holds the tx-count lock for the caller's whole body: the counting
+/// tests' windows must not hold another test's commits, and a failed
+/// window's poison must not fail its neighbours.
+fn count_lock() -> std::sync::MutexGuard<'static, ()> {
+    TX_COUNT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// The URL a store on `dir` opens with: the test database, under the
 /// directory's own schema, created first.
 fn url_of(dir: &std::path::Path) -> String {
@@ -164,9 +173,7 @@ fn assert_restore_equals_source(source: &Backend, restored: &Backend) {
 
 #[test]
 fn a_restore_commits_bounded_transactions_and_answers_like_its_source() {
-    let _tx_lock = TX_COUNT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _tx_lock = count_lock();
     let data = scion_server::test_support::private_tempdir();
     let store = stream_source(data.path());
 
@@ -250,9 +257,7 @@ fn a_big_restore_stays_under_its_rss_ceiling() {
     // only.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     const SLACK_KB: u64 = 8 * 1024;
-    let _tx_lock = TX_COUNT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _tx_lock = count_lock();
 
     if std::env::var_os("SCION_TEST_RESTORE_BIG").is_none() {
         println!("skipping the big restore: SCION_TEST_RESTORE_BIG arms it");
@@ -351,9 +356,7 @@ fn a_killed_restore_leaves_the_next_one_clean() {
     // The next restore's own count is not read here, but its commits
     // land in this process's counter while a counting test's window may
     // be open, so the restore-running tests take the lock too.
-    let _tx_lock = TX_COUNT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _tx_lock = count_lock();
     let data = scion_server::test_support::private_tempdir();
     let store = stream_source(data.path());
     let keep_out = scion_server::test_support::private_tempdir();
@@ -504,9 +507,7 @@ fn a_stream_cut_after_the_first_batch_fails_and_leaves_no_store() {
     // clean.
     const CHAIN_BIG: usize = 64;
     const MESSAGE_BYTES: usize = 200 * 1024;
-    let _tx_lock = TX_COUNT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _tx_lock = count_lock();
 
     let data = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
@@ -636,9 +637,7 @@ fn receipt_source(data: &Path) -> Backend {
 /// client's retry can still meet.
 #[test]
 fn the_restore_report_counts_what_it_put_back() {
-    let _tx_lock = TX_COUNT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _tx_lock = count_lock();
     let data = scion_server::test_support::private_tempdir();
     let store = receipt_source(&data.path().join("source"));
     let out = scion_server::test_support::private_tempdir()
@@ -669,9 +668,7 @@ fn the_restore_report_counts_what_it_put_back() {
 /// or dropped a term names work the store never did.
 #[test]
 fn the_restore_commits_the_transactions_it_counts() {
-    let _tx_lock = TX_COUNT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _tx_lock = count_lock();
     let data = scion_server::test_support::private_tempdir();
     let store = receipt_source(&data.path().join("source"));
     let out = scion_server::test_support::private_tempdir()
@@ -706,9 +703,7 @@ fn the_restore_commits_the_transactions_it_counts() {
 
 #[test]
 fn the_restore_of_an_empty_archive_commits_one_transaction() {
-    let _tx_lock = TX_COUNT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _tx_lock = count_lock();
     let data = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(&data.path().join("source")).unwrap();
     let out = scion_server::test_support::private_tempdir()
