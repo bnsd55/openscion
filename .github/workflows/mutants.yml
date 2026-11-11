@@ -176,11 +176,13 @@ jobs:
             pkg_args="--package=$TEST_PACKAGE"
           else
             first_file=$(echo "$FILES" | cut -d' ' -f1)
-            crate_dir=$(dirname "$(dirname "$first_file")")
-            crate_dir=${crate_dir%/src}
-            pkg_args="--package=$(cargo metadata --no-deps --format-version=1 \
-              | jq -r --arg dir "$crate_dir" \
-              '.packages[] | select(.manifest_path | startswith($dir)) | .name' | head -1)"
+            # The file's crate: walk up to the nearest Cargo.toml, whatever
+            # the depth under src/.
+            crate_dir=$(dirname "$first_file")
+            while [ ! -f "$crate_dir/Cargo.toml" ]; do
+              crate_dir=$(dirname "$crate_dir")
+            done
+            pkg_args="--manifest-path=$crate_dir/Cargo.toml"
           fi
           # shellcheck disable=SC2086
           cargo test $pkg_args $TEST_ARGS --no-run --message-format=json \
