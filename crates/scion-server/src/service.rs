@@ -4725,6 +4725,106 @@ mod tests {
         assert_eq!(parts, 1, "the five small entries ride one part");
     }
 
+    /// The overrides are off unless a test arms them: the production
+    /// path returns the real constants, and a run that never armed the
+    /// overrides must poll and bound the statvfs with them. A mutant
+    /// that breaks the override's own comparison answers zero millis
+    /// here - a poll that ticks flat out and a stat bound of no time.
+    #[tokio::test]
+    async fn the_free_space_overrides_off_leave_the_real_constants() {
+        // The overrides are the stuck tests' globals: hold their slot,
+        // so this test's zeroing cannot race a running poll.
+        let _slot = free_space_poll_slot().await;
+        FREE_SPACE_POLL_OVERRIDE.store(0, Ordering::Relaxed);
+        FREE_SPACE_STAT_BOUND_OVERRIDE.store(0, Ordering::Relaxed);
+        assert_eq!(free_space_poll_period(), FREE_SPACE_POLL);
+        assert_eq!(free_space_stat_bound(), FREE_SPACE_STAT_BOUND);
+    }
+
+    /// A request's `x-request-id` names the call's audit lines, and a
+    /// call that sent none still gets one the server made, so every
+    /// line it leaves carries a `request_id` its pair can be found by.
+    #[test]
+    fn a_request_id_names_the_call_and_one_is_made_when_none_sent() {
+        let mut request = as_default(CreateChangesetRequest::default());
+        request.metadata_mut().insert(
+            scion_proto::runtime::request_id::REQUEST_ID,
+            "abc-123".parse().expect("a visible-ascii id parses"),
+        );
+        assert_eq!(request_id_of(&request), "abc-123");
+        let made = request_id_of(&as_default(CreateChangesetRequest::default()));
+        assert!(
+            !made.is_empty() && made != "xyzzy",
+            "a call without an id gets one the server made: {made:?}"
+        );
+        // The server-made id is not a constant either: two calls that
+        // send none do not share one.
+        let again = request_id_of(&as_default(CreateChangesetRequest::default()));
+        assert_ne!(made, again, "two made ids differ");
+    }
+
+    /// The audit's ref values are the content ids' lowercase hex: a
+    /// reader that pairs a line's `old` and `new` with a ref it knows
+    /// reads the same spelling the ids print in.
+    #[test]
+    fn a_hex_id_is_the_bytes_lowercase_hex() {
+        let mut bytes = [0xff_u8; 32];
+        bytes[0] = 0x0a;
+        let id = ChangesetId::try_from(&bytes[..]).unwrap();
+        let hex = hex_id(id.as_bytes());
+        assert_eq!(hex.len(), 64, "a 32-byte id prints 64 hex digits");
+        assert!(hex.starts_with("0aff"), "the bytes print in order: {hex}");
+        assert!(
+            hex.bytes().all(|b| b.is_ascii_hexdigit()),
+            "only hex digits: {hex}"
+        );
+        assert_eq!(hex, hex.to_lowercase(), "the digits are lowercase");
+        assert_eq!(hex_id(&[]), "", "an empty id prints nothing");
+    }
+
+    /// The tx-age gauge samples the oldest open Postgres read
+    /// transaction: a read parked across the sample's period shows in
+    /// the gauge, so a stuck oldest read is visible to a scrape.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_pg_tx_age_gauge_samples_the_oldest_open_read() {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let (blockers, arrived) = hold_read_connections(&store);
+        let metrics = Arc::new(Metrics::default());
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(());
+        tokio::spawn(pg_tx_age_sample(
+            store.clone(),
+            Arc::clone(&metrics),
+            stop_rx,
+        ));
+        // The sample's first tick fires at once; the parked read's age
+        // shows on the second.
+        assert!(
+            arrived.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "the read parked"
+        );
+        tokio::time::sleep(TX_AGE_PERIOD + Duration::from_secs(1)).await;
+        let text = metrics.render();
+        let line = text
+            .lines()
+            .find(|l| l.starts_with("scion_pg_tx_age_seconds "))
+            .expect("the gauge renders");
+        let age: f64 = line
+            .rsplit(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .expect("the gauge renders a number");
+        assert!(
+            age >= 1.0,
+            "the oldest open read's age shows in the gauge: {line}"
+        );
+        for (blocker, release) in blockers {
+            let _ = release.send(());
+            let _ = blocker.join();
+        }
+    }
+
     type Blocker = (
         std::thread::JoinHandle<Result<(), crate::error::Error>>,
         std::sync::mpsc::Sender<()>,
