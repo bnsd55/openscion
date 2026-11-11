@@ -1954,3 +1954,176 @@ fn ref_for(fake: &Fake, object: &Object) -> ObjectRef {
         path: fake.path(object),
     }
 }
+/// A body of the limit exactly is kept; one byte over is not stored at
+/// all - not evicted later, refused at the put - so the store never
+/// holds an object it cannot keep, and the limit's own byte stays.
+#[test]
+fn the_byte_limit_keeps_its_exact_byte_and_refuses_the_next() {
+    let data = vec![7_u8; 1 << 20];
+    let blob_id = scion_core::BlobId::of(&data);
+    let packed = scion_proto::runtime::object::pack(&data).unwrap();
+    let over = vec![7_u8; (1 << 20) + 1];
+    let over_id = scion_core::BlobId::of(&over);
+    let over_packed = scion_proto::runtime::object::pack(&over).unwrap();
+
+    let memory = scion_tier::MemoryStore::new(packed.len() as usize);
+    scion_tier::Store::put(
+        &memory,
+        scion_tier::Key::Blob(blob_id),
+        &packed.clone().into(),
+    )
+    .unwrap();
+    assert_eq!(
+        scion_tier::Store::get(&memory, scion_tier::Key::Blob(blob_id), packed.len())
+            .unwrap()
+            .as_deref(),
+        Some(&packed[..]),
+        "a body of the limit exactly is kept"
+    );
+    scion_tier::Store::put(
+        &memory,
+        scion_tier::Key::Blob(over_id),
+        &over_packed.clone().into(),
+    )
+    .unwrap();
+    assert!(
+        scion_tier::Store::get(&memory, scion_tier::Key::Blob(over_id), over_packed.len())
+            .unwrap()
+            .is_none(),
+        "one byte over the limit is not stored"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let disk =
+        scion_tier::DiskStore::open(&dir.path().join("data"), packed.len() as usize).unwrap();
+    scion_tier::Store::put(
+        &disk,
+        scion_tier::Key::Blob(blob_id),
+        &packed.clone().into(),
+    )
+    .unwrap();
+    assert_eq!(
+        scion_tier::Store::get(&disk, scion_tier::Key::Blob(blob_id), packed.len())
+            .unwrap()
+            .as_deref(),
+        Some(&packed[..]),
+        "the disk store keeps its exact byte too"
+    );
+    scion_tier::Store::put(
+        &disk,
+        scion_tier::Key::Blob(over_id),
+        &over_packed.clone().into(),
+    )
+    .unwrap();
+    assert!(
+        scion_tier::Store::get(&disk, scion_tier::Key::Blob(over_id), over_packed.len())
+            .unwrap()
+            .is_none(),
+        "one byte over the disk store's limit is not stored"
+    );
+}
+
+/// The store drops the least recently used objects first: a put that
+/// must evict drops the object no read has touched, and a read moves an
+/// object behind the others, so the eviction order follows the calls,
+/// not the puts.
+#[test]
+fn the_eviction_order_follows_the_reads() {
+    let a = vec![b'a'; 1 << 20];
+    let b = vec![b'b'; 1 << 20];
+    let c = vec![b'c'; 1 << 20];
+    let key = |data: &[u8]| scion_tier::Key::Blob(scion_core::BlobId::of(data));
+    let (key_a, key_b, key_c) = (key(&a), key(&b), key(&c));
+    let packed_a = scion_proto::runtime::object::pack(&a).unwrap();
+    let packed_b = scion_proto::runtime::object::pack(&b).unwrap();
+    let packed_c = scion_proto::runtime::object::pack(&c).unwrap();
+    // Two objects fill the limit; a third must evict one.
+    let limit = (packed_a.len() + packed_b.len()) as usize;
+
+    let memory = scion_tier::MemoryStore::new(limit);
+    scion_tier::Store::put(&memory, key_a, &packed_a.clone().into()).unwrap();
+    scion_tier::Store::put(&memory, key_b, &packed_b.clone().into()).unwrap();
+    // The read makes b the most recently used: c evicts a, not b.
+    scion_tier::Store::get(&memory, key_b, packed_b.len()).unwrap();
+    scion_tier::Store::put(&memory, key_c, &packed_c.clone().into()).unwrap();
+    assert!(
+        scion_tier::Store::get(&memory, key_a, packed_a.len())
+            .unwrap()
+            .is_none(),
+        "the least recently used object drops first"
+    );
+    assert!(
+        scion_tier::Store::get(&memory, key_b, packed_b.len())
+            .unwrap()
+            .is_some(),
+        "the object a read touched stays while another drops"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let disk = scion_tier::DiskStore::open(&dir.path().join("data"), limit).unwrap();
+    scion_tier::Store::put(&disk, key_a, &packed_a.clone().into()).unwrap();
+    scion_tier::Store::put(&disk, key_b, &packed_b.clone().into()).unwrap();
+    scion_tier::Store::get(&disk, key_b, packed_b.len()).unwrap();
+    scion_tier::Store::put(&disk, key_c, &packed_c.clone().into()).unwrap();
+    assert!(
+        scion_tier::Store::get(&disk, key_a, packed_a.len())
+            .unwrap()
+            .is_none(),
+        "the disk store drops the least recently used first"
+    );
+    assert!(
+        scion_tier::Store::get(&disk, key_b, packed_b.len())
+            .unwrap()
+            .is_some(),
+        "the disk store keeps the read object"
+    );
+}
+
+/// The disk store checks each object against its ID when it reads it
+/// back: an object whose bytes on disk were rewritten behind the
+/// store's back is not served - the caller never sees bytes the ID
+/// does not name.
+#[test]
+fn a_disk_object_whose_bytes_do_not_match_its_id_is_not_served() {
+    let data = b"the read-back check is the last guard\n".to_vec();
+    let packed = scion_proto::runtime::object::pack(&data).unwrap();
+    let key = scion_tier::Key::Blob(scion_core::BlobId::of(&data));
+    let dir = tempfile::tempdir().unwrap();
+    let disk = scion_tier::DiskStore::open(&dir.path().join("data"), 1 << 20).unwrap();
+    scion_tier::Store::put(&disk, key, &packed.clone().into()).unwrap();
+    assert!(
+        scion_tier::Store::get(&disk, key, packed.len())
+            .unwrap()
+            .is_some(),
+        "the object reads back before the corruption"
+    );
+    // Rewrite the stored file in place: same length, other bytes. The
+    // layout is objects/<kind>/<first hex pair>/<the rest>.
+    let scion_tier::Key::Blob(id) = key else {
+        panic!("the test stores a blob");
+    };
+    let id_hex = id.to_string();
+    let path = dir
+        .path()
+        .join("data")
+        .join("objects")
+        .join("blob")
+        .join(&id_hex[..2])
+        .join(&id_hex[2..]);
+    let corrupted = packed
+        .iter()
+        .enumerate()
+        .map(|(i, b)| if i == 40 { b ^ 0xff } else { *b })
+        .collect::<Vec<u8>>();
+    std::fs::write(&path, &corrupted).unwrap();
+    assert!(
+        scion_tier::Store::get(&disk, key, packed.len())
+            .unwrap()
+            .is_none(),
+        "the rewritten object is not served"
+    );
+    assert!(
+        !path.exists(),
+        "a refused object is removed, not left for the next read"
+    );
+}
