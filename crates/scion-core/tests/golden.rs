@@ -526,7 +526,7 @@ fn accepts_paths_at_the_limits_and_keeps_raw_bytes() {
     }
 }
 
-/// The field-fit boundary sits at u32::MAX: a field of exactly that many
+/// The field-fit boundary sits at `u32::MAX`: a field of exactly that many
 /// bytes fits, one more is refused. The check reads only the length, so
 /// the test fabricates an oversized vector without touching its pages
 /// (a `set_len` on a vector whose allocation was never made at this
