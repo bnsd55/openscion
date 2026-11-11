@@ -3205,6 +3205,55 @@ mod tests {
     /// refused, not served: the reply's share is checked against the cap
     /// before any of the object's bytes are read.
     #[test]
+    fn a_changeset_at_the_object_cap_is_served() {
+        let (_dir, store, _, _) = file_store(b"x");
+        // The cap bounds the STORED body, and the encoding adds its own
+        // overhead, so pad the message until the stored length is the
+        // cap exactly: the refusal starts one byte past it, and a body
+        // at the cap is served.
+        let mut message_len = MAX_OBJECT_BYTES - 128;
+        let mut id = None;
+        for _ in 0..8 {
+            let big = Changeset::new(
+                vec![],
+                IdentityTime::new(b"t".to_vec(), b"t@x".to_vec(), 0, 0)
+                    .expect("identity fits the format"),
+                None,
+                vec![b'b'; message_len],
+                [].into(),
+            )
+            .expect("changeset fits the format");
+            let seeded = store
+                .write(|c| {
+                    let repo = c.repo_id("r")?;
+                    c.insert_changeset(repo, &big)
+                })
+                .unwrap();
+            let stored = store
+                .read(|c| c.stored_changeset_body_lengths(&[seeded.as_bytes().to_vec()]))
+                .unwrap();
+            let len = stored.first().map(|(_, len)| *len).unwrap_or_default();
+            match usize::try_from(len).unwrap_or(0) {
+                l if l == MAX_OBJECT_BYTES => {
+                    id = Some(seeded);
+                    break;
+                }
+                l if l < MAX_OBJECT_BYTES => message_len += MAX_OBJECT_BYTES - l,
+                l => message_len -= l - MAX_OBJECT_BYTES,
+            }
+        }
+        let id = id.expect("a body sized to the cap exists");
+        let service = test_service(store);
+        let request = as_default(GetChangesetRequest {
+            repo: "r".to_owned(),
+            changeset_id: id.as_bytes().to_vec(),
+        });
+        // The cap itself is legal: the reply opens and streams.
+        let reply = block_on(service.get_changeset(request));
+        assert!(reply.is_ok(), "a body at the cap is served: {reply:?}");
+    }
+
+    #[test]
     fn a_changeset_over_the_object_cap_is_refused() {
         let (_dir, store, _, _) = file_store(b"x");
         let big = Changeset::new(
