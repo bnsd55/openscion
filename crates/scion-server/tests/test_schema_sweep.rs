@@ -168,6 +168,11 @@ fn a_finished_tests_schema_drops_at_a_later_sweep() {
     let mut client = connect();
     wait_unnamed(&mut client, &schema);
     dir.close().unwrap();
+    // The directory is gone, and the sweep keeps a missing directory
+    // only once its registration is older than the grace (#1106): the
+    // row is dated past it, so the finished test's schema is stale as
+    // this test has always meant it to be.
+    register(&mut client, &schema, 601);
     // The run's own first-open sweep may drop it first; whichever sweep
     // runs, the finished test's schema is gone after this one.
     let _ = Backend::sweep_stale_test_schemas().unwrap();
@@ -519,6 +524,30 @@ fn the_drain_reaches_past_the_schemas_it_keeps() {
             "a schema whose directory exists never drops: {name}"
         );
     }
+}
+
+/// A URL taken before its directory exists survives a sweep that runs
+/// between the two (#1106): the restore makes its target after the URL
+/// is taken, and a sweep in another test process in between must not
+/// drop the schema the URL names. On the old sweep the missing
+/// directory read as a finished test, whatever the clock said, and the
+/// schema dropped.
+#[test]
+fn a_url_whose_directory_is_not_made_yet_survives_the_sweep() {
+    let _lock = locked();
+    let keep = private_tempdir();
+    let target = keep.path().join("target");
+    let url = Backend::test_postgres_url(&target).unwrap();
+    Backend::sweep_stale_test_schemas().unwrap();
+    let mut client = connect();
+    let schema = Backend::test_schema(&target);
+    assert!(
+        schema_exists(&mut client, &schema),
+        "the schema the URL names survives the sweep: its directory is not made yet"
+    );
+    let _store = Backend::open_test(&target)
+        .expect("the store opens: the schema is there when the directory is made");
+    drop(url);
 }
 
 /// One open whose migration waits for its schema's migration lock: a
