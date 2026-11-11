@@ -163,10 +163,17 @@ mod tests {
     /// silently dropped.
     #[test]
     fn the_path_error_names_the_rule_and_the_debug_shows_the_raw_bytes() {
+        assert_eq!(PathError::Empty.to_string(), "path is empty");
         assert_eq!(
             PathError::TooLong.to_string(),
             "path is longer than 4096 bytes"
         );
+        assert_eq!(
+            PathError::EmptyPart.to_string(),
+            "path has an empty part (leading, trailing or double '/')"
+        );
+        assert_eq!(PathError::Nul.to_string(), "path contains a NUL byte");
+        assert_eq!(PathError::Slash.to_string(), "name contains '/'");
         assert_eq!(
             PathError::TooManyParts.to_string(),
             "path has more than 256 parts"
