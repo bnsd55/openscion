@@ -249,9 +249,12 @@ jobs:
           fi
           # A test binary whose address space the cap ends fails its own
           # test, instead of starving the runner until GitHub cancels the
-          # job (#1112). prlimit exists on the Linux runner only.
+          # job (#1112). prlimit exists on the Linux runner only. --as
+          # reads bytes, not the KiB the input names.
           if [ -n "$AS_CAP_KB" ]; then
-            export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="prlimit --as=${AS_CAP_KB}KiB"
+            cap_bytes=$((AS_CAP_KB * 1024))
+            echo "the test runner's address-space cap: $cap_bytes bytes"
+            export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="prlimit --as=$cap_bytes"
           fi
           # shellcheck disable=SC2086
           # An empty array under `set -u` reads as unbound on bash 3.2.
