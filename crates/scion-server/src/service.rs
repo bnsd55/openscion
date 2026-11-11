@@ -4635,6 +4635,96 @@ mod tests {
         }
     }
 
+    /// A streamed `Log` walks page after page until the history ends or
+    /// the call has served its `limit`: the reply carries every entry
+    /// once, in order, and stops there. The stop's own condition is what
+    /// the unit run's misses at 1579 break: one stops the reply at the
+    /// first page (a history past one scan page loses its tail), the
+    /// other keeps walking past the limit and dies mid-page.
+    #[tokio::test]
+    async fn a_log_walks_to_its_limit_and_no_further() {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        // A history of one scan page plus a tail: the first page ends
+        // before the limit, so the walk must fetch the second page.
+        let count = read::MAX_SCAN + 5;
+        let (_repo, tip) = store
+            .write(|c| {
+                let repo = c.create_repo("r")?;
+                let mut parent = None;
+                for i in 0..count {
+                    let cs = Changeset::new(
+                        parent.iter().copied().collect(),
+                        IdentityTime::new(b"t".to_vec(), b"t@x".to_vec(), 0, 0)
+                            .expect("identity fits the format"),
+                        None,
+                        format!("cs {i}\n").into_bytes(),
+                        [].into(),
+                    )
+                    .expect("changeset fits the format");
+                    let (id, _) = crate::tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?;
+                    parent = Some(id);
+                }
+                Ok((repo, parent.unwrap()))
+            })
+            .unwrap();
+        let service = test_service(store);
+        let mut reply = service
+            .log(as_default(LogRequest {
+                repo: "r".to_owned(),
+                changeset_id: tip.as_bytes().to_vec(),
+                limit: u32::try_from(count).expect("the count fits a u32"),
+                path: Vec::new(),
+            }))
+            .await
+            .expect("the reply opens")
+            .into_inner();
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        while let Some(part) = tokio::time::timeout(Duration::from_secs(30), reply.next())
+            .await
+            .expect("the reply keeps moving")
+        {
+            let part = part.expect("the reply streams");
+            for entry in part.entries {
+                seen.push(entry.changeset_id);
+            }
+        }
+        assert_eq!(seen.len(), count, "every entry of the history arrives");
+        let mut sorted = seen.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), count, "no entry repeats: {sorted:?}");
+
+        // A limit the history runs past: the reply ends at the limit,
+        // its last part carries the walk's continuation, and no part
+        // without entries follows - a walk that runs past its limit
+        // serves an entry-less part and stops one page later.
+        let head = tip.as_bytes().to_vec();
+        let mut reply = service
+            .log(as_default(LogRequest {
+                repo: "r".to_owned(),
+                changeset_id: head,
+                limit: 5,
+                path: Vec::new(),
+            }))
+            .await
+            .expect("the reply opens")
+            .into_inner();
+        let mut parts = 0;
+        let mut served = 0;
+        while let Some(part) = tokio::time::timeout(Duration::from_secs(30), reply.next())
+            .await
+            .expect("the reply keeps moving")
+        {
+            let part = part.expect("the reply streams");
+            parts += 1;
+            served += part.entries.len();
+            assert!(!part.entries.is_empty(), "an entry-less part arrives");
+        }
+        assert_eq!(served, 5, "the reply serves exactly the limit");
+        assert_eq!(parts, 1, "the five small entries ride one part");
+    }
+
     type Blocker = (
         std::thread::JoinHandle<Result<(), crate::error::Error>>,
         std::sync::mpsc::Sender<()>,
