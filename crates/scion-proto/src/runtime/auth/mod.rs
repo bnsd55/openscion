@@ -1412,13 +1412,13 @@ mod tests {
     }
 
     /// The ancestor open's contract, pinned without winning a race: the
-    /// open is `O_NOFOLLOW | O_DIRECTORY`, so a symlink at the walk's
-    /// answer is refused (ELOOP) and a non-directory is refused
-    /// (ENOTDIR). A fold that drops `NOFOLLOW` follows the link and
-    /// reads another directory's ACLs; one that drops `DIRECTORY` opens
-    /// a file as if it were the checked directory. Either way the fd is
-    /// not the directory the walk checked.
-    #[cfg(target_os = "linux")]
+    /// open is `O_NOFOLLOW` (and `O_DIRECTORY` where the platform has
+    /// it), so a symlink at the walk's answer is refused, not followed -
+    /// a fold that drops `NOFOLLOW` opens the link and reads another
+    /// directory's ACLs, and one that drops `DIRECTORY` (Linux) opens a
+    /// file as if it were the checked directory. Either way the fd is
+    /// not the directory the walk checked. The regular-file case is
+    /// Linux-only: macOS has no `O_DIRECTORY`, and opens a file.
     #[test]
     fn the_ancestor_open_takes_a_directory_and_no_symlink() {
         let (tmp, me) = tempdir();
@@ -1428,8 +1428,9 @@ mod tests {
 
         // A symlink where the directory should be: refused, not
         // followed. Linux answers ENOTDIR here (O_DIRECTORY bites
-        // before ELOOP would); the mutants this pins open the link and
-        // answer Ok, so either errno still turns them red.
+        // before ELOOP would); macOS answers ELOOP (O_NOFOLLOW). The
+        // mutants this pins open the link and answer Ok, so either
+        // errno still turns them red.
         symlink(&dir, tmp.path().join("link")).unwrap();
         let err = ancestor_has_hidden_acl(&tmp.path().join("link"), me).unwrap_err();
         assert!(
@@ -1438,13 +1439,16 @@ mod tests {
             "the symlink answer must be refused: {err}"
         );
 
-        // A regular file where the directory should be: ENOTDIR.
-        let err = ancestor_has_hidden_acl(&dir.join("child"), me).unwrap_err();
-        assert_eq!(
-            err.raw_os_error(),
-            Some(rustix::io::Errno::NOTDIR.raw_os_error()),
-            "{err}"
-        );
+        #[cfg(target_os = "linux")]
+        {
+            // A regular file where the directory should be: ENOTDIR.
+            let err = ancestor_has_hidden_acl(&dir.join("child"), me).unwrap_err();
+            assert_eq!(
+                err.raw_os_error(),
+                Some(rustix::io::Errno::NOTDIR.raw_os_error()),
+                "{err}"
+            );
+        }
 
         // The real directory passes, and answers no hidden ACL.
         assert_eq!(ancestor_has_hidden_acl(&dir, me).unwrap(), None);
