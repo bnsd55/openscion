@@ -17,31 +17,29 @@ fn a_field_of_u32_max_fits_and_one_more_is_refused() {
     // are never read. Measured peak, test binary alone: 2.7 MB.
     // The panic must not format the value: its Debug would print every
     // byte of the 4 GiB vector and fill the disk (a plant run proved it).
-    let err = match IdentityTime::new(vec![0u8; u32::MAX as usize + 1], Vec::new(), 0, 0) {
-        Ok(_) => panic!("a name of u32::MAX + 1 bytes was accepted"),
-        Err(e) => e,
+    let Err(err) = IdentityTime::new(vec![0u8; u32::MAX as usize + 1], Vec::new(), 0, 0) else {
+        // Unreachable: the refusal carries the reason, not the bytes.
+        panic!("a name of u32::MAX + 1 bytes was accepted")
     };
     assert!(
         err.to_string().contains("identity name"),
         "the refusal must name the field: {err}"
     );
-    let err = match IdentityTime::new(Vec::new(), vec![0u8; u32::MAX as usize + 1], 0, 0) {
-        Ok(_) => panic!("an email of u32::MAX + 1 bytes was accepted"),
-        Err(e) => e,
+    let Err(err) = IdentityTime::new(Vec::new(), vec![0u8; u32::MAX as usize + 1], 0, 0) else {
+        panic!("an email of u32::MAX + 1 bytes was accepted")
     };
     assert!(
         err.to_string().contains("identity email"),
         "the refusal must name the field: {err}"
     );
-    let err = match Changeset::new(
+    let Err(err) = Changeset::new(
         Vec::new(),
         IdentityTime::new(Vec::new(), Vec::new(), 0, 0).unwrap(),
         None,
         vec![0u8; u32::MAX as usize + 1],
         std::collections::BTreeMap::new(),
-    ) {
-        Ok(_) => panic!("a message of u32::MAX + 1 bytes was accepted"),
-        Err(e) => e,
+    ) else {
+        panic!("a message of u32::MAX + 1 bytes was accepted")
     };
     assert!(
         err.to_string().contains("message"),
