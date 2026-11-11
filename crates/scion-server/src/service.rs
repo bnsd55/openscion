@@ -4320,6 +4320,83 @@ mod tests {
         assert!(read_all(second).await == data, "the second reply");
     }
 
+    /// The three shapes a wrong `read_share` can take, each killed on
+    /// the pool every reply shares: a smaller long-file share (the reply
+    /// serves where the true share parks), a bigger one (the reply parks
+    /// where the true share serves), and the branch flipped (a short
+    /// file's measured share replaced by the reader's, which a pool
+    /// sized for the measured share cannot grant). Each test holds the
+    /// service's one pool - the one every call shares - the way a
+    /// busy server holds it.
+    #[tokio::test]
+    async fn a_long_file_whose_share_does_not_fit_the_pool_is_not_served() {
+        let data = content(2);
+        let (_dir, store, cs, _) = file_store(&data);
+        let service = test_service(store);
+        // One permit short of the reply's whole share, spelled from the
+        // constants and not from read_share: a test that measures its
+        // hold with the function under test measures with the mutant.
+        // The true share of a two-part file is READER_BYTES plus two
+        // parts; the mutant's every smaller answer fits the pool and
+        // serves at once, which is the lie this test refuses.
+        let true_share = READER_BYTES + 2 * CHUNK_BYTES;
+        let reads = Arc::clone(&service.reads);
+        let hold = reads
+            .acquire_many(u32::try_from(READ_BUDGET_BYTES - true_share + 1).unwrap())
+            .await
+            .expect("the pool is whole");
+        let request = as_default(ReadFileRequest {
+            repo: "r".into(),
+            changeset_id: cs.as_bytes().to_vec(),
+            path: b"f".to_vec(),
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let got = block_on(service.read_file(request));
+            let _ = tx.send(got.is_ok());
+        });
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "a share the pool cannot pay is not served"
+        );
+        drop(hold);
+        let served = rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the reply lands once the pool frees");
+        assert!(served, "the body is served once the pool frees");
+    }
+
+    #[tokio::test]
+    async fn a_short_file_is_served_from_the_share_its_size_measures() {
+        let data = b"short file".to_vec();
+        let (_dir, store, cs, _) = file_store(&data);
+        // Room for the measured share of this file - its own size - and
+        // not one reader-window more.
+        let service = Arc::new(ScionService {
+            reads: Arc::new(Semaphore::new(data.len())),
+            ..test_service(store)
+        });
+        let mut reply = tokio::time::timeout(
+            Duration::from_secs(30),
+            service.read_file(as_default(ReadFileRequest {
+                repo: "r".into(),
+                changeset_id: cs.as_bytes().to_vec(),
+                path: b"f".to_vec(),
+            })),
+        )
+        .await
+        .expect("a short file's measured share fits the pool")
+        .unwrap()
+        .into_inner();
+        let part = tokio::time::timeout(Duration::from_secs(30), reply.next())
+            .await
+            .expect("the part reads")
+            .expect("the file streams")
+            .expect("the part reads");
+        assert_eq!(part.data, data, "the file's content comes back");
+    }
+
     type Blocker = (
         std::thread::JoinHandle<Result<(), crate::error::Error>>,
         std::sync::mpsc::Sender<()>,
