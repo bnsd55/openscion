@@ -186,7 +186,9 @@ jobs:
           fi
           # shellcheck disable=SC2086
           cargo test $pkg_args $TEST_ARGS --no-run --message-format=json \
-            | jq -r 'select(.executable != null) | .executable' | sort -u > mutants-measure/bins.txt
+            > mutants-measure/build.json
+          jq -r 'select(.executable != null) | .executable' mutants-measure/build.json \
+            | sort -u > mutants-measure/bins.txt
           while IFS= read -r bin; do
             [ -n "$bin" ] || continue
             bash -c '
