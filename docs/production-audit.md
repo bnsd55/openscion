@@ -246,7 +246,9 @@ section; its fixes landed as #561. Highlights, with that audit's verdicts:
 
 A mutation-testing pass per module: each run flips one comparison or
 guard at a time, and a surviving mutant names a check whose loss no
-test would notice. The table lists the modules run so far, the mutant
+test would notice. cargo-mutants skips every method named `new`, so
+the checks that live in constructors are planted by hand and removed
+(#1122); their verdicts sit in each file's row. The table lists the modules run so far, the mutant
 count, what survived, and the pull request whose tests killed each real
 gap.
 
