@@ -158,7 +158,7 @@ mod tests {
 
     /// The path text an operator and a client see: a `PathError`'s
     /// Display names the rule that failed (the server puts it in the
-    /// INVALID_ARGUMENT status verbatim), and the Debug of a path shows
+    /// `INVALID_ARGUMENT` status verbatim), and the Debug of a path shows
     /// its raw bytes escaped, so a non-UTF-8 byte is visible instead of
     /// silently dropped.
     #[test]
