@@ -191,7 +191,8 @@ jobs:
             exclude_args=(--exclude-re "$EXCLUDE_RE")
           fi
           # shellcheck disable=SC2086
-          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args "${exclude_args[@]}" -- $TEST_ARGS
+          # An empty array under `set -u` reads as unbound on bash 3.2.
+          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args ${exclude_args[@]+"${exclude_args[@]}"} -- $TEST_ARGS
           df -h /
       - name: the outcome lists
         if: always()
@@ -282,7 +283,8 @@ jobs:
             exclude_args=(--exclude-re "$EXCLUDE_RE")
           fi
           # shellcheck disable=SC2086
-          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args "${exclude_args[@]}" -- $TEST_ARGS
+          # An empty array under `set -u` reads as unbound on bash 3.2.
+          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args ${exclude_args[@]+"${exclude_args[@]}"} -- $TEST_ARGS
           df -h /
       - name: the outcome lists
         if: always()
