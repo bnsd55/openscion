@@ -3,7 +3,10 @@
 # archive at priority 2. Runs by hand, on this branch only.
 name: apt fallback proof
 on:
-  workflow_dispatch:
+  # workflow_dispatch needs the file on the default branch, which this
+  # branch is not; the push trigger fires the proof instead.
+  push:
+    branches: [apt-fallback-1126]
 
 jobs:
   proof:
