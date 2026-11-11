@@ -69,6 +69,14 @@ on:
         required: false
         default: ""
         type: string
+      exclude_re:
+        description: >-
+          a regex of mutants to skip, passed as cargo-mutants --exclude-re
+          (#1107: a mutant whose test run kills the runner itself, so the
+          run cannot carry it)
+        required: false
+        default: ""
+        type: string
       runner:
         description: >-
           the runner: ubuntu-24.04 (the default) with the Postgres service;
@@ -152,6 +160,7 @@ jobs:
           TEST_ARGS: ${{ inputs.test_args }}
           SHARD: ${{ inputs.shard }}
           SHARDS: ${{ inputs.shards }}
+          EXCLUDE_RE: ${{ inputs.exclude_re }}
           TEST_PACKAGE: ${{ inputs.test_package }}
         run: |
           # The dispatch names files, one per -f: cargo-mutants examines
@@ -177,8 +186,12 @@ jobs:
           if [ -n "$TEST_PACKAGE" ]; then
             mutants_args="-C --package=$TEST_PACKAGE"
           fi
+          exclude_args=""
+          if [ -n "$EXCLUDE_RE" ]; then
+            exclude_args="--exclude-re $EXCLUDE_RE"
+          fi
           # shellcheck disable=SC2086
-          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args -- $TEST_ARGS
+          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args $exclude_args -- $TEST_ARGS
           df -h /
       - name: the outcome lists
         if: always()
@@ -241,6 +254,7 @@ jobs:
           TEST_ARGS: ${{ inputs.test_args }}
           SHARD: ${{ inputs.shard }}
           SHARDS: ${{ inputs.shards }}
+          EXCLUDE_RE: ${{ inputs.exclude_re }}
           TEST_PACKAGE: ${{ inputs.test_package }}
         run: |
           set -eu
@@ -263,8 +277,12 @@ jobs:
           if [ -n "$TEST_PACKAGE" ]; then
             mutants_args="-C --package=$TEST_PACKAGE"
           fi
+          exclude_args=""
+          if [ -n "$EXCLUDE_RE" ]; then
+            exclude_args="--exclude-re $EXCLUDE_RE"
+          fi
           # shellcheck disable=SC2086
-          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args -- $TEST_ARGS
+          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args $exclude_args -- $TEST_ARGS
           df -h /
       - name: the outcome lists
         if: always()
