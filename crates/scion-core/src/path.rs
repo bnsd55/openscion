@@ -155,4 +155,38 @@ mod tests {
         }
         assert_eq!(RepoPath::new(b"a//b").unwrap_err(), PathError::EmptyPart);
     }
+
+    /// The path text an operator and a client see: a `PathError`'s
+    /// Display names the rule that failed (the server puts it in the
+    /// INVALID_ARGUMENT status verbatim), and the Debug of a path shows
+    /// its raw bytes escaped, so a non-UTF-8 byte is visible instead of
+    /// silently dropped.
+    #[test]
+    fn the_path_error_names_the_rule_and_the_debug_shows_the_raw_bytes() {
+        assert_eq!(
+            PathError::TooLong.to_string(),
+            "path is longer than 4096 bytes"
+        );
+        assert_eq!(
+            PathError::TooManyParts.to_string(),
+            "path has more than 256 parts"
+        );
+        assert_eq!(
+            PathError::DotPart.to_string(),
+            "path has a '.' or '..' part"
+        );
+        assert_eq!(
+            format!("{:?}", RepoPath::new(b"a/b".as_slice()).unwrap()),
+            "\"a/b\""
+        );
+        assert_eq!(
+            format!("{:?}", RepoPath::new([0xff, 0xfe]).unwrap()),
+            "\"\\xff\\xfe\""
+        );
+        assert_eq!(format!("{:?}", PathElem::new(b"x").unwrap()), "\"x\"");
+        assert_eq!(
+            format!("{:?}", PathElem::new([0xff, 0xfe]).unwrap()),
+            "\"\\xff\\xfe\""
+        );
+    }
 }
