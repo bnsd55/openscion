@@ -186,12 +186,12 @@ jobs:
           if [ -n "$TEST_PACKAGE" ]; then
             mutants_args="-C --package=$TEST_PACKAGE"
           fi
-          exclude_args=""
+          exclude_args=()
           if [ -n "$EXCLUDE_RE" ]; then
-            exclude_args="--exclude-re $EXCLUDE_RE"
+            exclude_args=(--exclude-re "$EXCLUDE_RE")
           fi
           # shellcheck disable=SC2086
-          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args $exclude_args -- $TEST_ARGS
+          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args "${exclude_args[@]}" -- $TEST_ARGS
           df -h /
       - name: the outcome lists
         if: always()
@@ -277,12 +277,12 @@ jobs:
           if [ -n "$TEST_PACKAGE" ]; then
             mutants_args="-C --package=$TEST_PACKAGE"
           fi
-          exclude_args=""
+          exclude_args=()
           if [ -n "$EXCLUDE_RE" ]; then
-            exclude_args="--exclude-re $EXCLUDE_RE"
+            exclude_args=(--exclude-re "$EXCLUDE_RE")
           fi
           # shellcheck disable=SC2086
-          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args $exclude_args -- $TEST_ARGS
+          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args "${exclude_args[@]}" -- $TEST_ARGS
           df -h /
       - name: the outcome lists
         if: always()
