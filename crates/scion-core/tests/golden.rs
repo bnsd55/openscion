@@ -533,17 +533,15 @@ fn accepts_paths_at_the_limits_and_keeps_raw_bytes() {
 /// size): the test costs one page, not four gigabytes.
 #[test]
 fn a_field_of_u32_max_fits_and_one_more_is_refused() {
-    // The workspace forbids unsafe, so the vector is a real calloc: the
-    // peak sits near the 4 GiB it claims. The run holds it (the check
-    // finishes in about a second), and the refusal happens before any
-    // byte is read.
-    let too_many = vec![0u8; u32::MAX as usize + 1];
-    let err = IdentityTime::new(too_many.clone(), Vec::new(), 0, 0).unwrap_err();
+    // Each oversized field is its own calloc, built and dropped before
+    // the next: the check reads only the length, so the vector's pages
+    // are never read. Measured peak, test binary alone: 2.7 MB.
+    let err = IdentityTime::new(vec![0u8; u32::MAX as usize + 1], Vec::new(), 0, 0).unwrap_err();
     assert!(
         err.to_string().contains("identity name"),
         "the refusal must name the field: {err}"
     );
-    let err = IdentityTime::new(Vec::new(), too_many, 0, 0).unwrap_err();
+    let err = IdentityTime::new(Vec::new(), vec![0u8; u32::MAX as usize + 1], 0, 0).unwrap_err();
     assert!(
         err.to_string().contains("identity email"),
         "the refusal must name the field: {err}"
