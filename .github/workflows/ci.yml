@@ -1443,6 +1443,13 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: an xfs loop device for the stores
         run: |
+          # The runner's apt mirror file names one host; when that host
+          # fails to resolve, apt-get dies before any install. The main
+          # archive goes in as a second, lower-priority line, so apt
+          # falls back to it (one URL per line, an optional tab and
+          # priority:N; the first match wins, so the default mirror
+          # stays first and the fallback only takes an unresolved one).
+          printf 'http://archive.ubuntu.com/ubuntu/\tpriority:1\n' | sudo tee -a /etc/apt/apt-mirrors.txt
           sudo apt-get update -qq
           sudo apt-get install -y -qq xfsprogs
           truncate -s 8G "$RUNNER_TEMP/xfs.img"
@@ -1517,6 +1524,13 @@ jobs:
           key: lazyfs-0.3.1-045a0b3
       - name: LazyFS (pinned 0.3.1, commit 045a0b3)
         run: |
+          # The runner's apt mirror file names one host; when that host
+          # fails to resolve, apt-get dies before any install. The main
+          # archive goes in as a second, lower-priority line, so apt
+          # falls back to it (one URL per line, an optional tab and
+          # priority:N; the first match wins, so the default mirror
+          # stays first and the fallback only takes an unresolved one).
+          printf 'http://archive.ubuntu.com/ubuntu/\tpriority:1\n' | sudo tee -a /etc/apt/apt-mirrors.txt
           sudo apt-get update -qq
           sudo apt-get install -y -qq libfuse3-dev libfuse3-3 fuse3
           # The mount script passes -o allow_other; a non-root user may only
@@ -1603,6 +1617,13 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: the kernel NFS client
         run: |
+          # The runner's apt mirror file names one host; when that host
+          # fails to resolve, apt-get dies before any install. The main
+          # archive goes in as a second, lower-priority line, so apt
+          # falls back to it (one URL per line, an optional tab and
+          # priority:N; the first match wins, so the default mirror
+          # stays first and the fallback only takes an unresolved one).
+          printf 'http://archive.ubuntu.com/ubuntu/\tpriority:1\n' | sudo tee -a /etc/apt/apt-mirrors.txt
           sudo apt-get update -qq
           sudo apt-get install -y -qq nfs-common
       # The script wraps every external command in `timeout`, and its trap
