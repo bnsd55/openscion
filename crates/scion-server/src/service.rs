@@ -4397,6 +4397,134 @@ mod tests {
         assert_eq!(part.data, data, "the file's content comes back");
     }
 
+    /// A log entry whose encoded body is `want` bytes: the message is
+    /// padded until the encoding lands on the size, so a test speaks in
+    /// exact part sizes whatever the encoding's own overhead is.
+    fn an_entry(id: u8, want: usize) -> (ChangesetId, Changeset) {
+        let mut message = vec![b'm'; want];
+        let build = |message: &[u8]| {
+            Changeset::new(
+                vec![],
+                IdentityTime::new(b"t".to_vec(), b"t@x".to_vec(), 0, 0)
+                    .expect("identity fits the format"),
+                None,
+                message.to_vec(),
+                [].into(),
+            )
+            .expect("the changeset fits the format")
+        };
+        let mut changeset = build(&message);
+        while changeset.encode().len() > want {
+            message.pop();
+            changeset = build(&message);
+        }
+        while changeset.encode().len() < want {
+            message.push(b'x');
+            changeset = build(&message);
+        }
+        (ChangesetId::try_from(&[id; 32][..]).unwrap(), changeset)
+    }
+
+    /// A walk whose `left` covers the page and whose continuation is
+    /// some id: `log_page_parts` reads only these two.
+    fn a_walk(store: Backend) -> LogWalk {
+        LogWalk {
+            worker: Worker::new(store),
+            repo: "r".to_owned(),
+            graph_queries: Arc::new(Semaphore::new(1)),
+            _call: Call::default(),
+            next: Some(ChangesetId::try_from(&[9_u8; 32][..]).unwrap()),
+            left: 10,
+            path: None,
+            deadline: Deadline::new(std::time::Instant::now() + Duration::from_secs(600)),
+            stalled: None,
+        }
+    }
+
+    /// The page splitter groups entries so a part's encoded bytes stay
+    /// within one chunk: an entry too big for a whole part is its own
+    /// part, an entry that would fill the part exactly stays, and an
+    /// entry that would pass the bound starts the next part. The bound
+    /// is what keeps one streamed part under the message cap, and a
+    /// wrong grouping is a reply the client cannot take.
+    #[test]
+    fn a_log_page_splits_at_the_chunk_bound() {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let over = CHUNK_BYTES + 1_000;
+        let mut walk = a_walk(store);
+        let entries = vec![
+            an_entry(b'a', over),
+            an_entry(b'b', CHUNK_BYTES - 2_000),
+            an_entry(b'c', 2_000),
+            an_entry(b'd', 1_000),
+        ];
+        let parts = log_page_parts(entries, &mut walk);
+        // The walk spends its `left` on the whole page: four entries in,
+        // four out, and the sizes are the entries' own encodings - the
+        // entry that would pass the bound starts a part of its own.
+        assert_eq!(walk.left, 6, "the walk still owes after the page");
+        // The entries' real encodings decide the grouping; the test
+        // reads the sizes back out of the parts and checks the rule on
+        // them, so the encoder's own overhead cannot flatter it.
+        let part_of = |name: u8| {
+            parts
+                .iter()
+                .position(|p| p.entries.iter().any(|e| e.changeset_id[0] == name))
+                .unwrap_or_else(|| panic!("the entry {} is in a part", name as char))
+        };
+        let size_of = |name: u8| {
+            parts[part_of(name)]
+                .entries
+                .iter()
+                .find(|e| e.changeset_id[0] == name)
+                .map(|e| e.changeset.len())
+                .unwrap()
+        };
+        assert!(size_of(b'a') > CHUNK_BYTES, "a alone is over the chunk");
+        assert_eq!(part_of(b'a'), 0, "a is the first part");
+        assert_eq!(
+            parts[1]
+                .entries
+                .iter()
+                .map(|e| e.changeset.len())
+                .sum::<usize>(),
+            CHUNK_BYTES,
+            "b and c fill their part exactly: the bound is met, not passed"
+        );
+        assert_eq!(
+            parts[0].entries.len(),
+            1,
+            "the over-chunk entry shares its part with nobody"
+        );
+        assert_eq!(part_of(b'b'), 1, "b starts its own part: a's part is over");
+        assert_eq!(
+            part_of(b'c'),
+            1,
+            "c fills b's part exactly: the bound is not passed, so it stays"
+        );
+        assert_eq!(
+            part_of(b'd'),
+            2,
+            "d starts the next part: adding it would pass the bound"
+        );
+        assert_eq!(parts.len(), 3, "the page splits into three parts");
+
+        // The last part carries where the walk continues; none before
+        // it does.
+        assert_eq!(
+            parts.last().unwrap().next_changeset_id,
+            vec![9_u8; 32],
+            "the last part carries the walk's continuation"
+        );
+        for part in &parts[..parts.len() - 1] {
+            assert!(
+                part.next_changeset_id.is_empty(),
+                "only the last part carries the continuation"
+            );
+        }
+    }
+
     type Blocker = (
         std::thread::JoinHandle<Result<(), crate::error::Error>>,
         std::sync::mpsc::Sender<()>,
