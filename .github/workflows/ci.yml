@@ -1443,6 +1443,14 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: an xfs loop device for the stores
         run: |
+          # The runner's mirror list names only azure.archive.ubuntu.com;
+          # when it does not answer, apt has nowhere else to go (#1126).
+          # A list line is one URL, optionally tab-priority:N with the
+          # lower number first, so the runner's mirror keeps its priority
+          # and the main archive is the fallback. Idempotent.
+          if ! grep -q archive.ubuntu.com /etc/apt/apt-mirrors.txt; then
+            printf 'http://archive.ubuntu.com/ubuntu/	priority:2\n' | sudo tee -a /etc/apt/apt-mirrors.txt
+          fi
           sudo apt-get update -qq
           sudo apt-get install -y -qq xfsprogs
           truncate -s 8G "$RUNNER_TEMP/xfs.img"
@@ -1517,6 +1525,14 @@ jobs:
           key: lazyfs-0.3.1-045a0b3
       - name: LazyFS (pinned 0.3.1, commit 045a0b3)
         run: |
+          # The runner's mirror list names only azure.archive.ubuntu.com;
+          # when it does not answer, apt has nowhere else to go (#1126).
+          # A list line is one URL, optionally tab-priority:N with the
+          # lower number first, so the runner's mirror keeps its priority
+          # and the main archive is the fallback. Idempotent.
+          if ! grep -q archive.ubuntu.com /etc/apt/apt-mirrors.txt; then
+            printf 'http://archive.ubuntu.com/ubuntu/	priority:2\n' | sudo tee -a /etc/apt/apt-mirrors.txt
+          fi
           sudo apt-get update -qq
           sudo apt-get install -y -qq libfuse3-dev libfuse3-3 fuse3
           # The mount script passes -o allow_other; a non-root user may only
@@ -1603,6 +1619,14 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: the kernel NFS client
         run: |
+          # The runner's mirror list names only azure.archive.ubuntu.com;
+          # when it does not answer, apt has nowhere else to go (#1126).
+          # A list line is one URL, optionally tab-priority:N with the
+          # lower number first, so the runner's mirror keeps its priority
+          # and the main archive is the fallback. Idempotent.
+          if ! grep -q archive.ubuntu.com /etc/apt/apt-mirrors.txt; then
+            printf 'http://archive.ubuntu.com/ubuntu/	priority:2\n' | sudo tee -a /etc/apt/apt-mirrors.txt
+          fi
           sudo apt-get update -qq
           sudo apt-get install -y -qq nfs-common
       # The script wraps every external command in `timeout`, and its trap
