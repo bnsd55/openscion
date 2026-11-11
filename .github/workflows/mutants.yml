@@ -85,6 +85,14 @@ on:
         required: false
         default: ""
         type: string
+      measure_peak:
+        description: >-
+          measure each test binary's peak address space before the mutants
+          start (#1112, for picking as_cap_kb). Off by default: an uncapped
+          run does exactly what main does.
+        required: false
+        default: "false"
+        type: boolean
       runner:
         description: >-
           the runner: ubuntu-24.04 (the default) with the Postgres service;
@@ -159,7 +167,7 @@ jobs:
       - name: the test binaries' peak address space
         # The peaks are measured before there is a cap; once the cap is
         # set, this step has nothing left to say.
-        if: inputs.as_cap_kb == null || inputs.as_cap_kb == ''
+        if: inputs.measure_peak
         env:
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           SCION_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
@@ -251,11 +259,13 @@ jobs:
           # test, instead of starving the runner until GitHub cancels the
           # job (#1112). prlimit exists on the Linux runner only. --as
           # reads bytes, not the KiB the input names.
-          if [ -n "$AS_CAP_KB" ]; then
-            cap_bytes=$((AS_CAP_KB * 1024))
-            echo "the test runner's address-space cap: $cap_bytes bytes"
-            export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="prlimit --as=$cap_bytes"
-          fi
+          case "$AS_CAP_KB" in
+            '') ;;
+            *[!0-9]*) echo "as_cap_kb must be digits" >&2; exit 1 ;;
+            *) cap_bytes=$((AS_CAP_KB * 1024))
+              echo "the test runner's address-space cap: $cap_bytes bytes"
+              export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="prlimit --as=$cap_bytes" ;;
+          esac
           # shellcheck disable=SC2086
           # An empty array under `set -u` reads as unbound on bash 3.2.
           cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args ${exclude_args[@]+"${exclude_args[@]}"} -- $TEST_ARGS
@@ -323,7 +333,6 @@ jobs:
           SHARDS: ${{ inputs.shards }}
           EXCLUDE_RE: ${{ inputs.exclude_re }}
           TEST_PACKAGE: ${{ inputs.test_package }}
-          AS_CAP_KB: ${{ inputs.as_cap_kb }}
         run: |
           set -eu
           file_args=""
