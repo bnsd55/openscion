@@ -4525,6 +4525,116 @@ mod tests {
         }
     }
 
+    /// The blame splitter groups ranges so each part's encoded bytes -
+    /// the ranges plus the changesets they name that no earlier part
+    /// carried - stay within one chunk. The first part here fills the
+    /// bound exactly: the splitter keeps an exact fill and splits only
+    /// past it. A named changeset rides the first part that names it,
+    /// once, and the walk's cursor rides only the last part.
+    #[test]
+    fn a_blame_page_splits_at_the_chunk_bound() {
+        let big = |name: u8, want: usize| BlameChangeset {
+            changeset_id: vec![name; 32],
+            author_name: vec![b'n'; want],
+            author_email: b"e@x".to_vec(),
+            author_unix_secs: 0,
+            author_tz_offset_minutes: 0,
+            path: b"f".to_vec(),
+        };
+        let range = |name: u8| BlameRange {
+            start_line: 1,
+            line_count: 1,
+            changeset_id: vec![name; 32],
+            origin_line: 1,
+        };
+        let named = range(b'z');
+        let range_bytes = named.encoded_len();
+        // Size the changeset's body so two ranges with it fill a part
+        // exactly and three pass the bound: the splitter must split
+        // between the second and the third. The author-name padding
+        // tunes the body to the byte, but the encoding's own length
+        // field steps as the padding crosses a varint boundary, so scan
+        // down for a name whose encode lands exactly on the target.
+        let base = big(b'z', 0).encoded_len();
+        let target = CHUNK_BYTES - 2 * range_bytes;
+        let cs = (0..8)
+            .map(|down| big(b'z', target - base - down))
+            .find(|c| c.encoded_len() == target)
+            .expect("a body sized to the byte exists near the target");
+        let cs_bytes = cs.encoded_len();
+        let mut send = BlameSend {
+            // Three ranges naming the same changeset: its body rides the
+            // first part only, the second range fills the part exactly,
+            // and the third passes the bound and starts the next part.
+            ranges: vec![named.clone(), named.clone(), named],
+            changesets: vec![cs],
+            cursor: b"cursor".to_vec(),
+            _call: Call::default(),
+            stalled: None,
+        };
+        let parts = blame_page_parts(&mut send);
+        assert_eq!(parts.len(), 2, "the third range passes the bound");
+        assert_eq!(
+            parts[0]
+                .ranges
+                .iter()
+                .map(prost::Message::encoded_len)
+                .sum::<usize>()
+                + parts[0]
+                    .changesets
+                    .iter()
+                    .map(prost::Message::encoded_len)
+                    .sum::<usize>(),
+            CHUNK_BYTES,
+            "the first part is exactly full: the exact fill is kept, not split"
+        );
+        assert_eq!(
+            parts[1]
+                .ranges
+                .iter()
+                .map(prost::Message::encoded_len)
+                .sum::<usize>(),
+            range_bytes,
+            "the second part holds the third range alone"
+        );
+        let carried: Vec<usize> = parts
+            .iter()
+            .map(|p| p.changesets.iter().map(prost::Message::encoded_len).sum())
+            .collect();
+        assert_eq!(
+            carried,
+            vec![cs_bytes, 0],
+            "the named changeset rides the first part that names it, once"
+        );
+        for (i, part) in parts.iter().enumerate() {
+            let total: usize = part
+                .ranges
+                .iter()
+                .map(prost::Message::encoded_len)
+                .sum::<usize>()
+                + part
+                    .changesets
+                    .iter()
+                    .map(prost::Message::encoded_len)
+                    .sum::<usize>();
+            assert!(
+                total <= CHUNK_BYTES,
+                "part {i} stays within the chunk: {total}"
+            );
+        }
+        assert_eq!(
+            parts.last().unwrap().next_cursor,
+            b"cursor".to_vec(),
+            "the last part carries the walk's cursor"
+        );
+        for part in &parts[..parts.len() - 1] {
+            assert!(
+                part.next_cursor.is_empty(),
+                "only the last part carries the cursor"
+            );
+        }
+    }
+
     type Blocker = (
         std::thread::JoinHandle<Result<(), crate::error::Error>>,
         std::sync::mpsc::Sender<()>,
