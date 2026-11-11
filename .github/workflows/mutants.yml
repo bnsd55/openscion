@@ -81,9 +81,11 @@ on:
         description: >-
           each test binary's address-space cap in KiB, via prlimit --as on
           the Linux job (#1112): a runaway mutant then fails its own test
-          instead of starving the runner. Empty runs without the cap.
+          instead of starving the runner. Default 8388608 (8 GiB): about
+          3.7x the largest measured test binary (2.1 GiB) and half the
+          runner's memory. An explicitly empty value runs without the cap.
         required: false
-        default: ""
+        default: "8388608"
         type: string
       measure_peak:
         description: >-
