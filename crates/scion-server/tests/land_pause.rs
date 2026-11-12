@@ -76,10 +76,15 @@ async fn land_on(scion: &mut Scion, id: &ChangesetId, target: &str, key: &str) -
         .into_inner()
 }
 
-/// The import's move of `main`, the way the import path moves a ref:
-/// one compare-and-swap against `expected` on a connection of the
-/// test's own - the import never takes the land's ref slot, so A's
-/// park does not stop it.
+/// The import's move of `main`: one compare-and-swap against
+/// `expected`, the statement `MetaTx::cas_ref` runs for the import
+/// (`pg.rs`, the `UPDATE refs ... WHERE version = $` branch). Raw SQL
+/// because the fence refuses a second open of the store beside the
+/// live server (`Backend::open_test` answers "another server holds
+/// this store"), so the test cannot call the real function through a
+/// backend of its own. The import never takes the land's ref slot, so
+/// A's park does not stop it. A change to `cas_ref`'s statement must
+/// change this one the same way.
 fn import_move_main(data: &Path, expected: i64, target: &ChangesetId) -> bool {
     // The move runs on its own thread: the test is a tokio one, and
     // the sync postgres client must not start a runtime inside it. The
