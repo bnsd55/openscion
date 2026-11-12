@@ -1347,14 +1347,21 @@ mod silent_failures {
 
     /// The printed command names the machine, the export with its
     /// secret, the port, and the mount point: without any of them the
-    /// user's `sudo mount` cannot reach this mount.
+    /// user's `sudo mount` cannot reach this mount. The failures name
+    /// the missing piece, never the command: it carries the secret.
     #[test]
     fn the_mount_command_names_its_target() {
         let command = mount_command(12000, "abc123", Path::new("/mnt/view"));
-        assert!(command.contains("sudo mount"), "{command}");
-        assert!(command.contains("127.0.0.1:/scion/abc123"), "{command}");
-        assert!(command.contains("port=12000"), "{command}");
-        assert!(command.contains("/mnt/view"), "{command}");
+        assert!(
+            command.contains("sudo mount"),
+            "the sudo command is missing"
+        );
+        assert!(
+            command.contains("127.0.0.1:/scion/abc123"),
+            "the target with its export and secret is missing"
+        );
+        assert!(command.contains("port=12000"), "the port is missing");
+        assert!(command.contains("/mnt/view"), "the mount point is missing");
     }
 
     /// The session file sits under the home directory, so a mount table
