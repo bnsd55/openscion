@@ -84,6 +84,8 @@ pub(crate) mod meta;
 pub(crate) mod metrics;
 pub(crate) mod names;
 pub(crate) mod objects;
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) mod pause;
 mod pg;
 pub mod preflight;
 pub(crate) mod quotas;

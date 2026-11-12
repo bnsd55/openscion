@@ -802,6 +802,17 @@ fn finish(
         if let Some(step) = step {
             step();
         }
+        #[cfg(any(test, feature = "test-hooks"))]
+        // The file park of the interleaving tests (#888). The park
+        // holds no Postgres transaction and no pool reader: the plan's
+        // read closed above, and the settle's write has not begun. It
+        // does hold this call's own ref slot lock - the lock spans the
+        // plan and the settle by design - so a land on another ref goes
+        // on beside it, and a mover on this ref must bypass the slot
+        // the way an import does: the mover the settle's
+        // compare-and-swap exists for. The park test forces that order
+        // and proves a neighbor land lands whole.
+        crate::pause::hit("after-plan", &req.request_key);
         let plan = match planned {
             Planned::Settled(row) => return Ok(Finished::Outcome(row)),
             Planned::Do(plan) => plan,
