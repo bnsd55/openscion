@@ -1953,4 +1953,45 @@ mod gc_intent_tests {
             "the run's own line is recorded: {log}"
         );
     }
+
+    /// The deferred intent's exit answers the run's own status: a run that
+    /// succeeded answers 0 even when its deferred line still fails. The
+    /// probe runs in a child of this same test binary, because the answer
+    /// is the process's exit status, and the probe's own process is the
+    /// only one that can carry it.
+    #[cfg(test)]
+    mod deferred_intent_exit_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn the_exit_answers_the_run_s_own_status() {
+            let exe = std::env::current_exe().expect("the test binary is known");
+            let out = std::process::Command::new(exe)
+                .args(["deferred_intent_exit_probe", "--nocapture"])
+                .env("SCION_TEST_DEFERRED_EXIT_PROBE", "1")
+                .output()
+                .expect("the probe runs");
+            assert!(
+                out.status.success(),
+                "a run that succeeded answers 0 even when its deferred line still fails: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        #[tokio::test]
+        async fn deferred_intent_exit_probe() {
+            if std::env::var_os("SCION_TEST_DEFERRED_EXIT_PROBE").is_none() {
+                // The suite's own run: nothing to probe.
+                return;
+            }
+            let dir = scion_server::test_support::private_tempdir();
+            let audit = scion_server::Audit::open(&dir.path().join("audit.log")).unwrap();
+            // Both appends fail as an out-of-space answer would: the run's
+            // own write is gone by the time the deferred line is written,
+            // and the deferred line fails again. The run succeeded, so the
+            // process answers 0.
+            audit.fail_next_appends(2).unwrap();
+            write_deferred_intent(&audit, true, true).await;
+        }
+    }
 }
