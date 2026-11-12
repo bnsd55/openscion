@@ -1897,8 +1897,7 @@ mod error_class_tests {
             "the drive is full",
         )));
         assert_eq!(error_class(&full), "disk_full");
-        let internal =
-            Error::Storage(Storage::internal_for_test(std::io::Error::other("refused")));
+        let internal = Error::Storage(Storage::internal_for_test(std::io::Error::other("refused")));
         assert_eq!(error_class(&internal), "failed");
     }
 
@@ -1916,5 +1915,42 @@ mod error_class_tests {
         assert!(is_disk_full(&quota), "over-quota is the disk's answer");
         let other = std::io::Error::other("the file went away");
         assert!(!is_disk_full(&other), "another error is not the disk's");
+    }
+}
+
+/// The gc's audit intent on a failing audit log: a disk-full append
+/// defers the intent and the run goes on, the deferred line names why
+/// it was late, and every other append failure refuses before any
+/// change. The audit's own test hook makes the appends fail as an
+/// out-of-space answer would, without touching a real disk.
+#[cfg(test)]
+mod gc_intent_tests {
+    use super::*;
+
+    fn audit_with_faults(dir: &Path, faults: u32) -> scion_server::Audit {
+        let audit = scion_server::Audit::open(&dir.join("audit.log")).unwrap();
+        audit.fail_next_appends(faults).unwrap();
+        audit
+    }
+
+    #[tokio::test]
+    async fn a_disk_full_intent_defers_and_the_run_answers() {
+        let dir = scion_server::test_support::private_tempdir();
+        let store = Backend::open_test(&dir.path().join("data")).unwrap();
+        // One failed append: the intent's. The run defers it, finishes,
+        // and the deferred line lands when the disk has room again.
+        let audit = audit_with_faults(&dir.path(), 1);
+        gc_command(audit, &store, Duration::from_secs(60), true, None)
+            .await
+            .expect("the run goes on past the failed intent");
+        let log = std::fs::read_to_string(dir.path().join("audit.log")).unwrap();
+        assert!(
+            log.contains("\"what\":\"gc\"") && log.contains("\"deferred\":\"disk_full\""),
+            "the deferred intent names why it was late: {log}"
+        );
+        assert!(
+            log.contains("\"status\":\"ok\"") || log.contains("admin"),
+            "the run's own line is recorded: {log}"
+        );
     }
 }
