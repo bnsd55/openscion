@@ -463,11 +463,47 @@ mod tests {
         assert_eq!(store.get(a.0, a.1.len()).unwrap(), Some(a.1.clone()));
         assert_eq!(store.size(c.0).unwrap(), None);
 
-        // Not a snapshot at all.
+        // Not a snapshot at all: the refusal says why.
         fs::write(&path, b"scnidx1\nc").unwrap();
         let store = DiskStore::open(&dir.path().join("three"), 1 << 20).unwrap();
         let err = seed(&store, &path).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData, "{err}");
+        assert!(err.to_string().contains("does not start as one"), "{err}");
+    }
+
+    /// The reader trusts none of the header: a snapshot whose repo name
+    /// is not a repo name is refused with the reason, and a file that
+    /// ends inside its name is refused, not read as a shorter one.
+    #[test]
+    fn a_snapshot_whose_repo_name_is_not_valid_is_refused() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::private_tempdir();
+        let path = dir.path().join("bad.scnsnap");
+        let mut file = fs::File::create(&path).unwrap();
+        file.write_all(MAGIC).unwrap();
+        // The right shape, not a repo name: a control character.
+        file.write_all(&5u16.to_le_bytes()).unwrap();
+        file.write_all(b"r\nxyz").unwrap();
+        drop(file);
+        fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let store = DiskStore::open(&dir.path().join("data"), 1 << 20).unwrap();
+        let err = seed(&store, &path).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidData, "{err}");
+        assert!(err.to_string().contains("repo name is not valid"), "{err}");
+
+        // The name says five bytes, the file holds two: refused, not
+        // read as a padded name.
+        let path = dir.path().join("short.scnsnap");
+        let mut file = fs::File::create(&path).unwrap();
+        file.write_all(MAGIC).unwrap();
+        file.write_all(&5u16.to_le_bytes()).unwrap();
+        file.write_all(b"rg").unwrap();
+        drop(file);
+        fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let err = seed(&store, &path).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidData, "{err}");
+        assert!(err.to_string().contains("ends in its repo name"), "{err}");
     }
 
     /// The wire pass, B7's property, on every OS: a fold-blind reader
