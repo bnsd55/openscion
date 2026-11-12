@@ -1958,9 +1958,21 @@ mod tests {
         let metrics = std::sync::Arc::new(Metrics::default());
         let rpc = metrics.rpc("/scion.v1.Scion/Blame").unwrap();
         metrics.request(rpc, 99, Instant::now(), 0, 0);
+        // The first code past the table: still one past the known codes.
+        metrics.request(rpc, 18, Instant::now(), 0, 0);
         let text = metrics.render();
         assert!(
-            text.contains("scion_requests_total{rpc=\"Scion/Blame\",code=\"unrecognised\"} 1\n"),
+            text.contains("scion_requests_total{rpc=\"Scion/Blame\",code=\"unrecognised\"} 2\n"),
+            "{text}"
+        );
+        // Both calls sat in the smallest buckets, and the count carries
+        // both: a flipped comparison drops them from every bucket.
+        assert!(
+            text.contains("scion_request_seconds_bucket{rpc=\"Scion/Blame\",le=\"+Inf\"} 2\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("scion_request_seconds_count{rpc=\"Scion/Blame\"} 2\n"),
             "{text}"
         );
     }
