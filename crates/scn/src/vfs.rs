@@ -2207,15 +2207,16 @@ mod tests {
         );
         // One warning, for this operation at this file, and its line
         // names the file and the cause.
-        let warned = test.vfs.warned.lock().unwrap();
-        assert_eq!(warned.set.len(), 1, "{warned:?}");
-        let (what, path) = warned.set.iter().next().unwrap();
-        assert_eq!(*what, "cannot write");
-        let line = io_line(what, path, &std::io::Error::from_raw_os_error(13));
+        let (what, path) = {
+            let warned = test.vfs.warned.lock().unwrap();
+            assert_eq!(warned.set.len(), 1, "{warned:?}");
+            warned.set.iter().next().unwrap().clone()
+        };
+        assert_eq!(what, "cannot write");
+        let line = io_line(what, &path, &std::io::Error::from_raw_os_error(13));
         assert!(line.contains("cannot write"), "{line}");
         assert!(line.contains(&path.display().to_string()), "{line}");
         assert!(line.contains("Permission denied"), "{line}");
-        drop(warned);
 
         // A retry of the same failing write adds no second warning.
         let again = test.vfs.write(id, 0, b"again\n").await;
@@ -3254,6 +3255,14 @@ mod tests {
         let (data, eof) = test.vfs.read(plain, 0, 100).await.unwrap();
         assert_eq!(data, b"x\n");
         assert!(eof, "a whole read of a local file is its end");
+        // The attributes of a materialized file take the real mode of
+        // the file on disk: a plain file stays plain.
+        let attr = test.vfs.getattr(plain).await.unwrap();
+        assert_eq!(
+            attr.mode & 0o777,
+            0o644,
+            "the materialized file stays plain"
+        );
 
         // A write to a directory is not a write; neither is a write to a
         // symlink.
