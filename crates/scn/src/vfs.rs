@@ -2552,6 +2552,15 @@ mod tests {
                 .overlay_file(&RepoPath::new("crate/keep.txt").unwrap())
                 .exists()
         );
+        // The deleted child of the moved directory stays deleted.
+        assert!(find(&test.vfs, "crate/gone.txt").await.is_err());
+        let crate_id = find(&test.vfs, "crate").await.unwrap();
+        let listed = test.vfs.readdir(crate_id, 0, 100).await.unwrap();
+        let names: Vec<Vec<u8>> = listed.entries.iter().map(|e| e.name.0.clone()).collect();
+        assert!(
+            !names.contains(&b"gone.txt".to_vec()),
+            "the deleted child came back in the listing: {names:?}"
+        );
     }
 
     /// A rename of a directory over an existing file is not a directory
