@@ -1506,6 +1506,7 @@ mod tests {
     use crate::Backend;
     use std::sync::Barrier;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
@@ -2263,5 +2264,348 @@ mod tests {
             let err = result.expect_err("every caller sees the failure");
             assert_eq!(err.to_string(), "the drive is gone");
         }
+    }
+
+    /// The EIO gates count down and then fail one call: an armed hook
+    /// lets the first two calls through and answers the third with the
+    /// disk's error, and the call after it passes. A gate that never
+    /// arms (a body that just passes), or one whose countdown grows or
+    /// divides instead of falling, never answers with the error, and
+    /// the same asserts catch both.
+    #[test]
+    fn the_eio_gates_fail_one_call_each_and_then_spend() {
+        let dir = crate::test_support::private_tempdir();
+        let blobs = Blobs::open(dir.path()).unwrap();
+        let content = b"the gates' one failing call";
+
+        // The write gate: two writes pass, the third fails, the fourth
+        // passes. The gate's errno is 28 (ENOSPC) unless set otherwise.
+        blobs.fail_writes.store(2, Ordering::SeqCst);
+        blobs.put(content).unwrap();
+        blobs.put(content).unwrap();
+        let err = blobs.put(content).unwrap_err().to_string();
+        assert!(err.contains("os error 28"), "{err}");
+        let id = blobs.put(content).unwrap();
+        assert_eq!(blobs.get(id).unwrap(), content, "the spent write gate");
+
+        // The read gate: two reads pass, the third fails, the fourth
+        // passes.
+        blobs.fail_reads.store(2, Ordering::SeqCst);
+        assert_eq!(blobs.get(id).unwrap(), content);
+        assert_eq!(blobs.get(id).unwrap(), content);
+        let err = blobs.get(id).unwrap_err().to_string();
+        assert!(err.contains("os error 5"), "{err}");
+        assert_eq!(blobs.get(id).unwrap(), content, "the spent read gate");
+
+        // The fsync gate: one put gates three fsyncs - the blob's temp
+        // file, its stored file's directory, and the drive cache - so an
+        // armed countdown of two is spent inside the first put, whose
+        // third fsync fails. The next put runs clean. A countdown that
+        // grows or divides instead of falling never reaches zero, every
+        // put passes, and the first put's assert catches it the same way
+        // a never-arming gate does.
+        blobs.fail_fsyncs.store(2, Ordering::SeqCst);
+        let err = blobs.put(content).unwrap_err().to_string();
+        assert!(err.contains("os error 5"), "{err}");
+        let id = blobs.put(content).unwrap();
+        assert_eq!(blobs.get(id).unwrap(), content, "the spent fsync gate");
+    }
+
+    /// `file_exists` is a cheap stat: it says yes for a blob the store
+    /// holds and no for one it does not. The importer's skip reads it,
+    /// so a constant answer either skips every reimport or reimports
+    /// everything.
+    #[test]
+    fn file_exists_says_what_is_on_disk() {
+        let dir = crate::test_support::private_tempdir();
+        let blobs = Blobs::open(dir.path()).unwrap();
+        let id = blobs.put(b"the blob whose file exists\n").unwrap();
+        assert!(blobs.file_exists(id), "the store holds this blob");
+        let absent = BlobId::of(b"content no put ever wrote");
+        assert!(!blobs.file_exists(absent), "no put made this blob");
+    }
+
+    /// A reader that has not read its content is not ended: `ended` is
+    /// the drain's signal that the decoder is freed, and a reader that
+    /// claims it at once would free a decoder still holding a window.
+    #[test]
+    fn a_reader_is_not_ended_before_its_content_is_read() {
+        let dir = crate::test_support::private_tempdir();
+        let blobs = Blobs::open(dir.path()).unwrap();
+        let id = blobs.put(b"not yet read").unwrap();
+        let mut reader = blobs.reader(id).unwrap();
+        assert!(!reader.ended(), "the reader holds a live decoder");
+        while reader.read_part(1 << 20).unwrap().is_some() {}
+        assert!(reader.ended(), "the content is read and checked");
+    }
+
+    /// `free_bytes` and `free_inodes` read the real filesystem: the
+    /// values are the drive's, far above any constant answer. The
+    /// positive tests above only pin `> 0`, which a constant `Ok(1)`
+    /// would pass; these pin magnitudes, so a stub answer is refused.
+    #[test]
+    fn free_bytes_and_free_inodes_read_the_real_filesystem() {
+        let dir = crate::test_support::private_tempdir();
+        let bytes = free_bytes(dir.path()).unwrap();
+        assert!(
+            bytes > 1 << 20,
+            "a real filesystem holds more than a token {bytes}"
+        );
+        let inodes = free_inodes(dir.path()).unwrap();
+        let inodes = inodes.expect("a temp filesystem has an inode table");
+        assert!(
+            inodes > 100,
+            "a real filesystem has inodes to spare: {inodes}"
+        );
+    }
+
+    /// A parked free-stat read holds until the guard drops: the hook
+    /// lets a test hold `statvfs` still, and the drop is what releases
+    /// it. A park that never parks, or a drop that never resets, leaves
+    /// the reader running or stuck.
+    #[test]
+    fn a_parked_free_stat_holds_until_the_guard_drops() {
+        let dir = crate::test_support::private_tempdir();
+        let guard = ParkFreeStat::now(dir.path().to_path_buf());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = dir.path().to_path_buf();
+        thread::spawn(move || {
+            let _ = free_bytes(&path);
+            tx.send(()).unwrap();
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the parked read came back while the guard still held"
+        );
+        drop(guard);
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("the dropped guard released the parked read");
+    }
+
+    /// The open's sweep removes the temp folders no process holds, and
+    /// keeps the ones a live holder has flocked: a crash's half-written
+    /// folder goes, a running process's staging folder stays.
+    #[test]
+    fn an_open_sweeps_a_dead_temp_folder_and_keeps_a_live_one() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::test_support::private_tempdir();
+        let tmp = dir.path().join("tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let live = tmp.join("live");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::set_permissions(&live, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let lock = std::fs::File::create(live.join(".lock")).unwrap();
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+        let dead = tmp.join("dead");
+        std::fs::create_dir_all(&dead).unwrap();
+        std::fs::set_permissions(&dead, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::File::create(dead.join(".lock")).unwrap();
+
+        Blobs::open(dir.path()).unwrap();
+
+        assert!(live.is_dir(), "the sweep removed a folder a process holds");
+        assert!(!dead.is_dir(), "the sweep kept a folder nothing holds");
+        drop(lock);
+    }
+
+    /// The open's folder loop refuses when the staging folder cannot be
+    /// made: `tmp/` is read-only, so every create fails with a
+    /// permission error, and the open returns that error. The `!=` flip
+    /// of the `AlreadyExists` check loops forever on it, so the open
+    /// runs on a thread and the join is bounded: the test fails red with
+    /// a message instead of hanging.
+    #[test]
+    fn an_open_whose_staging_folder_cannot_be_made_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::test_support::private_tempdir();
+        let tmp = dir.path().join("tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let data = dir.path().to_path_buf();
+        let opened = thread::spawn(move || Blobs::open(&data));
+        let refused = std::sync::mpsc::channel();
+        let done = thread::spawn(move || {
+            let result = opened.join();
+            let _ = refused.0.send(result);
+        });
+        let result = refused
+            .1
+            .recv_timeout(Duration::from_secs(60))
+            .unwrap_or_else(|_| panic!("the open looped instead of refusing a read-only tmp"));
+        drop(done);
+        let err = match result {
+            Ok(Ok(_)) => panic!("an open on a read-only tmp succeeded"),
+            Ok(Err(err)) => err.to_string(),
+            Err(join_err) => {
+                let _ = join_err;
+                panic!("the open's thread panicked instead of refusing")
+            }
+        };
+        assert!(err.contains("Permission denied"), "{err}");
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    /// The read path's bound on what a stored file may be: a packed file
+    /// past `compress_bound(MAX_OBJECT_BYTES)` is refused as corrupt by
+    /// name, one exactly at the bound goes to the decoder and fails as
+    /// garbage, a frame that unpacks past `MAX_OBJECT_BYTES` is refused
+    /// as oversized, and one that unpacks to exactly the limit verifies.
+    /// The limit checks sit on a trust boundary - the file on disk is
+    /// hostile - so each is pinned by its own verdict message.
+    #[test]
+    fn the_read_path_refuses_what_the_limits_name() {
+        let dir = crate::test_support::private_tempdir();
+        let blobs = Blobs::open(dir.path()).unwrap();
+        let limit = zstd::zstd_safe::compress_bound(MAX_OBJECT_BYTES);
+
+        // (a) one byte past the packed bound: refused by name.
+        let a = BlobId::of(b"a");
+        store_raw(&blobs, a, vec![0xFF; limit + 1]);
+        let err = blobs.get(a).unwrap_err().to_string();
+        assert!(err.contains("file is larger than"), "{err}");
+
+        // (b) exactly at the bound: the size check passes, the bytes are
+        // not a frame, so the decoder refuses them.
+        let b = BlobId::of(b"b");
+        store_raw(&blobs, b, vec![0xFF; limit]);
+        let err = blobs.get(b).unwrap_err().to_string();
+        assert!(err.contains("cannot unpack"), "{err}");
+
+        // (c) a frame that unpacks one byte past the object limit: the
+        // decoder sees the overshoot and calls the blob corrupt. A take
+        // bound that grew past the limit would instead match the ID and
+        // call the same blob valid, which this assert refuses.
+        let raw_c = vec![0u8; MAX_OBJECT_BYTES + 1];
+        let c = BlobId::of(&raw_c);
+        let packed_c = zstd::bulk::compress(&raw_c, 3).unwrap();
+        store_raw(&blobs, c, packed_c);
+        assert_eq!(blobs.verify(c).unwrap(), BlobStatus::Corrupt);
+
+        // (d) a frame that unpacks to exactly the limit: intact.
+        let raw_d = vec![0u8; MAX_OBJECT_BYTES];
+        let d = BlobId::of(&raw_d);
+        let packed_d = zstd::bulk::compress(&raw_d, 3).unwrap();
+        store_raw(&blobs, d, packed_d);
+        assert_eq!(blobs.verify(d).unwrap(), BlobStatus::Valid);
+    }
+
+    /// Writes `bytes` as blob `id`'s stored file by hand, past `put`'s
+    /// own size check: the read path's limits name what is on disk, and
+    /// the disk is hostile.
+    fn store_raw(blobs: &Blobs, id: BlobId, bytes: Vec<u8>) {
+        let (folder, path) = blobs.location(id);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// A put past the object limit is refused, and one exactly at it is
+    /// stored: the write path's own bound on what a client sends, below
+    /// the RPC layer's, so a client that streams the bytes reaches it.
+    #[test]
+    fn a_put_past_the_object_limit_is_refused_and_one_at_it_stored() {
+        let dir = crate::test_support::private_tempdir();
+        let blobs = Blobs::open(dir.path()).unwrap();
+        let too_big = vec![0u8; MAX_OBJECT_BYTES + 1];
+        let err = blobs.put(&too_big).unwrap_err().to_string();
+        assert!(
+            err.contains("too large") || err.contains("larger than"),
+            "{err}"
+        );
+        let at_limit = vec![0u8; MAX_OBJECT_BYTES];
+        let id = blobs.put(&at_limit).unwrap();
+        assert_eq!(id, BlobId::of(&at_limit));
+    }
+
+    /// A put that keeps a stored copy touches it: the file's mtime moves
+    /// to now, so the grace period of `gc` counts from the last upload,
+    /// not the first. A touch that does nothing leaves the old time, and
+    /// the same assert catches it.
+    #[test]
+    fn a_put_that_keeps_a_stored_copy_touches_its_file() {
+        let dir = crate::test_support::private_tempdir();
+        let blobs = Blobs::open(dir.path()).unwrap();
+        let content = b"the blob whose file the gc grace reads";
+        let id = blobs.put(content).unwrap();
+        let (_, path) = blobs.location(id);
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert_eq!(blobs.verify(id).unwrap(), BlobStatus::Valid);
+        blobs.put(content).unwrap();
+        let moved = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(
+            moved.elapsed().unwrap() < std::time::Duration::from_secs(60),
+            "the kept file's mtime stayed an hour old: {moved:?}"
+        );
+    }
+
+    /// A failed flush fails only the callers that shared it: the next
+    /// run leads a fresh flush and passes. A guard that pins every later
+    /// run to the old failure would fail the clean call, and the same
+    /// assert catches it.
+    #[test]
+    fn a_failed_flush_does_not_fail_the_next_run() {
+        let group = GroupFlush::default();
+        let fail = AtomicBool::new(true);
+        let err = group
+            .run(|| {
+                if fail.swap(false, Ordering::SeqCst) {
+                    Err(io::Error::other("the drive is gone"))
+                } else {
+                    Ok(())
+                }
+            })
+            .expect_err("the first run fails");
+        assert_eq!(err.to_string(), "the drive is gone");
+        group
+            .run(|| Ok(()))
+            .expect("the run after a failed one leads its own flush");
+    }
+
+    /// A caller that waits while another's flush runs leads the next one
+    /// when that flush ends: its target is the flush after the leader's,
+    /// and `finished < target` makes it lead rather than wait again. The
+    /// join is bounded, so a caller that never comes back from the wait
+    /// fails red instead of hanging.
+    #[test]
+    fn a_caller_that_waited_through_a_flush_leads_the_next_one() {
+        let group = GroupFlush::default();
+        let both_there = Barrier::new(2);
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::scope(|s| {
+            // The first caller's flush holds until the second waits.
+            let first = s.spawn(|| {
+                let group = &group;
+                group.run(|| {
+                    both_there.wait();
+                    Ok(())
+                })
+            });
+            s.spawn(|| {
+                let result = group.run(|| Ok(()));
+                done_tx.send(result).unwrap();
+            });
+            // The second is inside the wait before the first's flush ends,
+            // so its target was counted against the running one.
+            let give_up = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while group.joined() < 2 && std::time::Instant::now() < give_up {
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(
+                group.joined(),
+                2,
+                "the second caller never reached the wait"
+            );
+            both_there.wait();
+            first.join().unwrap().unwrap();
+            let second_result = done_rx
+                .recv_timeout(Duration::from_secs(60))
+                .expect("the second caller never came back from the wait");
+            second_result.unwrap();
+        });
     }
 }
