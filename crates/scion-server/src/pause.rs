@@ -41,11 +41,12 @@ fn dir() -> Option<&'static PathBuf> {
 /// - the caller waits for `<point>.<key>.release`, at most
 ///   [`PARK_CEILING`].
 ///
-/// A park holds no Postgres transaction, no pool reader and no ref
-/// slot lock - the caller's plan read has closed and its settle has
-/// not begun - so another land can land whole while this one sits.
-/// That is the property the interleaving tests force, and each park
-/// point's call site says it again.
+/// A park holds no Postgres transaction and no pool reader - the
+/// caller's plan read has closed and its settle has not begun. What
+/// else it holds is the call site's to say: the after-plan point holds
+/// the ref slot lock the plan and settle share by design, so a land on
+/// another ref goes on beside it and a mover on this ref must bypass
+/// the slot, as the import does.
 pub(crate) fn hit(point: &str, key: &str) {
     let Some(dir) = dir() else {
         return;

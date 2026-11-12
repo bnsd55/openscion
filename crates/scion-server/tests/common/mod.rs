@@ -297,7 +297,40 @@ impl Server {
 
     pub(crate) fn spawn_on(heading: &'static str, data: &Path, log: &Path) -> Self {
         let url = postgres_url(data);
-        Self::spawn_with_url(heading, data, Some(&url), log)
+        Self::spawn_with_url(heading, data, Some(&url), log, &[])
+    }
+
+    /// Starts a server that also serves /metrics on its own loopback
+    /// port: the runbook's argv with `--metrics-listen 127.0.0.1:0`
+    /// appended, so a test can scrape a counter off the real process.
+    /// The bound metrics address is the newest `serving metrics` line
+    /// in the log, read with [`metrics_addr`].
+    pub(crate) fn spawn_with_metrics(data: &Path, log: &Path) -> Self {
+        let url = postgres_url(data);
+        Self::spawn_with_url(
+            "One server",
+            data,
+            Some(&url),
+            log,
+            &["--metrics-listen", "127.0.0.1:0"],
+        )
+    }
+
+    /// [`Self::spawn_with_metrics`], waited until it listens, with the
+    /// backend proof `start` makes.
+    pub(crate) fn start_with_metrics(data: &Path, log: &Path) -> Self {
+        let mut server = Self::spawn_with_metrics(data, log);
+        let mark = usize::try_from(fs::metadata(log).map_or(0, |m| m.len()))
+            .expect("the log's length fits usize");
+        let start = Instant::now();
+        while !server.listens(log) {
+            if let Some(status) = server.child.try_wait().unwrap() {
+                panic!("{}", exit_report(log, mark, status));
+            }
+            assert!(start.elapsed() < Duration::from_secs(60), "no listen");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        server
     }
 
     /// Starts a server on `data` whose Postgres metadata is the one the
@@ -345,7 +378,7 @@ impl Server {
         log: &Path,
     ) -> Self {
         let url = postgres_url(schema_source);
-        Self::spawn_with_url(heading, data, Some(&url), log)
+        Self::spawn_with_url(heading, data, Some(&url), log, &[])
     }
 
     /// The harness's data-directory make: private, whatever the umask.
@@ -361,6 +394,7 @@ impl Server {
         data: &Path,
         postgres_url: Option<&str>,
         log: &Path,
+        extra_args: &[&str],
     ) -> Self {
         // The binary refuses a missing data directory (#578); the harness
         // is for servers that serve, so it makes the directory the way
@@ -425,6 +459,10 @@ impl Server {
                 cmd.env("SCION_POSTGRES_URL", url);
             }
             cmd.args(serve_args);
+            // Args a variant adds to the runbook's argv.
+            for arg in extra_args {
+                cmd.arg(arg);
+            }
             // Plain log lines, so the address parses without escape
             // codes.
             cmd.env("NO_COLOR", "1")
@@ -499,11 +537,54 @@ pub(crate) fn open_store_shared_reopened(data: &Path, schema_source: &Path) -> B
     Backend::open_test_shared_in_schema(data, &schema).unwrap()
 }
 
-/// The address of the newest `serving` line in the log, if there is one.
+/// The address of the newest `serving` line in the log, if there is
+/// one. The metrics line also says `serving` and carries another
+/// listener's address, so it is not the gate: a server with
+/// `--metrics-listen` logs it first, and a bare match would answer the
+/// metrics port while the gRPC listener has not logged yet (the #715
+/// train's Postgres 18 run hit exactly this in its own parser).
 pub(crate) fn bound_addr(log: &Path) -> Option<SocketAddr> {
     let text = fs::read_to_string(log).unwrap_or_default();
-    let line = text.lines().rev().find(|line| line.contains("serving"))?;
+    let line = text
+        .lines()
+        .rev()
+        .find(|line| line.contains("serving") && !line.contains("metrics"))?;
     line.split("listen=").nth(1)?.parse().ok()
+}
+
+/// The address of the newest `serving metrics` line in the log, if
+/// there is one: the /metrics endpoint a `--metrics-listen` spawn
+/// opened.
+pub(crate) fn metrics_addr(log: &Path) -> Option<SocketAddr> {
+    let text = fs::read_to_string(log).unwrap_or_default();
+    let line = text
+        .lines()
+        .rev()
+        .find(|line| line.contains("serving metrics"))?;
+    line.split("listen=").nth(1)?.parse().ok()
+}
+
+/// The value of one counter on a server's /metrics body: the line
+/// `name N` (the render writes counters with no labels). A plain
+/// `Connection: close` GET, so the tests need no HTTP client.
+pub(crate) fn metric_total(addr: SocketAddr, name: &str) -> Option<u64> {
+    let mut stream = TcpStream::connect(addr).ok()?;
+    stream
+        .write_all(
+            format!("GET /metrics HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .ok()?;
+    let mut body = Vec::new();
+    std::io::Read::read_to_end(&mut stream, &mut body).ok()?;
+    let text = String::from_utf8_lossy(&body);
+    // The body follows the first blank line; the counter's line names it.
+    text.lines()
+        .find(|line| line.starts_with(name) && line[name.len()..].starts_with(' '))?
+        .split(' ')
+        .next_back()?
+        .parse()
+        .ok()
 }
 
 impl Drop for Server {

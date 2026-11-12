@@ -1,16 +1,16 @@
 //! One forced interleaving of the land model (#888): land A parks
 //! between its plan and its settle; `main` moves under it; A's settle
-//! must lose the compare-and-swap, answer pending, and leave the land
-//! pending for its key; the caller's retry with the same key replans
-//! and lands on the new head. The park is the file seam behind
-//! `test-hooks`: the test arms the point, waits for the hit, moves the
-//! ref, and releases A - so the order holds on any machine, and a
-//! failure replays to the same order.
+//! must lose the compare-and-swap, and `finish` replans inside the
+//! same call, so the first reply is Landed on the new head. The park
+//! is the file seam behind `test-hooks`: the test arms the point,
+//! waits for the hit, moves the ref, and releases A - so the order
+//! holds on any machine, and a failure replays to the same order.
 
 #![cfg(unix)]
 
 mod common;
 
+use std::net::SocketAddr;
 use std::path::Path;
 
 use common::*;
@@ -133,15 +133,30 @@ async fn get_changeset(scion: &mut Scion, id: ChangesetId) -> Changeset {
     Changeset::decode_with_id(&bytes).unwrap().0
 }
 
+/// Reads `scion_land_replans_total` off the server's /metrics. The
+/// render omits the counter while it is zero, so a missing line reads
+/// as zero. The scrape runs off the runtime: a blocking read must not
+/// sit on a worker.
+async fn scrape_replans(metrics: SocketAddr) -> u64 {
+    tokio::task::spawn_blocking(move || metric_total(metrics, "scion_land_replans_total"))
+        .await
+        .unwrap()
+        .unwrap_or(0)
+}
+
 /// The park makes the compare-and-swap loss replay: A plans on the
 /// root, parks, the ref moves, A's settle loses the compare-and-swap,
-/// and the retry with the same key lands A on the new head.
+/// and `finish` replans and lands A on the new head in the same call.
+/// The replan counter proves the loss: it rises by exactly one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_parked_land_replans_when_the_ref_moves_under_it() {
     let dir = private_tempdir();
     let (data, log) = (dir.path().join("data"), dir.path().join("server.log"));
     create_repo(&data);
-    let server = Server::start(&data, &log);
+    // The metrics spawn: the replan counter must be scrapeable off the
+    // real process, so the test fails if the loss never happened.
+    let server = Server::start_with_metrics(&data, &log);
+    let metrics = metrics_addr(&log).expect("the server serves metrics");
     let (mut scion, mut objects) = connect(&server.url).await.unwrap();
     let root = resolve_ref(&mut objects, "main")
         .await
@@ -178,6 +193,9 @@ async fn a_parked_land_replans_when_the_ref_moves_under_it() {
         "the import's move takes the ref"
     );
 
+    // The replan counter before the release: the loss must show on it.
+    let before = scrape_replans(metrics).await;
+
     // A goes on. Its compare-and-swap lost the ref, and the finish
     // replans inside the same call: the attempt that lost reads the
     // import's head, and the land lands on it. The reply never shows
@@ -186,6 +204,13 @@ async fn a_parked_land_replans_when_the_ref_moves_under_it() {
     // lost the compare-and-swap can produce.
     release_park(&data, POINT, "a");
     assert_eq!(first.await.unwrap(), LandState::Landed);
+
+    // The replan counter rose by exactly one: the loss happened, and
+    // only once. Without it, a later change that moves the park point
+    // before the plan would let A plan on the import's head, land
+    // without a loss, and the chain would still hold.
+    let after = scrape_replans(metrics).await;
+    assert_eq!(after, before + 1, "the land replanned exactly once");
 
     // The chain is root, C, A's result: the import's move first, A's
     // land rebased onto it.
