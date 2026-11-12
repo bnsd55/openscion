@@ -1835,15 +1835,15 @@ mod tests {
     /// so a swap serves wrong hints to the transport.
     #[test]
     fn the_counting_bodies_delegate_the_hints() {
+        use http_body::Body as _;
         let metrics = std::sync::Arc::new(Metrics::default());
         let rpc = metrics.rpc("/scion.v1.Scion/Blame").unwrap();
         let frames: Vec<Result<http_body::Frame<bytes::Bytes>, std::convert::Infallible>> =
             vec![Ok(http_body::Frame::data(bytes::Bytes::from_static(b"hi")))];
-        let mut frames_body = CountingFrames {
+        let frames_body = CountingFrames {
             inner: boxed(StreamBody::new(tokio_stream::iter(frames))),
             counted_in: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
-        use http_body::Body as _;
         assert!(!frames_body.is_end_stream(), "a frame is still coming");
         let mut body = CountingBody {
             inner: boxed(http_body_util::Full::new(bytes::Bytes::from_static(b"hi"))),
@@ -1893,18 +1893,9 @@ mod tests {
     /// future ends the serve loop cleanly.
     #[tokio::test]
     async fn the_metrics_endpoint_serves_and_shuts_down() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let metrics = std::sync::Arc::new(Metrics::default());
-        metrics.blob_sync(4_000);
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-        let server = tokio::spawn(serve(listener, metrics.clone(), async move {
-            let _ = shutdown_rx.await;
-        }));
-        let mut served = false;
-        for path in ["/metrics", "/nope"] {
-            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        async fn scrape(addr: std::net::SocketAddr, path: &str) -> String {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
             stream
                 .write_all(
                     format!("GET {path} HTTP/1.1\r\nhost: t\r\nconnection: close\r\n\r\n")
@@ -1914,21 +1905,27 @@ mod tests {
                 .unwrap();
             let mut buf = Vec::new();
             stream.read_to_end(&mut buf).await.unwrap();
-            let text = String::from_utf8_lossy(&buf).to_string();
-            if path == "/metrics" {
-                assert!(text.contains("200"), "{text}");
-                assert!(text.contains("scion_blob_sync_seconds_count 1"), "{text}");
-                served = true;
-            } else {
-                assert!(text.contains("404"), "{text}");
-            }
+            String::from_utf8_lossy(&buf).to_string()
         }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let metrics = std::sync::Arc::new(Metrics::default());
+        metrics.blob_sync(4_000);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve(listener, metrics.clone(), async move {
+            let _ = shutdown_rx.await;
+        }));
+        let page = scrape(addr, "/metrics").await;
+        assert!(page.contains("200"), "{page}");
+        assert!(page.contains("scion_blob_sync_seconds_count 1"), "{page}");
+        let other = scrape(addr, "/nope").await;
+        assert!(other.contains("404"), "{other}");
         let _ = shutdown_tx.send(());
-        tokio::time::timeout(std::time::Duration::from_secs(5), server)
-            .await
-            .expect("serve ends on shutdown")
-            .expect("serve ends without an error");
-        assert!(served, "/metrics answered");
+        let _: std::io::Result<()> =
+            tokio::time::timeout(std::time::Duration::from_secs(5), server)
+                .await
+                .expect("serve ends on shutdown")
+                .expect("serve ends without an error");
     }
 
     /// `shutdown_signal` resolves on SIGTERM: the server's own signal
