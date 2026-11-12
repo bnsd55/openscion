@@ -945,6 +945,15 @@ fn derive_steps<K: Kind>(
         // bounded ([`Pg::wait_for_writers`]), so a load that never stops
         // delays a step, it does not stop the walk.
         store.wait_for_writers(deadline)?;
+        // The file park of the interleaving tests (#888): between the
+        // derive steps, keyed by the kind's name. The park holds no
+        // Postgres transaction and no pool reader - the step's
+        // transaction committed above, and the next step's read has not
+        // begun - and no ref slot lock: the land's caller dropped its
+        // ref slot for the derive, so other lands go on. The steps
+        // before it stay; a walk that stops here goes on from them.
+        #[cfg(any(test, feature = "test-hooks"))]
+        crate::pause::hit("between-derives", K::NAME);
         // The command callers (no deadline) log each step, so an
         // operator can tell a slow run from a stuck one; a request's
         // fill stays quiet.

@@ -491,11 +491,7 @@ mod tests {
     /// umask. The data-directory check refuses one group or others can
     /// read.
     fn private_tempdir() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        let mut mode = std::fs::metadata(dir.path()).unwrap().permissions();
-        mode.set_mode(0o700);
-        std::fs::set_permissions(dir.path(), mode).unwrap();
-        dir
+        crate::test_support::private_tempdir()
     }
 
     /// A URL file the preflight reads: mode 0600, as a secret wants.

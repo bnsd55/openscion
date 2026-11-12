@@ -70,9 +70,7 @@ fn run(mut command: Command) {
 /// A temp directory with mode 0700, set rather than left to the umask of
 /// the run.
 fn private_tempdir() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
-    dir
+    scion_server::test_support::private_tempdir()
 }
 
 /// `dir` and every directory below it, with its mode bits.
