@@ -1971,13 +1971,26 @@ mod tests {
     fn a_cancelled_call_counts_its_latency_and_bytes() {
         let metrics = std::sync::Arc::new(Metrics::default());
         let rpc = metrics.rpc("/scion.v1.Scion/Blame").unwrap();
-        // A duration the first buckets cover, far from the later ones.
+        // A duration between the 4 ms and 16 ms bounds, so the bucket
+        // membership is exact and a doubled micros crosses the 16 ms
+        // line.
         let started = Instant::now();
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        std::thread::sleep(std::time::Duration::from_millis(9));
         metrics.cancelled(rpc, started, 11, 13);
         let text = metrics.render();
         assert!(
             text.contains("scion_requests_total{rpc=\"Scion/Blame\",code=\"cancelled\"} 1\n"),
+            "{text}"
+        );
+        // The duration sits between the 4 ms and 16 ms bounds: the 4 ms
+        // bucket stays empty and the 16 ms one holds the call, so a
+        // doubled micros or a flipped comparison moves the count.
+        assert!(
+            !text.contains("scion_request_seconds_bucket{rpc=\"Scion/Blame\",le=\"0.004\"} 1\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("scion_request_seconds_bucket{rpc=\"Scion/Blame\",le=\"0.016\"} 1\n"),
             "{text}"
         );
         assert!(
