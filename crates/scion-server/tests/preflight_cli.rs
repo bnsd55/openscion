@@ -11,11 +11,7 @@ use std::process::{Command, Output};
 /// umask. The data-directory check refuses one group or others can
 /// read.
 fn private_tempdir() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    let mut mode = fs::metadata(dir.path()).unwrap().permissions();
-    mode.set_mode(0o700);
-    fs::set_permissions(dir.path(), mode).unwrap();
-    dir
+    scion_server::test_support::private_tempdir()
 }
 
 /// A secret file the CLI reads: mode 0600, as the checked read wants.
