@@ -214,6 +214,58 @@ fn bound_addr(log: &Path) -> Option<String> {
     Some(listen.trim().to_owned())
 }
 
+/// The live server children of this test process, by pid. A stage
+/// whose watcher fires stops the run, and the run's servers must not
+/// outlive it: a leaked server holds its sessions under a name the
+/// next test takes too (every process names its first server
+/// scion-test-1), so the leak would name itself as that test's
+/// failure. Registered at spawn, forgotten at drop.
+static SERVER_CHILDREN: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+fn forget_server_child(pid: u32) {
+    SERVER_CHILDREN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retain(|&known| known != pid);
+}
+
+/// Kills every live server child and waits, briefly, for the database
+/// to notice their sessions' sockets closing. Runs on the watcher
+/// thread of a stage that never returned, so nothing here may hang the
+/// stop: a database that does not answer is left to the exit that
+/// follows.
+fn stop_server_children() {
+    let children: Vec<u32> = SERVER_CHILDREN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    for pid in &children {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", &pid.to_string()])
+            .status();
+    }
+    if children.is_empty() {
+        return;
+    }
+    let Ok(mut client) = postgres::Client::connect(&pg_url(), postgres::NoTls) else {
+        return;
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let left = client
+            .query_one(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE application_name LIKE 'scion-test-%'",
+                &[],
+            )
+            .map_or(0, |row| row.get::<_, i64>(0));
+        if left == 0 {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// One `scion-server` process over the database. `kill` is SIGKILL: the
 /// process dies with its sockets open, which is the crash a FIN-less cut
 /// leaves.
@@ -258,6 +310,11 @@ impl PgServer {
             .stderr(Stdio::from(file.try_clone().unwrap()))
             .spawn()
             .unwrap();
+        let pid = child.id();
+        SERVER_CHILDREN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(pid);
         drop(file);
         Self {
             child,
@@ -341,6 +398,7 @@ impl PgServer {
 
 impl Drop for PgServer {
     fn drop(&mut self) {
+        forget_server_child(self.child.id());
         let _ = self.child.kill();
         let _ = self.child.wait();
         // A server that ends here is one a loop round is done with: its
@@ -616,11 +674,13 @@ impl Stage {
         let (done, wait) = std::sync::mpsc::channel();
         let watcher_name = name.to_owned();
         std::thread::spawn(move || {
+            use std::io::Write as _;
             if wait.recv_timeout(bound) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                // The run stops, but its servers must not outlive it.
+                stop_server_children();
                 // stderr, not the captured stdout: the exit below ends
                 // the process before the harness flushes its capture,
                 // and this message is the only trace of the stage.
-                use std::io::Write as _;
                 let _ = writeln!(
                     std::io::stderr(),
                     "the stage {watcher_name:?} never returned within \
