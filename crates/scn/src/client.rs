@@ -508,6 +508,30 @@ pub(crate) fn now_unix_secs() -> Result<i64> {
 }
 
 #[cfg(test)]
+mod clock_tests {
+    use super::*;
+
+    /// The clock reads the system time: within a minute of now, and
+    /// past 2026, so a stubbed constant cannot stand in for it.
+    #[test]
+    fn the_clock_reads_the_system_time() {
+        let secs = now_unix_secs().unwrap();
+        let now = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        assert!(secs > 1_767_225_600, "the clock reads {secs}: before 2026");
+        assert!(
+            (now - secs).abs() < 60,
+            "the clock reads {secs}, the system says {now}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use scion_proto::runtime::deadline::Until;
@@ -557,6 +581,34 @@ mod tests {
             let err = check_socket(path, owner + 1).unwrap_err();
             assert!(err.to_string().contains("owns it"), "{err:#}");
         }
+    }
+
+    /// A regular file where the socket should be is refused, whatever its
+    /// owner: the token must never go to something that is not a socket.
+    #[test]
+    fn a_regular_file_where_the_socket_should_be_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("plain.txt");
+        fs::write(&path, b"not a socket\n").unwrap();
+        let owner = fs::symlink_metadata(&path).unwrap().uid();
+        let err = check_socket(&path, owner).unwrap_err();
+        assert!(err.to_string().contains("not a socket"), "{err:#}");
+    }
+
+    /// A symlink at the socket path is refused even when it points at a
+    /// real socket the user owns: the check reads the link itself, not
+    /// what it points at, so a swap of the path under a running command
+    /// cannot slip the token to a socket the caller never named.
+    #[test]
+    fn a_symlink_at_the_socket_path_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let socket = tmp.path().join("daemon.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let link = tmp.path().join("link.sock");
+        std::os::unix::fs::symlink(&socket, &link).unwrap();
+        let owner = fs::symlink_metadata(&socket).unwrap().uid();
+        let err = check_socket(&link, owner).unwrap_err();
+        assert!(err.to_string().contains("not a socket"), "{err:#}");
     }
 
     #[test]
