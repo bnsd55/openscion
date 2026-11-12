@@ -2231,6 +2231,66 @@ mod tests {
         std::fs::set_permissions(&overlay, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
+    /// The mount itself dedupes a repeated failure below the cap, and
+    /// holds the cap once it is full: a repeat does not announce the cap,
+    /// and a new failure past the cap is not inserted.
+    #[cfg(feature = "unstable-writable-mount")]
+    #[tokio::test]
+    async fn the_mount_dedupes_a_repeat_and_holds_the_cap() {
+        let test = start(&[
+            ("README.md", b"hello\n", Some(false)),
+            ("other.txt", b"there\n", Some(false)),
+        ])
+        .await;
+        let overlay = test.vfs.overlay.clone();
+        std::fs::set_permissions(&overlay, std::fs::Permissions::from_mode(0o500)).unwrap();
+        {
+            let mut warned = test.vfs.warned.lock().unwrap();
+            for i in 0..(WARNED_CAP - 1) {
+                warned
+                    .set
+                    .insert(("earlier", std::path::PathBuf::from(format!("f{i}"))));
+            }
+        }
+        // The write creates the file: the overlay directory lost its
+        // write permission, so the create fails with EACCES. A first
+        // failing write warns and is kept; the repeat of the same
+        // failure adds nothing and announces no cap.
+        let first = test
+            .vfs
+            .write(find(&test.vfs, "README.md").await.unwrap(), 0, b"x\n")
+            .await;
+        assert!(matches!(first, Err(nfsstat3::NFS3ERR_IO)), "{first:?}");
+        {
+            let warned = test.vfs.warned.lock().unwrap();
+            assert_eq!(warned.set.len(), WARNED_CAP, "{warned:?}");
+            assert!(!warned.capped, "the cap was announced too early");
+        }
+        let again = test
+            .vfs
+            .write(find(&test.vfs, "README.md").await.unwrap(), 0, b"x\n")
+            .await;
+        assert!(matches!(again, Err(nfsstat3::NFS3ERR_IO)), "{again:?}");
+        {
+            let warned = test.vfs.warned.lock().unwrap();
+            assert_eq!(warned.set.len(), WARNED_CAP);
+            assert!(!warned.capped, "a repeat announced the cap");
+        }
+        // A distinct failure past the cap is not kept, and the cap is
+        // announced once.
+        let third = test
+            .vfs
+            .write(find(&test.vfs, "other.txt").await.unwrap(), 0, b"x\n")
+            .await;
+        assert!(matches!(third, Err(nfsstat3::NFS3ERR_IO)), "{third:?}");
+        {
+            let warned = test.vfs.warned.lock().unwrap();
+            assert_eq!(warned.set.len(), WARNED_CAP, "{warned:?}");
+            assert!(warned.capped, "the cap was not announced");
+        }
+        std::fs::set_permissions(&overlay, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
     /// A distinct failure past the cap is warned about no more, and the
     /// cap itself is announced once, by the mount that reached it.
     #[test]
