@@ -470,6 +470,12 @@ fn a_refusing_open_writes_nothing_to_the_catalog() {
         // the libpq startup option `-crole=<role>` below, so every
         // privilege check the open makes is the role's while the
         // connection keeps the test's own credential.
+        // A run interrupted before this test's cleanup leaves the role
+        // behind, and the next run's CREATE would refuse it (E42710):
+        // the seed drops it first, so the suite is rerun-safe.
+        admin
+            .batch_execute(&format!("DROP ROLE IF EXISTS {role}"))
+            .expect("a stale role from an interrupted run goes");
         admin
             .batch_execute(&format!("CREATE ROLE {role} NOLOGIN"))
             .expect("the role is made");
