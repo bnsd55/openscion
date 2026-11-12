@@ -33,7 +33,7 @@ async fn the_server_serves_while_the_startup_memory_probe_blocks() {
         std::thread::sleep(Duration::from_secs(2));
         Some(64 << 30)
     });
-    let dir = tempfile::tempdir().unwrap();
+    let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).expect("the store opens");
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
