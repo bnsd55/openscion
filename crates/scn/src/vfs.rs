@@ -2597,14 +2597,16 @@ mod tests {
             std::fs::metadata(&tool).unwrap().permissions().mode() & 0o111 != 0,
             "the moved executable lost its bit: {tool:?}"
         );
-        // The deleted child of the moved directory stays deleted.
+        // The deleted child of the moved directory stays deleted, and
+        // the listing of the new path holds exactly the moved names.
         assert!(find(&test.vfs, "crate/gone.txt").await.is_err());
         let crate_id = find(&test.vfs, "crate").await.unwrap();
         let listed = test.vfs.readdir(crate_id, 0, 100).await.unwrap();
         let names: Vec<Vec<u8>> = listed.entries.iter().map(|e| e.name.0.clone()).collect();
-        assert!(
-            !names.contains(&b"gone.txt".to_vec()),
-            "the deleted child came back in the listing: {names:?}"
+        assert_eq!(
+            names,
+            [b"inner".to_vec(), b"keep.txt".to_vec(), b"tool.sh".to_vec()],
+            "the listing of the new path"
         );
     }
 
