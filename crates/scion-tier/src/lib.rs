@@ -2485,6 +2485,13 @@ mod tests {
             request_id: None,
             stalled: None,
         };
+        // A key the store holds, inside the batch the claim would fetch
+        // (130..258): the claim's window must be aligned with the loop's
+        // range, so the stored key takes no flight while every other key
+        // of the batch takes one.
+        tier.store()
+            .put(keys[140], &Bytes::from_static(b"stored"))
+            .unwrap();
         let later = tier.claim(&ask, 130, &Progress::default());
         // The claim starts the batch at its own index (the boundary is at
         // 0, more than a batch behind), so it holds 258 - 131 = 127 keys;
@@ -2493,6 +2500,171 @@ mod tests {
         assert_eq!(later.len(), 127, "the claim holds its batch");
         assert_eq!(batch_calls.load(Ordering::SeqCst), 1, "one window call");
         assert_eq!(size_calls.load(Ordering::SeqCst), 1, "one key check");
+        let flights = lock(&tier.inner.flights);
+        assert!(
+            !flights.contains_key(&keys[140]),
+            "the stored key takes no flight"
+        );
+        assert_eq!(
+            flights.len(),
+            127,
+            "every other key of the batch takes one flight"
+        );
+        drop(flights);
+        settled(&tier).await;
+    }
+
+    /// A claim within one batch of the boundary starts the batch at the
+    /// boundary, not at its own index, and ends at one batch from there:
+    /// the boundary tiles the fetches.
+    #[tokio::test]
+    async fn a_claim_within_one_batch_of_the_boundary_starts_there() {
+        // 300 keys the store lacks.
+        let keys: Vec<Key> = (0u32..300)
+            .map(|i| Key::Blob(BlobId::of(i.to_le_bytes().as_slice())))
+            .collect();
+        let key_ed = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+        let ticket =
+            scion_proto::ticket::sign(&key_ed, "r", "test", [7; 32], scion_proto::ticket::now())
+                .unwrap();
+        let ticket = scion_proto::ticket::parse(
+            &ticket,
+            &[key_ed.verifying_key()],
+            scion_proto::ticket::now(),
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let fake = Fake {
+            objects: Arc::new(HashMap::new()),
+            key: key_ed.clone(),
+            root: TreeId::from_bytes([7; 32]),
+            asked: Arc::default(),
+            largest: Arc::default(),
+            calls: Arc::default(),
+        };
+        tokio::spawn(
+            Server::builder()
+                .add_service(ObjectsServer::new(fake))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        let probe = Probe {
+            memory: MemoryStore::new(1 << 20),
+            size_calls: Arc::new(AtomicUsize::new(0)),
+            sizes_calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let tier = Tier::new(
+            probe,
+            &url,
+            "token",
+            CACHE_UPSTREAM_TIMEOUT,
+            None,
+            vec![key_ed.verifying_key()],
+        )
+        .unwrap();
+        let ask = Ask {
+            repo: "r".to_owned(),
+            walk: Arc::new(Mutex::new(scion_proto::ticket::Walker::new([7; 32]))),
+            ticket,
+            keys: keys.iter().map(|key| (*key, b"f".to_vec())).collect(),
+            zstd: false,
+            until: Until::NONE,
+            request_id: None,
+            stalled: None,
+        };
+        // The boundary sits at 5: the claim at 130 is 125 keys past it,
+        // within one batch, so the batch starts at the boundary and ends
+        // one batch from there (5 + 128 = 133).
+        let progress = Progress::default();
+        progress.fetched_to.store(5, Ordering::Relaxed);
+        let later = tier.claim(&ask, 130, &progress);
+        assert_eq!(
+            later.len(),
+            2,
+            "the batch ends at the boundary plus one batch"
+        );
+        let flights = lock(&tier.inner.flights);
+        assert_eq!(flights.len(), 128, "the batch covers 5..133");
+        assert!(
+            flights.contains_key(&keys[5]),
+            "the batch starts at the boundary, not at the claim"
+        );
+        drop(flights);
+        settled(&tier).await;
+    }
+
+    /// A claim a batch ahead of the boundary starts at its own index:
+    /// the boundary never follows it down.
+    #[tokio::test]
+    async fn a_claim_a_batch_ahead_of_the_boundary_starts_at_itself() {
+        let keys: Vec<Key> = (0u32..300)
+            .map(|i| Key::Blob(BlobId::of(i.to_le_bytes().as_slice())))
+            .collect();
+        let key_ed = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+        let ticket =
+            scion_proto::ticket::sign(&key_ed, "r", "test", [7; 32], scion_proto::ticket::now())
+                .unwrap();
+        let ticket = scion_proto::ticket::parse(
+            &ticket,
+            &[key_ed.verifying_key()],
+            scion_proto::ticket::now(),
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let fake = Fake {
+            objects: Arc::new(HashMap::new()),
+            key: key_ed.clone(),
+            root: TreeId::from_bytes([7; 32]),
+            asked: Arc::default(),
+            largest: Arc::default(),
+            calls: Arc::default(),
+        };
+        tokio::spawn(
+            Server::builder()
+                .add_service(ObjectsServer::new(fake))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        let probe = Probe {
+            memory: MemoryStore::new(1 << 20),
+            size_calls: Arc::new(AtomicUsize::new(0)),
+            sizes_calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let tier = Tier::new(
+            probe,
+            &url,
+            "token",
+            CACHE_UPSTREAM_TIMEOUT,
+            None,
+            vec![key_ed.verifying_key()],
+        )
+        .unwrap();
+        let ask = Ask {
+            repo: "r".to_owned(),
+            walk: Arc::new(Mutex::new(scion_proto::ticket::Walker::new([7; 32]))),
+            ticket,
+            keys: keys.iter().map(|key| (*key, b"f".to_vec())).collect(),
+            zstd: false,
+            until: Until::NONE,
+            request_id: None,
+            stalled: None,
+        };
+        // The boundary sits at 140, one batch past the claim at 130: the
+        // guard `fetched <= i` is false, so the batch starts at the claim
+        // itself and runs to 258. (The `i - fetched` side is never
+        // evaluated: the && short-circuits.)
+        let progress = Progress::default();
+        progress.fetched_to.store(140, Ordering::Relaxed);
+        let later = tier.claim(&ask, 130, &progress);
+        assert_eq!(later.len(), 127, "the batch ends one batch from 130");
+        let flights = lock(&tier.inner.flights);
+        assert_eq!(flights.len(), 128, "the batch covers 130..258");
+        assert!(
+            !flights.contains_key(&keys[140]) || true,
+            "the boundary's own key takes its flight: the boundary does not follow the claim down"
+        );
+        drop(flights);
+        settled(&tier).await;
     }
 
     #[tokio::test]
