@@ -141,6 +141,14 @@ impl Server {
     pub(crate) fn try_wait(&mut self) -> Option<std::process::ExitStatus> {
         self.child.try_wait().unwrap()
     }
+
+    /// Kills the server at once (SIGKILL) and reaps it. A land the
+    /// server held dies with the process; the rows it committed
+    /// outlive it.
+    pub(crate) fn kill(&mut self) {
+        self.child.kill().unwrap();
+        self.child.wait().unwrap();
+    }
 }
 
 /// The failed start's report: the lines the server itself wrote (the log
