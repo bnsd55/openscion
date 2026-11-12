@@ -508,6 +508,30 @@ pub(crate) fn now_unix_secs() -> Result<i64> {
 }
 
 #[cfg(test)]
+mod clock_tests {
+    use super::*;
+
+    /// The clock reads the system time: within a minute of now, and
+    /// past 2026, so a stubbed constant cannot stand in for it.
+    #[test]
+    fn the_clock_reads_the_system_time() {
+        let secs = now_unix_secs().unwrap();
+        let now = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        assert!(secs > 1_767_225_600, "the clock reads {secs}: before 2026");
+        assert!(
+            (now - secs).abs() < 60,
+            "the clock reads {secs}, the system says {now}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use scion_proto::runtime::deadline::Until;

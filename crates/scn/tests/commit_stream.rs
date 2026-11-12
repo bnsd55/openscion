@@ -491,3 +491,41 @@ async fn the_client_refuses_a_torn_file() {
         "the refusal must name the change: {err:#}"
     );
 }
+
+/// A put of two chunks and a half lands the exact bytes. The reply's
+/// blob ID is the content's hash, so any wrong chunk bound, a skipped
+/// or repeated byte, or a first message without the repo's name shows
+/// in the hash or the refusal. The empty payload still sends its one
+/// empty message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_put_of_many_chunks_hashes_the_exact_bytes() {
+    let fx = Fixture::start_async().await;
+    let mut ctx =
+        open_scion::client::Ctx::connect(&fx.url, None, TOKEN, None, REPO.to_owned(), false)
+            .await
+            .unwrap();
+    // Pseudorandom bytes, so a wrong slice shows anywhere in the hash.
+    let mut data = vec![0_u8; 2 * scion_proto::CHUNK_BYTES + 512];
+    let mut seed = 0x5eed_u64;
+    for b in &mut data {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *b = ((seed >> 33) & 0xff) as u8;
+    }
+    // A bound, so a put that stalls (a message the server won't take)
+    // fails the test in seconds instead of hanging the suite.
+    let put = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        ctx.put_blob(data.clone()),
+    )
+    .await
+    .expect("the put answers in time")
+    .expect("the put lands");
+    assert_eq!(put, scion_core::BlobId::of(&data));
+    let empty = tokio::time::timeout(std::time::Duration::from_secs(30), ctx.put_blob(Vec::new()))
+        .await
+        .expect("the empty put answers in time")
+        .expect("the empty put lands");
+    assert_eq!(empty, scion_core::BlobId::of(b""));
+}
