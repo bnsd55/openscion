@@ -2984,6 +2984,104 @@ mod tests {
         settled(&tier).await;
     }
 
+    /// A reply that must grow its share past what the budget still holds
+    /// is refused, not served: cover waits and gives up, and the caller
+    /// asks again. If cover always said yes, a tier under load would
+    /// hold memory past its budget.
+    #[tokio::test]
+    async fn a_reply_that_grows_past_the_free_budget_is_refused() {
+        let data = vec![7u8; 4096];
+        let key = Key::Blob(BlobId::of(&data));
+        // An upstream that serves the object as one zstd frame.
+        struct OneZstd(Vec<u8>);
+        #[tonic::async_trait]
+        impl Objects for OneZstd {
+            async fn resolve_ref(
+                &self,
+                _: Request<ResolveRefRequest>,
+            ) -> Result<Response<ResolveRefResponse>, Status> {
+                Err(Status::unimplemented("no refs"))
+            }
+            async fn get_root_tree(
+                &self,
+                _: Request<GetRootTreeRequest>,
+            ) -> Result<Response<GetRootTreeResponse>, Status> {
+                Err(Status::unimplemented("no changesets"))
+            }
+            type GetObjectsStream = Replies;
+            async fn get_objects(
+                &self,
+                request: Request<GetObjectsRequest>,
+            ) -> Result<Response<Replies>, Status> {
+                let data = self.0.clone();
+                let packed = object::pack(&data).unwrap();
+                let header = Header {
+                    kind: ObjectKind::Blob,
+                    id: *BlobId::of(&data).as_bytes(),
+                    encoding: Encoding::Zstd,
+                    encoded_size: packed.len(),
+                    size: data.len(),
+                };
+                let first = header
+                    .parts(object::read_chunks(&packed[..], packed.len()).unwrap())
+                    .remove(0);
+                let names_it =
+                    request.get_ref().refs.first().is_some_and(|r| {
+                        r.id == header.id && r.kind == i32::from(ObjectKind::Blob)
+                    });
+                let parts: Replies = if names_it {
+                    Box::pin(tokio_stream::iter([Ok(first)]))
+                } else {
+                    Box::pin(tokio_stream::iter([Err(Status::not_found("not asked"))]))
+                };
+                Ok(Response::new(parts))
+            }
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(
+            Server::builder()
+                .add_service(ObjectsServer::new(OneZstd(data.clone())))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        let mut tier = Tier::new_relay(
+            MemoryStore::new(1 << 20),
+            &url,
+            "token",
+            CACHE_UPSTREAM_TIMEOUT,
+            None,
+        )
+        .unwrap();
+        let ask = only_fetch_ask(key.clone());
+        // A short wait: the refusal comes in milliseconds.
+        {
+            let inner = Arc::get_mut(&mut tier.inner).unwrap();
+            inner.busy = Duration::from_millis(300);
+        }
+        // The reply budget holds all but the reply's first take (the
+        // stored form's length) plus 8 bytes: the first take fits, the
+        // growth for a non-zstd client (the stored frame and the
+        // unpacked bytes on top) does not.
+        let packed = object::pack(&data).unwrap();
+        let grow = packed.len() + data.len() + UNPACK_BYTES;
+        let keep_free = packed.len() + 8;
+        let pre = IN_FLIGHT_BYTES - keep_free;
+        let in_flight = Arc::clone(&tier.inner.in_flight);
+        let permit = in_flight
+            .try_acquire_many_owned(u32::try_from(pre).unwrap())
+            .unwrap();
+        let found = tier.produce(&ask, 0, &Progress::default()).await;
+        drop(permit); // the budget is full around the call
+        // The refusal: the reply cannot grow its share, so produce hands
+        // back None - the RPC layer answers UNAVAILABLE and the caller
+        // asks again.
+        assert!(
+            found.is_none(),
+            "the growth must be refused while the budget is held"
+        );
+        settled(&tier).await;
+    }
+
     #[tokio::test]
     async fn a_fetch_that_finds_no_slot_ends_with_unavailable() {
         let data = b"an object".to_vec();
