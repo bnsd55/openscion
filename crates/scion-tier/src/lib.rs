@@ -3232,6 +3232,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_reply_that_grows_within_the_free_budget_is_served() {
+        // The refusal test's complement: the budget leaves room for the
+        // whole growth (the bytes past the reply's first take, plus 8),
+        // so the object serves. Cover's delta must be the bytes past the
+        // share already held - a delta that also counts the held share
+        // asks for more than the budget left and refuses instead.
+        let data = vec![7u8; 4096];
+        let key = Key::Blob(BlobId::of(&data));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(
+            Server::builder()
+                .add_service(ObjectsServer::new(OneZstd(data.clone())))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        let mut tier = Tier::new_relay(
+            MemoryStore::new(1 << 20),
+            &url,
+            "token",
+            CACHE_UPSTREAM_TIMEOUT,
+            None,
+        )
+        .unwrap();
+        let ask = only_fetch_ask(key);
+        {
+            let inner = Arc::get_mut(&mut tier.inner).unwrap();
+            inner.busy = Duration::from_millis(300);
+        }
+        let packed = object::pack(&data).unwrap();
+        let grow = packed.len() + data.len() + UNPACK_BYTES;
+        // The first take's retained share sits inside the reply's permit
+        // while the growth is taken on top: the budget must leave the
+        // whole growth plus 8 bytes free.
+        let keep_free = grow + 8;
+        let in_flight = Arc::clone(&tier.inner.in_flight);
+        let permit = in_flight
+            .try_acquire_many_owned(u32::try_from(IN_FLIGHT_BYTES - keep_free).unwrap())
+            .unwrap();
+        let found = tier.produce(&ask, 0, &Progress::default()).await;
+        drop(permit); // the budget is full around the call
+        assert!(
+            found.is_some(),
+            "the growth fits what the budget left; the object must serve"
+        );
+        settled(&tier).await;
+    }
+
+    #[tokio::test]
     async fn a_fetch_that_finds_no_slot_ends_with_unavailable() {
         let data = b"an object".to_vec();
         let key = Key::Blob(BlobId::of(&data));
