@@ -2335,24 +2335,30 @@ mod tests {
             "the executable file of the ref answers its bit"
         );
         assert_eq!(test.vfs.getattr(plain).await.unwrap().mode & 0o777, 0o644);
-        let root = NFSFileSystem::root_dir(&test.vfs);
-        let (made_exec, _) = test
-            .vfs
-            .create(
-                root,
-                &filename3::from(b"tool".to_vec()),
-                sattr3 {
-                    mode: nfsserve::nfs::set_mode3::mode(0o755),
-                    ..sattr3::default()
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            test.vfs.getattr(made_exec).await.unwrap().mode & 0o777,
-            0o755,
-            "the created file keeps the mode the create named"
-        );
+        // A create is a write: the read-only default build refuses it,
+        // and with it the mode check of the created file.
+        #[cfg(feature = "unstable-writable-mount")]
+        let made_exec = {
+            let root = NFSFileSystem::root_dir(&test.vfs);
+            let (made_exec, _) = test
+                .vfs
+                .create(
+                    root,
+                    &filename3::from(b"tool".to_vec()),
+                    sattr3 {
+                        mode: nfsserve::nfs::set_mode3::mode(0o755),
+                        ..sattr3::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                test.vfs.getattr(made_exec).await.unwrap().mode & 0o777,
+                0o755,
+                "the created file keeps the mode the create named"
+            );
+            made_exec
+        };
     }
 
     #[cfg(feature = "unstable-writable-mount")]
