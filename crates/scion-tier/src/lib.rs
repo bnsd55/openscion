@@ -2351,6 +2351,133 @@ mod tests {
         }
     }
 
+    /// A upstream that refuses every GetObjects with a whole-call status
+    /// (Unauthenticated), before any object part.
+    struct Refuses;
+
+    #[tonic::async_trait]
+    impl Objects for Refuses {
+        async fn resolve_ref(
+            &self,
+            _: Request<ResolveRefRequest>,
+        ) -> Result<Response<ResolveRefResponse>, Status> {
+            Err(Status::unimplemented("no refs"))
+        }
+
+        async fn get_root_tree(
+            &self,
+            _: Request<GetRootTreeRequest>,
+        ) -> Result<Response<GetRootTreeResponse>, Status> {
+            Err(Status::unimplemented("no changesets"))
+        }
+
+        type GetObjectsStream = Replies;
+
+        async fn get_objects(
+            &self,
+            _: Request<GetObjectsRequest>,
+        ) -> Result<Response<Replies>, Status> {
+            Ok(Response::new(Box::pin(tokio_stream::iter([Err(
+                Status::unauthenticated("the upstream token was revoked"),
+            )]))))
+        }
+    }
+
+    /// An upstream that answers the first object of the ask and then ends
+    /// the stream with a per-object status (NotFound): the rest of the
+    /// objects fail alone, not the whole call.
+    struct OneThenNotFound(Vec<u8>);
+
+    #[tonic::async_trait]
+    impl Objects for OneThenNotFound {
+        async fn resolve_ref(
+            &self,
+            _: Request<ResolveRefRequest>,
+        ) -> Result<Response<ResolveRefResponse>, Status> {
+            Err(Status::unimplemented("no refs"))
+        }
+
+        async fn get_root_tree(
+            &self,
+            _: Request<GetRootTreeRequest>,
+        ) -> Result<Response<GetRootTreeResponse>, Status> {
+            Err(Status::unimplemented("no changesets"))
+        }
+
+        type GetObjectsStream = Replies;
+
+        async fn get_objects(
+            &self,
+            request: Request<GetObjectsRequest>,
+        ) -> Result<Response<Replies>, Status> {
+            let data = self.0.clone();
+            let refs = request.get_ref().refs.clone();
+            let header = Header {
+                kind: ObjectKind::Blob,
+                id: *BlobId::of(&data).as_bytes(),
+                encoding: Encoding::Raw,
+                encoded_size: data.len(),
+                size: data.len(),
+            };
+            let first = header
+                .parts(object::read_chunks(&data[..], data.len()).unwrap())
+                .remove(0);
+            let first_names_the_ask = refs
+                .first()
+                .is_some_and(|r| r.id == header.id && r.kind == i32::from(ObjectKind::Blob));
+            let parts: Replies = if first_names_the_ask {
+                Box::pin(
+                    tokio_stream::iter([Ok(first)]).chain(tokio_stream::iter([Err(
+                        Status::not_found("the second object is gone"),
+                    )])),
+                )
+            } else {
+                Box::pin(tokio_stream::iter([Err(Status::not_found(
+                    "not the asked object",
+                ))]))
+            };
+            Ok(Response::new(parts))
+        }
+    }
+
+    /// A tier in front of [`Refuses`].
+    async fn refusing_upstream() -> Tier<MemoryStore> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(
+            Server::builder()
+                .add_service(ObjectsServer::new(Refuses))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        Tier::new_relay(
+            MemoryStore::new(0),
+            &url,
+            "token",
+            CACHE_UPSTREAM_TIMEOUT,
+            None,
+        )
+        .unwrap()
+    }
+
+    /// A tier in front of [`OneThenNotFound`].
+    async fn one_then_not_found_upstream(data: &[u8]) -> Tier<MemoryStore> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(
+            Server::builder()
+                .add_service(ObjectsServer::new(OneThenNotFound(data.to_vec())))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        Tier::new_relay(
+            MemoryStore::new(1 << 20),
+            &url,
+            "token",
+            CACHE_UPSTREAM_TIMEOUT,
+            None,
+        )
+        .unwrap()
+    }
+
     /// A tier in front of [`Stalls`] that sends the first part of `data`.
     async fn stalled_upstream(data: &[u8]) -> Tier<MemoryStore> {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2674,6 +2801,64 @@ mod tests {
             let flights = lock(&tier.inner.flights);
             assert_eq!(flights.len(), 128, "the batch covers 130..258");
         }
+        settled(&tier).await;
+    }
+
+    /// An upstream that refuses the whole call before any object: the
+    /// caller's failure is the call's own (whole_call), so a caller with
+    /// a later deadline asks again. A per-object reading of a
+    /// whole-call status would leave the other waiters hanging on their
+    /// deadlines while the upstream is broken.
+    #[tokio::test]
+    async fn an_upstream_that_refuses_the_call_fails_the_whole_call() {
+        let tier = refusing_upstream().await;
+        let data = b"an object".to_vec();
+        let key = Key::Blob(BlobId::of(&data));
+        let ask = only_fetch_ask(key);
+        let failed = tier
+            .fetch(&ask, 0, &Progress::default())
+            .await
+            .expect_err("the upstream refused the call");
+        assert_eq!(failed.status.code(), Code::Unauthenticated, "{failed:?}");
+        assert!(
+            failed.whole_call,
+            "the refusal is the call's own, not one object's"
+        );
+        settled(&tier).await;
+    }
+
+    /// An upstream that gives the first object and ends its reply with a
+    /// per-object status: the given object reaches its caller, and the
+    /// gone one fails alone (whole_call false), so the rest of the call
+    /// stands.
+    #[tokio::test]
+    async fn a_gone_object_fails_alone_after_a_given_one() {
+        let data = b"the object upstream has".to_vec();
+        let tier = one_then_not_found_upstream(&data).await;
+        let given = Key::Blob(BlobId::of(&data));
+        let gone = Key::Blob(BlobId::of(b"the object upstream lacks"));
+        let ask = only_fetch_ask(given.clone());
+        let mut keys = ask.keys.clone();
+        keys.push((gone, b"g".to_vec()));
+        let ask = Ask { keys, ..ask };
+        let given_out = tier.fetch(&ask, 0, &Progress::default()).await.unwrap();
+        // The tier serves the object in its stored form; unpack to the
+        // bytes the fake holds.
+        assert_eq!(
+            object::unpack(&given_out.unwrap(), data.len()).unwrap(),
+            data
+        );
+        // The gone key rode the same flight: its waiter settles with the
+        // per-object refusal, not the call's own.
+        let failed = tier
+            .fetch(&ask, 1, &Progress::default())
+            .await
+            .expect_err("the gone object is refused");
+        assert_eq!(failed.status.code(), Code::NotFound, "{failed:?}");
+        assert!(
+            !failed.whole_call,
+            "the gone object fails alone; the call stood"
+        );
         settled(&tier).await;
     }
 
