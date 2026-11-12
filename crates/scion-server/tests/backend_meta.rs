@@ -19,8 +19,7 @@ fn the_archive_manifest_names_the_stores_marker() {
     let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     let out = dir.path().join("archive");
-    let manifest =
-        scion_server::archive::export(&store, dir.path(), None, true, &out).unwrap();
+    let manifest = scion_server::archive::export(&store, dir.path(), None, true, &out).unwrap();
     let marker = std::fs::read_to_string(dir.path().join("backend")).unwrap();
     let marker_uuid = marker
         .lines()
