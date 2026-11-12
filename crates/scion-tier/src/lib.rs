@@ -1880,7 +1880,6 @@ mod tests {
     /// must stay Unimplemented with the pointer to the server.
     #[tokio::test]
     async fn a_tier_answers_neither_refs_nor_root_trees() {
-        use scion_proto::v1::objects_server::Objects as _;
         use scion_proto::v1::{GetRootTreeRequest, ResolveRefRequest};
         let tier = Tier::new_relay(
             MemoryStore::new(1 << 20),
