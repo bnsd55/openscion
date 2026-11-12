@@ -2,8 +2,11 @@
 //! feature refuses the write flags before it connects. The refusal names
 //! the build, not the syntax and not the server, and it fires whatever
 //! the server answers - here, nothing at all, the address is dead.
+//!
+//! The whole file is default-build-only: with the feature on, the write
+//! path serves and these refusals do not exist.
 
-#![cfg(unix)]
+#![cfg(all(unix, not(feature = "unstable-writable-mount")))]
 
 use std::process::{Command, Output};
 
