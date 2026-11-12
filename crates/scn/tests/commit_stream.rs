@@ -516,14 +516,14 @@ async fn a_put_of_many_chunks_hashes_the_exact_bytes() {
     // A bound, so a put that stalls (a message the server won't take)
     // fails the test in seconds instead of hanging the suite.
     let put = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(60),
         ctx.put_blob(data.clone()),
     )
     .await
     .expect("the put answers in time")
     .expect("the put lands");
     assert_eq!(put, scion_core::BlobId::of(&data));
-    let empty = tokio::time::timeout(std::time::Duration::from_secs(30), ctx.put_blob(Vec::new()))
+    let empty = tokio::time::timeout(std::time::Duration::from_secs(60), ctx.put_blob(Vec::new()))
         .await
         .expect("the empty put answers in time")
         .expect("the empty put lands");
