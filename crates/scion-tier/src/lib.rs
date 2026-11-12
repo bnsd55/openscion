@@ -2351,7 +2351,7 @@ mod tests {
         }
     }
 
-    /// A upstream that refuses every GetObjects with a whole-call status
+    /// An upstream that refuses every `GetObjects` with a whole-call status
     /// (Unauthenticated), before any object part.
     struct Refuses;
 
@@ -2805,7 +2805,7 @@ mod tests {
     }
 
     /// An upstream that refuses the whole call before any object: the
-    /// caller's failure is the call's own (whole_call), so a caller with
+    /// caller's failure is the call's own (`whole_call`), so a caller with
     /// a later deadline asks again. A per-object reading of a
     /// whole-call status would leave the other waiters hanging on their
     /// deadlines while the upstream is broken.
@@ -2829,7 +2829,7 @@ mod tests {
 
     /// An upstream that gives the first object and ends its reply with a
     /// per-object status: the given object reaches its caller, and the
-    /// gone one fails alone (whole_call false), so the rest of the call
+    /// gone one fails alone (`whole_call` false), so the rest of the call
     /// stands.
     #[tokio::test]
     async fn a_gone_object_fails_alone_after_a_given_one() {
@@ -2837,7 +2837,7 @@ mod tests {
         let tier = one_then_not_found_upstream(&data).await;
         let given = Key::Blob(BlobId::of(&data));
         let gone = Key::Blob(BlobId::of(b"the object upstream lacks"));
-        let ask = only_fetch_ask(given.clone());
+        let ask = only_fetch_ask(given);
         let mut keys = ask.keys.clone();
         keys.push((gone, b"g".to_vec()));
         let ask = Ask { keys, ..ask };
