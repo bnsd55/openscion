@@ -737,6 +737,148 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
     );
 }
 
+/// A probe for the hang: one kill mid-land, and after the death a full
+/// listing of what the dead server's sessions and locks left behind in
+/// the shared database - `pg_stat_activity` first, then every lock a
+/// session of this database still holds, named by its application. The
+/// print is the finding: nothing of the killed process may remain here,
+/// so whatever the rows show is what the next rep met.
+///
+/// What the dead server left, polled to zero. The kill ended its
+/// process, so its sessions end when the database notices the closed
+/// sockets; the poll waits that instant out and the bound fails with
+/// the listing instead of holding the job. The names the server's
+/// connections carry: its setup renames every session to the schema,
+/// its URL names the client side `scion-test-N`.
+fn nothing_left_behind(client: &mut postgres::Client, schema: &str, name: &str) {
+    // The queries bind the two names; the owned copies are the shape
+    // the parameter slice takes.
+    let schema = schema.to_owned();
+    let name = name.to_owned();
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(10);
+    let (sessions, locks) = loop {
+        let sessions = client
+            .query(
+                "SELECT pid, application_name, state, wait_event_type, wait_event, \
+                 now() - xact_start AS xact_age, now() - state_change AS idle, left(query, 60) AS head \
+                 FROM pg_stat_activity \
+                 WHERE (application_name = $1 OR application_name = $2) \
+                   AND pid <> pg_backend_pid() \
+                 ORDER BY pid",
+                &[&schema, &name],
+            )
+            .expect("the session listing answers");
+        let locks = client
+            .query(
+                "SELECT l.pid, a.application_name, l.locktype, l.mode, l.granted \
+                 FROM pg_locks l \
+                 JOIN pg_stat_activity a ON a.pid = l.pid \
+                 WHERE (a.application_name = $1 OR a.application_name = $2) \
+                   AND a.pid <> pg_backend_pid() \
+                 ORDER BY l.pid, l.locktype",
+                &[&schema, &name],
+            )
+            .expect("the lock listing answers");
+        if sessions.is_empty() && locks.is_empty() {
+            break (sessions, locks);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the killed server's rows never ended: {} sessions, {} locks \
+             after {:?}\n{sessions:#?}\n{locks:#?}",
+            sessions.len(),
+            locks.len(),
+            started.elapsed(),
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    println!(
+        "probe: the killed server left nothing: {} sessions, {} locks, \
+         the database was clean at {:?}",
+        sessions.len(),
+        locks.len(),
+        started.elapsed(),
+    );
+}
+
+#[test]
+fn a_kill_during_a_land_leaves_no_session_or_lock_behind() {
+    let _one = one_server();
+    let dir = scion_server::test_support::private_tempdir();
+    let data = dir.path().join("data");
+    let log = dir.path().join("server.log");
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
+    let schema = Backend::test_schema(&data);
+    drop_schema(&schema);
+    create_schema(&schema);
+    seed_repo(&data);
+    // Both changesets are seeded before the server spawns: its open
+    // takes the schema's one-server lock and a test-side open beside it
+    // is refused by the fence that guards the same store.
+    let warm = seed_wide_changeset(&data, "warm");
+    let cut = seed_wide_changeset(&data, "cut");
+    let mut server = PgServer::spawn(&data, &schema, &log);
+    warm_land(&server, warm, "warm");
+
+    // The land runs while the kill lands: the same shape the old-or-new
+    // test kills.
+    let url = server.url.clone();
+    let handle = std::thread::spawn(move || land(&url, cut.as_bytes(), "cut"));
+    std::thread::sleep(Duration::from_millis(400));
+    server.kill_and_wait();
+    let _ = handle.join();
+
+    let mut client = raw(&pg_url());
+    nothing_left_behind(&mut client, &schema, &server.name);
+
+    // The rows the database held the moment after the kill, whatever
+    // their owner: the full picture the next rep met.
+    let rows = client
+        .query(
+            "SELECT pid, application_name, state, wait_event_type, wait_event, \
+             left(query, 60) AS head \
+             FROM pg_stat_activity \
+             WHERE datname = current_database() AND pid <> pg_backend_pid() \
+             ORDER BY pid",
+            &[],
+        )
+        .expect("the session listing answers");
+    println!("--- sessions after the kill: {} rows", rows.len());
+    for row in rows {
+        println!(
+            "    pid {} name {:?} state {:?} wait {:?}/{:?} q {}",
+            row.get::<_, i32>("pid"),
+            row.get::<_, Option<String>>("application_name"),
+            row.get::<_, Option<String>>("state"),
+            row.get::<_, Option<String>>("wait_event_type"),
+            row.get::<_, Option<String>>("wait_event"),
+            row.get::<_, Option<String>>("head")
+                .as_deref()
+                .unwrap_or(""),
+        );
+    }
+    // The schema's advisory keys, by name: the session locks die with
+    // the sessions; a key held with no session would be a prepared
+    // transaction, which no session poll can see.
+    let keys = client
+        .query_one(
+            "SELECT (SELECT count(*) FROM pg_locks \
+              WHERE locktype = 'advisory' AND granted \
+                AND objid IN (hashtext($1), hashtext($1 || ':gc'))) \
+             + (SELECT count(*) FROM pg_locks \
+              WHERE locktype = 'advisory' AND granted AND pid IS NULL)",
+            &[&schema],
+        )
+        .expect("the key count answers")
+        .get::<_, i64>(0);
+    assert_eq!(
+        keys, 0,
+        "the killed server left an advisory key held: {keys} keys on \
+         the schema or held without a session"
+    );
+}
+
 /// A kill while the schema upgrades leaves the database at one whole
 /// version, and the next start upgrades it and serves.
 #[test]
