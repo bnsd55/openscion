@@ -720,6 +720,10 @@ impl Disk {
     fn insert_oldest(&mut self, key: Key, size: usize) {
         // The walk only queues files the index does not name, so this is
         // always a fresh object.
+        debug_assert!(
+            self.state(key).unwrap_or_default().is_none(),
+            "the walk queued a file the index names"
+        );
         self.objects += 1;
         self.bytes += size as u64;
         self.newest.insert(key, Some((0, size)));
