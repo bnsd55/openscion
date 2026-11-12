@@ -77,6 +77,42 @@ pub(crate) struct Server {
     pub url: String,
 }
 
+/// The land park directory of a data directory: a sibling of it in the
+/// test's own tempdir, so parallel tests never share one. The server
+/// reads the path from the env; the helpers below speak the file seam.
+pub(crate) fn pause_dir(data: &Path) -> std::path::PathBuf {
+    data.parent().unwrap_or(data).join("pause")
+}
+
+/// Arms a park point for a land: the next land with `key` that reaches
+/// `point` parks there until [`release_park`].
+pub(crate) fn arm_park(data: &Path, point: &str, key: &str) {
+    let dir = pause_dir(data);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(format!("{point}.{key}.arm")), b"").unwrap();
+}
+
+/// Waits for the parked land to answer: the hit file appears when the
+/// land sits at the point. The wait has the floor the stage bounds
+/// run under: a shared runner can hold a call for the reader pool's
+/// own wait, so anything shorter is a false alarm.
+pub(crate) fn wait_park(data: &Path, point: &str, key: &str) {
+    let hit = pause_dir(data).join(format!("{point}.{key}.hit"));
+    let started = Instant::now();
+    while !hit.exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the land never parked at {point} for {key}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Ends the park: the land at `point` for `key` goes on.
+pub(crate) fn release_park(data: &Path, point: &str, key: &str) {
+    fs::write(pause_dir(data).join(format!("{point}.{key}.release")), b"").unwrap();
+}
+
 /// The token file of this test process: one per process, in the temp
 /// dir the ancestor walk accepts, private to the owner.
 pub(crate) fn token_file() -> &'static std::path::PathBuf {
@@ -395,6 +431,11 @@ impl Server {
                 // The write park of the two-process race test: inert
                 // unless a test creates a park file for a blob.
                 .env("SCION_TEST_PARK_WRITES", "1")
+                // The land parks of the interleaving tests: the
+                // directory the park files live in, one per data
+                // directory, so parallel tests never share one. Inert
+                // unless a test arms a point in it.
+                .env("SCION_TEST_PAUSE_DIR", pause_dir(data))
                 .env("RUST_LOG", "info")
                 .stdout(log_file.try_clone().unwrap())
                 .stderr(log_file)
