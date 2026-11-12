@@ -591,8 +591,25 @@ fn warm_land(server: &PgServer, changeset: ChangesetId, key: &str) -> Duration {
 /// A kill while a wide land runs leaves the ref at its old or its new
 /// target, the metadata whole, and a replay of the same request key
 /// agreeing with what the ref says.
+/// One stage of the crash test with its bound: the stage prints its
+/// own time, so a hung job's log names the stage that sat, and panics
+/// with the stage's name when it runs past the bound. Each bound is
+/// about ten times the slowest time twenty local runs measured, so a
+/// stage that merely runs slow passes and a stage that sits fails with
+/// its name.
+fn stage(name: &str, bound: Duration, started: Instant) {
+    let took = started.elapsed();
+    println!("stage {name}: {took:?}");
+    assert!(
+        took <= bound,
+        "the stage {name:?} ran {took:?}, past its {bound:?} bound"
+    );
+}
+
 #[test]
+#[allow(clippy::too_many_lines)]
 fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
+    let whole_started = Instant::now();
     let _one = one_server();
     let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");
@@ -604,13 +621,21 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
     let schema = Backend::test_schema(&data);
     drop_schema(&schema);
     create_schema(&schema);
+    let stage_started = Instant::now();
     seed_repo(&data);
-    // The warm land, whole: its time sets the step of the kills.
-    // (The server's log: the tempdir keeps it; a failure prints it.)
+    stage(
+        "the seed of the repo",
+        Duration::from_secs(3),
+        stage_started,
+    );
+    let stage_started = Instant::now();
     let warm = seed_wide_changeset(&data, "warm");
+    stage("the warm seed", Duration::from_secs(50), stage_started);
+    let stage_started = Instant::now();
     let mut server = PgServer::spawn(&data, &schema, &log);
     warm_land(&server, warm, "warm");
     server.kill_and_wait();
+    stage("the warm land", Duration::from_secs(16), stage_started);
 
     // One wide changeset per rep, seeded before the loop, each on the
     // head its rep will find: the kill of rep k lands inside rep k's own
@@ -619,6 +644,7 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
     // measure: the probe's land on the rep's own server and head is the
     // twin of the land the rep kills, so the kill step is measured from
     // what the kill interrupts and not from the first land's time.
+    let stage_started = Instant::now();
     let cuts: Vec<_> = (0..REPS)
         .map(|k| {
             (
@@ -629,6 +655,7 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
             )
         })
         .collect();
+    stage("the cuts' seeds", Duration::from_secs(1062), stage_started);
 
     // Kill mid-land, rep after rep, each with its own changeset and
     // request key, until the kills have produced both endings. Every rep
@@ -643,35 +670,45 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
     // endings, and the factors alone do not reach the early ones.
     let mut scale = 1.0;
     for (k, (name, cs, probe_name, probe_cs)) in cuts.iter().enumerate() {
+        let stage_started = Instant::now();
         let mut server = PgServer::spawn(&data, &schema, &log);
+        stage("the spawn", Duration::from_secs(6), stage_started);
         // The measure is the kill's twin: the same server, the same
         // head depth, a land of the same width. The step comes from it,
         // so a batching change of the product moves the kills with it.
         let probe_started = Instant::now();
         land(&server.url, probe_cs.as_bytes(), probe_name).expect("the probe lands");
         let step = probe_started.elapsed() / 8;
+        stage("the probe land", Duration::from_secs(2), probe_started);
         // The head after the probe, read through the server: the test's
         // own open would take the schema's one-server lock beside a
         // running server, and a second writer on one store is refused.
+        let stage_started = Instant::now();
         let head = ChangesetId::try_from(resolve_ref(&server.url, "main").as_slice())
             .expect("the ref names a changeset");
+        stage("the head read", Duration::from_millis(120), stage_started);
         let call_name = name.clone();
         let call_cs = *cs;
         let url = server.url.clone();
+        let kill_started = Instant::now();
         let handle = std::thread::spawn(move || land(&url, call_cs.as_bytes(), &call_name));
         // The move sits at the very end of a land, so the factors run
         // past the whole measured land (up to 11/8 of it): a kill after
         // the reply still shows the new ending.
         let factor = k % 11 + 1;
         std::thread::sleep(step.mul_f64(scale) * u32::try_from(factor).unwrap());
+        stage("the land to the kill", Duration::from_secs(2), kill_started);
+        let wait_started = Instant::now();
         server.kill_and_wait();
         let _ = handle.join();
+        stage("the kill and wait", Duration::from_secs(1), wait_started);
 
         // The ref is at the head it had (the kill came before the
         // move) or at a changeset the move put there. A landed land
         // rebases onto the head it found, so the ref's target names a
         // changeset of its own, whose first parent is the head the
         // land rebased onto.
+        let read_started = Instant::now();
         let target = ref_target(&data);
         let moved = target != head;
         reps += 1;
@@ -686,13 +723,22 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
                 "rep {k}: the landed changeset is not on the head"
             );
         }
+        stage(
+            "the reads after the kill",
+            Duration::from_secs(7),
+            read_started,
+        );
 
         // One restarted server answers the replay of the same key. A
         // ref that moved reports the first move's outcome and moves
         // nothing; a ref that did not move takes the retry and lands.
         // Either way the ref must end exactly where the reply says.
+        let stage_started = Instant::now();
         let mut server = PgServer::spawn(&data, &schema, &log);
+        stage("the spawn", Duration::from_secs(6), stage_started);
+        let replay_started = Instant::now();
         let replay = land(&server.url, cs.as_bytes(), name).expect("the replay answers");
+        stage("the replay land", Duration::from_secs(3), replay_started);
         assert_eq!(
             replay.state(),
             LandState::Landed,
@@ -702,7 +748,10 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
             .expect("the reply names a changeset");
         // The server is gone before the seam reads: its one-server lock
         // is the store's, and the test's own open must not meet it.
+        let wait_started = Instant::now();
         server.kill_and_wait();
+        stage("the kill and wait", Duration::from_secs(1), wait_started);
+        let read_started = Instant::now();
         let after = ref_target(&data);
         assert_eq!(after, landed, "rep {k}: the ref disagrees with the reply");
         assert!(
@@ -718,6 +767,11 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
                 "rep {k}: the retry did not land on the head"
             );
         }
+        stage(
+            "the reads after the replay",
+            Duration::from_secs(6),
+            read_started,
+        );
         if moved {
             saw_new = true;
             if !saw_old {
@@ -735,6 +789,7 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
         "the kills never straddled the land (old seen: {saw_old}, new: {saw_new}) \
          over {reps} reps, steps of an eighth of the measured land up to 11/8"
     );
+    stage("the whole test", Duration::from_secs(1311), whole_started);
 }
 
 /// A probe for the hang: one kill mid-land, and after the death a full
