@@ -2231,6 +2231,92 @@ mod tests {
         assert!(warned.capped);
     }
 
+    /// The trust boundary: a read-only mount refuses every mutating call
+    /// with EROFS before it looks at its arguments, and the ref's tree
+    /// and the overlay keep their bytes.
+    #[cfg(feature = "unstable-writable-mount")]
+    #[tokio::test]
+    async fn a_read_only_mount_refuses_every_mutation_and_keeps_the_tree() {
+        let mut test = start(&[("README.md", b"hello\n", Some(false))]).await;
+        test.vfs = test.vfs.writable(false);
+        let root = NFSFileSystem::root_dir(&test.vfs);
+        let id = find(&test.vfs, "README.md").await.unwrap();
+        fn rofs<T: std::fmt::Debug>(res: Result<T, nfsstat3>, what: &str) {
+            assert!(
+                matches!(res, Err(nfsstat3::NFS3ERR_ROFS)),
+                "{what}: {res:?}"
+            );
+        }
+        rofs(test.vfs.write(id, 0, b"planted\n").await, "write");
+        rofs(
+            test.vfs
+                .setattr(
+                    id,
+                    sattr3 {
+                        mode: set_mode3::mode(0o600),
+                        ..sattr3::default()
+                    },
+                )
+                .await,
+            "setattr",
+        );
+        rofs(
+            test.vfs
+                .create(
+                    root,
+                    &filename3::from(b"new.txt".to_vec()),
+                    sattr3::default(),
+                )
+                .await,
+            "create",
+        );
+        rofs(
+            test.vfs
+                .create_exclusive(root, &filename3::from(b"excl.txt".to_vec()))
+                .await,
+            "create_exclusive",
+        );
+        rofs(
+            test.vfs
+                .mkdir(root, &filename3::from(b"newdir".to_vec()))
+                .await,
+            "mkdir",
+        );
+        rofs(
+            test.vfs
+                .symlink(
+                    root,
+                    &filename3::from(b"link".to_vec()),
+                    &nfspath3::from(b"target".to_vec()),
+                    &sattr3::default(),
+                )
+                .await,
+            "symlink",
+        );
+        rofs(
+            test.vfs
+                .remove(root, &filename3::from(b"README.md".to_vec()))
+                .await,
+            "remove",
+        );
+        rofs(
+            test.vfs
+                .rename(
+                    root,
+                    &filename3::from(b"README.md".to_vec()),
+                    root,
+                    &filename3::from(b"moved.txt".to_vec()),
+                )
+                .await,
+            "rename",
+        );
+        // The overlay holds nothing, and the ref's file reads back.
+        let mut left = std::fs::read_dir(test.dirs[1].path()).unwrap();
+        assert!(left.next().is_none(), "the overlay grew");
+        let (data, _) = test.vfs.read(id, 0, 1000).await.unwrap();
+        assert_eq!(data, b"hello\n");
+    }
+
     #[cfg(feature = "unstable-writable-mount")]
     #[tokio::test]
     async fn a_planted_symlink_is_never_written_through() {
