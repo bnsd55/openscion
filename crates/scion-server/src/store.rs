@@ -1505,8 +1505,8 @@ pub(crate) mod spawn_guard {
 mod tests {
     use crate::Backend;
     use std::sync::Barrier;
-    use std::sync::mpsc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
@@ -2507,7 +2507,10 @@ mod tests {
         let blobs = Blobs::open(dir.path()).unwrap();
         let too_big = vec![0u8; MAX_OBJECT_BYTES + 1];
         let err = blobs.put(&too_big).unwrap_err().to_string();
-        assert!(err.contains("too large") || err.contains("larger than"), "{err}");
+        assert!(
+            err.contains("too large") || err.contains("larger than"),
+            "{err}"
+        );
         let at_limit = vec![0u8; MAX_OBJECT_BYTES];
         let id = blobs.put(&at_limit).unwrap();
         assert_eq!(id, BlobId::of(&at_limit));
@@ -2582,7 +2585,7 @@ mod tests {
                     Ok(())
                 })
             });
-            let second = s.spawn(|| {
+            s.spawn(|| {
                 let result = group.run(|| Ok(()));
                 done_tx.send(result).unwrap();
             });
@@ -2592,7 +2595,11 @@ mod tests {
             while group.joined() < 2 && std::time::Instant::now() < give_up {
                 thread::sleep(Duration::from_millis(1));
             }
-            assert_eq!(group.joined(), 2, "the second caller never reached the wait");
+            assert_eq!(
+                group.joined(),
+                2,
+                "the second caller never reached the wait"
+            );
             both_there.wait();
             first.join().unwrap().unwrap();
             let second_result = done_rx
