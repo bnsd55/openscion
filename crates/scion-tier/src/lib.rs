@@ -2593,6 +2593,17 @@ mod tests {
             );
         }
         settled(&tier).await;
+        // The exact edge: 128 keys past the boundary is no longer within
+        // one batch, so the batch starts at the claim itself.
+        let progress = Progress::default();
+        progress.fetched_to.store(2, Ordering::Relaxed);
+        let later = tier.claim(&ask, 130, &progress);
+        assert_eq!(
+            later.len(),
+            127,
+            "i - fetched == MAX_BATCH is a claim a batch ahead"
+        );
+        settled(&tier).await;
     }
 
     /// A claim a batch ahead of the boundary starts at its own index:
