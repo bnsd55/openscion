@@ -323,8 +323,11 @@ async fn a_reply_over_the_stalled_bytes_cap_ends_its_connection() {
     // parks the reply with its 4 MiB estimate, and that count crosses
     // one byte at once, so the connection goes. Reading a frame without
     // releasing keeps the window shut, so the park is real for as long
-    // as it lasts. The bound rides the server's own timing: 120 s of
-    // stall, then the close.
+    // as it lasts. The bound rides the server's own timing: the stall
+    // timeout is a const in service.rs with no env lever (unlike the
+    // statement and migration timeouts), so no test can shrink it; the
+    // 180 s here is the server's 120 s plus a margin, not a hang
+    // bound.
     let ended = tokio::time::timeout(Duration::from_secs(180), async {
         loop {
             match reply.data().await {

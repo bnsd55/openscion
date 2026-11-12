@@ -1881,3 +1881,40 @@ mod access_file_tests {
         assert!(err.contains("symlink"), "{err}");
     }
 }
+
+/// The labels an admin line names its failure under: the class, never
+/// the message, which can carry a path.
+#[cfg(test)]
+mod error_class_tests {
+    use super::*;
+    use scion_server::Storage;
+
+    #[test]
+    fn a_storage_error_is_classed_by_the_engine_s_answer() {
+        let busy = Error::Storage(Storage::busy_for_test(std::io::Error::other("gone")));
+        assert_eq!(error_class(&busy), "busy");
+        let full = Error::Storage(Storage::disk_full_for_test(std::io::Error::other(
+            "the drive is full",
+        )));
+        assert_eq!(error_class(&full), "disk_full");
+        let internal =
+            Error::Storage(Storage::internal_for_test(std::io::Error::other("refused")));
+        assert_eq!(error_class(&internal), "failed");
+    }
+
+    #[test]
+    fn an_error_that_is_not_the_engine_s_is_classed_failed() {
+        let io = Error::Io(std::io::Error::other("the file went away"));
+        assert_eq!(error_class(&io), "failed");
+    }
+
+    #[test]
+    fn is_disk_full_says_which_io_errors_are_the_disk_s() {
+        let full = std::io::Error::from(std::io::ErrorKind::StorageFull);
+        assert!(is_disk_full(&full), "out-of-space is the disk's answer");
+        let quota = std::io::Error::from(std::io::ErrorKind::QuotaExceeded);
+        assert!(is_disk_full(&quota), "over-quota is the disk's answer");
+        let other = std::io::Error::other("the file went away");
+        assert!(!is_disk_full(&other), "another error is not the disk's");
+    }
+}

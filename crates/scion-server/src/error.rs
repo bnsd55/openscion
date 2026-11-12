@@ -220,6 +220,27 @@ impl std::fmt::Display for Storage {
     }
 }
 
+/// The classified storage errors the binary's tests build to pin the
+/// audit line's class labels. Production compiles no constructor: the
+/// only Storage values a release build sees come from the engine.
+#[cfg(any(test, feature = "test-hooks"))]
+impl Storage {
+    /// A busy-class storage error.
+    pub fn busy_for_test(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::busy(source)
+    }
+
+    /// A disk-full-class storage error.
+    pub fn disk_full_for_test(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::disk_full(source)
+    }
+
+    /// An internal-class storage error.
+    pub fn internal_for_test(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::internal(source)
+    }
+}
+
 impl std::error::Error for Storage {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(self.source.as_ref())
