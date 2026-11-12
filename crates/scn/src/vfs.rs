@@ -2233,12 +2233,16 @@ mod tests {
 
     /// The trust boundary: a read-only mount refuses every mutating call
     /// with EROFS before it looks at its arguments, and the ref's tree
-    /// and the overlay keep their bytes.
-    #[cfg(feature = "unstable-writable-mount")]
+    /// and the overlay keep their bytes. The default build has no write
+    /// path at all; a writable-mount build still refuses a read-only
+    /// mount.
     #[tokio::test]
     async fn a_read_only_mount_refuses_every_mutation_and_keeps_the_tree() {
         let mut test = start(&[("README.md", b"hello\n", Some(false))]).await;
-        test.vfs = test.vfs.writable(false);
+        #[cfg(feature = "unstable-writable-mount")]
+        {
+            test.vfs = test.vfs.writable(false);
+        }
         let root = NFSFileSystem::root_dir(&test.vfs);
         let id = find(&test.vfs, "README.md").await.unwrap();
         fn rofs<T: std::fmt::Debug>(res: Result<T, nfsstat3>, what: &str) {
@@ -2248,18 +2252,7 @@ mod tests {
             );
         }
         rofs(test.vfs.write(id, 0, b"planted\n").await, "write");
-        rofs(
-            test.vfs
-                .setattr(
-                    id,
-                    sattr3 {
-                        mode: set_mode3::mode(0o600),
-                        ..sattr3::default()
-                    },
-                )
-                .await,
-            "setattr",
-        );
+        rofs(test.vfs.setattr(id, sattr3::default()).await, "setattr");
         rofs(
             test.vfs
                 .create(
