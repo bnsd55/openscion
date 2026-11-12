@@ -1002,6 +1002,17 @@ fn settle(
             {
                 step(index);
             }
+            #[cfg(any(test, feature = "test-hooks"))]
+            // The file park after the settle commits, before the reply
+            // (the lost-reply order of #888). The park holds the ref
+            // slot lock the plan and settle share, and no Postgres
+            // transaction and no pool reader: the settle's write
+            // transaction committed above, and the reply goes out after
+            // `land` flushes. A call dropped while parked loses its
+            // reply; the row it committed stays, and the retry with the
+            // same request key replays it. The park test proves the
+            // row, the replay, and the one move.
+            crate::pause::hit("after-settle", &req.request_key);
             tracing::info!(land_id, id = ?outcome.result, target = %target, "landed");
             Ok(Finished::Outcome(outcome))
         }
