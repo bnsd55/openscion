@@ -1241,6 +1241,24 @@ mod silent_failures {
         .is_none()));
     }
 
+    /// The serve lock refuses a second server: with one holder live, a
+    /// second hold errs and names the overlay, so no second mount can
+    /// read the held lock as free and serve over the first.
+    #[test]
+    fn a_held_serve_lock_refuses_a_second_server() {
+        let _serial = serial();
+        let home = tempfile::tempdir().unwrap();
+        let overlay = home.path().join("overlay");
+        fs::create_dir_all(&overlay).unwrap();
+        let _first = hold_serve_lock(&overlay).unwrap();
+        let second = hold_serve_lock(&overlay).unwrap_err().to_string();
+        assert!(
+            second.contains("another scn process serves this overlay"),
+            "{second}"
+        );
+        assert!(second.contains(&overlay.display().to_string()), "{second}");
+    }
+
     /// A save that cannot write its temp file errs, and the old table is
     /// still there whole: the rename never happened.
     #[test]
