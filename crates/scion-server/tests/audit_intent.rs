@@ -8,24 +8,9 @@
 //! the binary's own unit tests, where the audit's test hook makes one
 //! append fail as an out-of-space answer would.
 
+use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt as _;
-use std::process::{Command, Output};
-
-fn run_gc_with_audit(dir: &std::path::Path, audit: &str) -> Output {
-    let data = dir.join("data");
-    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
-    Command::new(env!("CARGO_BIN_EXE_scion-server"))
-        .arg("--data")
-        .arg(&data)
-        .args(["gc", "--audit-file", audit])
-        .env("NO_COLOR", "1")
-        .env(
-            "SCION_POSTGRES_URL",
-            scion_server::Backend::test_postgres_url(&data).unwrap(),
-        )
-        .output()
-        .expect("the gc runs")
-}
+use std::process::Command;
 
 /// An append failure that is not the disk's answer refuses the run
 /// before any change. The audit file here is a private regular file
@@ -39,9 +24,9 @@ fn a_gc_whose_audit_fails_otherwise_refuses_before_any_change() {
     let data = dir.path().join("data");
     scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
     let audit = dir.path().join("audit.log");
-    use std::io::Write as _;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .mode(0o600)
         .open(&audit)

@@ -1939,7 +1939,7 @@ mod gc_intent_tests {
         let store = Backend::open_test(&dir.path().join("data")).unwrap();
         // One failed append: the intent's. The run defers it, finishes,
         // and the deferred line lands when the disk has room again.
-        let audit = audit_with_faults(&dir.path(), 1);
+        let audit = audit_with_faults(dir.path(), 1);
         gc_command(audit, &store, Duration::from_secs(60), true, None)
             .await
             .expect("the run goes on past the failed intent");

@@ -568,7 +568,7 @@ fn the_gate_is_the_listener_line_not_any_serving_line() {
     assert!(is_the_listener_line(listener_line));
 }
 
-/// A blank SCION_TOKEN is no token at all: the env source must fall
+/// A blank `SCION_TOKEN` is no token at all: the env source must fall
 /// through to stdin, where the real token waits. An env guard that
 /// accepts blank values would digest the empty string and hand back
 /// its digest as if the server's secret were nothing.
