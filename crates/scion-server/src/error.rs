@@ -466,6 +466,42 @@ mod tests {
         ))));
         assert_eq!(status.code(), Code::Internal);
         assert_eq!(status.message(), "internal error");
+        // A remount left the disk read-only: the retryable code, the
+        // fixed reply, no path.
+        let eio_ro = std::io::Error::from_raw_os_error(30);
+        assert_eq!(eio_ro.kind(), std::io::ErrorKind::ReadOnlyFilesystem);
+        let status = Status::from(Error::Io(eio_ro));
+        assert_eq!(status.code(), Code::Unavailable, "{status:?}");
+        assert_eq!(status.message(), "the disk is read-only; retry later");
+        // The class names themselves, as Display carries them into the
+        // log lines.
+        assert_eq!(
+            Error::Storage(Storage::busy(std::io::Error::other("x"))).to_string(),
+            "the database is busy"
+        );
+        assert_eq!(
+            Error::Storage(Storage::disk_full(std::io::Error::other("x"))).to_string(),
+            "the database is out of space"
+        );
+        assert_eq!(
+            Error::Storage(Storage::internal(std::io::Error::other("x"))).to_string(),
+            "the database failed"
+        );
+        // A git failure displays its own message behind the variant's
+        // git: mark (the log reads it; the reply's fixed text never
+        // carries it).
+        assert_eq!(
+            Error::Git(Git::message("the import cap is spent".to_owned())).to_string(),
+            "git: the import cap is spent"
+        );
+        assert_eq!(
+            Error::Git(Git::cause(
+                "cannot open the object database".to_owned(),
+                std::io::Error::other("not a repository"),
+            ))
+            .to_string(),
+            "git: cannot open the object database"
+        );
     }
 
     #[test]
