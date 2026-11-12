@@ -617,9 +617,14 @@ impl Stage {
         let watcher_name = name.to_owned();
         std::thread::spawn(move || {
             if wait.recv_timeout(bound) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
-                println!(
-                    "the stage {watcher_name:?} never returned within {bound:?}; \
-                     the run stops here"
+                // stderr, not the captured stdout: the exit below ends
+                // the process before the harness flushes its capture,
+                // and this message is the only trace of the stage.
+                use std::io::Write as _;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "the stage {watcher_name:?} never returned within \
+                     {bound:?}; the run stops here"
                 );
                 std::process::exit(1);
             }
@@ -727,14 +732,16 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
         let call_name = name.clone();
         let call_cs = *cs;
         let url = server.url.clone();
-        let land_to_kill = Stage::start("the land to the kill", STAGE_FLOOR);
+        let land_to_kill = Instant::now();
         let handle = std::thread::spawn(move || land(&url, call_cs.as_bytes(), &call_name));
         // The move sits at the very end of a land, so the factors run
         // past the whole measured land (up to 11/8 of it): a kill after
-        // the reply still shows the new ending.
+        // the reply still shows the new ending. The wait is a sleep,
+        // which cannot hang, so it carries no bound - a sleep may run
+        // past the floor when the probe land ran long - only the print.
         let factor = k % 11 + 1;
         std::thread::sleep(step.mul_f64(scale) * u32::try_from(factor).unwrap());
-        land_to_kill.done();
+        println!("stage the land to the kill: {:?}", land_to_kill.elapsed());
         let wait = Stage::start("the kill and wait", STAGE_FLOOR);
         server.kill_and_wait();
         let _ = handle.join();
