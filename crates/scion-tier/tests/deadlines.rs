@@ -124,7 +124,20 @@ impl Objects for Deepest {
         self.called.notify_one();
         let wait = Until::of(&request).wait(self.busy);
         if wait < self.ready {
-            tokio::time::sleep(wait).await;
+            if self.ready == Duration::MAX {
+                // A tier that never finds room refuses at once, after a
+                // short beat - never after the caller's whole remaining
+                // budget: an answer at the wire races the caller's
+                // deadline, and a loaded runner turns the race into a
+                // `CANCELLED` instead of this status (the #1179 flake).
+                // The beat only orders the refusal after the call.
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            } else {
+                // A tier that would serve after `ready` holds the call
+                // until the budget runs out: the fetch stays alive for
+                // the callers that remain.
+                tokio::time::sleep(wait).await;
+            }
             return Err(Status::resource_exhausted("no room for the object"));
         }
         tokio::time::sleep(self.ready).await;
