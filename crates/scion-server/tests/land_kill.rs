@@ -12,13 +12,8 @@
 
 mod common;
 
-use std::path::Path;
-
 use common::*;
-use scion_core::{Changeset, ChangesetId, FileState, RepoPath};
-use scion_proto::v1::{
-    CreateChangesetRequest, GetChangesetRequest, LandRequest, LandResponse, LandState,
-};
+use scion_proto::v1::LandState;
 use scion_server::test_support::private_tempdir;
 
 /// The park point the seam names in the land path: between a plan and
@@ -27,125 +22,6 @@ use scion_server::test_support::private_tempdir;
 /// comment in `land.rs` says it beside the code. A kill while parked
 /// is exactly the order the issue names.
 const POINT: &str = "after-plan";
-
-/// A changeset of one file on `base`, made the way a client makes one:
-/// the blob up, the changeset created, the ID the server answered.
-async fn changeset_for(scion: &mut Scion, base: ChangesetId, name: &str) -> ChangesetId {
-    let raw = format!("{name} file\n{}\n", "x".repeat(64));
-    let blob = put_blob(scion, raw.as_bytes()).await.unwrap();
-    let changeset = Changeset::new(
-        vec![base],
-        author(),
-        None,
-        format!("{name}\n").into_bytes(),
-        [(
-            RepoPath::new(format!("{name}.txt")).unwrap(),
-            Some(FileState::Regular {
-                content: blob,
-                executable: false,
-            }),
-        )]
-        .into_iter()
-        .collect::<std::collections::BTreeMap<_, _>>(),
-    )
-    .expect("changeset fits the format");
-    let (bytes, id) = changeset.encode_with_id();
-    let reply = scion
-        .create_changeset(CreateChangesetRequest {
-            repo: REPO.into(),
-            changeset: bytes,
-        })
-        .await
-        .unwrap()
-        .into_inner();
-    assert_eq!(changeset_id(&reply.changeset_id), id);
-    id
-}
-
-/// One land call under `key`, to the ref `target`.
-async fn land_on(scion: &mut Scion, id: &ChangesetId, target: &str, key: &str) -> LandResponse {
-    scion
-        .land(LandRequest {
-            repo: REPO.into(),
-            changeset_id: id.as_bytes().to_vec(),
-            target_ref: target.into(),
-            request_key: key.into(),
-        })
-        .await
-        .expect("the land answers")
-        .into_inner()
-}
-
-/// The changeset an ID names, read through the server's stream.
-async fn get_changeset(scion: &mut Scion, id: ChangesetId) -> Changeset {
-    let request = GetChangesetRequest {
-        repo: REPO.into(),
-        changeset_id: id.as_bytes().to_vec(),
-    };
-    let mut stream = scion
-        .get_changeset(request)
-        .await
-        .unwrap_or_else(|s| panic!("GetChangeset {id}: {s:?}"))
-        .into_inner();
-    let mut bytes = Vec::new();
-    while let Some(part) = stream.message().await.unwrap() {
-        bytes.extend_from_slice(&part.changeset);
-    }
-    Changeset::decode_with_id(&bytes).unwrap().0
-}
-
-/// The land's row of one request key: its ID and its state, read on a
-/// connection of the test's own (the one-server fence refuses a second
-/// open, so the test reads with plain SQL, the way the import's move
-/// does). While the server is dead, this connection is the only one.
-fn land_row(data: &Path, key: &str) -> (i64, String) {
-    let key = key.to_owned();
-    let schema = scion_server::Backend::test_schema(data);
-    std::thread::spawn(move || {
-        let url = std::env::var("SCION_TEST_POSTGRES_URL")
-            .expect("SCION_TEST_POSTGRES_URL must name the test database");
-        let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
-        client
-            .batch_execute(&format!("SET search_path TO {schema}"))
-            .unwrap();
-        let row = client
-            .query_one(
-                "SELECT land_id, state FROM lands WHERE request_key = $1",
-                &[&key],
-            )
-            .expect("the land's row is there");
-        (row.get::<_, i64>(0), row.get::<_, String>(1))
-    })
-    .join()
-    .unwrap()
-}
-
-/// The version `main` stands at, read the way the import's move reads
-/// it: the count of moves the ref took.
-fn ref_version(data: &Path) -> i64 {
-    let schema = scion_server::Backend::test_schema(data);
-    std::thread::spawn(move || {
-        let url = std::env::var("SCION_TEST_POSTGRES_URL")
-            .expect("SCION_TEST_POSTGRES_URL must name the test database");
-        let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
-        client
-            .batch_execute(&format!("SET search_path TO {schema}"))
-            .unwrap();
-        let repo_id: i64 = client
-            .query_one("SELECT repo_id FROM repos WHERE name = $1", &[&REPO])
-            .unwrap()
-            .get(0);
-        client
-            .query_one(
-                "SELECT version FROM refs WHERE repo_id = $1 AND name = 'main'",
-                &[&repo_id],
-            )
-            .unwrap()
-            .get(0)
-    })
-    .join()
-    .unwrap()
-}
 
 /// The kill leaves a resumable land: the row says pending on a
 /// database no server holds, and the retry finishes that row - the
