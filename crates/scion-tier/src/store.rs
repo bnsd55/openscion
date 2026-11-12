@@ -112,13 +112,12 @@ impl<V> Lru<V> {
         dropped
     }
 
-    /// Removes `key`. Returns whether it was there.
-    fn remove(&mut self, key: Key) -> bool {
+    /// Removes `key`.
+    fn remove(&mut self, key: Key) {
         let Some((_, size)) = self.entries.remove(&key) else {
-            return false;
+            return;
         };
         self.bytes -= size;
-        true
     }
 }
 
@@ -420,7 +419,6 @@ struct Version {
     /// For [`Op::Put`]: the size of the stored form.
     size: usize,
     used_at: u64,
-    seq: u64,
 }
 
 /// The state of the index that the db does not have yet, and the counters
@@ -441,8 +439,6 @@ struct Disk {
     bytes: u64,
     next_used: u64,
     next_seq: u64,
-    /// Set once a batch is due, so the next put or get commits it.
-    due: bool,
     /// The directories that dropped files left, to sync before the last
     /// commit of a stop, so no dropped file comes back after a crash.
     left: HashSet<PathBuf>,
@@ -479,6 +475,9 @@ impl Disk {
                 id BLOB NOT NULL,
                 size INTEGER NOT NULL,
                 used_at INTEGER NOT NULL,
+                -- Written as the constant 0, read by no query: no version
+                -- of this index ever read it, and the column stays so an
+                -- older daemon's INSERT keeps working.
                 seq INTEGER NOT NULL,
                 PRIMARY KEY (kind, id)
             ) WITHOUT ROWID;
@@ -494,7 +493,6 @@ impl Disk {
             bytes: 0,
             next_used: 0,
             next_seq: 1,
-            due: false,
             left: HashSet::new(),
             #[cfg(test)]
             committed: 0,
@@ -578,18 +576,12 @@ impl Disk {
 
     /// Notes one more version of `key`, and keeps the mirrors.
     fn push(&mut self, op: Op, key: Key, size: usize, used_at: u64) {
-        let seq = self.next_seq;
-        self.next_seq += 1;
         self.pending.push(Version {
             op,
             key,
             size,
             used_at,
-            seq,
         });
-        if self.pending.len() >= FLUSH_RECORDS || self.pending_bytes >= FLUSH_NEW_BYTES {
-            self.due = true;
-        }
     }
 
     /// Notes that `key` was just used, and bumps its place. The batch has
@@ -726,11 +718,13 @@ impl Disk {
     /// Adds `key` as the least recently used: what the walk adopted, which
     /// leaves first.
     fn insert_oldest(&mut self, key: Key, size: usize) {
-        let old = self.state(key).unwrap_or_default();
-        match old {
-            Some((_, old_size)) => self.bytes -= old_size as u64,
-            None => self.objects += 1,
-        }
+        // The walk only queues files the index does not name, so this is
+        // always a fresh object.
+        debug_assert!(
+            self.state(key).unwrap_or_default().is_none(),
+            "the walk queued a file the index names"
+        );
+        self.objects += 1;
         self.bytes += size as u64;
         self.newest.insert(key, Some((0, size)));
         self.pending_bytes += size;
@@ -761,8 +755,7 @@ impl Disk {
         }
         #[cfg(test)]
         let count = self.pending.len();
-        let mark = self.next_seq - 1;
-        let committed = self.commit_batch(mark);
+        let committed = self.commit_batch();
         if committed.is_ok() {
             self.pending = Vec::new();
             self.pending_bytes = 0;
@@ -803,7 +796,7 @@ impl Disk {
 
     /// The transaction of [`Disk::commit`]: every row version, then the
     /// counters and the mark. One transaction: all of it lands, or none.
-    fn commit_batch(&mut self, mark: u64) -> io::Result<()> {
+    fn commit_batch(&mut self) -> io::Result<()> {
         let tx = self.conn.transaction().map_err(index_error)?;
         // Sizes and counters of stored bytes, far below i64::MAX.
         #[allow(clippy::cast_possible_wrap)]
@@ -813,25 +806,19 @@ impl Disk {
             match version.op {
                 Op::Use => {
                     tx.execute(
-                        "UPDATE objects SET used_at = ?3, seq = ?4
+                        "UPDATE objects SET used_at = ?3, seq = 0
                          WHERE kind = ?1 AND id = ?2",
-                        rusqlite::params![kind, id, version.used_at as i64, version.seq as i64],
+                        rusqlite::params![kind, id, version.used_at as i64],
                     )
                     .map_err(index_error)?;
                 }
                 Op::Put => {
                     tx.execute(
                         "INSERT INTO objects(kind, id, size, used_at, seq)
-                         VALUES(?1, ?2, ?3, ?4, ?5)
+                         VALUES(?1, ?2, ?3, ?4, 0)
                          ON CONFLICT(kind, id) DO UPDATE
-                         SET size = ?3, used_at = ?4, seq = ?5",
-                        rusqlite::params![
-                            kind,
-                            id,
-                            version.size as i64,
-                            version.used_at as i64,
-                            version.seq as i64
-                        ],
+                         SET size = ?3, used_at = ?4, seq = 0",
+                        rusqlite::params![kind, id, version.size as i64, version.used_at as i64],
                     )
                     .map_err(index_error)?;
                 }
@@ -851,7 +838,8 @@ impl Disk {
             ("bytes", self.bytes as i64),
             ("next_used", self.next_used as i64),
             ("next_seq", self.next_seq as i64),
-            ("mark", mark as i64),
+            // Read by no query: written as the constant 0, like seq.
+            ("mark", 0),
         ] {
             tx.execute(
                 "INSERT INTO meta(k, v) VALUES(?1, ?2)
@@ -1580,8 +1568,6 @@ impl DiskStore {
         }
         if took > 0 {
             walk.room.notify_all();
-            // The batch that counts them is due.
-            disk.due = true;
         }
     }
 
@@ -1677,10 +1663,6 @@ impl DiskStore {
                 self.stray.store(false, Ordering::Relaxed);
             }
         }
-        if !disk.due {
-            return;
-        }
-        disk.due = false;
         if disk.pending.len() < FLUSH_RECORDS && disk.pending_bytes < FLUSH_NEW_BYTES {
             return;
         }
