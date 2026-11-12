@@ -142,6 +142,37 @@ fn a_damaged_marker_refuses_both_opens() {
     }
 }
 
+/// A directory that still holds the old build's SQLite database is
+/// refused before anything is contacted: a second, empty store on it
+/// would look like a server with no data at all. The refusal needs no
+/// Postgres, and a scion.db that holds no bytes does not refuse - only
+/// one with content does.
+#[test]
+fn a_directory_that_holds_a_sqlite_store_is_refused() {
+    let dir = scion_server::test_support::private_tempdir();
+    std::fs::write(dir.path().join("scion.db"), "old build's rows\n").unwrap();
+    let Err(error) = Backend::open(dir.path(), "postgres://127.0.0.1:5/scion", None) else {
+        panic!("the SQLite directory refuses the open");
+    };
+    assert!(
+        error.to_string().contains("SQLite metadata database"),
+        "{error}"
+    );
+    // An empty scion.db is not a store: the open goes on to the next
+    // check (the damaged marker, absent here), which refuses - so the
+    // empty file did not stop the open, and the refusal is not this
+    // test's message.
+    let empty = scion_server::test_support::private_tempdir();
+    std::fs::write(empty.path().join("scion.db"), b"").unwrap();
+    let Err(error) = Backend::open(empty.path(), "postgres://127.0.0.1:5/scion", None) else {
+        panic!("the empty scion.db's open must still fail - the fake URL");
+    };
+    assert!(
+        !error.to_string().contains("SQLite metadata database"),
+        "an empty scion.db must not read as a store: {error}"
+    );
+}
+
 /// A write that another writer blocks answers busy in seconds, not past
 /// the minute-long statement clock: the open sets a lock timeout, and a
 /// lock the database cannot give in it maps to busy, so the client
