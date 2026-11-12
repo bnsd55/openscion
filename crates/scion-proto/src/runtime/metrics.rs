@@ -1469,7 +1469,11 @@ mod tests {
 
     /// Polls a boxed body to its end with a no-op waker: the frames of
     /// these tests are ready at once.
-    fn drain(body: &mut CountingBody) {
+    fn drain<B>(body: &mut B)
+    where
+        B: http_body::Body<Data = bytes::Bytes> + Unpin,
+        B::Error: std::fmt::Display,
+    {
         use http_body::Body as _;
         let waker = Waker::noop();
         let mut cx = std::task::Context::from_waker(waker);
@@ -1861,6 +1865,22 @@ mod tests {
         assert_eq!(body.size_hint().upper(), Some(2));
         drain(&mut body);
         assert!(body.is_end_stream(), "a full body ends");
+        // The same delegation over a body that knows its own end: a
+        // Full's frames end once its one frame is polled.
+        let mut full = CountingFrames {
+            inner: boxed(http_body_util::Full::new(bytes::Bytes::from_static(b"hi"))),
+            counted_in: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        };
+        assert_eq!(
+            full.size_hint().lower(),
+            2,
+            "the frames hint follows the inner"
+        );
+        drain(&mut full);
+        assert!(
+            full.is_end_stream(),
+            "a frames body ends once its frames do"
+        );
     }
 
     /// The in-flight gauge returns when the guard drops, however the call
@@ -2042,7 +2062,8 @@ mod tests {
         metrics.land("conflict");
         metrics.land("not-an-outcome");
         metrics.land_replan();
-        assert_eq!(metrics.land_replans(), 1);
+        metrics.land_replan();
+        assert_eq!(metrics.land_replans(), 2);
         metrics.cache_hit();
         metrics.cache_miss();
         let text = metrics.render();
@@ -2063,7 +2084,7 @@ mod tests {
             text.contains("scion_lands_total{outcome=\"conflict\"} 1\n"),
             "{text}"
         );
-        assert!(text.contains("scion_land_replans_total 1\n"), "{text}");
+        assert!(text.contains("scion_land_replans_total 2\n"), "{text}");
         assert!(text.contains("scion_cache_hits_total 1\n"), "{text}");
         assert!(text.contains("scion_cache_misses_total 1\n"), "{text}");
         assert_eq!(metrics.cache_counts(), (1, 1));
@@ -2082,6 +2103,9 @@ mod tests {
         metrics.set_host_memory_bytes(8 << 30);
         metrics.set_diff_rename_cache_bytes(4096);
         metrics.set_blob_count(500_000);
+        metrics.data_free_inodes(12_345);
+        metrics.data_free_sample_age(90);
+        metrics.audit_reopens_failed(4);
         metrics.audit_reopen_failing(1);
         metrics.pg_readers_busy(3);
         metrics.pg_tx_age(std::time::Duration::from_secs(2));
@@ -2103,6 +2127,15 @@ mod tests {
         );
         assert!(text.contains("scion_blob_ceiling_share 0.5\n"), "{text}");
         assert!(text.contains("scion_audit_reopen_failing 1\n"), "{text}");
+        assert!(text.contains("scion_data_free_inodes 12345\n"), "{text}");
+        assert!(
+            text.contains("scion_data_free_sample_age_seconds 90\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("scion_audit_reopens_failed_total 4\n"),
+            "{text}"
+        );
         assert!(text.contains("scion_pg_readers_busy 3\n"), "{text}");
         assert!(text.contains("scion_pg_tx_age_seconds 2\n"), "{text}");
         assert!(
