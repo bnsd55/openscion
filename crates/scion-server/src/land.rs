@@ -94,6 +94,26 @@ const MAX_DEPTH: i64 = if cfg!(test) { 16 } else { PRUNE_EVERY };
 /// budget, so that they reach it.
 pub(crate) const MAX_INDEX_BYTES: usize = if cfg!(test) { 64 << 10 } else { 128 << 20 };
 
+/// The budget a build's path indexes share. A test spawn of the server
+/// needs the reach to stop early - the compiled 128 MiB takes a
+/// million-entry chain to stop - so the test-hooks build reads the env
+/// lever. Release builds never read the env.
+#[cfg(feature = "test-hooks")]
+fn max_index_bytes() -> usize {
+    match std::env::var_os("SCION_TEST_MAX_INDEX_BYTES") {
+        Some(value) => value
+            .to_str()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(MAX_INDEX_BYTES),
+        None => MAX_INDEX_BYTES,
+    }
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn max_index_bytes() -> usize {
+    MAX_INDEX_BYTES
+}
+
 /// Where a land stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LandState {
@@ -575,7 +595,7 @@ impl Lands {
                 .map(|(key, slot)| (key.clone(), Arc::clone(slot)))
                 .collect()
         };
-        let free = MAX_INDEX_BYTES - self.used.load(Ordering::Acquire);
+        let free = max_index_bytes() - self.used.load(Ordering::Acquire);
         let short = bytes.saturating_sub(free);
         let mut idle = Vec::new();
         let mut freed = 0;
@@ -630,7 +650,7 @@ impl Lands {
     /// Takes `bytes` from the budget if they are free.
     fn take(&self, bytes: usize) -> bool {
         let mut used = self.used.load(Ordering::Acquire);
-        while bytes <= MAX_INDEX_BYTES - used {
+        while bytes <= max_index_bytes() - used {
             let sum = used + bytes;
             match self
                 .used
@@ -1208,7 +1228,7 @@ impl PathIndex {
                 }
                 let cs = decode_page_changeset(id, &body)?;
                 most += added_bytes(cs.changes());
-                if self.bytes + most > MAX_INDEX_BYTES {
+                if self.bytes + most > max_index_bytes() {
                     tracing::info!(
                         generation,
                         "the path indexes are full; it starts over at the head"
