@@ -214,56 +214,66 @@ fn bound_addr(log: &Path) -> Option<String> {
     Some(listen.trim().to_owned())
 }
 
-/// The live server children of this test process, by pid. A stage
-/// whose watcher fires stops the run, and the run's servers must not
-/// outlive it: a leaked server holds its sessions under a name the
-/// next test takes too (every process names its first server
-/// scion-test-1), so the leak would name itself as that test's
-/// failure. Registered at spawn, forgotten at drop.
-static SERVER_CHILDREN: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+/// The live server children of this test process: each pid with the
+/// session name its connections carry. A stage whose watcher fires
+/// stops the run, and the run's servers must not outlive it: a leaked
+/// server holds its sessions under a name the next test takes too
+/// (every process names its first server scion-test-1), so the leak
+/// would name itself as that test's failure. Registered at spawn,
+/// forgotten at drop.
+static SERVER_CHILDREN: std::sync::Mutex<Vec<(u32, String)>> = std::sync::Mutex::new(Vec::new());
 
 fn forget_server_child(pid: u32) {
     SERVER_CHILDREN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .retain(|&known| known != pid);
+        .retain(|&(known, _)| known != pid);
 }
 
 /// Kills every live server child and waits, briefly, for the database
-/// to notice their sessions' sockets closing. Runs on the watcher
-/// thread of a stage that never returned, so nothing here may hang the
-/// stop: a database that does not answer is left to the exit that
-/// follows.
+/// to notice their sessions' sockets closing - only those sessions:
+/// the registry holds each child's name, and another test process's
+/// server must not stretch this stop. The poll runs on a thread of its
+/// own and the wait on this one is bounded, so a database that takes
+/// the socket and never answers - the stuck-database case this test
+/// hunts - cannot hang the stop: the caller stops the wait and exits
+/// either way.
 fn stop_server_children() {
-    let children: Vec<u32> = SERVER_CHILDREN
+    let children: Vec<(u32, String)> = SERVER_CHILDREN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    for pid in &children {
+    if children.is_empty() {
+        return;
+    }
+    for (pid, _) in &children {
         let _ = std::process::Command::new("kill")
             .args(["-KILL", "--", &pid.to_string()])
             .status();
     }
-    if children.is_empty() {
-        return;
-    }
-    let Ok(mut client) = postgres::Client::connect(&pg_url(), postgres::NoTls) else {
-        return;
-    };
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        let left = client
-            .query_one(
-                "SELECT count(*) FROM pg_stat_activity \
-                 WHERE application_name LIKE 'scion-test-%'",
-                &[],
-            )
-            .map_or(0, |row| row.get::<_, i64>(0));
-        if left == 0 {
+    let names: Vec<String> = children.into_iter().map(|(_, name)| name).collect();
+    let (done, wait) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let Ok(mut client) = postgres::Client::connect(&pg_url(), postgres::NoTls) else {
             return;
+        };
+        let deadline = Instant::now() + STAGE_FLOOR;
+        loop {
+            let left = client
+                .query_one(
+                    "SELECT count(*) FROM pg_stat_activity \
+                     WHERE application_name = ANY($1)",
+                    &[&names],
+                )
+                .map_or(0, |row| row.get::<_, i64>(0));
+            if left == 0 || Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+        let _ = done.send(());
+    });
+    let _ = wait.recv_timeout(Duration::from_secs(10));
 }
 
 /// One `scion-server` process over the database. `kill` is SIGKILL: the
@@ -314,7 +324,7 @@ impl PgServer {
         SERVER_CHILDREN
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(pid);
+            .push((pid, name.clone()));
         drop(file);
         Self {
             child,
