@@ -1873,6 +1873,68 @@ mod tests {
         }
     }
 
+    /// The two RPCs a tier must never answer: a ref and a root tree.
+    /// A tier that fetched root trees would mint a ticket for any repo,
+    /// and a ref would move the server's resolution onto the tier. The
+    /// whole-body stub mutants answer Ok with an empty response; both
+    /// must stay Unimplemented with the pointer to the server.
+    #[tokio::test]
+    async fn a_tier_answers_neither_refs_nor_root_trees() {
+        use scion_proto::v1::objects_server::Objects as _;
+        use scion_proto::v1::{GetRootTreeRequest, ResolveRefRequest};
+        let tier = Tier::new_relay(
+            MemoryStore::new(1 << 20),
+            "http://127.0.0.1:1",
+            "token",
+            CACHE_UPSTREAM_TIMEOUT,
+            None,
+        )
+        .unwrap();
+        let refused = Objects::resolve_ref(&tier, Request::new(ResolveRefRequest::default()))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), Code::Unimplemented, "{refused:?}");
+        assert!(refused.message().contains("ask the server"), "{refused:?}");
+        let refused = Objects::get_root_tree(&tier, Request::new(GetRootTreeRequest::default()))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), Code::Unimplemented, "{refused:?}");
+        assert!(refused.message().contains("ask the server"), "{refused:?}");
+    }
+
+    /// An object whose path the ticket's walk does not reach fails alone:
+    /// nothing goes out for it, and the caller is told the object is not
+    /// in the ticket. The walk check's stub would serve it.
+    #[tokio::test]
+    async fn an_object_off_the_walk_is_refused_and_its_neighbour_still_serves() {
+        let f = setup(3, 1 << 20).await;
+        // A wrong path for a real key: the walk from the ticket's root
+        // tree does not reach it.
+        let mut off_walk = ask(&f, &f.keys, "r");
+        off_walk.keys[0].1 = b"not/its/path".to_vec();
+        let (Err(failed), _permit) = f
+            .tier
+            .produce(&off_walk, 0, &Progress::default())
+            .await
+            .unwrap()
+        else {
+            panic!("the walk must not reach the object")
+        };
+        assert_eq!(failed.status.code(), Code::NotFound, "{failed:?}");
+        assert!(
+            failed.status.message().contains("is not in the ticket"),
+            "{failed:?}"
+        );
+        assert!(!failed.whole_call, "the object fails alone");
+        settled(&f.tier).await;
+        // Its neighbours are still reachable on a correct ask.
+        let found = f
+            .tier
+            .produce(&ask(&f, &f.keys, "r"), 1, &Progress::default())
+            .await;
+        assert!(found.is_some(), "the neighbours still serve");
+    }
+
     #[tokio::test]
     async fn a_tier_refuses_a_ticket_of_another_key() {
         use scion_proto::v1::GetObjectsRequest;
