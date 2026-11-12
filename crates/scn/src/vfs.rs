@@ -2735,6 +2735,62 @@ mod tests {
         assert_eq!(names, [b"a".to_vec()]);
     }
 
+    /// The note's own arithmetic: a count the bytes cannot pay for is
+    /// refused with the affordability error, bytes past the last
+    /// deletion are refused, and a note of several entries reads back.
+    #[test]
+    fn a_note_of_deletions_refuses_what_its_bytes_cannot_pay() {
+        let overlay = tempfile::tempdir().unwrap();
+        let note = overlay.path().join(DELETES);
+        // One entry of one byte, but a count of five: the bytes cannot
+        // pay for five deletions.
+        let mut bytes = vec![DELETES_VERSION_1];
+        bytes.extend_from_slice(&5u32.to_le_bytes());
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(b"g");
+        assert_eq!(bytes.len(), 10);
+        std::fs::write(&note, &bytes).unwrap();
+        let why = format!("{:#}", read_deletes(overlay.path()).unwrap_err());
+        assert!(
+            why.contains("names more deletions than it holds"),
+            "the affordability guard did not refuse: {why}"
+        );
+        // A count the bytes pay for only in part ends in the middle.
+        let mut bytes = vec![DELETES_VERSION_1];
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(b"g");
+        std::fs::write(&note, &bytes).unwrap();
+        let why = format!("{:#}", read_deletes(overlay.path()).unwrap_err());
+        assert!(why.contains("ends in the middle"), "{why}");
+        // Bytes past the last deletion are a damaged note.
+        let mut bytes = vec![DELETES_VERSION_1];
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(b"g");
+        bytes.push(0);
+        std::fs::write(&note, &bytes).unwrap();
+        let why = format!("{:#}", read_deletes(overlay.path()).unwrap_err());
+        assert!(why.contains("past its last deletion"), "{why}");
+        // A note of several entries reads back: four entries, each one
+        // byte of name. The count is four, the bytes hold them all.
+        let mut bytes = vec![DELETES_VERSION_1];
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        for name in ["a", "b", "c", "d"] {
+            bytes.extend_from_slice(&1u32.to_le_bytes());
+            bytes.extend_from_slice(name.as_bytes());
+        }
+        assert_eq!(bytes.len(), 25);
+        std::fs::write(&note, &bytes).unwrap();
+        let mut read = read_deletes(overlay.path()).unwrap();
+        read.sort();
+        let expect: Vec<RepoPath> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|n| RepoPath::new(n.as_bytes()).unwrap())
+            .collect();
+        assert_eq!(read, expect);
+    }
+
     /// A damaged note of deletions is an error, not "no deletions" ([F5]):
     /// a commit that read one as empty would keep every path the mount
     /// deleted.
@@ -2753,7 +2809,7 @@ mod tests {
         let mut bytes = vec![DELETES_VERSION_1];
         bytes.extend_from_slice(&7u32.to_le_bytes());
         std::fs::write(overlay.path().join(DELETES), &bytes).unwrap();
-        let why = read_deletes(overlay.path()).unwrap_err().to_string();
+        let why = format!("{:#}", read_deletes(overlay.path()).unwrap_err());
         assert!(why.contains("damaged"), "{why}");
     }
 
