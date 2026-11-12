@@ -14,10 +14,8 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use common::*;
-use scion_core::{Changeset, ChangesetId, FileState, RepoPath};
-use scion_proto::v1::{
-    CreateChangesetRequest, GetChangesetRequest, LandRequest, LandResponse, LandState,
-};
+use scion_core::ChangesetId;
+use scion_proto::v1::LandState;
 use scion_server::test_support::private_tempdir;
 
 /// The park point the seam names in the land path: between a plan and
@@ -27,54 +25,6 @@ use scion_server::test_support::private_tempdir;
 /// mover that forces the compare-and-swap loss bypasses the slot the
 /// way an import does.
 const POINT: &str = "after-plan";
-
-/// A changeset of one file on `base`, made the way a client makes one:
-/// the blob up, the changeset created, the ID the server answered.
-async fn changeset_for(scion: &mut Scion, base: ChangesetId, name: &str) -> ChangesetId {
-    let raw = format!("{name} file\n{}\n", "x".repeat(64));
-    let blob = put_blob(scion, raw.as_bytes()).await.unwrap();
-    let changeset = Changeset::new(
-        vec![base],
-        author(),
-        None,
-        format!("{name}\n").into_bytes(),
-        [(
-            RepoPath::new(format!("{name}.txt")).unwrap(),
-            Some(FileState::Regular {
-                content: blob,
-                executable: false,
-            }),
-        )]
-        .into_iter()
-        .collect::<std::collections::BTreeMap<_, _>>(),
-    )
-    .expect("changeset fits the format");
-    let (bytes, id) = changeset.encode_with_id();
-    let reply = scion
-        .create_changeset(CreateChangesetRequest {
-            repo: REPO.into(),
-            changeset: bytes,
-        })
-        .await
-        .unwrap()
-        .into_inner();
-    assert_eq!(changeset_id(&reply.changeset_id), id);
-    id
-}
-
-/// One land call under `key`, to the ref `target`.
-async fn land_on(scion: &mut Scion, id: &ChangesetId, target: &str, key: &str) -> LandResponse {
-    scion
-        .land(LandRequest {
-            repo: REPO.into(),
-            changeset_id: id.as_bytes().to_vec(),
-            target_ref: target.into(),
-            request_key: key.into(),
-        })
-        .await
-        .expect("the land answers")
-        .into_inner()
-}
 
 /// The import's move of `main`: one compare-and-swap against
 /// `expected`, the statement `MetaTx::cas_ref` runs for the import
@@ -113,24 +63,6 @@ fn import_move_main(data: &Path, expected: i64, target: &ChangesetId) -> bool {
     })
     .join()
     .unwrap()
-}
-
-/// The changeset an ID names, read through the server's stream.
-async fn get_changeset(scion: &mut Scion, id: ChangesetId) -> Changeset {
-    let request = GetChangesetRequest {
-        repo: REPO.into(),
-        changeset_id: id.as_bytes().to_vec(),
-    };
-    let mut stream = scion
-        .get_changeset(request)
-        .await
-        .unwrap_or_else(|s| panic!("GetChangeset {id}: {s:?}"))
-        .into_inner();
-    let mut bytes = Vec::new();
-    while let Some(part) = stream.message().await.unwrap() {
-        bytes.extend_from_slice(&part.changeset);
-    }
-    Changeset::decode_with_id(&bytes).unwrap().0
 }
 
 /// Reads `scion_land_replans_total` off the server's /metrics. The
