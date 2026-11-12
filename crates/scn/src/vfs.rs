@@ -2515,12 +2515,23 @@ mod tests {
         let test = start(&[
             ("box/keep.txt", b"kept\n", Some(false)),
             ("box/inner/deep.txt", b"deep\n", Some(false)),
+            ("box/gone.txt", b"gone\n", Some(false)),
         ])
         .await;
         let root = NFSFileSystem::root_dir(&test.vfs);
         // Touch one file, so the overlay holds it before the move.
         let id = find(&test.vfs, "box/keep.txt").await.unwrap();
         test.vfs.write(id, 5, b"\n").await.unwrap();
+        // A file of the ref that the mount deleted stays deleted: the
+        // move of the directory must not bring it back.
+        test.vfs
+            .remove(
+                find(&test.vfs, "box").await.unwrap(),
+                &filename3::from(b"gone.txt".to_vec()),
+            )
+            .await
+            .unwrap();
+        assert!(find(&test.vfs, "box/gone.txt").await.is_err());
         test.vfs
             .rename(
                 root,
