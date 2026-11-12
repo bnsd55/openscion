@@ -556,10 +556,27 @@ async fn a_write_whose_intent_fails_is_refused() {
     // supervisor restarts a server that can prove its lines again.
     // The call rides the connection the drain is still finishing, so
     // poll with a deadline instead of racing the drain once.
+    //
+    // The per-call bound sits above the server's own tightest wait on
+    // this path, not below it: a `resolve_ref` takes a reader from the
+    // pool, and the pool's own wait is `READER_WAIT` (pg.rs, 30 s), with
+    // the read statement behind it bounded at minutes. On a runner whose
+    // Postgres is shared with other suites' runtimes, one call can
+    // legitimately hold for tens of seconds (run 43150672619 fired the
+    // 5 s trap exactly there), so a trap under 30 s names a slow runner
+    // a hung server. 35 s covers the pool's own bound plus slop; a call
+    // that is still pending at 35 s is one the server's pool wait should
+    // have answered, and the trap names it.
+    //
+    // The poll as a whole is bounded too: 40 polls of at most 35 s (the
+    // drain's own refusal arrives in the first seconds), so a slow
+    // runner costs the test at most a couple of minutes and a truly hung
+    // call still fails inside a minute.
+    let poll_started = std::time::Instant::now();
     let mut drained = false;
-    for _ in 0..100 {
+    for _ in 0..40 {
         let later = bound(
-            5,
+            35,
             "resolve_ref (the drain poll)",
             ci.resolve_ref(ResolveRefRequest {
                 repo: REPO.into(),
@@ -571,6 +588,11 @@ async fn a_write_whose_intent_fails_is_refused() {
             drained = true;
             break;
         }
+        assert!(
+            poll_started.elapsed() < std::time::Duration::from_secs(240),
+            "the drain never refused a call in 240 s (elapsed {:?}) - the #965 poll bound",
+            poll_started.elapsed()
+        );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert!(drained, "a server whose audit lost a line drains");
