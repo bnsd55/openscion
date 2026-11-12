@@ -281,6 +281,8 @@ mod tests {
     #[test]
     fn any_repo_name_gives_one_plain_file_name() {
         assert_eq!(file_name("main"), "main.scnsnap");
+        assert_eq!(file_name("r2"), "r2.scnsnap");
+        assert_eq!(file_name("a-b_c"), "a-b_c.scnsnap");
         assert_eq!(file_name("team/app"), "team%2Fapp.scnsnap");
         assert_eq!(file_name("../x"), "%2E.%2Fx.scnsnap");
         assert_eq!(file_name("a%b é"), "a%25b%20%C3%A9.scnsnap");
@@ -469,6 +471,20 @@ mod tests {
         let err = seed(&store, &path).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData, "{err}");
         assert!(err.to_string().contains("does not start as one"), "{err}");
+    }
+
+    /// A read error is not a clean end: `fill` hands the error back, so
+    /// a seed cannot read a broken read as an ended file.
+    #[test]
+    fn a_read_error_is_not_a_clean_end() {
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("the read broke"))
+            }
+        }
+        let mut out = [0u8; 4];
+        assert!(fill(&mut Broken, &mut out).is_err());
     }
 
     /// The reader trusts none of the header: a snapshot whose repo name
