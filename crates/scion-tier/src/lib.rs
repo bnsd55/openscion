@@ -2500,17 +2500,18 @@ mod tests {
         assert_eq!(later.len(), 127, "the claim holds its batch");
         assert_eq!(batch_calls.load(Ordering::SeqCst), 1, "one window call");
         assert_eq!(size_calls.load(Ordering::SeqCst), 1, "one key check");
-        let flights = lock(&tier.inner.flights);
-        assert!(
-            !flights.contains_key(&keys[140]),
-            "the stored key takes no flight"
-        );
-        assert_eq!(
-            flights.len(),
-            127,
-            "every other key of the batch takes one flight"
-        );
-        drop(flights);
+        {
+            let flights = lock(&tier.inner.flights);
+            assert!(
+                !flights.contains_key(&keys[140]),
+                "the stored key takes no flight"
+            );
+            assert_eq!(
+                flights.len(),
+                127,
+                "every other key of the batch takes one flight"
+            );
+        }
         settled(&tier).await;
     }
 
@@ -2583,13 +2584,14 @@ mod tests {
             2,
             "the batch ends at the boundary plus one batch"
         );
-        let flights = lock(&tier.inner.flights);
-        assert_eq!(flights.len(), 128, "the batch covers 5..133");
-        assert!(
-            flights.contains_key(&keys[5]),
-            "the batch starts at the boundary, not at the claim"
-        );
-        drop(flights);
+        {
+            let flights = lock(&tier.inner.flights);
+            assert_eq!(flights.len(), 128, "the batch covers 5..133");
+            assert!(
+                flights.contains_key(&keys[5]),
+                "the batch starts at the boundary, not at the claim"
+            );
+        }
         settled(&tier).await;
     }
 
@@ -2657,13 +2659,10 @@ mod tests {
         progress.fetched_to.store(140, Ordering::Relaxed);
         let later = tier.claim(&ask, 130, &progress);
         assert_eq!(later.len(), 127, "the batch ends one batch from 130");
-        let flights = lock(&tier.inner.flights);
-        assert_eq!(flights.len(), 128, "the batch covers 130..258");
-        assert!(
-            !flights.contains_key(&keys[140]) || true,
-            "the boundary's own key takes its flight: the boundary does not follow the claim down"
-        );
-        drop(flights);
+        {
+            let flights = lock(&tier.inner.flights);
+            assert_eq!(flights.len(), 128, "the batch covers 130..258");
+        }
         settled(&tier).await;
     }
 
