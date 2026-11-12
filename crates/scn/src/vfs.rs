@@ -3567,4 +3567,31 @@ mod tests {
         assert!(find(&test.vfs, "hold/kid").await.is_ok());
         assert!(find(&test.vfs, "spare").await.is_ok());
     }
+
+    /// A directory of the ref whose only name was removed is empty, and
+    /// its own removal is refused with the read-only error: the
+    /// directory of the ref stays, and its file's deletion is what the
+    /// commit takes.
+    #[cfg(feature = "unstable-writable-mount")]
+    #[tokio::test]
+    async fn a_ref_directory_emptied_by_a_removal_is_refused_with_rofs() {
+        let test = start(&[("y/only", b"old\n", Some(false))]).await;
+        let root = NFSFileSystem::root_dir(&test.vfs);
+        test.vfs
+            .remove(
+                find(&test.vfs, "y").await.unwrap(),
+                &filename3::from(b"only".to_vec()),
+            )
+            .await
+            .unwrap();
+        let refused = test
+            .vfs
+            .remove(root, &filename3::from(b"y".to_vec()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(refused, nfsstat3::NFS3ERR_ROFS),
+            "the emptied directory of the ref: {refused:?}"
+        );
+    }
 }
