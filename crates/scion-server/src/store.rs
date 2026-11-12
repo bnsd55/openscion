@@ -2264,4 +2264,146 @@ mod tests {
             assert_eq!(err.to_string(), "the drive is gone");
         }
     }
+
+    /// The EIO gates count down and then fail one call: an armed hook
+    /// lets the first two calls through and answers the third with the
+    /// disk's error, and the call after it passes. A gate that never
+    /// arms (a body that just passes), or one whose countdown grows or
+    /// divides instead of falling, never answers with the error, and
+    /// the same asserts catch both.
+    #[test]
+    fn the_eio_gates_fail_one_call_each_and_then_spend() {
+        let dir = crate::test_support::private_tempdir();
+        let blobs = Blobs::open(dir.path()).unwrap();
+        let content = b"the gates' one failing call";
+
+        // The write gate: two writes pass, the third fails, the fourth
+        // passes. The gate's errno is 28 (ENOSPC) unless set otherwise.
+        blobs.fail_writes.store(2, Ordering::SeqCst);
+        blobs.put(content).unwrap();
+        blobs.put(content).unwrap();
+        let err = blobs.put(content).unwrap_err().to_string();
+        assert!(err.contains("os error 28"), "{err}");
+        let id = blobs.put(content).unwrap();
+        assert_eq!(blobs.get(id).unwrap(), content, "the spent write gate");
+
+        // The read gate: two reads pass, the third fails, the fourth
+        // passes.
+        blobs.fail_reads.store(2, Ordering::SeqCst);
+        assert_eq!(blobs.get(id).unwrap(), content);
+        assert_eq!(blobs.get(id).unwrap(), content);
+        let err = blobs.get(id).unwrap_err().to_string();
+        assert!(err.contains("os error 5"), "{err}");
+        assert_eq!(blobs.get(id).unwrap(), content, "the spent read gate");
+
+        // The fsync gate: one put gates three fsyncs - the blob's temp
+        // file, its stored file's directory, and the drive cache - so an
+        // armed countdown of two is spent inside the first put, whose
+        // third fsync fails. The next put runs clean. A countdown that
+        // grows or divides instead of falling never reaches zero, every
+        // put passes, and the first put's assert catches it the same way
+        // a never-arming gate does.
+        blobs.fail_fsyncs.store(2, Ordering::SeqCst);
+        let err = blobs.put(content).unwrap_err().to_string();
+        assert!(err.contains("os error 5"), "{err}");
+        let id = blobs.put(content).unwrap();
+        assert_eq!(blobs.get(id).unwrap(), content, "the spent fsync gate");
+    }
+
+    /// `file_exists` is a cheap stat: it says yes for a blob the store
+    /// holds and no for one it does not. The importer's skip reads it,
+    /// so a constant answer either skips every reimport or reimports
+    /// everything.
+    #[test]
+    fn file_exists_says_what_is_on_disk() {
+        let dir = crate::test_support::private_tempdir();
+        let blobs = Blobs::open(dir.path()).unwrap();
+        let id = blobs.put(b"the blob whose file exists\n").unwrap();
+        assert!(blobs.file_exists(id), "the store holds this blob");
+        let absent = BlobId::of(b"content no put ever wrote");
+        assert!(!blobs.file_exists(absent), "no put made this blob");
+    }
+
+    /// A reader that has not read its content is not ended: `ended` is
+    /// the drain's signal that the decoder is freed, and a reader that
+    /// claims it at once would free a decoder still holding a window.
+    #[test]
+    fn a_reader_is_not_ended_before_its_content_is_read() {
+        let dir = crate::test_support::private_tempdir();
+        let blobs = Blobs::open(dir.path()).unwrap();
+        let id = blobs.put(b"not yet read").unwrap();
+        let mut reader = blobs.reader(id).unwrap();
+        assert!(!reader.ended(), "the reader holds a live decoder");
+        while reader.read_part(1 << 20).unwrap().is_some() {}
+        assert!(reader.ended(), "the content is read and checked");
+    }
+
+    /// `free_bytes` and `free_inodes` read the real filesystem: the
+    /// values are the drive's, far above any constant answer. The
+    /// positive tests above only pin `> 0`, which a constant `Ok(1)`
+    /// would pass; these pin magnitudes, so a stub answer is refused.
+    #[test]
+    fn free_bytes_and_free_inodes_read_the_real_filesystem() {
+        let dir = crate::test_support::private_tempdir();
+        let bytes = free_bytes(dir.path()).unwrap();
+        assert!(
+            bytes > 1 << 20,
+            "a real filesystem holds more than a token {bytes}"
+        );
+        let inodes = free_inodes(dir.path()).unwrap();
+        let inodes = inodes.expect("a temp filesystem has an inode table");
+        assert!(
+            inodes > 100,
+            "a real filesystem has inodes to spare: {inodes}"
+        );
+    }
+
+    /// A parked free-stat read holds until the guard drops: the hook
+    /// lets a test hold `statvfs` still, and the drop is what releases
+    /// it. A park that never parks, or a drop that never resets, leaves
+    /// the reader running or stuck.
+    #[test]
+    fn a_parked_free_stat_holds_until_the_guard_drops() {
+        let dir = crate::test_support::private_tempdir();
+        let guard = ParkFreeStat::now(dir.path().to_path_buf());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = dir.path().to_path_buf();
+        thread::spawn(move || {
+            let _ = free_bytes(&path);
+            tx.send(()).unwrap();
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the parked read came back while the guard still held"
+        );
+        drop(guard);
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("the dropped guard released the parked read");
+    }
+
+    /// The open's sweep removes the temp folders no process holds, and
+    /// keeps the ones a live holder has flocked: a crash's half-written
+    /// folder goes, a running process's staging folder stays.
+    #[test]
+    fn an_open_sweeps_a_dead_temp_folder_and_keeps_a_live_one() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::test_support::private_tempdir();
+        let tmp = dir.path().join("tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let live = tmp.join("live");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::set_permissions(&live, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let lock = std::fs::File::create(live.join(".lock")).unwrap();
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+        let dead = tmp.join("dead");
+        std::fs::create_dir_all(&dead).unwrap();
+        std::fs::set_permissions(&dead, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::File::create(dead.join(".lock")).unwrap();
+
+        Blobs::open(dir.path()).unwrap();
+
+        assert!(live.is_dir(), "the sweep removed a folder a process holds");
+        assert!(!dead.is_dir(), "the sweep kept a folder nothing holds");
+        drop(lock);
+    }
 }
