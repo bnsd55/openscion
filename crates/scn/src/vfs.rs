@@ -2563,6 +2563,14 @@ mod tests {
                 .overlay_file(&RepoPath::new("crate/keep.txt").unwrap())
                 .exists()
         );
+        // The moved file of the ref keeps its executable bit on disk.
+        let tool = test
+            .vfs
+            .overlay_file(&RepoPath::new("crate/tool.sh").unwrap());
+        assert!(
+            std::fs::metadata(&tool).unwrap().permissions().mode() & 0o111 != 0,
+            "the moved executable lost its bit: {tool:?}"
+        );
         // The deleted child of the moved directory stays deleted.
         assert!(find(&test.vfs, "crate/gone.txt").await.is_err());
         let crate_id = find(&test.vfs, "crate").await.unwrap();
