@@ -2030,6 +2030,10 @@ mod tests {
             "{text}"
         );
         assert!(
+            !text.contains("scion_lands_total{outcome=\"aborted\"} 0\n"),
+            "{text}"
+        );
+        assert!(
             text.contains("scion_lands_total{outcome=\"conflict\"} 1\n"),
             "{text}"
         );
