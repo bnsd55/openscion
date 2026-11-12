@@ -2496,4 +2496,69 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(path, bytes).unwrap();
     }
+
+    /// A put past the object limit is refused, and one exactly at it is
+    /// stored: the write path's own bound on what a client sends, below
+    /// the RPC layer's, so a client that streams the bytes reaches it.
+    #[test]
+    fn a_put_past_the_object_limit_is_refused_and_one_at_it_stored() {
+        let dir = crate::test_support::private_tempdir();
+        let blobs = Blobs::open(dir.path()).unwrap();
+        let too_big = vec![0u8; MAX_OBJECT_BYTES + 1];
+        let err = blobs.put(&too_big).unwrap_err().to_string();
+        assert!(err.contains("too large") || err.contains("larger than"), "{err}");
+        let at_limit = vec![0u8; MAX_OBJECT_BYTES];
+        let id = blobs.put(&at_limit).unwrap();
+        assert_eq!(id, BlobId::of(&at_limit));
+    }
+
+    /// A put that keeps a stored copy touches it: the file's mtime moves
+    /// to now, so the grace period of `gc` counts from the last upload,
+    /// not the first. A touch that does nothing leaves the old time, and
+    /// the same assert catches it.
+    #[test]
+    fn a_put_that_keeps_a_stored_copy_touches_its_file() {
+        let dir = crate::test_support::private_tempdir();
+        let blobs = Blobs::open(dir.path()).unwrap();
+        let content = b"the blob whose file the gc grace reads";
+        let id = blobs.put(content).unwrap();
+        let (_, path) = blobs.location(id);
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert_eq!(blobs.verify(id).unwrap(), BlobStatus::Valid);
+        blobs.put(content).unwrap();
+        let moved = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(
+            moved.elapsed().unwrap() < std::time::Duration::from_secs(60),
+            "the kept file's mtime stayed an hour old: {moved:?}"
+        );
+    }
+
+    /// A failed flush fails only the callers that shared it: the next
+    /// run leads a fresh flush and passes. A guard that pins every later
+    /// run to the old failure would fail the clean call, and the same
+    /// assert catches it.
+    #[test]
+    fn a_failed_flush_does_not_fail_the_next_run() {
+        let group = GroupFlush::default();
+        let fail = AtomicBool::new(true);
+        let err = group
+            .run(|| {
+                if fail.swap(false, Ordering::SeqCst) {
+                    Err(io::Error::other("the drive is gone"))
+                } else {
+                    Ok(())
+                }
+            })
+            .expect_err("the first run fails");
+        assert_eq!(err.to_string(), "the drive is gone");
+        group
+            .run(|| Ok(()))
+            .expect("the run after a failed one leads its own flush");
+    }
 }
