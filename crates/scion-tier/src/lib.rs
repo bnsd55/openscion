@@ -2609,10 +2609,9 @@ mod tests {
     }
 
     /// An upstream whose first reply item is the ask's own first part, and
-    /// whose second item is a whole-call status (Unauthenticated): the
-    /// error lands inside the part loop, not at the RPC boundary. For a
-    /// stranger key it refuses per object.
-    struct PartThenDies(Vec<u8>);
+    /// whose second item is `mid`: the error lands inside the part loop,
+    /// not at the RPC boundary. For a stranger key it refuses per object.
+    struct PartThenDies(Vec<u8>, Code);
 
     #[tonic::async_trait]
     impl Objects for PartThenDies {
@@ -2659,7 +2658,7 @@ mod tests {
             let parts: Replies = if first_names_the_ask {
                 Box::pin(
                     tokio_stream::iter([Ok(first)]).chain(tokio_stream::iter([Err(
-                        Status::unauthenticated("the upstream token was revoked"),
+                        Status::new(self.1, "the stream died here"),
                     )])),
                 )
             } else {
@@ -2671,13 +2670,19 @@ mod tests {
         }
     }
 
-    /// A tier in front of [`PartThenDies`].
+    /// A tier in front of [`PartThenDies`], whose second stream item is a
+    /// whole-call status.
     async fn part_then_dies_upstream(data: &[u8]) -> Tier<MemoryStore> {
+        part_then_code_upstream(data, Code::Unauthenticated).await
+    }
+
+    /// A tier in front of [`PartThenDies`] with `mid` as the second item.
+    async fn part_then_code_upstream(data: &[u8], mid: Code) -> Tier<MemoryStore> {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(
             Server::builder()
-                .add_service(ObjectsServer::new(PartThenDies(data.to_vec())))
+                .add_service(ObjectsServer::new(PartThenDies(data.to_vec(), mid)))
                 .serve_with_incoming(TcpListenerStream::new(listener)),
         );
         Tier::new_relay(
@@ -3116,6 +3121,26 @@ mod tests {
     /// per-object status: the given object reaches its caller, and the
     /// gone one fails alone (`whole_call` false), so the rest of the call
     /// stands.
+    #[tokio::test]
+    async fn a_per_object_error_inside_the_part_loop_fails_one_object() {
+        // A second key rides the same ask; the stream gives the first
+        // object's opening part, then a per-object status: the object in
+        // flight fails alone (whole_call false), the call does not error.
+        let data = b"an object of eighteen".to_vec();
+        let tier = part_then_code_upstream(&data, Code::NotFound).await;
+        let gone = Key::Blob(BlobId::of(&data));
+        let other = Key::Blob(BlobId::of(b"a second object, never served"));
+        let mut ask = only_fetch_ask(gone);
+        ask.keys.push((other, b"s".to_vec()));
+        let failed = tier
+            .fetch(&ask, 0, &Progress::default())
+            .await
+            .expect_err("the stream died mid-object");
+        assert_eq!(failed.status.code(), Code::NotFound, "{failed:?}");
+        assert!(!failed.whole_call, "the object fails alone");
+        settled(&tier).await;
+    }
+
     #[tokio::test]
     async fn a_gone_object_fails_alone_after_a_given_one() {
         let data = b"the object upstream has".to_vec();
