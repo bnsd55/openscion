@@ -1787,16 +1787,6 @@ impl Vfs {
         // Load this level, then take the names: the moves below change the
         // maps the listing lives in.
         self.list_dir(nodes, dir_id).await?;
-        if let Some(Node {
-            kind: Kind::Dir { listed, .. },
-            ..
-        }) = nodes.by_id.get(&dir_id)
-        {
-            println!(
-                "BOX LISTED: {:?}",
-                listed.as_ref().map(|l| l.keys().collect::<Vec<_>>())
-            );
-        }
         let mut children: Vec<(Vec<u8>, u64)> = match nodes.by_id.get(&dir_id) {
             Some(Node {
                 kind:
@@ -2600,14 +2590,6 @@ mod tests {
         .await;
         let root = NFSFileSystem::root_dir(&test.vfs);
         // Touch one file, so the overlay holds it before the move.
-        let box_id = find(&test.vfs, "box").await.unwrap();
-        {
-            let listed = test.vfs.readdir(box_id, 0, 100).await.unwrap();
-            let names: Vec<Vec<u8>> = listed.entries.iter().map(|e| e.name.0.clone()).collect();
-            println!("BOX BEFORE: {names:?}");
-            let tool_lookup = find(&test.vfs, "box/tool.sh").await;
-            println!("TOOL LOOKUP: {tool_lookup:?}");
-        }
         let id = find(&test.vfs, "box/keep.txt").await.unwrap();
         test.vfs.write(id, 5, b"\n").await.unwrap();
         // A file of the ref that the mount deleted stays deleted: the
@@ -2651,12 +2633,6 @@ mod tests {
                 .overlay_file(&RepoPath::new("crate/keep.txt").unwrap())
                 .exists()
         );
-        {
-            let crate_id = find(&test.vfs, "crate").await.unwrap();
-            let listed = test.vfs.readdir(crate_id, 0, 100).await.unwrap();
-            let names: Vec<Vec<u8>> = listed.entries.iter().map(|e| e.name.0.clone()).collect();
-            println!("CRATE2: {names:?}");
-        }
         // The moved file of the ref keeps its executable bit on disk.
         let tool = test
             .vfs
@@ -3194,6 +3170,7 @@ mod tests {
     /// not empty, and handles of files that are gone. The refusals are
     /// the mount's trust boundary.
     #[cfg(feature = "unstable-writable-mount")]
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn the_writable_mount_refuses_what_it_must() {
         let test = start(&[("README.md", b"hello\n", Some(false))]).await;
@@ -3273,6 +3250,10 @@ mod tests {
         // A write reads the exec bit back from the file it wrote.
         let attr = test.vfs.write(plain, 0, b"x\n").await.unwrap();
         assert_eq!(attr.mode & 0o777, 0o644, "a write keeps the file plain");
+        // A whole read of the local file is its end.
+        let (data, eof) = test.vfs.read(plain, 0, 100).await.unwrap();
+        assert_eq!(data, b"x\n");
+        assert!(eof, "a whole read of a local file is its end");
 
         // A write to a directory is not a write; neither is a write to a
         // symlink.
@@ -3539,5 +3520,42 @@ mod tests {
         let moved = find(&test.vfs, "y/new").await.unwrap();
         let (data, _) = test.vfs.read(moved, 0, 100).await.unwrap();
         assert_eq!(data, b"new\n", "the child moved into the emptied target");
+
+        // A local directory that holds a child is not empty: a rename
+        // over it is refused, and both directories are as they were.
+        test.vfs
+            .mkdir(root, &filename3::from(b"hold".to_vec()))
+            .await
+            .unwrap();
+        let (id, _) = test
+            .vfs
+            .create(
+                find(&test.vfs, "hold").await.unwrap(),
+                &filename3::from(b"kid".to_vec()),
+                sattr3::default(),
+            )
+            .await
+            .unwrap();
+        test.vfs.write(id, 0, b"kid\n").await.unwrap();
+        test.vfs
+            .mkdir(root, &filename3::from(b"spare".to_vec()))
+            .await
+            .unwrap();
+        let refused = test
+            .vfs
+            .rename(
+                root,
+                &filename3::from(b"spare".to_vec()),
+                root,
+                &filename3::from(b"hold".to_vec()),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(refused, nfsstat3::NFS3ERR_NOTEMPTY),
+            "a rename over a local directory with a child: {refused:?}"
+        );
+        assert!(find(&test.vfs, "hold/kid").await.is_ok());
+        assert!(find(&test.vfs, "spare").await.is_ok());
     }
 }
