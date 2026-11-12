@@ -1505,6 +1505,7 @@ pub(crate) mod spawn_guard {
 mod tests {
     use crate::Backend;
     use std::sync::Barrier;
+    use std::sync::mpsc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread;
     use std::time::Duration;
@@ -2560,5 +2561,44 @@ mod tests {
         group
             .run(|| Ok(()))
             .expect("the run after a failed one leads its own flush");
+    }
+
+    /// A caller that waits while another's flush runs leads the next one
+    /// when that flush ends: its target is the flush after the leader's,
+    /// and `finished < target` makes it lead rather than wait again. The
+    /// join is bounded, so a caller that never comes back from the wait
+    /// fails red instead of hanging.
+    #[test]
+    fn a_caller_that_waited_through_a_flush_leads_the_next_one() {
+        let group = GroupFlush::default();
+        let both_there = Barrier::new(2);
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::scope(|s| {
+            // The first caller's flush holds until the second waits.
+            let first = s.spawn(|| {
+                let group = &group;
+                group.run(|| {
+                    both_there.wait();
+                    Ok(())
+                })
+            });
+            let second = s.spawn(|| {
+                let result = group.run(|| Ok(()));
+                done_tx.send(result).unwrap();
+            });
+            // The second is inside the wait before the first's flush ends,
+            // so its target was counted against the running one.
+            let give_up = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while group.joined() < 2 && std::time::Instant::now() < give_up {
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(group.joined(), 2, "the second caller never reached the wait");
+            both_there.wait();
+            first.join().unwrap().unwrap();
+            let second_result = done_rx
+                .recv_timeout(Duration::from_secs(60))
+                .expect("the second caller never came back from the wait");
+            second_result.unwrap();
+        });
     }
 }
