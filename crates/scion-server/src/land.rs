@@ -32,7 +32,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 
 use hashlink::LruCache;
 use scion_core::{Changeset, ChangesetId, FileState, RepoPath};
@@ -103,6 +103,7 @@ pub(crate) const MAX_INDEX_BYTES: usize = if cfg!(test) { 64 << 10 } else { 128 
 /// subtraction). Release builds never read the env.
 #[cfg(feature = "test-hooks")]
 fn max_index_bytes() -> usize {
+    use std::sync::OnceLock;
     static LEVER: OnceLock<usize> = OnceLock::new();
     *LEVER.get_or_init(|| {
         std::env::var_os("SCION_TEST_MAX_INDEX_BYTES")
