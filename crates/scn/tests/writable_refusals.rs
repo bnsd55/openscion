@@ -20,30 +20,35 @@ fn scn(args: &[&str]) -> Output {
 /// refused with the build's name in the message, exit 2.
 #[test]
 fn a_writable_mount_on_a_read_only_build_is_refused_before_it_connects() {
-    let out = scn(&["--server", "http://127.0.0.1:1", "mount", "--unstable-writable", "/tmp/scn-mut-refuse"]);
+    let out = scn(&[
+        "--server",
+        "http://127.0.0.1:1",
+        "mount",
+        "--unstable-writable",
+        "/tmp/scn-mut-refuse",
+    ]);
     assert_eq!(out.status.code(), Some(2), "the refusal exits 2");
     let text = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        text.contains("this build has no writable mount"),
-        "{text}"
-    );
-    assert!(
-        text.contains("unstable-writable-mount"),
-        "{text}"
-    );
+    assert!(text.contains("this build has no writable mount"), "{text}");
+    assert!(text.contains("unstable-writable-mount"), "{text}");
 }
 
 /// `scn commit --from-mount` on a build without the feature: the same
 /// refusal, the same exit.
 #[test]
 fn a_commit_from_a_mount_on_a_read_only_build_is_refused_before_it_connects() {
-    let out = scn(&["--server", "http://127.0.0.1:1", "commit", "--message", "m", "--from-mount", "/tmp/scn-mut-refuse"]);
+    let out = scn(&[
+        "--server",
+        "http://127.0.0.1:1",
+        "commit",
+        "--message",
+        "m",
+        "--from-mount",
+        "/tmp/scn-mut-refuse",
+    ]);
     assert_eq!(out.status.code(), Some(2), "the refusal exits 2");
     let text = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        text.contains("this build has no writable mount"),
-        "{text}"
-    );
+    assert!(text.contains("this build has no writable mount"), "{text}");
 }
 
 /// The other side of the guard: without the write flags the commands
@@ -54,20 +59,17 @@ fn a_commit_from_a_mount_on_a_read_only_build_is_refused_before_it_connects() {
 fn a_mount_without_the_writable_flag_is_not_refused_by_the_build() {
     let out = scn(&["mount", "--no-mount", "/tmp"]);
     let text = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !text.contains("this build has no writable mount"),
-        "{text}"
-    );
+    assert!(!text.contains("this build has no writable mount"), "{text}");
 }
 
 #[test]
 fn a_commit_without_from_mount_is_not_refused_by_the_build() {
     let out = scn(&["--server", "http://127.0.0.1:1", "commit", "--message", "m"]);
     let text = String::from_utf8_lossy(&out.stderr);
+    assert!(!text.contains("this build has no writable mount"), "{text}");
+    // It got past the guard and failed on the dead server instead.
     assert!(
-        !text.contains("this build has no writable mount"),
+        text.contains("cannot connect") || out.status.code() == Some(2),
         "{text}"
     );
-    // It got past the guard and failed on the dead server instead.
-    assert!(text.contains("cannot connect") || out.status.code() == Some(2), "{text}");
 }
