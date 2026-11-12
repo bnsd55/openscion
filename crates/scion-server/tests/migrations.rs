@@ -531,3 +531,94 @@ fn a_refusing_open_writes_nothing_to_the_catalog() {
     );
     drop(guard);
 }
+
+/// A serve that was asked to migrate records the move in its audit
+/// log: one `admin`/`ok` line naming the versions it moved, written
+/// before the server takes a call. A record that answers without
+/// writing would leave the log without the line.
+#[test]
+fn a_migrating_serve_records_the_move_in_its_audit_log() {
+    let base = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL must name the test database");
+    let schema = "mig_serve_audit";
+    let url = url_for(&base, schema);
+    seed_behind_store(&base, schema);
+    let dir = scion_server::test_support::private_tempdir();
+    let data = dir.path().join("data");
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
+    let audit_path = dir.path().join("migrate-audit.log");
+    let log = dir.path().join("serve.log");
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
+        .args(["--data", data.to_str().unwrap()])
+        .env("SCION_POSTGRES_URL", &url)
+        .args([
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--token-file",
+            ensure_token().to_str().unwrap(),
+            "--migrate",
+            "--audit-file",
+            audit_path.to_str().unwrap(),
+        ])
+        .env("NO_COLOR", "1")
+        .stdout(
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log)
+                .unwrap(),
+        )
+        .stderr(
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log)
+                .unwrap(),
+        )
+        .spawn()
+        .expect("the migrating serve starts");
+    let start = std::time::Instant::now();
+    loop {
+        if bound_addr(&log).is_some() {
+            break;
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!(
+                "the migrating serve exited: {status}: {}",
+                fs::read_to_string(&log).unwrap_or_default()
+            );
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(60),
+            "no listen"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let text = fs::read_to_string(&audit_path)
+        .expect("the audit file exists: the migration's line is in it");
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("every audit line is JSON"))
+        .collect();
+    let moved = lines
+        .iter()
+        .find(|line| line["event"] == "admin" && line["fields"]["what"] == "migrate")
+        .or_else(|| {
+            lines
+                .iter()
+                .find(|line| line["what"] == "migrate" || line["event"] == "migrate")
+        })
+        .expect("the migration's line is in the log");
+    let field = |name: &str| {
+        moved
+            .get(name)
+            .or_else(|| moved.get("fields").and_then(|f| f.get(name)))
+            .cloned()
+            .unwrap_or_else(|| panic!("the line names {name}: {moved}"))
+    };
+    assert_eq!(field("from"), 5, "the line names the old version");
+    assert_eq!(field("to"), 6, "the line names the new version");
+}
