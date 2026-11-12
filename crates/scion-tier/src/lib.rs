@@ -1873,6 +1873,128 @@ mod tests {
         }
     }
 
+    /// The two RPCs a tier must never answer: a ref and a root tree.
+    /// A tier that fetched root trees would mint a ticket for any repo,
+    /// and a ref would move the server's resolution onto the tier. The
+    /// whole-body stub mutants answer Ok with an empty response; both
+    /// must stay Unimplemented with the pointer to the server.
+    /// A key checks the bytes that name it: another object's bytes are
+    /// refused, and a blob round-trips through its stored form.
+    #[test]
+    fn a_key_refuses_another_objects_bytes_and_round_trips_its_own() {
+        use scion_core::{BlobId, TreeId};
+
+        let mine = b"the object that is mine".to_vec();
+        let key = Key::Blob(BlobId::of(&mine));
+        let packed = object::pack(&mine).unwrap();
+        // Its own stored form checks, and to_stored keeps the packed bytes.
+        key.check_stored(&packed).expect("its own bytes check");
+        let header = Header {
+            kind: ObjectKind::Blob,
+            id: *BlobId::of(&mine).as_bytes(),
+            encoding: Encoding::Zstd,
+            encoded_size: packed.len(),
+            size: mine.len(),
+        };
+        let stored = key.to_stored(&header, packed.clone()).unwrap();
+        assert_eq!(stored, packed, "a zstd blob is stored as it came");
+
+        // Another object's bytes are refused, in both directions.
+        let other = b"the object that is not mine".to_vec();
+        let other_packed = object::pack(&other).unwrap();
+        assert!(
+            key.check_stored(&other_packed).is_err(),
+            "another object's bytes do not check"
+        );
+        let other_header = Header {
+            id: *BlobId::of(&other).as_bytes(),
+            encoded_size: other_packed.len(),
+            size: other.len(),
+            ..header
+        };
+        assert!(
+            key.to_stored(&other_header, other_packed).is_err(),
+            "a key refuses bytes that hash elsewhere"
+        );
+
+        // A raw blob is packed here, and the bytes that are not its ID are
+        // refused before the pack.
+        let raw_header = Header {
+            encoding: Encoding::Raw,
+            encoded_size: mine.len(),
+            size: mine.len(),
+            ..header
+        };
+        assert_eq!(
+            key.to_stored(&raw_header, mine.clone()).unwrap(),
+            packed,
+            "a raw blob is packed for the store"
+        );
+
+        // A tree key against blob bytes: the decode refuses them.
+        let tree = Key::Tree(TreeId::from_bytes([7; 32]));
+        assert!(
+            tree.check_stored(&packed).is_err(),
+            "a tree key refuses blob bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tier_answers_neither_refs_nor_root_trees() {
+        use scion_proto::v1::{GetRootTreeRequest, ResolveRefRequest};
+        let tier = Tier::new_relay(
+            MemoryStore::new(1 << 20),
+            "http://127.0.0.1:1",
+            "token",
+            CACHE_UPSTREAM_TIMEOUT,
+            None,
+        )
+        .unwrap();
+        let refused = Objects::resolve_ref(&tier, Request::new(ResolveRefRequest::default()))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), Code::Unimplemented, "{refused:?}");
+        assert!(refused.message().contains("ask the server"), "{refused:?}");
+        let refused = Objects::get_root_tree(&tier, Request::new(GetRootTreeRequest::default()))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), Code::Unimplemented, "{refused:?}");
+        assert!(refused.message().contains("ask the server"), "{refused:?}");
+    }
+
+    /// An object whose path the ticket's walk does not reach fails alone:
+    /// nothing goes out for it, and the caller is told the object is not
+    /// in the ticket. The walk check's stub would serve it.
+    #[tokio::test]
+    async fn an_object_off_the_walk_is_refused_and_its_neighbour_still_serves() {
+        let f = setup(3, 1 << 20).await;
+        // A wrong path for a real key: the walk from the ticket's root
+        // tree does not reach it.
+        let mut off_walk = ask(&f, &f.keys, "r");
+        off_walk.keys[0].1 = b"not/its/path".to_vec();
+        let (Err(failed), _permit) = f
+            .tier
+            .produce(&off_walk, 0, &Progress::default())
+            .await
+            .unwrap()
+        else {
+            panic!("the walk must not reach the object")
+        };
+        assert_eq!(failed.status.code(), Code::NotFound, "{failed:?}");
+        assert!(
+            failed.status.message().contains("is not in the ticket"),
+            "{failed:?}"
+        );
+        assert!(!failed.whole_call, "the object fails alone");
+        settled(&f.tier).await;
+        // Its neighbours are still reachable on a correct ask.
+        let found = f
+            .tier
+            .produce(&ask(&f, &f.keys, "r"), 1, &Progress::default())
+            .await;
+        assert!(found.is_some(), "the neighbours still serve");
+    }
+
     #[tokio::test]
     async fn a_tier_refuses_a_ticket_of_another_key() {
         use scion_proto::v1::GetObjectsRequest;
@@ -1931,6 +2053,15 @@ mod tests {
         };
         assert_eq!(chunks.len(), 1);
         assert_eq!(tier.cache_hits_and_misses(), (1, 1));
+        // The metrics getter hands back the tier's own counters, not a
+        // fresh default: the daemon's /metrics endpoint reads through
+        // it, so a swapped Arc would serve all-zero counts while the
+        // tier kept counting into a dropped one.
+        assert_eq!(
+            tier.metrics().cache_counts(),
+            (1, 1),
+            "the getter reads the counters the tier just wrote"
+        );
     }
 
     #[tokio::test]
@@ -2302,6 +2433,52 @@ mod tests {
 
     /// An upstream that sends the first part of one large RAW blob, then
     /// nothing more.
+    struct OneZstd(Vec<u8>);
+    #[tonic::async_trait]
+    impl Objects for OneZstd {
+        async fn resolve_ref(
+            &self,
+            _: Request<ResolveRefRequest>,
+        ) -> Result<Response<ResolveRefResponse>, Status> {
+            Err(Status::unimplemented("no refs"))
+        }
+        async fn get_root_tree(
+            &self,
+            _: Request<GetRootTreeRequest>,
+        ) -> Result<Response<GetRootTreeResponse>, Status> {
+            Err(Status::unimplemented("no changesets"))
+        }
+        type GetObjectsStream = Replies;
+        async fn get_objects(
+            &self,
+            request: Request<GetObjectsRequest>,
+        ) -> Result<Response<Replies>, Status> {
+            let data = self.0.clone();
+            let packed = object::pack(&data).unwrap();
+            let header = Header {
+                kind: ObjectKind::Blob,
+                id: *BlobId::of(&data).as_bytes(),
+                encoding: Encoding::Zstd,
+                encoded_size: packed.len(),
+                size: data.len(),
+            };
+            let first = header
+                .parts(object::read_chunks(&packed[..], packed.len()).unwrap())
+                .remove(0);
+            let names_it = request
+                .get_ref()
+                .refs
+                .first()
+                .is_some_and(|r| r.id == header.id && r.kind == i32::from(ObjectKind::Blob));
+            let parts: Replies = if names_it {
+                Box::pin(tokio_stream::iter([Ok(first)]))
+            } else {
+                Box::pin(tokio_stream::iter([Err(Status::not_found("not asked"))]))
+            };
+            Ok(Response::new(parts))
+        }
+    }
+
     struct Stalls(Vec<u8>);
 
     #[tonic::async_trait]
@@ -2340,6 +2517,221 @@ mod tests {
             let parts = tokio_stream::iter([Ok(first)]).chain(tokio_stream::pending());
             Ok(Response::new(Box::pin(parts)))
         }
+    }
+
+    /// An upstream that refuses every `GetObjects` with a whole-call status
+    /// (Unauthenticated), before any object part.
+    struct Refuses;
+
+    #[tonic::async_trait]
+    impl Objects for Refuses {
+        async fn resolve_ref(
+            &self,
+            _: Request<ResolveRefRequest>,
+        ) -> Result<Response<ResolveRefResponse>, Status> {
+            Err(Status::unimplemented("no refs"))
+        }
+
+        async fn get_root_tree(
+            &self,
+            _: Request<GetRootTreeRequest>,
+        ) -> Result<Response<GetRootTreeResponse>, Status> {
+            Err(Status::unimplemented("no changesets"))
+        }
+
+        type GetObjectsStream = Replies;
+
+        async fn get_objects(
+            &self,
+            _: Request<GetObjectsRequest>,
+        ) -> Result<Response<Replies>, Status> {
+            Ok(Response::new(Box::pin(tokio_stream::iter([Err(
+                Status::unauthenticated("the upstream token was revoked"),
+            )]))))
+        }
+    }
+
+    /// An upstream that answers the first object of the ask and then ends
+    /// the stream with a per-object status (NotFound): the rest of the
+    /// objects fail alone, not the whole call.
+    struct OneThenNotFound(Vec<u8>);
+
+    #[tonic::async_trait]
+    impl Objects for OneThenNotFound {
+        async fn resolve_ref(
+            &self,
+            _: Request<ResolveRefRequest>,
+        ) -> Result<Response<ResolveRefResponse>, Status> {
+            Err(Status::unimplemented("no refs"))
+        }
+
+        async fn get_root_tree(
+            &self,
+            _: Request<GetRootTreeRequest>,
+        ) -> Result<Response<GetRootTreeResponse>, Status> {
+            Err(Status::unimplemented("no changesets"))
+        }
+
+        type GetObjectsStream = Replies;
+
+        async fn get_objects(
+            &self,
+            request: Request<GetObjectsRequest>,
+        ) -> Result<Response<Replies>, Status> {
+            let data = self.0.clone();
+            let refs = request.get_ref().refs.clone();
+            let header = Header {
+                kind: ObjectKind::Blob,
+                id: *BlobId::of(&data).as_bytes(),
+                encoding: Encoding::Raw,
+                encoded_size: data.len(),
+                size: data.len(),
+            };
+            let first = header
+                .parts(object::read_chunks(&data[..], data.len()).unwrap())
+                .remove(0);
+            let first_names_the_ask = refs
+                .first()
+                .is_some_and(|r| r.id == header.id && r.kind == i32::from(ObjectKind::Blob));
+            let parts: Replies = if first_names_the_ask {
+                Box::pin(
+                    tokio_stream::iter([Ok(first)]).chain(tokio_stream::iter([Err(
+                        Status::not_found("the second object is gone"),
+                    )])),
+                )
+            } else {
+                Box::pin(tokio_stream::iter([Err(Status::not_found(
+                    "not the asked object",
+                ))]))
+            };
+            Ok(Response::new(parts))
+        }
+    }
+
+    /// An upstream whose first reply item is the ask's own first part, and
+    /// whose second item is `mid`: the error lands inside the part loop,
+    /// not at the RPC boundary. For a stranger key it refuses per object.
+    struct PartThenDies(Vec<u8>, Code);
+
+    #[tonic::async_trait]
+    impl Objects for PartThenDies {
+        async fn resolve_ref(
+            &self,
+            _: Request<ResolveRefRequest>,
+        ) -> Result<Response<ResolveRefResponse>, Status> {
+            Err(Status::unimplemented("no refs"))
+        }
+
+        async fn get_root_tree(
+            &self,
+            _: Request<GetRootTreeRequest>,
+        ) -> Result<Response<GetRootTreeResponse>, Status> {
+            Err(Status::unimplemented("no changesets"))
+        }
+
+        type GetObjectsStream = Replies;
+
+        async fn get_objects(
+            &self,
+            request: Request<GetObjectsRequest>,
+        ) -> Result<Response<Replies>, Status> {
+            let data = self.0.clone();
+            let refs = request.get_ref().refs.clone();
+            let header = Header {
+                kind: ObjectKind::Blob,
+                id: *BlobId::of(&data).as_bytes(),
+                encoding: Encoding::Raw,
+                encoded_size: data.len(),
+                size: data.len(),
+            };
+            // Two parts of the announced bytes; the stream carries only
+            // the first, then the whole-call error.
+            let first = header
+                .parts(vec![
+                    Bytes::copy_from_slice(&data[..data.len() / 2]),
+                    Bytes::copy_from_slice(&data[data.len() / 2..]),
+                ])
+                .remove(0);
+            let first_names_the_ask = refs
+                .first()
+                .is_some_and(|r| r.id == header.id && r.kind == i32::from(ObjectKind::Blob));
+            let parts: Replies = if first_names_the_ask {
+                Box::pin(
+                    tokio_stream::iter([Ok(first)]).chain(tokio_stream::iter([Err(Status::new(
+                        self.1,
+                        "the stream died here",
+                    ))])),
+                )
+            } else {
+                Box::pin(tokio_stream::iter([Err(Status::not_found(
+                    "not the asked object",
+                ))]))
+            };
+            Ok(Response::new(parts))
+        }
+    }
+
+    /// A tier in front of [`PartThenDies`], whose second stream item is a
+    /// whole-call status.
+    async fn part_then_dies_upstream(data: &[u8]) -> Tier<MemoryStore> {
+        part_then_code_upstream(data, Code::Unauthenticated).await
+    }
+
+    /// A tier in front of [`PartThenDies`] with `mid` as the second item.
+    async fn part_then_code_upstream(data: &[u8], mid: Code) -> Tier<MemoryStore> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(
+            Server::builder()
+                .add_service(ObjectsServer::new(PartThenDies(data.to_vec(), mid)))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        Tier::new_relay(
+            MemoryStore::new(1 << 20),
+            &url,
+            "token",
+            CACHE_UPSTREAM_TIMEOUT,
+            None,
+        )
+        .unwrap()
+    }
+
+    /// A tier in front of [`Refuses`].
+    async fn refusing_upstream() -> Tier<MemoryStore> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(
+            Server::builder()
+                .add_service(ObjectsServer::new(Refuses))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        Tier::new_relay(
+            MemoryStore::new(0),
+            &url,
+            "token",
+            CACHE_UPSTREAM_TIMEOUT,
+            None,
+        )
+        .unwrap()
+    }
+
+    /// A tier in front of [`OneThenNotFound`].
+    async fn one_then_not_found_upstream(data: &[u8]) -> Tier<MemoryStore> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(
+            Server::builder()
+                .add_service(ObjectsServer::new(OneThenNotFound(data.to_vec())))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        Tier::new_relay(
+            MemoryStore::new(1 << 20),
+            &url,
+            "token",
+            CACHE_UPSTREAM_TIMEOUT,
+            None,
+        )
+        .unwrap()
     }
 
     /// A tier in front of [`Stalls`] that sends the first part of `data`.
@@ -2476,6 +2868,13 @@ mod tests {
             request_id: None,
             stalled: None,
         };
+        // A key the store holds, inside the batch the claim would fetch
+        // (130..258): the claim's window must be aligned with the loop's
+        // range, so the stored key takes no flight while every other key
+        // of the batch takes one.
+        tier.store()
+            .put(keys[140], &Bytes::from_static(b"stored"))
+            .unwrap();
         let later = tier.claim(&ask, 130, &Progress::default());
         // The claim starts the batch at its own index (the boundary is at
         // 0, more than a batch behind), so it holds 258 - 131 = 127 keys;
@@ -2484,6 +2883,400 @@ mod tests {
         assert_eq!(later.len(), 127, "the claim holds its batch");
         assert_eq!(batch_calls.load(Ordering::SeqCst), 1, "one window call");
         assert_eq!(size_calls.load(Ordering::SeqCst), 1, "one key check");
+        {
+            let flights = lock(&tier.inner.flights);
+            assert!(
+                !flights.contains_key(&keys[140]),
+                "the stored key takes no flight"
+            );
+            assert_eq!(
+                flights.len(),
+                127,
+                "every other key of the batch takes one flight"
+            );
+        }
+        settled(&tier).await;
+    }
+
+    /// A claim within one batch of the boundary starts the batch at the
+    /// boundary, not at its own index, and ends at one batch from there:
+    /// the boundary tiles the fetches.
+    #[tokio::test]
+    async fn a_claim_within_one_batch_of_the_boundary_starts_there() {
+        // 300 keys the store lacks.
+        let keys: Vec<Key> = (0u32..300)
+            .map(|i| Key::Blob(BlobId::of(i.to_le_bytes().as_slice())))
+            .collect();
+        let key_ed = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+        let ticket =
+            scion_proto::ticket::sign(&key_ed, "r", "test", [7; 32], scion_proto::ticket::now())
+                .unwrap();
+        let ticket = scion_proto::ticket::parse(
+            &ticket,
+            &[key_ed.verifying_key()],
+            scion_proto::ticket::now(),
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let fake = Fake {
+            objects: Arc::new(HashMap::new()),
+            key: key_ed.clone(),
+            root: TreeId::from_bytes([7; 32]),
+            asked: Arc::default(),
+            largest: Arc::default(),
+            calls: Arc::default(),
+        };
+        tokio::spawn(
+            Server::builder()
+                .add_service(ObjectsServer::new(fake))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        let probe = Probe {
+            memory: MemoryStore::new(1 << 20),
+            size_calls: Arc::new(AtomicUsize::new(0)),
+            sizes_calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let tier = Tier::new(
+            probe,
+            &url,
+            "token",
+            CACHE_UPSTREAM_TIMEOUT,
+            None,
+            vec![key_ed.verifying_key()],
+        )
+        .unwrap();
+        let ask = Ask {
+            repo: "r".to_owned(),
+            walk: Arc::new(Mutex::new(scion_proto::ticket::Walker::new([7; 32]))),
+            ticket,
+            keys: keys.iter().map(|key| (*key, b"f".to_vec())).collect(),
+            zstd: false,
+            until: Until::NONE,
+            request_id: None,
+            stalled: None,
+        };
+        // The boundary sits at 5: the claim at 130 is 125 keys past it,
+        // within one batch, so the batch starts at the boundary and ends
+        // one batch from there (5 + 128 = 133).
+        let progress = Progress::default();
+        progress.fetched_to.store(5, Ordering::Relaxed);
+        let later = tier.claim(&ask, 130, &progress);
+        assert_eq!(
+            later.len(),
+            2,
+            "the batch ends at the boundary plus one batch"
+        );
+        {
+            let flights = lock(&tier.inner.flights);
+            assert_eq!(flights.len(), 128, "the batch covers 5..133");
+            assert!(
+                flights.contains_key(&keys[5]),
+                "the batch starts at the boundary, not at the claim"
+            );
+        }
+        settled(&tier).await;
+        // The exact edge: 128 keys past the boundary is no longer within
+        // one batch, so the batch starts at the claim itself.
+        let progress = Progress::default();
+        progress.fetched_to.store(2, Ordering::Relaxed);
+        let later = tier.claim(&ask, 130, &progress);
+        assert_eq!(
+            later.len(),
+            127,
+            "i - fetched == MAX_BATCH is a claim a batch ahead"
+        );
+        settled(&tier).await;
+    }
+
+    /// A claim a batch ahead of the boundary starts at its own index:
+    /// the boundary never follows it down.
+    #[tokio::test]
+    async fn a_claim_a_batch_ahead_of_the_boundary_starts_at_itself() {
+        let keys: Vec<Key> = (0u32..300)
+            .map(|i| Key::Blob(BlobId::of(i.to_le_bytes().as_slice())))
+            .collect();
+        let key_ed = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+        let ticket =
+            scion_proto::ticket::sign(&key_ed, "r", "test", [7; 32], scion_proto::ticket::now())
+                .unwrap();
+        let ticket = scion_proto::ticket::parse(
+            &ticket,
+            &[key_ed.verifying_key()],
+            scion_proto::ticket::now(),
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let fake = Fake {
+            objects: Arc::new(HashMap::new()),
+            key: key_ed.clone(),
+            root: TreeId::from_bytes([7; 32]),
+            asked: Arc::default(),
+            largest: Arc::default(),
+            calls: Arc::default(),
+        };
+        tokio::spawn(
+            Server::builder()
+                .add_service(ObjectsServer::new(fake))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        let probe = Probe {
+            memory: MemoryStore::new(1 << 20),
+            size_calls: Arc::new(AtomicUsize::new(0)),
+            sizes_calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let tier = Tier::new(
+            probe,
+            &url,
+            "token",
+            CACHE_UPSTREAM_TIMEOUT,
+            None,
+            vec![key_ed.verifying_key()],
+        )
+        .unwrap();
+        let ask = Ask {
+            repo: "r".to_owned(),
+            walk: Arc::new(Mutex::new(scion_proto::ticket::Walker::new([7; 32]))),
+            ticket,
+            keys: keys.iter().map(|key| (*key, b"f".to_vec())).collect(),
+            zstd: false,
+            until: Until::NONE,
+            request_id: None,
+            stalled: None,
+        };
+        // The boundary sits at 140, one batch past the claim at 130: the
+        // guard `fetched <= i` is false, so the batch starts at the claim
+        // itself and runs to 258. (The `i - fetched` side is never
+        // evaluated: the && short-circuits.)
+        let progress = Progress::default();
+        progress.fetched_to.store(140, Ordering::Relaxed);
+        let later = tier.claim(&ask, 130, &progress);
+        assert_eq!(later.len(), 127, "the batch ends one batch from 130");
+        {
+            let flights = lock(&tier.inner.flights);
+            assert_eq!(flights.len(), 128, "the batch covers 130..258");
+        }
+        settled(&tier).await;
+    }
+
+    /// An upstream that refuses the whole call before any object: the
+    /// caller's failure is the call's own (`whole_call`), so a caller with
+    /// a later deadline asks again. A per-object reading of a
+    /// whole-call status would leave the other waiters hanging on their
+    /// deadlines while the upstream is broken.
+    #[tokio::test]
+    async fn a_whole_call_error_inside_the_part_loop_fails_the_whole_call() {
+        // The first part answers, then the stream dies with a whole-call
+        // status: the error rides the call, not one object - the single
+        // waiter must see whole_call true and the error's own code.
+        let data = b"an object of eighteen".to_vec();
+        let tier = part_then_dies_upstream(&data).await;
+        let key = Key::Blob(BlobId::of(&data));
+        let failed = tier
+            .fetch(&only_fetch_ask(key), 0, &Progress::default())
+            .await
+            .expect_err("the stream died mid-object");
+        assert_eq!(failed.status.code(), Code::Unauthenticated, "{failed:?}");
+        assert!(
+            failed.whole_call,
+            "a mid-object whole-call error is the call's own"
+        );
+        settled(&tier).await;
+    }
+
+    #[tokio::test]
+    async fn a_per_object_refusal_of_the_first_item_fails_one_object() {
+        // The stream's first item is a per-object status: the object fails
+        // alone (whole_call false) and the call itself does not error.
+        let tier = part_then_dies_upstream(b"an object").await;
+        let stranger = Key::Blob(BlobId::of(b"a stranger's object"));
+        let failed = tier
+            .fetch(&only_fetch_ask(stranger), 0, &Progress::default())
+            .await
+            .expect_err("the upstream refused the object");
+        assert_eq!(failed.status.code(), Code::NotFound, "{failed:?}");
+        assert!(!failed.whole_call, "the object fails alone");
+        settled(&tier).await;
+    }
+
+    #[tokio::test]
+    async fn an_upstream_that_refuses_the_call_fails_the_whole_call() {
+        let tier = refusing_upstream().await;
+        let data = b"an object".to_vec();
+        let key = Key::Blob(BlobId::of(&data));
+        let ask = only_fetch_ask(key);
+        let failed = tier
+            .fetch(&ask, 0, &Progress::default())
+            .await
+            .expect_err("the upstream refused the call");
+        assert_eq!(failed.status.code(), Code::Unauthenticated, "{failed:?}");
+        assert!(
+            failed.whole_call,
+            "the refusal is the call's own, not one object's"
+        );
+        settled(&tier).await;
+    }
+
+    /// An upstream that gives the first object and ends its reply with a
+    /// per-object status: the given object reaches its caller, and the
+    /// gone one fails alone (`whole_call` false), so the rest of the call
+    /// stands.
+    #[tokio::test]
+    async fn a_per_object_error_inside_the_part_loop_fails_one_object() {
+        // A second key rides the same ask; the stream gives the first
+        // object's opening part, then a per-object status: the object in
+        // flight fails alone (whole_call false), the call does not error.
+        let data = b"an object of eighteen".to_vec();
+        let tier = part_then_code_upstream(&data, Code::NotFound).await;
+        let gone = Key::Blob(BlobId::of(&data));
+        let other = Key::Blob(BlobId::of(b"a second object, never served"));
+        let mut ask = only_fetch_ask(gone);
+        ask.keys.push((other, b"s".to_vec()));
+        let failed = tier
+            .fetch(&ask, 0, &Progress::default())
+            .await
+            .expect_err("the stream died mid-object");
+        assert_eq!(failed.status.code(), Code::NotFound, "{failed:?}");
+        assert!(!failed.whole_call, "the object fails alone");
+        settled(&tier).await;
+    }
+
+    #[tokio::test]
+    async fn a_gone_object_fails_alone_after_a_given_one() {
+        let data = b"the object upstream has".to_vec();
+        let tier = one_then_not_found_upstream(&data).await;
+        let given = Key::Blob(BlobId::of(&data));
+        let gone = Key::Blob(BlobId::of(b"the object upstream lacks"));
+        let ask = only_fetch_ask(given);
+        let mut keys = ask.keys.clone();
+        keys.push((gone, b"g".to_vec()));
+        let ask = Ask { keys, ..ask };
+        let given_out = tier.fetch(&ask, 0, &Progress::default()).await.unwrap();
+        // The tier serves the object in its stored form; unpack to the
+        // bytes the fake holds.
+        assert_eq!(
+            object::unpack(&given_out.unwrap(), data.len()).unwrap(),
+            data
+        );
+        // The gone key rode the same flight: its waiter settles with the
+        // per-object refusal, not the call's own.
+        let failed = tier
+            .fetch(&ask, 1, &Progress::default())
+            .await
+            .expect_err("the gone object is refused");
+        assert_eq!(failed.status.code(), Code::NotFound, "{failed:?}");
+        assert!(
+            !failed.whole_call,
+            "the gone object fails alone; the call stood"
+        );
+        settled(&tier).await;
+    }
+
+    /// A reply that must grow its share past what the budget still holds
+    /// is refused, not served: cover waits and gives up, and the caller
+    /// asks again. If cover always said yes, a tier under load would
+    /// hold memory past its budget.
+    #[tokio::test]
+    async fn a_reply_that_grows_past_the_free_budget_is_refused() {
+        let data = vec![7u8; 4096];
+        let key = Key::Blob(BlobId::of(&data));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(
+            Server::builder()
+                .add_service(ObjectsServer::new(OneZstd(data.clone())))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        let mut tier = Tier::new_relay(
+            MemoryStore::new(1 << 20),
+            &url,
+            "token",
+            CACHE_UPSTREAM_TIMEOUT,
+            None,
+        )
+        .unwrap();
+        let ask = only_fetch_ask(key);
+        // A short wait: the refusal comes in milliseconds.
+        {
+            let inner = Arc::get_mut(&mut tier.inner).unwrap();
+            inner.busy = Duration::from_millis(300);
+        }
+        // The reply budget holds all but the reply's first take (the
+        // stored form's length) plus 8 bytes: the first take fits, the
+        // growth for a non-zstd client (the stored frame and the
+        // unpacked bytes on top) does not.
+        let packed = object::pack(&data).unwrap();
+        // The reply's share must grow by the stored frame and the
+        // unpacked bytes on top of its first take.
+        let grow = packed.len() + data.len() + UNPACK_BYTES;
+        let keep_free = packed.len() + 8;
+        assert!(
+            grow > keep_free,
+            "the test needs a growth past what the budget leaves"
+        );
+        let in_flight = Arc::clone(&tier.inner.in_flight);
+        let permit = in_flight
+            .try_acquire_many_owned(u32::try_from(IN_FLIGHT_BYTES - keep_free).unwrap())
+            .unwrap();
+        let found = tier.produce(&ask, 0, &Progress::default()).await;
+        drop(permit); // the budget is full around the call
+        // The refusal: the reply cannot grow its share, so produce hands
+        // back None - the RPC layer answers UNAVAILABLE and the caller
+        // asks again.
+        assert!(
+            found.is_none(),
+            "the growth must be refused while the budget is held"
+        );
+        settled(&tier).await;
+    }
+
+    #[tokio::test]
+    async fn a_reply_that_grows_within_the_free_budget_is_served() {
+        // The refusal test's complement: the budget leaves room for the
+        // whole growth (the bytes past the reply's first take, plus 8),
+        // so the object serves. Cover's delta must be the bytes past the
+        // share already held - a delta that also counts the held share
+        // asks for more than the budget left and refuses instead.
+        let data = vec![7u8; 4096];
+        let key = Key::Blob(BlobId::of(&data));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(
+            Server::builder()
+                .add_service(ObjectsServer::new(OneZstd(data.clone())))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        let mut tier = Tier::new_relay(
+            MemoryStore::new(1 << 20),
+            &url,
+            "token",
+            CACHE_UPSTREAM_TIMEOUT,
+            None,
+        )
+        .unwrap();
+        let ask = only_fetch_ask(key);
+        {
+            let inner = Arc::get_mut(&mut tier.inner).unwrap();
+            inner.busy = Duration::from_millis(300);
+        }
+        let packed = object::pack(&data).unwrap();
+        let grow = packed.len() + data.len() + UNPACK_BYTES;
+        // The first take's retained share sits inside the reply's permit
+        // while the growth is taken on top: the budget must leave the
+        // whole growth plus 8 bytes free.
+        let keep_free = grow + 8;
+        let in_flight = Arc::clone(&tier.inner.in_flight);
+        let permit = in_flight
+            .try_acquire_many_owned(u32::try_from(IN_FLIGHT_BYTES - keep_free).unwrap())
+            .unwrap();
+        let found = tier.produce(&ask, 0, &Progress::default()).await;
+        drop(permit); // the budget is full around the call
+        assert!(
+            found.is_some(),
+            "the growth fits what the budget left; the object must serve"
+        );
+        settled(&tier).await;
     }
 
     #[tokio::test]
