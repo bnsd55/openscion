@@ -319,7 +319,8 @@ impl Metrics {
     }
 
     pub(crate) fn call_finished(&self) {
-        let _ = self;
+        let held = self.calls_in_flight.fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(held > 0, "the in-flight gauge fell under zero");
     }
 
     /// The gauge of calls whose reply body has not ended: what a drain
