@@ -2406,4 +2406,94 @@ mod tests {
         assert!(!dead.is_dir(), "the sweep kept a folder nothing holds");
         drop(lock);
     }
+
+    /// The open's folder loop refuses when the staging folder cannot be
+    /// made: `tmp/` is read-only, so every create fails with a
+    /// permission error, and the open returns that error. The `!=` flip
+    /// of the `AlreadyExists` check loops forever on it, so the open
+    /// runs on a thread and the join is bounded: the test fails red with
+    /// a message instead of hanging.
+    #[test]
+    fn an_open_whose_staging_folder_cannot_be_made_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::test_support::private_tempdir();
+        let tmp = dir.path().join("tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let data = dir.path().to_path_buf();
+        let opened = thread::spawn(move || Blobs::open(&data));
+        let refused = std::sync::mpsc::channel();
+        let done = thread::spawn(move || {
+            let result = opened.join();
+            let _ = refused.0.send(result);
+        });
+        let result = refused
+            .1
+            .recv_timeout(Duration::from_secs(60))
+            .unwrap_or_else(|_| panic!("the open looped instead of refusing a read-only tmp"));
+        drop(done);
+        let err = match result {
+            Ok(Ok(_)) => panic!("an open on a read-only tmp succeeded"),
+            Ok(Err(err)) => err.to_string(),
+            Err(join_err) => {
+                let _ = join_err;
+                panic!("the open's thread panicked instead of refusing")
+            }
+        };
+        assert!(err.contains("Permission denied"), "{err}");
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    /// The read path's bound on what a stored file may be: a packed file
+    /// past `compress_bound(MAX_OBJECT_BYTES)` is refused as corrupt by
+    /// name, one exactly at the bound goes to the decoder and fails as
+    /// garbage, a frame that unpacks past `MAX_OBJECT_BYTES` is refused
+    /// as oversized, and one that unpacks to exactly the limit verifies.
+    /// The limit checks sit on a trust boundary - the file on disk is
+    /// hostile - so each is pinned by its own verdict message.
+    #[test]
+    fn the_read_path_refuses_what_the_limits_name() {
+        let dir = crate::test_support::private_tempdir();
+        let blobs = Blobs::open(dir.path()).unwrap();
+        let limit = zstd::zstd_safe::compress_bound(MAX_OBJECT_BYTES);
+
+        // (a) one byte past the packed bound: refused by name.
+        let a = BlobId::of(b"a");
+        store_raw(&blobs, a, vec![0xFF; limit + 1]);
+        let err = blobs.get(a).unwrap_err().to_string();
+        assert!(err.contains("file is larger than"), "{err}");
+
+        // (b) exactly at the bound: the size check passes, the bytes are
+        // not a frame, so the decoder refuses them.
+        let b = BlobId::of(b"b");
+        store_raw(&blobs, b, vec![0xFF; limit]);
+        let err = blobs.get(b).unwrap_err().to_string();
+        assert!(err.contains("cannot unpack"), "{err}");
+
+        // (c) a frame that unpacks one byte past the object limit: the
+        // decoder sees the overshoot and calls the blob corrupt. A take
+        // bound that grew past the limit would instead match the ID and
+        // call the same blob valid, which this assert refuses.
+        let raw_c = vec![0u8; MAX_OBJECT_BYTES + 1];
+        let c = BlobId::of(&raw_c);
+        let packed_c = zstd::bulk::compress(&raw_c, 3).unwrap();
+        store_raw(&blobs, c, packed_c);
+        assert_eq!(blobs.verify(c).unwrap(), BlobStatus::Corrupt);
+
+        // (d) a frame that unpacks to exactly the limit: intact.
+        let raw_d = vec![0u8; MAX_OBJECT_BYTES];
+        let d = BlobId::of(&raw_d);
+        let packed_d = zstd::bulk::compress(&raw_d, 3).unwrap();
+        store_raw(&blobs, d, packed_d);
+        assert_eq!(blobs.verify(d).unwrap(), BlobStatus::Valid);
+    }
+
+    /// Writes `bytes` as blob `id`'s stored file by hand, past `put`'s
+    /// own size check: the read path's limits name what is on disk, and
+    /// the disk is hostile.
+    fn store_raw(blobs: &Blobs, id: BlobId, bytes: Vec<u8>) {
+        let (folder, path) = blobs.location(id);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
 }
