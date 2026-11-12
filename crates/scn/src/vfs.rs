@@ -1784,6 +1784,16 @@ impl Vfs {
         // Load this level, then take the names: the moves below change the
         // maps the listing lives in.
         self.list_dir(nodes, dir_id).await?;
+        if let Some(Node {
+            kind: Kind::Dir { listed, .. },
+            ..
+        }) = nodes.by_id.get(&dir_id)
+        {
+            println!(
+                "BOX LISTED: {:?}",
+                listed.as_ref().map(|l| l.keys().collect::<Vec<_>>())
+            );
+        }
         let mut children: Vec<(Vec<u8>, u64)> = match nodes.by_id.get(&dir_id) {
             Some(Node {
                 kind:
@@ -1813,6 +1823,7 @@ impl Vfs {
             let child_from = Self::child(Some(from), &name)?;
             let child_to = Self::child(Some(to), &name)?;
             let kind = nodes.by_id[&id].kind.is_dir();
+            println!("MOVE CHILD {name:?} id {id} dir {kind}");
             if kind {
                 self.move_dir(nodes, id, &child_from, &child_to).await?;
                 // The directory keeps its node and its listing; it
@@ -2516,10 +2527,19 @@ mod tests {
             ("box/keep.txt", b"kept\n", Some(false)),
             ("box/inner/deep.txt", b"deep\n", Some(false)),
             ("box/gone.txt", b"gone\n", Some(false)),
+            ("box/tool.sh", b"#!/bin/sh\n", Some(true)),
         ])
         .await;
         let root = NFSFileSystem::root_dir(&test.vfs);
         // Touch one file, so the overlay holds it before the move.
+        let box_id = find(&test.vfs, "box").await.unwrap();
+        {
+            let listed = test.vfs.readdir(box_id, 0, 100).await.unwrap();
+            let names: Vec<Vec<u8>> = listed.entries.iter().map(|e| e.name.0.clone()).collect();
+            println!("BOX BEFORE: {names:?}");
+            let tool_lookup = find(&test.vfs, "box/tool.sh").await;
+            println!("TOOL LOOKUP: {tool_lookup:?}");
+        }
         let id = find(&test.vfs, "box/keep.txt").await.unwrap();
         test.vfs.write(id, 5, b"\n").await.unwrap();
         // A file of the ref that the mount deleted stays deleted: the
@@ -2563,6 +2583,12 @@ mod tests {
                 .overlay_file(&RepoPath::new("crate/keep.txt").unwrap())
                 .exists()
         );
+        {
+            let crate_id = find(&test.vfs, "crate").await.unwrap();
+            let listed = test.vfs.readdir(crate_id, 0, 100).await.unwrap();
+            let names: Vec<Vec<u8>> = listed.entries.iter().map(|e| e.name.0.clone()).collect();
+            println!("CRATE2: {names:?}");
+        }
         // The moved file of the ref keeps its executable bit on disk.
         let tool = test
             .vfs
