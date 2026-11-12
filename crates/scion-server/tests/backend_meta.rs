@@ -76,9 +76,13 @@ fn an_open_that_migrates_reports_the_versions_it_moved() {
              );"
         ))
         .unwrap();
-    for (n, file) in ["0001_init.sql", "0002_view_roots.sql", "0003_view_trees.sql"]
-        .into_iter()
-        .enumerate()
+    for (n, file) in [
+        "0001_init.sql",
+        "0002_view_roots.sql",
+        "0003_view_trees.sql",
+    ]
+    .into_iter()
+    .enumerate()
     {
         let sql = std::fs::read_to_string(format!(
             "{}/migrations/postgres/{file}",
@@ -96,7 +100,10 @@ fn an_open_that_migrates_reports_the_versions_it_moved() {
     let store = Backend::open_test_shared_in_schema(dir.path(), &schema).unwrap();
     assert_eq!(
         store.migrated(),
-        Some((3, scion_server::test_support::backend::schema_version::POSTGRES)),
+        Some((
+            3,
+            scion_server::test_support::backend::schema_version::POSTGRES
+        )),
         "the open names the versions its migrations moved"
     );
     // A fresh open creates the schema and reports no move.
