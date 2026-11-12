@@ -1021,9 +1021,12 @@ impl NFSFileSystem for Vfs {
         };
         if is_dir {
             // Empty only: no overlay child, and no name of the tree left.
+            // The scan asks about children of the directory itself, not
+            // of its parent: a parent of None is the root, and every
+            // top-level name would look like a child.
             let overlay_child = nodes.by_path.iter().any(|(p, _)| {
                 p.as_ref()
-                    .is_some_and(|p| Self::parent(p).as_ref() == dir_path.as_ref())
+                    .is_some_and(|p| Self::parent(p).as_ref() == Some(&path))
             });
             let tree_child = match &nodes.by_id[&id].kind {
                 Kind::Dir {
@@ -2081,6 +2084,10 @@ mod tests {
         assert_eq!(cached().await, 1, "the read did not fetch the blob");
         let (data, _) = test.vfs.read(id, 0, 1000).await.unwrap();
         assert_eq!(data, b"data\n");
+        let (_, eof) = test.vfs.read(id, 0, 1000).await.unwrap();
+        assert!(eof, "a read from zero that took the whole file is its end");
+        let (data, _) = test.vfs.read(id, 0, 1000).await.unwrap();
+        assert_eq!(data, b"data\n");
         assert_eq!(cached().await, 1, "the second read fetched the blob again");
     }
 
@@ -2416,7 +2423,7 @@ mod tests {
         // A create is a write: the read-only default build refuses it,
         // and with it the mode check of the created file.
         #[cfg(feature = "unstable-writable-mount")]
-        let made_exec = {
+        let _made_exec = {
             let root = NFSFileSystem::root_dir(&test.vfs);
             let (made_exec, _) = test
                 .vfs
@@ -2536,6 +2543,7 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(attr.ftype, ftype3::NF3LNK));
+        assert_eq!(attr.size, 3, "the size of a fresh symlink is its target's");
         let id = find(&test.vfs, "latest").await.unwrap();
         let target = test.vfs.readlink(id).await.unwrap();
         assert_eq!(target.as_ref(), b"run");
@@ -3125,5 +3133,411 @@ mod tests {
         let (data, _) = vfs.read(id, 0, 1000).await.unwrap();
         assert_eq!(data, b"x\n");
         assert_eq!(mints.load(Ordering::SeqCst), 2);
+    }
+
+    /// Paging walks each entry once: a page continues after its cookie,
+    /// the last page says end, and no page repeats an earlier one.
+    #[cfg(feature = "unstable-writable-mount")]
+    #[tokio::test]
+    async fn a_paged_readdir_walks_each_entry_once() {
+        let test = start(&[]).await;
+        let root = NFSFileSystem::root_dir(&test.vfs);
+        let (docs, _) = test
+            .vfs
+            .mkdir(root, &filename3::from(b"docs".to_vec()))
+            .await
+            .unwrap();
+        for name in ["a", "b", "c", "d", "e"] {
+            let (id, _) = test
+                .vfs
+                .create(
+                    docs,
+                    &filename3::from(name.as_bytes().to_vec()),
+                    sattr3::default(),
+                )
+                .await
+                .unwrap();
+            test.vfs.write(id, 0, b"x\n").await.unwrap();
+        }
+        let names = |page: &ReadDirResult| -> Vec<String> {
+            page.entries
+                .iter()
+                .map(|e| String::from_utf8_lossy(e.name.as_ref()).into_owned())
+                .collect()
+        };
+        // docs holds a, b, c, d, e in byte order. Two at a time.
+        let first = test.vfs.readdir(docs, 0, 2).await.unwrap();
+        assert_eq!(names(&first), ["a", "b"]);
+        assert!(!first.end, "the first page is not the last");
+        let second = test
+            .vfs
+            .readdir(docs, first.entries[1].fileid, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            names(&second),
+            ["c", "d"],
+            "the page continues after its cookie"
+        );
+        assert!(!second.end);
+        let last = test
+            .vfs
+            .readdir(docs, second.entries[1].fileid, 2)
+            .await
+            .unwrap();
+        assert_eq!(names(&last), ["e"]);
+        assert!(last.end, "the last page says end");
+    }
+
+    /// The writable mount refuses what it must: stale handles, writes
+    /// that are not writes, names that are taken, directories that are
+    /// not empty, and handles of files that are gone. The refusals are
+    /// the mount's trust boundary.
+    #[cfg(feature = "unstable-writable-mount")]
+    #[tokio::test]
+    async fn the_writable_mount_refuses_what_it_must() {
+        let test = start(&[("README.md", b"hello\n", Some(false))]).await;
+        let root = NFSFileSystem::root_dir(&test.vfs);
+
+        // A stale handle refuses every mutation.
+        assert!(matches!(
+            test.vfs.setattr(9_999, sattr3::default()).await,
+            Err(nfsstat3::NFS3ERR_STALE)
+        ));
+
+        // The mode of a directory is fixed.
+        let (dir, _) = test
+            .vfs
+            .mkdir(root, &filename3::from(b"d".to_vec()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            test.vfs
+                .setattr(
+                    dir,
+                    sattr3 {
+                        mode: set_mode3::mode(0o755),
+                        ..sattr3::default()
+                    },
+                )
+                .await,
+            Err(nfsstat3::NFS3ERR_PERM)
+        ));
+
+        // A file keeps only the exec bit of a mode change: a plain mode
+        // stays plain, an exec mode turns the bit on.
+        let (file, _) = test
+            .vfs
+            .create(dir, &filename3::from(b"f".to_vec()), sattr3::default())
+            .await
+            .unwrap();
+        let attr = test
+            .vfs
+            .setattr(
+                file,
+                sattr3 {
+                    mode: set_mode3::mode(0o600),
+                    ..sattr3::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(attr.mode & 0o777, 0o644, "a plain mode stays plain");
+        let attr = test
+            .vfs
+            .setattr(
+                file,
+                sattr3 {
+                    mode: set_mode3::mode(0o755),
+                    ..sattr3::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(attr.mode & 0o777, 0o755, "an exec mode turns the bit on");
+
+        // A created file keeps the mode the client asked for.
+        let (plain, attr) = test
+            .vfs
+            .create(
+                dir,
+                &filename3::from(b"p".to_vec()),
+                sattr3 {
+                    mode: set_mode3::mode(0o644),
+                    ..sattr3::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(attr.mode & 0o777, 0o644, "a plain create stays plain");
+        // A write reads the exec bit back from the file it wrote.
+        let attr = test.vfs.write(plain, 0, b"x\n").await.unwrap();
+        assert_eq!(attr.mode & 0o777, 0o644, "a write keeps the file plain");
+
+        // A write to a directory is not a write; neither is a write to a
+        // symlink.
+        assert!(matches!(
+            test.vfs.write(dir, 0, b"x\n").await,
+            Err(nfsstat3::NFS3ERR_ISDIR)
+        ));
+        let link = test
+            .vfs
+            .symlink(
+                dir,
+                &filename3::from(b"link".to_vec()),
+                &nfspath3::from(b"f".to_vec()),
+                &sattr3::default(),
+            )
+            .await
+            .unwrap()
+            .0;
+        assert!(matches!(
+            test.vfs.write(link, 0, b"x\n").await,
+            Err(nfsstat3::NFS3ERR_INVAL)
+        ));
+
+        // A name that is taken refuses.
+        assert!(matches!(
+            test.vfs
+                .create_exclusive(dir, &filename3::from(b"f".to_vec()))
+                .await,
+            Err(nfsstat3::NFS3ERR_EXIST)
+        ));
+        let fresh = test
+            .vfs
+            .create_exclusive(dir, &filename3::from(b"fresh".to_vec()))
+            .await
+            .unwrap();
+        assert_ne!(fresh, file, "a fresh name gets its own handle");
+        assert!(matches!(
+            test.vfs.mkdir(dir, &filename3::from(b"f".to_vec())).await,
+            Err(nfsstat3::NFS3ERR_EXIST)
+        ));
+
+        // A directory that is not empty refuses to go. An empty one goes,
+        // and a directory whose only child went, too.
+        assert!(matches!(
+            test.vfs.remove(root, &filename3::from(b"d".to_vec())).await,
+            Err(nfsstat3::NFS3ERR_NOTEMPTY)
+        ));
+        test.vfs
+            .mkdir(root, &filename3::from(b"empty".to_vec()))
+            .await
+            .unwrap();
+        test.vfs
+            .remove(root, &filename3::from(b"empty".to_vec()))
+            .await
+            .unwrap();
+        assert!(find(&test.vfs, "empty").await.is_err());
+
+        // A rename keeps the exec bit of the file it moves.
+        test.vfs
+            .create(
+                dir,
+                &filename3::from(b"tool.sh".to_vec()),
+                sattr3 {
+                    mode: set_mode3::mode(0o755),
+                    ..sattr3::default()
+                },
+            )
+            .await
+            .unwrap();
+        test.vfs
+            .rename(
+                dir,
+                &filename3::from(b"tool.sh".to_vec()),
+                dir,
+                &filename3::from(b"run.sh".to_vec()),
+            )
+            .await
+            .unwrap();
+        let run = find(&test.vfs, "d/run.sh").await.unwrap();
+        let attr = test.vfs.getattr(run).await.unwrap();
+        assert_ne!(attr.mode & 0o111, 0, "the exec bit moved with the file");
+
+        // The handle of a removed file is stale.
+        let gone = find(&test.vfs, "README.md").await.unwrap();
+        test.vfs
+            .remove(root, &filename3::from(b"README.md".to_vec()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            test.vfs.getattr(gone).await,
+            Err(nfsstat3::NFS3ERR_STALE)
+        ));
+    }
+
+    /// The mount secret is sixteen bytes from the system's random source,
+    /// and the mount path names it in hex.
+    #[tokio::test]
+    async fn the_mount_secret_is_random_and_named_in_hex() {
+        let test = start(&[("a", b"data\n", Some(false))]).await;
+        let name = test.vfs.secret_name();
+        assert_eq!(name.len(), 32, "{name}");
+        assert!(
+            name.bytes().all(|b| b.is_ascii_hexdigit()),
+            "the secret name is hex: {name}"
+        );
+        let fresh = secret_from_urandom().unwrap();
+        let again = secret_from_urandom().unwrap();
+        assert_ne!(fresh, again, "two draws of the random source matched");
+    }
+
+    /// A create over a deleted path forgets the deletion: the commit must
+    /// not delete the file it just created.
+    #[cfg(feature = "unstable-writable-mount")]
+    #[tokio::test]
+    async fn a_create_over_a_deleted_path_forgets_the_deletion() {
+        let test = start(&[("README.md", b"hello\n", Some(false))]).await;
+        let root = NFSFileSystem::root_dir(&test.vfs);
+        test.vfs
+            .remove(root, &filename3::from(b"README.md".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(
+            read_deletes(&test.vfs.overlay).unwrap().len(),
+            1,
+            "the removal is recorded"
+        );
+        test.vfs
+            .create(
+                root,
+                &filename3::from(b"README.md".to_vec()),
+                sattr3::default(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            read_deletes(&test.vfs.overlay).unwrap().is_empty(),
+            "the deletion of a re-created path is forgotten"
+        );
+    }
+
+    /// The attributes of everything the mount answers carry the mount's
+    /// own time, not the epoch.
+    #[tokio::test]
+    async fn the_attrs_time_from_the_mount() {
+        let test = start(&[("a", b"data\n", Some(false))]).await;
+        let root = NFSFileSystem::root_dir(&test.vfs);
+        let attr = test.vfs.getattr(root).await.unwrap();
+        assert!(attr.mtime.seconds > 1_500_000_000, "{}", attr.mtime.seconds);
+    }
+
+    /// The blob cache keeps its oldest entries only while they fit the
+    /// bound: past it, the oldest leave, and the count matches the map.
+    #[cfg(feature = "unstable-writable-mount")]
+    #[tokio::test]
+    async fn the_blob_cache_evicts_at_its_bound() {
+        let first = vec![0xa5_u8; 70 << 20];
+        let second = vec![0x5a_u8; 70 << 20];
+        let test = start(&[
+            ("a", first.as_slice(), Some(false)),
+            ("b", second.as_slice(), Some(false)),
+        ])
+        .await;
+        let a = find(&test.vfs, "a").await.unwrap();
+        let b = find(&test.vfs, "b").await.unwrap();
+        let _ = test.vfs.read(a, 0, 1).await.unwrap();
+        let _ = test.vfs.read(b, 0, 1).await.unwrap();
+        let blobs = test.vfs.blobs.lock().await;
+        assert_eq!(blobs.0.len(), 1, "the oldest blob left the cache");
+        assert_eq!(blobs.1, 70 << 20, "the count matches the map");
+    }
+
+    /// The reader of a deletions note refuses a note whose count its
+    /// bytes cannot name, a note it cannot read, and reads a fresh
+    /// overlay as holding no deletions.
+    #[test]
+    fn the_deletes_note_refuses_what_its_bytes_cannot_name() {
+        let overlay = tempfile::tempdir().unwrap();
+        // A fresh overlay holds no deletions.
+        assert_eq!(read_deletes(overlay.path()).unwrap(), []);
+        let note = overlay.path().join(DELETES);
+        // Four entries cannot fit in sixteen bytes: the guard refuses
+        // before the first entry is read.
+        let mut bytes = vec![DELETES_VERSION_1];
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(b"abcdefg");
+        assert_eq!(bytes.len(), 16);
+        std::fs::write(&note, &bytes).unwrap();
+        let why = format!("{:#}", read_deletes(overlay.path()).unwrap_err());
+        assert!(
+            why.contains("names more deletions than it holds"),
+            "a note of sixteen bytes paid for four entries: {why}"
+        );
+        // A note the system cannot read is an error, not silence.
+        std::fs::set_permissions(&note, std::fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(
+            read_deletes(overlay.path()).is_err(),
+            "an unreadable note is an error, not an empty list"
+        );
+    }
+
+    /// A directory renamed to itself keeps its handle: the move is a
+    /// no-op, and the id the client holds stays the answer.
+    #[cfg(feature = "unstable-writable-mount")]
+    #[tokio::test]
+    async fn a_dir_renamed_to_itself_keeps_its_handle() {
+        let test = start(&[]).await;
+        let root = NFSFileSystem::root_dir(&test.vfs);
+        test.vfs
+            .mkdir(root, &filename3::from(b"d".to_vec()))
+            .await
+            .unwrap();
+        let before = find(&test.vfs, "d").await.unwrap();
+        test.vfs
+            .rename(
+                root,
+                &filename3::from(b"d".to_vec()),
+                root,
+                &filename3::from(b"d".to_vec()),
+            )
+            .await
+            .unwrap();
+        let after = find(&test.vfs, "d").await.unwrap();
+        assert_eq!(before, after, "the handle of a self-rename survives");
+    }
+
+    /// A directory whose only child was removed is empty: a rename over
+    /// it replaces it, and the moved children land in it.
+    #[cfg(feature = "unstable-writable-mount")]
+    #[tokio::test]
+    async fn a_dir_whose_child_was_removed_is_empty() {
+        let test = start(&[("y/only", b"old\n", Some(false))]).await;
+        let root = NFSFileSystem::root_dir(&test.vfs);
+        test.vfs
+            .mkdir(root, &filename3::from(b"x".to_vec()))
+            .await
+            .unwrap();
+        let (id, _) = test
+            .vfs
+            .create(
+                find(&test.vfs, "x").await.unwrap(),
+                &filename3::from(b"new".to_vec()),
+                sattr3::default(),
+            )
+            .await
+            .unwrap();
+        test.vfs.write(id, 0, b"new\n").await.unwrap();
+        test.vfs
+            .remove(
+                find(&test.vfs, "y").await.unwrap(),
+                &filename3::from(b"only".to_vec()),
+            )
+            .await
+            .unwrap();
+        test.vfs
+            .rename(
+                root,
+                &filename3::from(b"x".to_vec()),
+                root,
+                &filename3::from(b"y".to_vec()),
+            )
+            .await
+            .unwrap();
+        let moved = find(&test.vfs, "y/new").await.unwrap();
+        let (data, _) = test.vfs.read(moved, 0, 100).await.unwrap();
+        assert_eq!(data, b"new\n", "the child moved into the emptied target");
     }
 }
