@@ -2317,6 +2317,44 @@ mod tests {
         assert_eq!(data, b"hello\n");
     }
 
+    /// The attributes carry the executable bit: a file of the ref that
+    /// is executable answers 0o755, a plain one 0o644, and a created
+    /// file takes its bit from the create call's mode.
+    #[tokio::test]
+    async fn an_exec_file_is_answered_with_the_exec_bit() {
+        let test = start(&[
+            ("run.sh", b"#!/bin/sh\n", Some(true)),
+            ("README.md", b"hi\n", Some(false)),
+        ])
+        .await;
+        let run = find(&test.vfs, "run.sh").await.unwrap();
+        let plain = find(&test.vfs, "README.md").await.unwrap();
+        assert_eq!(
+            test.vfs.getattr(run).await.unwrap().mode & 0o777,
+            0o755,
+            "the executable file of the ref answers its bit"
+        );
+        assert_eq!(test.vfs.getattr(plain).await.unwrap().mode & 0o777, 0o644);
+        let root = NFSFileSystem::root_dir(&test.vfs);
+        let (made_exec, _) = test
+            .vfs
+            .create(
+                root,
+                &filename3::from(b"tool".to_vec()),
+                sattr3 {
+                    mode: set_mode3::mode(0o755),
+                    ..sattr3::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            test.vfs.getattr(made_exec).await.unwrap().mode & 0o777,
+            0o755,
+            "the created file keeps the mode the create named"
+        );
+    }
+
     #[cfg(feature = "unstable-writable-mount")]
     #[tokio::test]
     async fn a_planted_symlink_is_never_written_through() {
