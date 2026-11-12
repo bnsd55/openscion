@@ -458,14 +458,11 @@ async fn get_changeset(scion: &mut Scion, id: ChangesetId) -> (Changeset, Change
 /// other and return the same land. Appends the replies.
 async fn finish_lands(scions: &[Scion], model: &mut Model) {
     let mut calls = tokio::task::JoinSet::new();
-    for idx in 0..model.recs.len() {
-        if model.recs[idx].is_final() {
+    for (idx, rec) in model.recs.iter().enumerate() {
+        if rec.is_final() {
             continue;
         }
-        let (request, scion) = {
-            let rec = &model.recs[idx];
-            (rec.request(), scions[rec.caller].clone())
-        };
+        let (request, scion) = { (rec.request(), scions[rec.caller].clone()) };
         calls.spawn(async move {
             let mut scion = scion;
             let reply = scion
@@ -475,11 +472,8 @@ async fn finish_lands(scions: &[Scion], model: &mut Model) {
             (idx, reply.into_inner())
         });
         // The twin of a cut call: in flight at the same time.
-        if model.recs[idx].replies.is_empty() {
-            let (request, scion) = {
-                let rec = &model.recs[idx];
-                (rec.request(), scions[rec.caller].clone())
-            };
+        if rec.replies.is_empty() {
+            let (request, scion) = { (rec.request(), scions[rec.caller].clone()) };
             calls.spawn(async move {
                 let mut scion = scion;
                 let reply = scion

@@ -305,7 +305,33 @@ impl Server {
 
     pub(crate) fn spawn_on(heading: &'static str, data: &Path, log: &Path) -> Self {
         let url = postgres_url(data);
-        Self::spawn_with_url(heading, data, Some(&url), log, &[])
+        Self::spawn_with_url(heading, data, Some(&url), log, &[], &[])
+    }
+
+    /// Starts a server with env a test's server needs: a seam lever's
+    /// value the runbook's own argv carries no flag for. The derive
+    /// test's spawn needs the index budget's lever, so the reach stops
+    /// early and the land's derive runs.
+    pub(crate) fn spawn_with_env(data: &Path, log: &Path, envs: &[(&str, &str)]) -> Self {
+        let url = postgres_url(data);
+        Self::spawn_with_url("One server", data, Some(&url), log, &[], envs)
+    }
+
+    /// [`Self::spawn_with_env`], waited until it listens, with the
+    /// backend proof `start` makes.
+    pub(crate) fn start_with_env(data: &Path, log: &Path, envs: &[(&str, &str)]) -> Self {
+        let mut server = Self::spawn_with_env(data, log, envs);
+        let mark = usize::try_from(fs::metadata(log).map_or(0, |m| m.len()))
+            .expect("the log's length fits usize");
+        let start = Instant::now();
+        while !server.listens(log) {
+            if let Some(status) = server.child.try_wait().unwrap() {
+                panic!("{}", exit_report(log, mark, status));
+            }
+            assert!(start.elapsed() < Duration::from_secs(60), "no listen");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        server
     }
 
     /// Starts a server that also serves /metrics on its own loopback
@@ -321,6 +347,7 @@ impl Server {
             Some(&url),
             log,
             &["--metrics-listen", "127.0.0.1:0"],
+            &[],
         )
     }
 
@@ -386,7 +413,7 @@ impl Server {
         log: &Path,
     ) -> Self {
         let url = postgres_url(schema_source);
-        Self::spawn_with_url(heading, data, Some(&url), log, &[])
+        Self::spawn_with_url(heading, data, Some(&url), log, &[], &[])
     }
 
     /// The harness's data-directory make: private, whatever the umask.
@@ -403,6 +430,7 @@ impl Server {
         postgres_url: Option<&str>,
         log: &Path,
         extra_args: &[&str],
+        extra_envs: &[(&str, &str)],
     ) -> Self {
         // The binary refuses a missing data directory (#578); the harness
         // is for servers that serve, so it makes the directory the way
@@ -470,6 +498,10 @@ impl Server {
             // Args a variant adds to the runbook's argv.
             for arg in extra_args {
                 cmd.arg(arg);
+            }
+            // Env a variant adds, beside the harness's own.
+            for (name, value) in extra_envs {
+                cmd.env(name, value);
             }
             // Plain log lines, so the address parses without escape
             // codes.

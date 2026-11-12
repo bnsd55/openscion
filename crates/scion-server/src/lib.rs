@@ -118,6 +118,12 @@ pub mod test_support {
     /// umask, so a test that opens a store in the temp directory
     /// directly must hold a private one.
     ///
+    /// The name carries 16 random characters, not tempfile's 6: a test
+    /// schema is the hash of this path, and a deleted directory's name
+    /// is reusable at once, so a short name let two tests' directories
+    /// - one live, one a leftover store - hash to one schema (#1162).
+    ///   62^16 makes a reuse in a job impossible in practice.
+    ///
     /// # Panics
     ///
     /// Panics if the temp directory cannot be made: a test wants to
@@ -126,9 +132,25 @@ pub mod test_support {
     #[must_use]
     pub fn private_tempdir() -> tempfile::TempDir {
         use std::os::unix::fs::PermissionsExt as _;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix(".tmp")
+            .rand_bytes(16)
+            .tempdir()
+            .unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         dir
+    }
+
+    /// The name's random part carries 16 characters, so a deleted
+    /// directory's name is not redrawn within a job's lifetime: the
+    /// test schema is the hash of this path (#1162).
+    #[test]
+    fn a_private_tempdir_name_carries_16_random_characters() {
+        let dir = private_tempdir();
+        let name = dir.path().file_name().unwrap().to_string_lossy();
+        let random = name.strip_prefix(".tmp").unwrap_or(&name);
+        assert_eq!(random.len(), 16, "{name}");
+        assert!(random.bytes().all(|b| b.is_ascii_alphanumeric()), "{name}");
     }
 
     /// The reader pool the nightly's two proof tests open with: their
