@@ -2024,6 +2024,11 @@ mod tests {
             text.contains("scion_lands_total{outcome=\"landed\"} 1\n"),
             "{text}"
         );
+        // An outcome that counted nothing renders no line.
+        assert!(
+            !text.contains("scion_lands_total{outcome=\"landed\"} 0\n"),
+            "{text}"
+        );
         assert!(
             text.contains("scion_lands_total{outcome=\"conflict\"} 1\n"),
             "{text}"
