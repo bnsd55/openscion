@@ -2003,11 +2003,15 @@ mod tests {
     fn a_cancelled_call_counts_its_latency_and_bytes() {
         let metrics = std::sync::Arc::new(Metrics::default());
         let rpc = metrics.rpc("/scion.v1.Scion/Blame").unwrap();
-        // A duration between the 4 ms and 16 ms bounds, so the bucket
-        // membership is exact and a doubled micros crosses the 16 ms
-        // line. The start sits 9 ms in the past, so no sleep decides
-        // the bucket: the elapsed time is 9 ms plus the microseconds
-        // the call between here and `cancelled` takes.
+        // A duration of at least 9 ms, and that is all the test says:
+        // the start sits 9 ms in the past, so the recorded duration is
+        // 9 ms plus whatever the call between here and `cancelled`
+        // takes. Which upper bucket that lands in is the runner's
+        // business, and no assert may decide a result by elapsed time.
+        // The pins are the ones the 9 ms floor proves: the two lowest
+        // buckets stay empty (a flipped comparison would count the call
+        // into them), and the sum slot holds at least the 9 ms the
+        // start was set back.
         let started = Instant::now()
             .checked_sub(std::time::Duration::from_millis(9))
             .expect("the clock is past 9 ms");
@@ -2017,16 +2021,20 @@ mod tests {
             text.contains("scion_requests_total{rpc=\"Scion/Blame\",code=\"cancelled\"} 1\n"),
             "{text}"
         );
-        // The duration sits between the 4 ms and 16 ms bounds: the 4 ms
-        // bucket stays empty and the 16 ms one holds the call, so a
-        // doubled micros or a flipped comparison moves the count.
         assert!(
-            !text.contains("scion_request_seconds_bucket{rpc=\"Scion/Blame\",le=\"0.004\"} 1\n"),
+            text.contains("scion_request_seconds_bucket{rpc=\"Scion/Blame\",le=\"0.001\"} 0\n"),
             "{text}"
         );
         assert!(
-            text.contains("scion_request_seconds_bucket{rpc=\"Scion/Blame\",le=\"0.016\"} 1\n"),
+            text.contains("scion_request_seconds_bucket{rpc=\"Scion/Blame\",le=\"0.004\"} 0\n"),
             "{text}"
+        );
+        // The sum slot holds at least the 9 ms the start was set back:
+        // read as microseconds, past the render's float seconds.
+        let sum = metrics.latency[rpc.0][BUCKETS.len()].load(Ordering::Relaxed);
+        assert!(
+            sum >= 9_000,
+            "the sum holds at least the 9 ms the start was set back: {sum} µs"
         );
         assert!(
             text.contains("scion_rpc_bytes_total{rpc=\"Scion/Blame\",direction=\"in\"} 11\n"),
