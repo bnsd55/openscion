@@ -1878,6 +1878,67 @@ mod tests {
     /// and a ref would move the server's resolution onto the tier. The
     /// whole-body stub mutants answer Ok with an empty response; both
     /// must stay Unimplemented with the pointer to the server.
+    /// A key checks the bytes that name it: another object's bytes are
+    /// refused, and a blob round-trips through its stored form.
+    #[test]
+    fn a_key_refuses_another_objects_bytes_and_round_trips_its_own() {
+        use scion_core::{BlobId, TreeId};
+
+        let mine = b"the object that is mine".to_vec();
+        let key = Key::Blob(BlobId::of(&mine));
+        let packed = object::pack(&mine).unwrap();
+        // Its own stored form checks, and to_stored keeps the packed bytes.
+        key.check_stored(&packed).expect("its own bytes check");
+        let header = Header {
+            kind: ObjectKind::Blob,
+            id: *BlobId::of(&mine).as_bytes(),
+            encoding: Encoding::Zstd,
+            encoded_size: packed.len(),
+            size: mine.len(),
+        };
+        let stored = key.to_stored(&header, packed.clone()).unwrap();
+        assert_eq!(stored, packed, "a zstd blob is stored as it came");
+
+        // Another object's bytes are refused, in both directions.
+        let other = b"the object that is not mine".to_vec();
+        let other_packed = object::pack(&other).unwrap();
+        assert!(
+            key.check_stored(&other_packed).is_err(),
+            "another object's bytes do not check"
+        );
+        let other_header = Header {
+            id: *BlobId::of(&other).as_bytes(),
+            encoded_size: other_packed.len(),
+            size: other.len(),
+            ..header
+        };
+        assert!(
+            key.to_stored(&other_header, other_packed).is_err(),
+            "a key refuses bytes that hash elsewhere"
+        );
+
+        // A raw blob is packed here, and the bytes that are not its ID are
+        // refused before the pack.
+        let raw_header = Header {
+            encoding: Encoding::Raw,
+            encoded_size: mine.len(),
+            size: mine.len(),
+            ..header
+        };
+        assert_eq!(
+            key.to_stored(&raw_header, mine.clone()).unwrap(),
+            packed,
+            "a raw blob is packed for the store"
+        );
+
+        // A tree key against blob bytes: the decode refuses them.
+        let tree = Key::Tree(TreeId::from_bytes([7; 32]));
+        assert!(
+            tree.check_stored(&packed).is_err(),
+            "a tree key refuses blob bytes"
+        );
+    }
+
     #[tokio::test]
     async fn a_tier_answers_neither_refs_nor_root_trees() {
         use scion_proto::v1::{GetRootTreeRequest, ResolveRefRequest};
