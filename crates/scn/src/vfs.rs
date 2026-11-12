@@ -2499,6 +2499,54 @@ mod tests {
         assert!(matches!(refused, nfsstat3::NFS3ERR_NOTEMPTY));
     }
 
+    /// A rename of a directory that holds files moves them: each file
+    /// serves at the new path with its bytes, the old paths are
+    /// deletions, and the overlay files moved with the directory.
+    #[cfg(feature = "unstable-writable-mount")]
+    #[tokio::test]
+    async fn a_rename_of_a_dir_moves_its_files() {
+        let test = start(&[
+            ("box/keep.txt", b"kept\n", Some(false)),
+            ("box/inner/deep.txt", b"deep\n", Some(false)),
+        ])
+        .await;
+        let root = NFSFileSystem::root_dir(&test.vfs);
+        // Touch one file, so the overlay holds it before the move.
+        let id = find(&test.vfs, "box/keep.txt").await.unwrap();
+        test.vfs.write(id, 5, b"\n").await.unwrap();
+        test.vfs
+            .rename(
+                root,
+                &filename3::from(b"box".to_vec()),
+                root,
+                &filename3::from(b"crate".to_vec()),
+            )
+            .await
+            .unwrap();
+        assert!(find(&test.vfs, "box/keep.txt").await.is_err());
+        let moved = find(&test.vfs, "crate/keep.txt").await.unwrap();
+        let (data, _) = test.vfs.read(moved, 0, 100).await.unwrap();
+        assert_eq!(data, b"kept\n\n", "the touched bytes moved with the file");
+        let deep = find(&test.vfs, "crate/inner/deep.txt").await.unwrap();
+        let (data, _) = test.vfs.read(deep, 0, 100).await.unwrap();
+        assert_eq!(data, b"deep\n", "the nested file moved with the directory");
+        // The old paths are deletions; the new ones are not.
+        let deleted = read_deletes(&test.vfs.overlay).unwrap();
+        assert!(
+            deleted.contains(&RepoPath::new("box/keep.txt").unwrap()),
+            "{deleted:?}"
+        );
+        assert!(
+            deleted.contains(&RepoPath::new("box/inner/deep.txt").unwrap()),
+            "{deleted:?}"
+        );
+        assert!(
+            test.vfs
+                .overlay_file(&RepoPath::new("crate/keep.txt").unwrap())
+                .exists()
+        );
+    }
+
     /// A rename of a directory over an existing file is not a directory
     #[cfg(feature = "unstable-writable-mount")]
     #[tokio::test]
