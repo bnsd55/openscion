@@ -6,6 +6,10 @@
 
 [advisories]
 version = 2
+# An unsound advisory fails, in any dependency ("all": direct or
+# transitive) - the supply-chain floor the Scorecard gate measures, set
+# here so CI's deny check catches the next one before Scorecard does.
+unsound = "all"
 yanked = "warn"
 unmaintained = "workspace"
 
