@@ -2433,6 +2433,52 @@ mod tests {
 
     /// An upstream that sends the first part of one large RAW blob, then
     /// nothing more.
+    struct OneZstd(Vec<u8>);
+    #[tonic::async_trait]
+    impl Objects for OneZstd {
+        async fn resolve_ref(
+            &self,
+            _: Request<ResolveRefRequest>,
+        ) -> Result<Response<ResolveRefResponse>, Status> {
+            Err(Status::unimplemented("no refs"))
+        }
+        async fn get_root_tree(
+            &self,
+            _: Request<GetRootTreeRequest>,
+        ) -> Result<Response<GetRootTreeResponse>, Status> {
+            Err(Status::unimplemented("no changesets"))
+        }
+        type GetObjectsStream = Replies;
+        async fn get_objects(
+            &self,
+            request: Request<GetObjectsRequest>,
+        ) -> Result<Response<Replies>, Status> {
+            let data = self.0.clone();
+            let packed = object::pack(&data).unwrap();
+            let header = Header {
+                kind: ObjectKind::Blob,
+                id: *BlobId::of(&data).as_bytes(),
+                encoding: Encoding::Zstd,
+                encoded_size: packed.len(),
+                size: data.len(),
+            };
+            let first = header
+                .parts(object::read_chunks(&packed[..], packed.len()).unwrap())
+                .remove(0);
+            let names_it = request
+                .get_ref()
+                .refs
+                .first()
+                .is_some_and(|r| r.id == header.id && r.kind == i32::from(ObjectKind::Blob));
+            let parts: Replies = if names_it {
+                Box::pin(tokio_stream::iter([Ok(first)]))
+            } else {
+                Box::pin(tokio_stream::iter([Err(Status::not_found("not asked"))]))
+            };
+            Ok(Response::new(parts))
+        }
+    }
+
     struct Stalls(Vec<u8>);
 
     #[tonic::async_trait]
@@ -2992,51 +3038,6 @@ mod tests {
     async fn a_reply_that_grows_past_the_free_budget_is_refused() {
         let data = vec![7u8; 4096];
         let key = Key::Blob(BlobId::of(&data));
-        // An upstream that serves the object as one zstd frame.
-        struct OneZstd(Vec<u8>);
-        #[tonic::async_trait]
-        impl Objects for OneZstd {
-            async fn resolve_ref(
-                &self,
-                _: Request<ResolveRefRequest>,
-            ) -> Result<Response<ResolveRefResponse>, Status> {
-                Err(Status::unimplemented("no refs"))
-            }
-            async fn get_root_tree(
-                &self,
-                _: Request<GetRootTreeRequest>,
-            ) -> Result<Response<GetRootTreeResponse>, Status> {
-                Err(Status::unimplemented("no changesets"))
-            }
-            type GetObjectsStream = Replies;
-            async fn get_objects(
-                &self,
-                request: Request<GetObjectsRequest>,
-            ) -> Result<Response<Replies>, Status> {
-                let data = self.0.clone();
-                let packed = object::pack(&data).unwrap();
-                let header = Header {
-                    kind: ObjectKind::Blob,
-                    id: *BlobId::of(&data).as_bytes(),
-                    encoding: Encoding::Zstd,
-                    encoded_size: packed.len(),
-                    size: data.len(),
-                };
-                let first = header
-                    .parts(object::read_chunks(&packed[..], packed.len()).unwrap())
-                    .remove(0);
-                let names_it =
-                    request.get_ref().refs.first().is_some_and(|r| {
-                        r.id == header.id && r.kind == i32::from(ObjectKind::Blob)
-                    });
-                let parts: Replies = if names_it {
-                    Box::pin(tokio_stream::iter([Ok(first)]))
-                } else {
-                    Box::pin(tokio_stream::iter([Err(Status::not_found("not asked"))]))
-                };
-                Ok(Response::new(parts))
-            }
-        }
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(
@@ -3052,7 +3053,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let ask = only_fetch_ask(key.clone());
+        let ask = only_fetch_ask(key);
         // A short wait: the refusal comes in milliseconds.
         {
             let inner = Arc::get_mut(&mut tier.inner).unwrap();
@@ -3063,12 +3064,17 @@ mod tests {
         // growth for a non-zstd client (the stored frame and the
         // unpacked bytes on top) does not.
         let packed = object::pack(&data).unwrap();
+        // The reply's share must grow by the stored frame and the
+        // unpacked bytes on top of its first take.
         let grow = packed.len() + data.len() + UNPACK_BYTES;
         let keep_free = packed.len() + 8;
-        let pre = IN_FLIGHT_BYTES - keep_free;
+        assert!(
+            grow > keep_free,
+            "the test needs a growth past what the budget leaves"
+        );
         let in_flight = Arc::clone(&tier.inner.in_flight);
         let permit = in_flight
-            .try_acquire_many_owned(u32::try_from(pre).unwrap())
+            .try_acquire_many_owned(u32::try_from(IN_FLIGHT_BYTES - keep_free).unwrap())
             .unwrap();
         let found = tier.produce(&ask, 0, &Progress::default()).await;
         drop(permit); // the budget is full around the call
