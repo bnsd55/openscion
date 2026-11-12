@@ -163,6 +163,19 @@ fn the_export_is_the_golden_and_restores_to_it() {
 
     let out = data.path().join("archive");
     let manifest = archive::export(&store, data.path(), None, true, &out).unwrap();
+    // The manifest names the store the marker names, byte for byte: an
+    // archive's manifest says where its metadata came from, not a
+    // made-up or zero UUID.
+    let marker = fs::read_to_string(data.path().join("backend")).unwrap();
+    let marker_uuid = marker
+        .lines()
+        .nth(1)
+        .expect("the marker names the store UUID");
+    assert_eq!(
+        manifest["store_uuid"].as_str(),
+        Some(marker_uuid),
+        "the manifest's store UUID is the marker's: {manifest}"
+    );
     let normalized = normalized_manifest(&manifest);
 
     let rows = rows(&out);
