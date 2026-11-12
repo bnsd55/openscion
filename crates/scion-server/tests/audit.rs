@@ -563,8 +563,8 @@ async fn a_write_whose_intent_fails_is_refused() {
     // the read statement behind it bounded at minutes. On a runner whose
     // Postgres is shared with other suites' runtimes, one call can
     // legitimately hold for tens of seconds (run 43150672619 fired the
-    // 5 s trap exactly there), so a trap under 30 s names a slow runner
-    // a hung server. 35 s covers the pool's own bound plus slop; a call
+    // 5 s trap exactly there), so a trap under 30 s mistakes a slow runner
+    // for a hung server. 35 s covers the pool's own bound plus slop; a call
     // that is still pending at 35 s is one the server's pool wait should
     // have answered, and the trap names it.
     //
