@@ -801,6 +801,14 @@ mod tests {
         )
         .unwrap();
         drop(raw);
+        // The count the run asserts on is a point-in-time read of
+        // pg_locks: await the holders again at the last point before
+        // it, so the run's own connect is the only session in the
+        // window. The setup between the helper's await and here (the
+        // raw client's rewrite of the version row) is exactly where a
+        // macOS night saw a holder take the key after the first await
+        // had passed.
+        await_no_holders(&std::fs::read_to_string(&url).unwrap());
         let report = run(&PreflightOptions {
             data: dir.path().to_path_buf(),
             postgres_url_file: Some(url.clone()),
