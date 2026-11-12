@@ -569,6 +569,16 @@ async fn get(client: &mut Client, fake: &Fake, objects: &[&Object]) -> Result<Ve
     get_in(client, fake, objects).await?
 }
 
+/// A tempdir whose mode is private (0o700), whatever the process umask
+/// is: a store or a socket refuses a directory another user could swap
+/// or write, so every test's data directory and socket parent goes
+/// through this helper and no test can forget the mode.
+fn private_tempdir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    dir
+}
+
 fn blob(data: &[u8]) -> Object {
     Object {
         kind: ObjectKind::Blob.into(),
@@ -756,9 +766,7 @@ async fn each_tier_refuses_a_call_without_the_token() {
     let fake = Fake::sending([], Duration::ZERO);
     let upstream = serve_fake(fake.clone()).await;
     let (cache, cache_url) = serve_cache(&upstream, CACHE_UPSTREAM_TIMEOUT, &fake.keys()).await;
-    let dir = tempfile::tempdir().unwrap();
-    // The socket's directory must be private.
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let dir = private_tempdir();
     let socket = dir.path().join("daemon.sock");
     let store = DiskStore::open(&dir.path().join("data"), 1 << 20).unwrap();
     let daemon = Tier::new_relay(store, &cache_url, TOKEN, CACHE_UPSTREAM_TIMEOUT, None).unwrap();
@@ -1084,8 +1092,7 @@ struct TestAuthority {
 impl TestAuthority {
     /// A CA with no name that a test needs.
     fn new(name: &str) -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let dir = private_tempdir();
         let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign];
@@ -1232,8 +1239,7 @@ async fn serve_daemon(
     ca: Option<&TestCert>,
     client: Option<&TestCert>,
 ) -> (String, tempfile::TempDir) {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let dir = private_tempdir();
     let socket = dir.path().join("daemon.sock");
     let store = DiskStore::open(&dir.path().join("data"), 1 << 20).unwrap();
     let client_tls = ClientTls::load(
@@ -1338,8 +1344,7 @@ async fn a_daemon_miss_fetches_the_object_only() {
     let fake = Fake::new(&[&object], Duration::ZERO);
     let upstream = serve_fake(fake.clone()).await;
     let (cache, cache_url) = serve_cache(&upstream, CACHE_UPSTREAM_TIMEOUT, &fake.keys()).await;
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let dir = private_tempdir();
     let socket = dir.path().join("daemon.sock");
     let store = DiskStore::open(&dir.path().join("data"), 1 << 20).unwrap();
     // No ticket keys: a daemon, which checks no ticket and runs no walk.
@@ -1496,8 +1501,7 @@ async fn a_daemons_cache_still_refuses_a_view_ticket_outside_its_view() {
     let warmed = fake.calls();
 
     // bob's daemon: no ticket keys, so no walk of its own.
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let dir = private_tempdir();
     let socket = dir.path().join("daemon.sock");
     let store = DiskStore::open(&dir.path().join("data"), 1 << 20).unwrap();
     let daemon = Tier::new_relay(store, &cache_url, TOKEN, CACHE_UPSTREAM_TIMEOUT, None).unwrap();
@@ -1616,8 +1620,7 @@ async fn a_daemon_killed_mid_fill_serves_no_torn_object_after_its_restart() {
     let limit = 8 << 20;
     let fake = Fake::new(&fill.iter().collect::<Vec<_>>(), Duration::ZERO);
     let upstream = serve_fake(fake.clone()).await;
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let dir = private_tempdir();
     let socket = dir.path().join("daemon.sock");
     let data = dir.path().join("data");
     // The daemon refuses a data directory that does not exist, and one
@@ -1826,8 +1829,7 @@ async fn a_daemons_stderr_stays_quiet_and_colorless_across_gets() {
     let object = blob(b"once per request is not a log level\n");
     let fake = Fake::new(&[&object], Duration::ZERO);
     let upstream = serve_fake(fake.clone()).await;
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let dir = private_tempdir();
     let socket = dir.path().join("daemon.sock");
     let log = dir.path().join("daemon.log");
     let data = dir.path().join("data");
@@ -1993,7 +1995,7 @@ fn the_byte_limit_keeps_its_exact_byte_and_refuses_the_next() {
         "one byte over the limit is not stored"
     );
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_tempdir();
     let disk =
         scion_tier::DiskStore::open(&dir.path().join("data"), packed.len() as usize).unwrap();
     scion_tier::Store::put(
@@ -2059,7 +2061,7 @@ fn the_eviction_order_follows_the_reads() {
         "the object a read touched stays while another drops"
     );
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_tempdir();
     let disk = scion_tier::DiskStore::open(&dir.path().join("data"), limit).unwrap();
     scion_tier::Store::put(&disk, key_a, &packed_a.clone().into()).unwrap();
     scion_tier::Store::put(&disk, key_b, &packed_b.clone().into()).unwrap();
@@ -2088,7 +2090,7 @@ fn a_disk_object_whose_bytes_do_not_match_its_id_is_not_served() {
     let data = b"the read-back check is the last guard\n".to_vec();
     let packed = scion_proto::runtime::object::pack(&data).unwrap();
     let key = scion_tier::Key::Blob(scion_core::BlobId::of(&data));
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_tempdir();
     let disk = scion_tier::DiskStore::open(&dir.path().join("data"), 1 << 20).unwrap();
     scion_tier::Store::put(&disk, key, &packed.clone().into()).unwrap();
     assert!(
