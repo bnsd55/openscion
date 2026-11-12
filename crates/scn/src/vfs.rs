@@ -2772,6 +2772,22 @@ mod tests {
         std::fs::write(&note, &bytes).unwrap();
         let why = format!("{:#}", read_deletes(overlay.path()).unwrap_err());
         assert!(why.contains("past its last deletion"), "{why}");
+        // A count of four over two entries' bytes: the guard refuses it
+        // (four entries cost at least four more bytes than the note
+        // holds), and a looser guard would silently read two.
+        let mut bytes = vec![DELETES_VERSION_1];
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        for name in ["a", "b"] {
+            bytes.extend_from_slice(&1u32.to_le_bytes());
+            bytes.extend_from_slice(name.as_bytes());
+        }
+        assert_eq!(bytes.len(), 15);
+        std::fs::write(&note, &bytes).unwrap();
+        let why = format!("{:#}", read_deletes(overlay.path()).unwrap_err());
+        assert!(
+            why.contains("names more deletions than it holds"),
+            "the guard let a count of four through two entries' bytes: {why}"
+        );
         // A note of several entries reads back: four entries, each one
         // byte of name. The count is four, the bytes hold them all.
         let mut bytes = vec![DELETES_VERSION_1];
