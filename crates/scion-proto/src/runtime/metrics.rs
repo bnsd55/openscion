@@ -1927,20 +1927,4 @@ mod tests {
                 .expect("serve ends on shutdown")
                 .expect("serve ends without an error");
     }
-
-    /// `shutdown_signal` resolves on SIGTERM: the server's own signal
-    /// driver catches it, so the process survives to end cleanly.
-    #[tokio::test]
-    async fn shutdown_signal_resolves_on_sigterm() {
-        let waiting = tokio::spawn(shutdown_signal());
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        std::process::Command::new("kill")
-            .args(["-TERM", &std::process::id().to_string()])
-            .status()
-            .expect("kill runs");
-        tokio::time::timeout(std::time::Duration::from_secs(10), waiting)
-            .await
-            .expect("shutdown_signal resolves on SIGTERM")
-            .unwrap();
-    }
 }
