@@ -2342,7 +2342,7 @@ mod tests {
                 root,
                 &filename3::from(b"tool".to_vec()),
                 sattr3 {
-                    mode: set_mode3::mode(0o755),
+                    mode: nfsserve::nfs::set_mode3::mode(0o755),
                     ..sattr3::default()
                 },
             )
