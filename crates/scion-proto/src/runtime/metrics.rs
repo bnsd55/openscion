@@ -1808,4 +1808,142 @@ mod tests {
             "{text}"
         );
     }
+
+    /// The request body's own frames outweigh the client's declared
+    /// content-length: `moved_bytes` reads the frames when they flowed.
+    #[test]
+    fn the_request_frames_outweigh_a_declared_content_length() {
+        let metrics = std::sync::Arc::new(Metrics::default());
+        let rpc = metrics.rpc("/scion.v1.Scion/Blame").unwrap();
+        let body = CountingBody {
+            inner: boxed(StreamBody::new(tokio_stream::iter(Vec::<
+                Result<http_body::Frame<bytes::Bytes>, std::convert::Infallible>,
+            >::new()))),
+            metrics: metrics.clone(),
+            rpc,
+            started: Instant::now(),
+            bytes_in: 7,
+            bytes_in_frames: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(5)),
+            bytes_out: 3,
+            counted: false,
+            guard: None,
+        };
+        assert_eq!(body.moved_bytes(), (5, 3));
+    }
+
+    /// The counting bodies hand `is_end_stream` and `size_hint` through,
+    /// so a swap serves wrong hints to the transport.
+    #[test]
+    fn the_counting_bodies_delegate_the_hints() {
+        let metrics = std::sync::Arc::new(Metrics::default());
+        let rpc = metrics.rpc("/scion.v1.Scion/Blame").unwrap();
+        let frames: Vec<Result<http_body::Frame<bytes::Bytes>, std::convert::Infallible>> =
+            vec![Ok(http_body::Frame::data(bytes::Bytes::from_static(b"hi")))];
+        let mut frames_body = CountingFrames {
+            inner: boxed(StreamBody::new(tokio_stream::iter(frames))),
+            counted_in: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        };
+        use http_body::Body as _;
+        assert!(!frames_body.is_end_stream(), "a frame is still coming");
+        let mut body = CountingBody {
+            inner: boxed(http_body_util::Full::new(bytes::Bytes::from_static(b"hi"))),
+            metrics: metrics.clone(),
+            rpc,
+            started: Instant::now(),
+            bytes_in: 0,
+            bytes_in_frames: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            bytes_out: 0,
+            counted: false,
+            guard: None,
+        };
+        assert!(!body.is_end_stream(), "a full body holds its frame");
+        assert_eq!(body.size_hint().lower(), 2);
+        assert_eq!(body.size_hint().upper(), Some(2));
+        drain(&mut body);
+        assert!(body.is_end_stream(), "a full body ends");
+    }
+
+    /// The in-flight gauge returns when the guard drops, however the call
+    /// ended: the drain waits on exactly this gauge.
+    #[test]
+    fn a_dropped_guard_gives_the_in_flight_gauge_back() {
+        let metrics = std::sync::Arc::new(Metrics::default());
+        metrics.call_started();
+        assert_eq!(metrics.calls_in_flight(), 1);
+        drop(CallGuard {
+            metrics: metrics.clone(),
+        });
+        assert_eq!(metrics.calls_in_flight(), 0);
+    }
+
+    /// The metrics listener takes loopback addresses, and non-loopback
+    /// ones only with `allow_insecure`: the endpoint is plain HTTP.
+    #[test]
+    fn the_metrics_listener_takes_loopback_only_unless_allowed() {
+        let loopback: std::net::SocketAddr = "127.0.0.1:9100".parse().unwrap();
+        let wild: std::net::SocketAddr = "0.0.0.0:9100".parse().unwrap();
+        assert!(loopback_or_allow(loopback, false).is_ok());
+        assert!(loopback_or_allow(wild, true).is_ok());
+        let why = loopback_or_allow(wild, false).unwrap_err();
+        assert!(why.contains("not a loopback address"), "{why}");
+        assert!(why.contains("--insecure-listen"), "{why}");
+    }
+
+    /// `/metrics` renders, another path answers 404, and the shutdown
+    /// future ends the serve loop cleanly.
+    #[tokio::test]
+    async fn the_metrics_endpoint_serves_and_shuts_down() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let metrics = std::sync::Arc::new(Metrics::default());
+        metrics.blob_sync(4_000);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve(listener, metrics.clone(), async move {
+            let _ = shutdown_rx.await;
+        }));
+        let mut served = false;
+        for path in ["/metrics", "/nope"] {
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            stream
+                .write_all(
+                    format!("GET {path} HTTP/1.1\r\nhost: t\r\nconnection: close\r\n\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf).await.unwrap();
+            let text = String::from_utf8_lossy(&buf).to_string();
+            if path == "/metrics" {
+                assert!(text.contains("200"), "{text}");
+                assert!(text.contains("scion_blob_sync_seconds_count 1"), "{text}");
+                served = true;
+            } else {
+                assert!(text.contains("404"), "{text}");
+            }
+        }
+        let _ = shutdown_tx.send(());
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("serve ends on shutdown")
+            .expect("serve ends without an error");
+        assert!(served, "/metrics answered");
+    }
+
+    /// `shutdown_signal` resolves on SIGTERM: the server's own signal
+    /// driver catches it, so the process survives to end cleanly.
+    #[tokio::test]
+    async fn shutdown_signal_resolves_on_sigterm() {
+        let waiting = tokio::spawn(shutdown_signal());
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        std::process::Command::new("kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status()
+            .expect("kill runs");
+        tokio::time::timeout(std::time::Duration::from_secs(10), waiting)
+            .await
+            .expect("shutdown_signal resolves on SIGTERM")
+            .unwrap();
+    }
 }
