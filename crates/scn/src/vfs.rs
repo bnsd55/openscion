@@ -3363,10 +3363,15 @@ mod tests {
     async fn the_mount_secret_is_random_and_named_in_hex() {
         let test = start(&[("a", b"data\n", Some(false))]).await;
         let name = test.vfs.secret_name();
-        assert_eq!(name.len(), 32, "{name}");
+        assert_eq!(
+            name.len(),
+            32,
+            "the secret name holds {} characters",
+            name.len()
+        );
         assert!(
             name.bytes().all(|b| b.is_ascii_hexdigit()),
-            "the secret name is hex: {name}"
+            "a character of the secret name is not hex"
         );
         let fresh = secret_from_urandom().unwrap();
         let again = secret_from_urandom().unwrap();
