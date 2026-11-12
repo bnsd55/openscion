@@ -11,6 +11,28 @@ use std::time::{Duration, Instant};
 use scion_server::test_support::meta::Meta as _;
 use scion_server::{Backend, Metrics};
 
+/// The archive manifest names the store the marker names, byte for
+/// byte: an archive's manifest says where its metadata came from, not a
+/// made-up or zero UUID.
+#[test]
+fn the_archive_manifest_names_the_stores_marker() {
+    let dir = scion_server::test_support::private_tempdir();
+    let store = Backend::open_test(dir.path()).unwrap();
+    let out = dir.path().join("archive");
+    let manifest =
+        scion_server::archive::export(&store, dir.path(), None, true, &out).unwrap();
+    let marker = std::fs::read_to_string(dir.path().join("backend")).unwrap();
+    let marker_uuid = marker
+        .lines()
+        .nth(1)
+        .expect("the marker names the store UUID");
+    assert_eq!(
+        manifest["store_uuid"].as_str(),
+        Some(marker_uuid),
+        "{manifest}"
+    );
+}
+
 /// A marker whose UUID line is all hex digits but the wrong length (31
 /// here) reads as no UUID: the open adopts the directory and writes the
 /// marker anew. Parsing off the end of the line would panic the open

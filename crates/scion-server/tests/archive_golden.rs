@@ -156,22 +156,6 @@ fn normalized_manifest(manifest: &serde_json::Value) -> String {
     )
 }
 
-/// The manifest names the store the marker names, byte for byte: an
-/// archive's manifest says where its metadata came from, not a made-up
-/// or zero UUID.
-fn assert_manifest_uuid_is_the_markers(manifest: &serde_json::Value, data: &Path) {
-    let marker = fs::read_to_string(data.join("backend")).unwrap();
-    let marker_uuid = marker
-        .lines()
-        .nth(1)
-        .expect("the marker names the store UUID");
-    assert_eq!(
-        manifest["store_uuid"].as_str(),
-        Some(marker_uuid),
-        "the manifest's store UUID is the marker's: {manifest}"
-    );
-}
-
 #[test]
 fn the_export_is_the_golden_and_restores_to_it() {
     let data = tempfile::tempdir().unwrap();
@@ -179,7 +163,6 @@ fn the_export_is_the_golden_and_restores_to_it() {
 
     let out = data.path().join("archive");
     let manifest = archive::export(&store, data.path(), None, true, &out).unwrap();
-    assert_manifest_uuid_is_the_markers(&manifest, data.path());
     let normalized = normalized_manifest(&manifest);
 
     let rows = rows(&out);
