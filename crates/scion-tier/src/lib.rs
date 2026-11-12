@@ -2657,9 +2657,10 @@ mod tests {
                 .is_some_and(|r| r.id == header.id && r.kind == i32::from(ObjectKind::Blob));
             let parts: Replies = if first_names_the_ask {
                 Box::pin(
-                    tokio_stream::iter([Ok(first)]).chain(tokio_stream::iter([Err(
-                        Status::new(self.1, "the stream died here"),
-                    )])),
+                    tokio_stream::iter([Ok(first)]).chain(tokio_stream::iter([Err(Status::new(
+                        self.1,
+                        "the stream died here",
+                    ))])),
                 )
             } else {
                 Box::pin(tokio_stream::iter([Err(Status::not_found(
