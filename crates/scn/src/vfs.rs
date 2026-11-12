@@ -1815,7 +1815,14 @@ impl Vfs {
             let kind = nodes.by_id[&id].kind.is_dir();
             if kind {
                 self.move_dir(nodes, id, &child_from, &child_to).await?;
-                nodes.drop_node(id);
+                // The directory keeps its node and its listing; it
+                // answers at the new path now. Dropping it would lose
+                // every lookup and listing under the new path.
+                nodes.by_path.remove(&Some(child_from.clone()));
+                if let Some(node) = nodes.by_id.get_mut(&id) {
+                    node.path = Some(child_to.clone());
+                }
+                nodes.by_path.insert(Some(child_to.clone()), id);
             } else {
                 let bytes = self.file_bytes(nodes, id).await?;
                 let is_link = matches!(
