@@ -2005,9 +2005,12 @@ mod tests {
         let rpc = metrics.rpc("/scion.v1.Scion/Blame").unwrap();
         // A duration between the 4 ms and 16 ms bounds, so the bucket
         // membership is exact and a doubled micros crosses the 16 ms
-        // line.
-        let started = Instant::now();
-        std::thread::sleep(std::time::Duration::from_millis(9));
+        // line. The start sits 9 ms in the past, so no sleep decides
+        // the bucket: the elapsed time is 9 ms plus the microseconds
+        // the call between here and `cancelled` takes.
+        let started = Instant::now()
+            .checked_sub(std::time::Duration::from_millis(9))
+            .expect("the clock is past 9 ms");
         metrics.cancelled(rpc, started, 11, 13);
         let text = metrics.render();
         assert!(
