@@ -8,8 +8,13 @@
 async fn shutdown_signal_resolves_on_sigterm() {
     let mut listening = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("the SIGTERM driver registers");
-    let waiting = tokio::spawn(scion_proto::runtime::metrics::shutdown_signal());
+    let mut waiting = tokio::spawn(scion_proto::runtime::metrics::shutdown_signal());
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // The future must still be waiting: a stub that resolves without the
+    // signal fails here, before the kill can excuse it.
+    tokio::time::timeout(std::time::Duration::from_millis(300), &mut waiting)
+        .await
+        .expect_err("shutdown_signal holds until the signal arrives");
     std::process::Command::new("kill")
         .args(["-TERM", &std::process::id().to_string()])
         .status()

@@ -2017,6 +2017,19 @@ mod tests {
             text.contains("scion_request_seconds_count{rpc=\"Scion/Blame\"} 1\n"),
             "{text}"
         );
+        // An RPC and a code that counted nothing render no line at all.
+        assert!(
+            !text.contains("scion_request_seconds_bucket{rpc=\"Scion/PutBlob\""),
+            "{text}"
+        );
+        assert!(
+            !text.contains("scion_rpc_bytes_total{rpc=\"Scion/PutBlob\""),
+            "{text}"
+        );
+        assert!(
+            !text.contains("scion_requests_total{rpc=\"Scion/Blame\",code=\"ok\"} 0\n"),
+            "{text}"
+        );
     }
 
     /// The lands render by outcome, an unknown outcome counts nothing,
@@ -2100,6 +2113,10 @@ mod tests {
             text.contains("scion_pg_pool_wait_seconds_count 1\n"),
             "{text}"
         );
+        // Nothing replanned and nothing cached here: no zero line renders.
+        assert!(!text.contains("scion_land_replans_total 0\n"), "{text}");
+        assert!(!text.contains("scion_cache_hits_total 0\n"), "{text}");
+        assert!(!text.contains("scion_cache_misses_total 0\n"), "{text}");
     }
 
     /// A view walk that ended renders nothing; the walk counter reads
