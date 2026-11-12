@@ -2608,6 +2608,88 @@ mod tests {
         }
     }
 
+    /// An upstream whose first reply item is the ask's own first part, and
+    /// whose second item is a whole-call status (Unauthenticated): the
+    /// error lands inside the part loop, not at the RPC boundary. For a
+    /// stranger key it refuses per object.
+    struct PartThenDies(Vec<u8>);
+
+    #[tonic::async_trait]
+    impl Objects for PartThenDies {
+        async fn resolve_ref(
+            &self,
+            _: Request<ResolveRefRequest>,
+        ) -> Result<Response<ResolveRefResponse>, Status> {
+            Err(Status::unimplemented("no refs"))
+        }
+
+        async fn get_root_tree(
+            &self,
+            _: Request<GetRootTreeRequest>,
+        ) -> Result<Response<GetRootTreeResponse>, Status> {
+            Err(Status::unimplemented("no changesets"))
+        }
+
+        type GetObjectsStream = Replies;
+
+        async fn get_objects(
+            &self,
+            request: Request<GetObjectsRequest>,
+        ) -> Result<Response<Replies>, Status> {
+            let data = self.0.clone();
+            let refs = request.get_ref().refs.clone();
+            let header = Header {
+                kind: ObjectKind::Blob,
+                id: *BlobId::of(&data).as_bytes(),
+                encoding: Encoding::Raw,
+                encoded_size: data.len(),
+                size: data.len(),
+            };
+            // Two parts of the announced bytes; the stream carries only
+            // the first, then the whole-call error.
+            let first = header
+                .parts(vec![
+                    Bytes::copy_from_slice(&data[..data.len() / 2]),
+                    Bytes::copy_from_slice(&data[data.len() / 2..]),
+                ])
+                .remove(0);
+            let first_names_the_ask = refs
+                .first()
+                .is_some_and(|r| r.id == header.id && r.kind == i32::from(ObjectKind::Blob));
+            let parts: Replies = if first_names_the_ask {
+                Box::pin(
+                    tokio_stream::iter([Ok(first)]).chain(tokio_stream::iter([Err(
+                        Status::unauthenticated("the upstream token was revoked"),
+                    )])),
+                )
+            } else {
+                Box::pin(tokio_stream::iter([Err(Status::not_found(
+                    "not the asked object",
+                ))]))
+            };
+            Ok(Response::new(parts))
+        }
+    }
+
+    /// A tier in front of [`PartThenDies`].
+    async fn part_then_dies_upstream(data: &[u8]) -> Tier<MemoryStore> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(
+            Server::builder()
+                .add_service(ObjectsServer::new(PartThenDies(data.to_vec())))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        Tier::new_relay(
+            MemoryStore::new(1 << 20),
+            &url,
+            "token",
+            CACHE_UPSTREAM_TIMEOUT,
+            None,
+        )
+        .unwrap()
+    }
+
     /// A tier in front of [`Refuses`].
     async fn refusing_upstream() -> Tier<MemoryStore> {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2977,6 +3059,41 @@ mod tests {
     /// a later deadline asks again. A per-object reading of a
     /// whole-call status would leave the other waiters hanging on their
     /// deadlines while the upstream is broken.
+    #[tokio::test]
+    async fn a_whole_call_error_inside_the_part_loop_fails_the_whole_call() {
+        // The first part answers, then the stream dies with a whole-call
+        // status: the error rides the call, not one object - the single
+        // waiter must see whole_call true and the error's own code.
+        let data = b"an object of eighteen".to_vec();
+        let tier = part_then_dies_upstream(&data).await;
+        let key = Key::Blob(BlobId::of(&data));
+        let failed = tier
+            .fetch(&only_fetch_ask(key), 0, &Progress::default())
+            .await
+            .expect_err("the stream died mid-object");
+        assert_eq!(failed.status.code(), Code::Unauthenticated, "{failed:?}");
+        assert!(
+            failed.whole_call,
+            "a mid-object whole-call error is the call's own"
+        );
+        settled(&tier).await;
+    }
+
+    #[tokio::test]
+    async fn a_per_object_refusal_of_the_first_item_fails_one_object() {
+        // The stream's first item is a per-object status: the object fails
+        // alone (whole_call false) and the call itself does not error.
+        let tier = part_then_dies_upstream(b"an object").await;
+        let stranger = Key::Blob(BlobId::of(b"a stranger's object"));
+        let failed = tier
+            .fetch(&only_fetch_ask(stranger), 0, &Progress::default())
+            .await
+            .expect_err("the upstream refused the object");
+        assert_eq!(failed.status.code(), Code::NotFound, "{failed:?}");
+        assert!(!failed.whole_call, "the object fails alone");
+        settled(&tier).await;
+    }
+
     #[tokio::test]
     async fn an_upstream_that_refuses_the_call_fails_the_whole_call() {
         let tier = refusing_upstream().await;
