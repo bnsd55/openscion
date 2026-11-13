@@ -319,11 +319,14 @@ fn count_class(item: &str) -> Option<(&'static str, usize)> {
         .min_by_key(|(c, at)| (*at, std::cmp::Reverse(c.len())))
 }
 
+/// One counted part: the number and where its entry starts.
+type CountParts = (u32, Vec<(u32, usize)>, Vec<usize>);
+
 /// One row's count cell: `(total, parts, group starts)`. Number-first items
 /// ("25 caught") and verb-first run markers ("the boundary run caught 24")
 /// both parse; the prose after the parts ("of which 9 are killed ...")
 /// stops the walk.
-fn count_parts(cell: &str) -> Option<(u32, Vec<(u32, usize)>, Vec<usize>)> {
+fn count_parts(cell: &str) -> Option<CountParts> {
     let (head, rest) = cell.split_once(':')?;
     let head = head.trim().strip_suffix(" tested").unwrap_or(head.trim());
     let total: u32 = head.parse().ok()?;
@@ -359,22 +362,18 @@ fn count_parts(cell: &str) -> Option<(u32, Vec<(u32, usize)>, Vec<usize>)> {
         // ("the boundary run caught 24") put the class first; number-first
         // items ("25 caught", "71 the run missed") put the number first.
         let starts_number = item.starts_with(|c: char| c.is_ascii_digit());
-        let class_at = if starts_number {
-            count_class(item)
-        } else {
-            count_class(item).map(|(c, at)| (c, at))
-        };
+        let class_at = count_class(item);
         let Some((class, at)) = class_at else {
             break;
         };
         let digits: String = if starts_number {
-            item.chars().take_while(|c| c.is_ascii_digit()).collect()
+            item.chars().take_while(char::is_ascii_digit).collect()
         } else {
             let after = &item[at + class.len()..];
             let after_digits: String = after
                 .trim_start()
                 .chars()
-                .take_while(|c| c.is_ascii_digit())
+                .take_while(char::is_ascii_digit)
                 .collect();
             if after_digits.is_empty() {
                 // "the union is 8 caught": the number sits before the class.
@@ -382,7 +381,7 @@ fn count_parts(cell: &str) -> Option<(u32, Vec<(u32, usize)>, Vec<usize>)> {
                 before
                     .chars()
                     .rev()
-                    .take_while(|c| c.is_ascii_digit())
+                    .take_while(char::is_ascii_digit)
                     .collect::<String>()
                     .chars()
                     .rev()
