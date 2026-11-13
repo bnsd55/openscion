@@ -56,58 +56,6 @@ fn the_mutation_table_has_no_blank_line_between_its_rows() {
     );
 }
 
-/// The files the audit names as excluded, with the reason. A row that
-/// names one of these replaces its entry, and the entry is dropped.
-const EXCLUSIONS: &[(&str, &str)] = &[
-    // (path relative to crates/, the audit's reason)
-    (
-        "scion-server/src/test_support/backend.rs",
-        "test-only helpers",
-    ),
-    (
-        "scion-server/src/test_support/damage.rs",
-        "test-only helpers",
-    ),
-    ("scion-server/src/test_support/db.rs", "test-only helpers"),
-    ("scion-server/src/test_support/docs.rs", "test-only helpers"),
-    ("scion-server/src/test_support/pg.rs", "test-only helpers"),
-    (
-        "scion-server/src/test_support/store.rs",
-        "test-only helpers",
-    ),
-    ("scion-server/src/pause.rs", "test-only helpers"),
-    ("scion-server/src/seed.rs", "test-only helpers"),
-    (
-        "scion-server/src/lib.rs",
-        "test-only helpers behind a feature",
-    ),
-    ("scn/src/lib.rs", "test-only helpers"),
-    ("scion-proto/src/runtime/mod.rs", "test-only helpers"),
-    ("scion-server/src/auth.rs", "re-export only"),
-    ("scn/src/cmd/mod.rs", "re-export only"),
-    ("scion-proto/src/lib.rs", "no branch"),
-    ("scion-server/src/pg.rs", "tracked by #1060"),
-    ("scion-server/src/tickets.rs", "tracked by #1192"),
-    ("scion-server/src/names.rs", "tracked by #1192"),
-    ("scion-tier/src/bin/scion-cache.rs", "tracked by #1191"),
-    ("scion-tier/src/bin/scion-daemon.rs", "tracked by #1191"),
-    ("scn/src/cmd/land.rs", "tracked by #1199"),
-    ("scn/src/cmd/blame.rs", "tracked by #1199"),
-    ("scn/src/cmd/query.rs", "tracked by #1199"),
-    ("scn/src/cmd/read.rs", "tracked by #1199"),
-    ("scn/src/out.rs", "tracked by #1199"),
-    ("scion-proto/src/runtime/auth/ffi.rs", "tracked by #1200"),
-    (
-        "scion-proto/src/runtime/auth/removed.rs",
-        "tracked by #1200",
-    ),
-    ("scion-proto/src/runtime/deadline.rs", "tracked by #1200"),
-    ("scion-proto/src/runtime/host.rs", "tracked by #1200"),
-    ("scion-proto/src/runtime/reply.rs", "tracked by #1200"),
-    ("scion-proto/src/runtime/metrics.rs", "tracked by #1200"),
-    ("scion-server/src/metrics.rs", "tracked by #1200"),
-];
-
 /// The `.rs` paths a section-10 row names, normalized: a leading
 /// `crates/` is stripped, so `crates/scn/src/vfs.rs` and `scn/src/vfs.rs`
 /// name the same file.
@@ -164,26 +112,72 @@ fn source_files() -> Vec<String> {
 /// across the source files (a bare basename naming two files resolves
 /// nothing, so its rows must carry fuller paths).
 fn names_file(paths: &[String], file: &str, all: &[String]) -> bool {
-    let Some(rel) = file.split_once("/src/").map(|(_, rest)| rest) else {
+    let Some((_, rel)) = file.split_once("/src/") else {
         return false;
     };
-    // A row's token drops the `src/` segment: `runtime/deadline.rs`
-    // names scion-server/src/deadline.rs when it ends with it, and a
-    // bare basename matches only when unique (checked below).
-    let without_src = rel.to_owned();
-    if paths
-        .iter()
-        .any(|p| p.ends_with(&without_src) && p.contains('/'))
-    {
-        return true;
+    for p in paths {
+        if p.contains("/src/") {
+            // A token that keeps `src/` is a full path: it names the
+            // file when the file ends with it at a path boundary.
+            if file == p.as_str() || file.ends_with(&format!("/{p}")) {
+                return true;
+            }
+        } else if p.contains('/') {
+            // A src-less token like `runtime/metrics.rs` is the file's
+            // after-`src/` path and must equal it exactly: a tail match
+            // would let `runtime/metrics.rs` claim
+            // scion-server/src/metrics.rs too.
+            if rel == p.as_str() {
+                return true;
+            }
+        } else {
+            // A bare basename names the file only when it is the file's
+            // own basename and that basename is unique across all the
+            // source files.
+            if rel.rsplit('/').next() == Some(p.as_str()) {
+                let unique = all
+                    .iter()
+                    .filter(|f| f.rsplit('/').next() == Some(p.as_str()))
+                    .count()
+                    == 1;
+                if unique {
+                    return true;
+                }
+            }
+        }
     }
-    let basename = rel.rsplit('/').next().unwrap();
-    let unique = all
-        .iter()
-        .filter(|f| f.rsplit('/').next() == Some(basename))
-        .count()
-        == 1;
-    unique && paths.iter().any(|p| p == basename)
+    false
+}
+
+/// The excluded files, parsed from the audit's "### The files no row
+/// names" block: the single source. Every backticked `crates/...` path
+/// in the block is an exclusion; the entry's text before the colon is
+/// its reason. The parser refuses a block path that names no source
+/// file, so a renamed or deleted file cannot sit in the list.
+fn excluded_from_audit(text: &str) -> Vec<String> {
+    let block = text
+        .split("### The files no row names")
+        .nth(1)
+        .unwrap_or_else(|| panic!("{AUDIT} lost its exclusion block"));
+    let block = block.split("\n## ").next().unwrap();
+    let mut excluded = Vec::new();
+    for line in block.lines() {
+        let mut rest = line;
+        while let Some(open) = rest.find('`') {
+            let after = &rest[open + 1..];
+            let Some(close) = after.find('`') else { break };
+            let token = &after[..close];
+            if token.starts_with("crates/")
+                && token.len() > 3
+                && token[token.len() - 3..].eq_ignore_ascii_case(".rs")
+                && !token.contains('*')
+            {
+                excluded.push(token.to_owned());
+            }
+            rest = &after[close + 1..];
+        }
+    }
+    excluded
 }
 
 #[test]
@@ -195,10 +189,21 @@ fn section_10_names_every_source_file() {
         .unwrap_or_else(|| panic!("{AUDIT} lost its section 10 heading"));
     let paths = row_paths(section);
     let all = source_files();
+    let excluded = excluded_from_audit(&text);
+    for path in &excluded {
+        let relative = path.strip_prefix("crates/").unwrap_or(path);
+        assert!(
+            all.iter().any(|f| f == relative),
+            "{AUDIT}'s exclusion block names {path}, which is not a source file on main - drop the entry"
+        );
+    }
     let unaccounted: Vec<&String> = all
         .iter()
         .filter(|file| {
-            !EXCLUSIONS.iter().any(|(path, _)| path == *file) && !names_file(&paths, file, &all)
+            !excluded
+                .iter()
+                .any(|path| path.strip_prefix("crates/") == Some(file.as_str()))
+                && !names_file(&paths, file, &all)
         })
         .collect();
     assert!(
