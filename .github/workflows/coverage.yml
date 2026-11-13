@@ -177,7 +177,10 @@ jobs:
           # kills its agent before 3G/600M arrive. The watch also
           # trips on GROWTH against this measure's own start, which
           # fires while there is still room to leave the evidence.
-          start_avail=$(df --output=avail -BG / 2> /dev/null | tail -1 | tr -dc '0-9') || true
+          # Disk in MB: -BG rounds to whole GB, and a drop limit set a
+          # single GB above the normal drop trips on rounding (issue
+          # #1212). The MB unit makes the sampling noise 1M.
+          start_avail=$(df --output=avail -BM / 2> /dev/null | tail -1 | tr -dc '0-9') || true
           start_mem=$(free -m 2> /dev/null | awk 'NR==2 {print $7}') || true
           # The agent can also die of a process or thread leak: servers a
           # test left behind pile up until the runner cannot fork. The
@@ -194,10 +197,10 @@ jobs:
               family=${family:-0}
               # shellcheck disable=SC2034
               echo "processes=$procs threads=$threads store_family=$family" >> watcher.log || true
-              avail=$(df --output=avail -BG / | tail -1 | tr -dc '0-9' 2> /dev/null) || true
+              avail=$(df --output=avail -BM / | tail -1 | tr -dc '0-9' 2> /dev/null) || true
               mem=$(free -m | awk 'NR==2 {print $7}' 2> /dev/null) || true
               swap_used=$(free -m 2> /dev/null | awk 'NR==3 {print $3}') || true
-              echo "procs=$procs threads=$threads family=$family mem_avail=${mem:-?}M swap_used=${swap_used:-?}M disk_avail=${avail:-?}G" || true
+              echo "procs=$procs threads=$threads family=$family mem_avail=${mem:-?}M swap_used=${swap_used:-?}M disk_avail=${avail:-?}M" || true
               avail_drop=0; mem_drop=0; proc_growth=0
               if [ -n "${avail:-}" ] && [ -n "${start_avail:-}" ]; then
                 avail_drop=$((start_avail - avail))
@@ -208,9 +211,19 @@ jobs:
               if [ -n "${procs:-}" ] && [ -n "${start_procs:-}" ]; then
                 proc_growth=$((procs - start_procs))
               fi
-              if [ "${avail:-10}" -le 3 ] || [ "${mem:-10000}" -le 600 ] || [ "$avail_drop" -ge 6 ] || [ "$mem_drop" -ge 4000 ] || [ "$proc_growth" -ge 500 ] || [ "$family" -ge 200 ]; then
+              # The disk-drop limit comes from measurement (#1212):
+              # the green coverage runs of 2026-11-12/13 - 43250390050,
+              # 43335975585, 43387205869, 43379720277, 43392604611,
+              # 43411017706 - each dropped at most 5G of the ~110G
+              # start (start minus the lowest sample during the
+              # measure), and the runner's avail rises again by the
+              # run's end. 20G is 4x that measured drop: the rounding
+              # that tripped the old 6G limit cannot reach it, and a
+              # leak that eats 20G still leaves ~90G free, so it fires
+              # long before the 3G absolute floor could matter.
+              if [ "${avail:-10240}" -le 3072 ] || [ "${mem:-10000}" -le 600 ] || [ "$avail_drop" -ge 20480 ] || [ "$mem_drop" -ge 4000 ] || [ "$proc_growth" -ge 500 ] || [ "$family" -ge 200 ]; then
                 {
-                  echo "the runner is out of disk or memory, or is leaking: avail=${avail:-?}G avail_floor=3G free_mem=${mem:-?}M mem_floor=600M disk_drop_since_start=${avail_drop:-?}G mem_drop_since_start=${mem_drop:-?}M processes=$procs (start ${start_procs:-?}, growth $proc_growth, floor +500) store_family=$family (floor 200) threads=$threads"
+                  echo "the runner is out of disk or memory, or is leaking: avail=${avail:-?}M avail_floor=3072M free_mem=${mem:-?}M mem_floor=600M disk_drop_since_start=${avail_drop:-?}M (limit 20480M) mem_drop_since_start=${mem_drop:-?}M processes=$procs (start ${start_procs:-?}, growth $proc_growth, floor +500) store_family=$family (floor 200) threads=$threads"
                   df -h / || true
                   free -m || true
                   { ps -eo pid,rss,pcpu,etime,comm,args --sort=-rss > watcher.top && head -14 watcher.top; } || true
