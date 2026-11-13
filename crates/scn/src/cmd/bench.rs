@@ -352,7 +352,7 @@ mod tests {
             scion_server::test_support::service::ServeOptions {
                 data: data.path().to_path_buf(),
                 audit: scion_server::test_support::audit::Audit::off(),
-                limits: Default::default(),
+                limits: scion_proto::runtime::listen::Limits::default(),
                 quotas: scion_server::Quotas::off(),
                 pending_lands: None,
                 land_stale_secs: 1 << 40,
