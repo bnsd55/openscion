@@ -233,10 +233,38 @@ fn a_real_write_error_fails_the_diff_text() {
     use std::io::Write as _;
     let data = common::private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
-    let (base, tip) = start(&store);
+    // 8000 changed paths: about 88 KiB of diff text, past the writer's
+    // buffer, so the write itself is the call that meets the device.
+    let put = |content: &str| {
+        let mut blobs = store.blobs().batch();
+        blobs.put(content.as_bytes()).unwrap()
+    };
+    let blob_old = put("old");
+    let blob_new = put("new");
+    let state = |blob| FileState::Regular {
+        content: blob,
+        executable: false,
+    };
+    let base = land(
+        &store,
+        &changeset(
+            None,
+            &(0..8000)
+                .map(|n| (format!("f{n:04}.txt").leak() as &str, state(blob_old)))
+                .collect::<Vec<_>>(),
+        ),
+    );
+    let tip = land(
+        &store,
+        &changeset(
+            Some(base),
+            &(0..8000)
+                .map(|n| (format!("f{n:04}.txt").leak() as &str, state(blob_new)))
+                .collect::<Vec<_>>(),
+        ),
+    );
     let tiers = Tiers::start(data, store.clone());
     let home = common::private_tempdir();
-    let _tip = tip;
 
     // The child's stdout is the device; a clone of the same description
     // stays here, so the assert below can write it again.

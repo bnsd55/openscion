@@ -686,34 +686,46 @@ fn diff_names_added_changed_and_deleted_paths() {
 
 /// A diff whose text passes the stdout writer's buffer (8 KiB), into a
 /// pipe whose reader leaves: the write that carries the rest meets the
-/// closed pipe, and the command ends quietly. A fold that stops seeing
-/// the closed pipe fails the command loudly instead.
+/// The diff's text outgrows every buffer on the way: 8000 changed
+/// paths print about 88 KiB, past the stdout writer's 8 KiB buffer and
+/// the pipe's 64 KiB. The reader takes one byte and holds the pipe
+/// open, so the writer parks with the pipe full; when the reader
+/// leaves, the parked write meets the closed pipe, and the command
+/// ends quietly. A fold that stops seeing the closed pipe fails the
+/// command loudly instead.
 #[test]
 fn the_diffs_text_ends_quietly_when_the_reader_leaves() {
-    let git_dir = tempfile::tempdir().unwrap();
-    let dir = git_dir.path();
-    git(dir, &["init", "-q", "-b", "main"]);
-    // Enough changed paths that the diff's text passes one writer
-    // buffer: 900 lines of about 12 bytes each, over 8 KiB.
-    let before: Vec<(&str, Option<&str>)> = (0..900)
-        .map(|n| (format!("f{n:03}.txt").leak() as &str, Some("old")))
-        .collect();
-    commit(dir, "root", &before);
-    let old = git(dir, &["rev-parse", "HEAD"]);
-    let after: Vec<(&str, Option<&str>)> = (0..900)
-        .map(|n| (format!("f{n:03}.txt").leak() as &str, Some("new")))
-        .collect();
-    commit(dir, "change", &after);
-    let new = git(dir, &["rev-parse", "HEAD"]);
-    let opts = ImportOptions {
-        rev: "HEAD".into(),
-        target_ref: "main".into(),
-        verify_sample: 0,
-    };
     let data = tempfile::tempdir().unwrap();
     let store = Backend::open_test(data.path()).unwrap();
-    import_git(&store, REPO, dir, &opts).unwrap();
-    let ids = changesets(&store, dir);
+
+    let base = land(
+        &store,
+        &changeset(
+            None,
+            &(0..8000)
+                .map(|n| {
+                    (
+                        format!("f{n:04}.txt").leak() as &str,
+                        state_of(&store, "old"),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ),
+    );
+    let tip = land(
+        &store,
+        &changeset(
+            Some(base),
+            &(0..8000)
+                .map(|n| {
+                    (
+                        format!("f{n:04}.txt").leak() as &str,
+                        state_of(&store, "new"),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ),
+    );
     let server = Server::start(data, store);
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_scn"))
@@ -723,8 +735,8 @@ fn the_diffs_text_ends_quietly_when_the_reader_leaves() {
             "--repo",
             REPO,
             "diff",
-            &ids[&old],
-            &ids[&new],
+            &base.to_string(),
+            &tip.to_string(),
         ])
         .env("SCION_TOKEN", TOKEN)
         .stdout(Stdio::piped())
@@ -733,7 +745,14 @@ fn the_diffs_text_ends_quietly_when_the_reader_leaves() {
         .unwrap();
     let mut stdout = child.stdout.take().unwrap();
     let mut first = [0u8; 1];
-    stdout.read_exact(&mut first).unwrap();
+    if stdout.read_exact(&mut first).is_err() {
+        let out = child.wait_with_output().unwrap();
+        panic!(
+            "the child died before writing: status {:?}, stderr {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
     drop(stdout);
     let out = child.wait_with_output().unwrap();
     assert_eq!(out.status.code(), Some(0), "status: {}", out.status);
@@ -750,6 +769,10 @@ fn the_diffs_flush_ends_quietly_when_the_reader_leaves() {
     let dir = git_dir.path();
     git(dir, &["init", "-q", "-b", "main"]);
     // 1200 lines of about 12 bytes: the first 8 KiB pass the writer's
+    // buffer and land in the pipe, and the tail rides in the writer's
+    // buffer until the flush. The reader holds the pipe open until the
+    // first bytes arrive, then leaves with the writer's buffer still
+    // full, so the flush is the write that meets the closed pipe. of about 12 bytes: the first 8 KiB pass the writer's
     // buffer and land in the pipe, and the tail rides in the writer's
     // buffer until the flush. The reader holds the pipe open until the
     // first bytes arrive, then leaves with the writer's buffer still
@@ -804,4 +827,49 @@ fn the_diffs_flush_ends_quietly_when_the_reader_leaves() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+/// A regular file's state: one blob per distinct content, so the diff
+/// sees a real change between the two trees.
+fn state_of(store: &Backend, content: &str) -> scion_core::FileState {
+    scion_core::FileState::Regular {
+        content: store.blobs().put(content.as_bytes()).unwrap(),
+        executable: false,
+    }
+}
+
+/// A changeset on `parent` that puts `files` (raw path and state), as
+/// `common`'s does; this suite builds its big diff on the store
+/// directly, without a git fixture.
+fn changeset(parent: Option<ChangesetId>, files: &[(&str, FileState)]) -> Changeset {
+    Changeset::new(
+        parent.into_iter().collect(),
+        scion_core::IdentityTime::new(
+            b"Ada".to_vec(),
+            b"ada@example.com".to_vec(),
+            1_700_000_000,
+            0,
+        )
+        .expect("identity fits the format"),
+        None,
+        b"tiers\n".to_vec(),
+        files
+            .iter()
+            .map(|(path, state)| (scion_core::RepoPath::new(*path).unwrap(), Some(*state)))
+            .collect(),
+    )
+    .expect("changeset fits the format")
+}
+
+/// Lands one changeset on the store.
+fn land(store: &Backend, cs: &Changeset) -> ChangesetId {
+    store
+        .write(|c| {
+            let repo = c.create_repo(REPO)?;
+            let (id, _) = tree::store_changeset(c, repo, cs, &mut |_| Ok(0))?;
+            let version = c.get_ref(repo, "main")?.map(|r| r.version);
+            assert!(c.cas_ref(repo, "main", version, id)?);
+            Ok(id)
+        })
+        .unwrap()
 }
