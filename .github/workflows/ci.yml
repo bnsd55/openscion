@@ -400,7 +400,13 @@ jobs:
     # walk a seeded model of thousands of changesets, and the crash
     # suite kills a server and lands again. Bring it back toward 30
     # when the slowest model oracles get a cheaper full walk.
-    timeout-minutes: 50
+    # #1197: the cap must also cover the ci profile's own kill - a hung
+    # test is killed and NAMED at 60 s x 20 (nextest.toml) inside this
+    # job, and the job must outlive the kill for the log to say so.
+    # Measured over the last 10 green main runs: the nextest step max
+    # 22.9 min, the other steps max 6.3, + the 20-min kill + 3 spare
+    # = 52.1 -> 53.
+    timeout-minutes: 53
     services:
       # The scripts' servers keep their metadata in Postgres: the smoke
       # below (start-scion-smoke) opens the database this service names.
@@ -630,7 +636,12 @@ jobs:
     # seeded models, and the crash suite's kill-and-land loops. Bring
     # it back toward 30 when the slowest model oracles get a cheaper
     # full walk.
-    timeout-minutes: 45
+    # #1197: the cap must cover the ci profile's own kill - a hung test
+    # is killed and NAMED at 60 s x 20 (nextest.toml) inside this job.
+    # One cap serves the whole matrix, sized to the hungriest cell:
+    # Postgres 16 measured (last 10 green main runs) step max 20.7,
+    # other steps max 3.6, + the 20-min kill + 3 spare = 47.3 -> 48.
+    timeout-minutes: 48
     strategy:
       fail-fast: false
       matrix:
@@ -929,7 +940,15 @@ jobs:
     if: >-
       ${{ !cancelled() && (github.event_name != 'pull_request' || (needs.tier.result == 'success' && !github.event.pull_request.draft && needs.tier.outputs.docs_only != 'true' && needs.tier.outputs.macos == 'true')) }}
     runs-on: macos-15
-    timeout-minutes: 40
+    # #1197: the cap must cover the ci profile's own kill - a hung test
+    # is killed and NAMED at 60 s x 20 (nextest.toml) inside this job,
+    # and the job must outlive the kill for the log to say so. Measured
+    # over the last 10 green main runs: the nextest step max 25.7 min,
+    # the other steps max 3.2, + the 20-min kill + 3 spare = 51.9 -> 52;
+    # the cap carries 55 because this job's wall spread is the widest
+    # (p90 26.9, max 28.9) and GitHub warns of macOS arm64 capacity
+    # limits, which stretch the setup steps unpredictably.
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
