@@ -539,10 +539,47 @@ mod tests {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "the dropped store's lock is still held by {holders} server(s)"
+                "the dropped store's lock is still held by {holders} server(s):\n{}",
+                holders_detail(&mut db, &schema)
             );
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
+    }
+
+    /// Each holder of the schema's one-server key, named: pid,
+    /// application name, state and query start, from `pg_locks` joined
+    /// to `pg_stat_activity`. A timeout that names nothing would leave the
+    /// next recurrence as blind as this one.
+    fn holders_detail(db: &mut postgres::Client, schema: &str) -> String {
+        use std::fmt::Write as _;
+        let rows = db
+            .query(
+                "SELECT l.pid, coalesce(a.application_name, ''), coalesce(a.state, ''),
+                        coalesce(a.query_start::text, ''), coalesce(a.query, '')
+                 FROM pg_locks AS l
+                 LEFT JOIN pg_stat_activity AS a ON a.pid = l.pid
+                 WHERE l.locktype = 'advisory'
+                   AND l.classid = (($1::bigint >> 32) & 4294967295)::oid
+                   AND l.objid = ($1::bigint & 4294967295)::oid
+                   AND l.database = (SELECT oid FROM pg_database
+                                     WHERE datname = current_database())
+                   AND l.granted",
+                &[&crate::pg::schema_lock_key(schema)],
+            )
+            .unwrap();
+        let mut text = String::new();
+        for row in rows {
+            let _ = writeln!(
+                text,
+                "  pid {} app {:?} state {:?} query started {} query {:?}",
+                row.get::<_, i32>(0),
+                row.get::<_, String>(1),
+                row.get::<_, String>(2),
+                row.get::<_, String>(3),
+                row.get::<_, String>(4),
+            );
+        }
+        text
     }
 
     /// A store ready for a first boot: the test database, a marker, a
@@ -801,6 +838,14 @@ mod tests {
         )
         .unwrap();
         drop(raw);
+        // The count the run asserts on is a point-in-time read of
+        // pg_locks: await the holders again at the last point before
+        // it, so the run's own connect is the only session in the
+        // window. The setup between the helper's await and here (the
+        // raw client's rewrite of the version row) is exactly where a
+        // macOS night saw a holder take the key after the first await
+        // had passed.
+        await_no_holders(&std::fs::read_to_string(&url).unwrap());
         let report = run(&PreflightOptions {
             data: dir.path().to_path_buf(),
             postgres_url_file: Some(url.clone()),
@@ -809,9 +854,21 @@ mod tests {
             metrics_listen: None,
             migrate: true,
         });
+        let mut holders = String::new();
+        if report.code != 0 {
+            let url_text = std::fs::read_to_string(&url).unwrap();
+            let mut db = postgres::Client::connect(url_text.trim(), postgres::NoTls).unwrap();
+            let schema: Option<String> = db
+                .query_one("SELECT current_schema()::text", &[])
+                .unwrap()
+                .get(0);
+            if let Some(schema) = schema {
+                holders = holders_detail(&mut db, &schema);
+            }
+        }
         assert_eq!(
             report.code, 0,
-            "the migrate serve moves it:\n{:#?}",
+            "the migrate serve moves it:\n{:#?}\nthe key's holders now:\n{holders}",
             report.lines
         );
         let schema = line(&report, "schema version");
