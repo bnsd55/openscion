@@ -684,15 +684,14 @@ fn diff_names_added_changed_and_deleted_paths() {
     );
 }
 
-/// A diff whose text passes the stdout writer's buffer (8 KiB), into a
-/// pipe whose reader leaves: the write that carries the rest meets the
 /// The diff's text outgrows every buffer on the way: 8000 changed
-/// paths print about 88 KiB, past the stdout writer's 8 KiB buffer and
-/// the pipe's 64 KiB. The reader takes one byte and holds the pipe
-/// open, so the writer parks with the pipe full; when the reader
-/// leaves, the parked write meets the closed pipe, and the command
-/// ends quietly. A fold that stops seeing the closed pipe fails the
-/// command loudly instead.
+/// paths print about 1.2 MiB, past the stdout writer's 8 KiB buffer
+/// and past the pipe's own buffer, which the kernel grows to about a
+/// MiB before it holds a writer back. The reader takes one byte and
+/// holds the pipe open, so the writer parks with the pipe full; when
+/// the reader leaves, the parked write meets the closed pipe, and the
+/// command ends quietly. A fold that stops seeing the closed pipe
+/// fails the command loudly instead.
 #[test]
 fn the_diffs_text_ends_quietly_when_the_reader_leaves() {
     let data = tempfile::tempdir().unwrap();
@@ -705,7 +704,7 @@ fn the_diffs_text_ends_quietly_when_the_reader_leaves() {
             &(0..8000)
                 .map(|n| {
                     (
-                        format!("f{n:04}.txt").leak() as &str,
+                        format!("{}{n:04}.txt", "pad_".repeat(36)).leak() as &str,
                         state_of(&store, "old"),
                     )
                 })
@@ -719,7 +718,7 @@ fn the_diffs_text_ends_quietly_when_the_reader_leaves() {
             &(0..8000)
                 .map(|n| {
                     (
-                        format!("f{n:04}.txt").leak() as &str,
+                        format!("{}{n:04}.txt", "pad_".repeat(36)).leak() as &str,
                         state_of(&store, "new"),
                     )
                 })

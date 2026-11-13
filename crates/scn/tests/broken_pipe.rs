@@ -297,3 +297,48 @@ fn a_real_write_error_fails_the_diff_text() {
     // pins scn's behavior and not the device's silence.
     assert!(full.write_all(b"x").is_err());
 }
+
+/// A small diff on the full device: the buffered writer holds the two
+/// lines back, so the last flush is the write that meets "no space
+/// left", and the command must report it instead of ending quietly. A
+/// flush stub would swallow the error and exit 0 with the output lost.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_real_write_error_fails_the_diff_flush() {
+    use std::fs::OpenOptions;
+    use std::io::Write as _;
+    let data = common::private_tempdir();
+    let store = Backend::open_test(data.path()).unwrap();
+    let (base, tip) = start(&store);
+    let tiers = Tiers::start(data, store.clone());
+    let home = common::private_tempdir();
+
+    // The child's stdout is the device; a clone of the same description
+    // stays here, so the assert below can write it again.
+    let mut full = OpenOptions::new().write(true).open("/dev/full").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_scn"))
+        .args([
+            "--server",
+            &tiers.server,
+            "--repo",
+            REPO,
+            "diff",
+            &base.to_string(),
+            &tip.to_string(),
+        ])
+        .env("SCION_TOKEN", TOKEN)
+        .env("HOME", home.path())
+        .stdout(Stdio::from(full.try_clone().unwrap()))
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "a lost output must not be a quiet success"
+    );
+    assert!(
+        !out.stderr.is_empty(),
+        "the error names the write's failure"
+    );
+    assert!(full.write_all(b"x").is_err());
+}
