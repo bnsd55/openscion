@@ -117,7 +117,7 @@ fn a_real_write_error_fails_the_command() {
 
     // The child's stdout is the device; a clone of the same description
     // stays here, so the assert below can write it again.
-    let full = OpenOptions::new().write(true).open("/dev/full").unwrap();
+    let mut full = OpenOptions::new().write(true).open("/dev/full").unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_scn"))
         .args([
             "--server",
