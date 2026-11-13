@@ -93,20 +93,26 @@ impl Fixture {
         }
     }
 
-    fn bench_json(&self) -> Value {
+    fn bench_json_with(&self, extra: &[&str]) -> (bool, Value) {
         let out = Command::new(env!("CARGO_BIN_EXE_scn"))
             .args(["--server", &self.url, "--repo", "r", "--json"])
             .args(["bench", "--agents", "2", "--lands", "4"])
+            .args(extra)
             .env("SCION_TOKEN", TOKEN)
             .env("SCION_AUTHOR", "Ada <ada@example.com>")
             .output()
             .unwrap();
-        assert!(
-            out.status.success(),
-            "scn bench: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap()
+        let ok = out.status.success();
+        (
+            ok,
+            serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap_or(Value::Null),
+        )
+    }
+
+    fn bench_json(&self) -> Value {
+        let (ok, json) = self.bench_json_with(&[]);
+        assert!(ok, "scn bench: {json}");
+        json
     }
 }
 
@@ -123,4 +129,26 @@ fn the_bench_json_names_a_positive_time_for_every_push_stage() {
             "{stage} p50 must measure real work, not 0.0: {json}"
         );
     }
+}
+
+#[test]
+fn the_bench_json_names_a_positive_rate_and_counts_every_land() {
+    let fixture = Fixture::start();
+    let json = fixture.bench_json();
+    let landed = json["landed"].as_u64().unwrap();
+    let seconds = json["seconds"].as_f64().unwrap();
+    let rate = json["lands_per_second"].as_f64().unwrap();
+    assert!(rate > 0.0, "the rate measures real work: {json}");
+    // The rate is the lands over the seconds, not any other combination.
+    assert!(
+        (rate - landed as f64 / seconds).abs() < 1e-9,
+        "lands_per_second must be landed/seconds: {json}"
+    );
+    // Every land is accounted for: landed plus conflicts plus rejected is
+    // the budget.
+    let accounted: u64 = ["landed", "conflicts", "rejected"]
+        .iter()
+        .map(|k| json[k].as_u64().unwrap_or(0))
+        .sum();
+    assert_eq!(accounted, 4, "every land lands, conflicts or is rejected: {json}");
 }

@@ -304,6 +304,24 @@ mod tests {
     }
 
     #[test]
+    fn percentiles_answer_the_known_ranks() {
+        let sorted: [Duration; 5] = [
+            Duration::from_millis(10),
+            Duration::from_millis(20),
+            Duration::from_millis(30),
+            Duration::from_millis(40),
+            Duration::from_millis(50),
+        ];
+        // p50 of 5 items: rank (5-1)*0.5 = 2 -> 30 ms; p99: rank 3.96 -> 4 -> 50 ms;
+        // max: the last item.
+        assert_eq!(percentiles_ms(&sorted), [30.0, 50.0, 50.0]);
+        // The ranks feed the report's rate, so 0 ms entries stay 0 and the
+        // max is the tail, not the sum.
+        let zero: [Duration; 1] = [Duration::from_millis(0)];
+        assert_eq!(percentiles_ms(&zero), [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
     fn check_landed_needs_exactly_the_reported_set() {
         let history: HashSet<_> = [id(1), id(2)].into();
         assert!(check_landed(&[id(1), id(2)], &history).is_ok());
