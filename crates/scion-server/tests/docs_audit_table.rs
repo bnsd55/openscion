@@ -213,7 +213,6 @@ fn section_10_rows_have_three_cells() {
     }
 }
 
-#[test]
 /// No two section 10 rows are identical: a glued-on copy of an existing
 /// row must be deleted, not split out.
 #[test]
@@ -235,6 +234,7 @@ fn section_10_has_no_duplicate_rows() {
     }
 }
 
+#[test]
 fn section_10_names_every_source_file() {
     let text = fs::read_to_string(Path::new(ROOT).join(AUDIT)).expect("the audit file exists");
     let section = text
