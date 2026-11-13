@@ -45,5 +45,5 @@ tower.workspace = true
 # The h2-level proof of the stalled-bytes cap: the flow window must stay
 # shut, and only the raw client holds it shut without releasing.
 h2 = "0.4"
-http = "1.5"
-prost = "0.14"
+http.workspace = true
+prost.workspace = true
