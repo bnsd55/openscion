@@ -214,6 +214,27 @@ fn section_10_rows_have_three_cells() {
 }
 
 #[test]
+/// No two section 10 rows are identical: a glued-on copy of an existing
+/// row must be deleted, not split out.
+#[test]
+fn section_10_has_no_duplicate_rows() {
+    let text = fs::read_to_string(Path::new(ROOT).join(AUDIT)).expect("the audit file exists");
+    let section = text
+        .split(SECTION)
+        .nth(1)
+        .unwrap_or_else(|| panic!("{AUDIT} lost its section 10 heading"));
+    let mut seen = std::collections::HashSet::new();
+    for line in section.lines() {
+        if !line.starts_with('|') {
+            continue;
+        }
+        assert!(
+            seen.insert(line),
+            "{AUDIT} section 10 has two identical rows: {line}"
+        );
+    }
+}
+
 fn section_10_names_every_source_file() {
     let text = fs::read_to_string(Path::new(ROOT).join(AUDIT)).expect("the audit file exists");
     let section = text
