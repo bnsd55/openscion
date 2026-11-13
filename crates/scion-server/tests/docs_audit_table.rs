@@ -60,15 +60,27 @@ fn the_mutation_table_has_no_blank_line_between_its_rows() {
 /// names one of these replaces its entry, and the entry is dropped.
 const EXCLUSIONS: &[(&str, &str)] = &[
     // (path relative to crates/, the audit's reason)
-    ("scion-server/src/test_support/backend.rs", "test-only helpers"),
-    ("scion-server/src/test_support/damage.rs", "test-only helpers"),
+    (
+        "scion-server/src/test_support/backend.rs",
+        "test-only helpers",
+    ),
+    (
+        "scion-server/src/test_support/damage.rs",
+        "test-only helpers",
+    ),
     ("scion-server/src/test_support/db.rs", "test-only helpers"),
     ("scion-server/src/test_support/docs.rs", "test-only helpers"),
     ("scion-server/src/test_support/pg.rs", "test-only helpers"),
-    ("scion-server/src/test_support/store.rs", "test-only helpers"),
+    (
+        "scion-server/src/test_support/store.rs",
+        "test-only helpers",
+    ),
     ("scion-server/src/pause.rs", "test-only helpers"),
     ("scion-server/src/seed.rs", "test-only helpers"),
-    ("scion-server/src/lib.rs", "test-only helpers behind a feature"),
+    (
+        "scion-server/src/lib.rs",
+        "test-only helpers behind a feature",
+    ),
     ("scn/src/lib.rs", "test-only helpers"),
     ("scion-proto/src/runtime/mod.rs", "test-only helpers"),
     ("scion-server/src/auth.rs", "re-export only"),
@@ -85,7 +97,10 @@ const EXCLUSIONS: &[(&str, &str)] = &[
     ("scn/src/cmd/read.rs", "tracked by #1199"),
     ("scn/src/out.rs", "tracked by #1199"),
     ("scion-proto/src/runtime/auth/ffi.rs", "tracked by #1200"),
-    ("scion-proto/src/runtime/auth/removed.rs", "tracked by #1200"),
+    (
+        "scion-proto/src/runtime/auth/removed.rs",
+        "tracked by #1200",
+    ),
     ("scion-proto/src/runtime/deadline.rs", "tracked by #1200"),
     ("scion-proto/src/runtime/host.rs", "tracked by #1200"),
     ("scion-proto/src/runtime/reply.rs", "tracked by #1200"),
@@ -127,9 +142,7 @@ fn source_files() -> Vec<String> {
                 }
                 walk(&path, out);
             } else if path.extension().is_some_and(|e| e == "rs")
-                && path
-                    .components()
-                    .any(|c| c.as_os_str() == "src")
+                && path.components().any(|c| c.as_os_str() == "src")
             {
                 out.push(path);
             }
@@ -185,8 +198,7 @@ fn section_10_names_every_source_file() {
     let unaccounted: Vec<&String> = all
         .iter()
         .filter(|file| {
-            !EXCLUSIONS.iter().any(|(path, _)| path == *file)
-                && !names_file(&paths, file, &all)
+            !EXCLUSIONS.iter().any(|(path, _)| path == *file) && !names_file(&paths, file, &all)
         })
         .collect();
     assert!(
