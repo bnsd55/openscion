@@ -694,13 +694,13 @@ fn the_diffs_text_ends_quietly_when_the_reader_leaves() {
     let dir = git_dir.path();
     git(dir, &["init", "-q", "-b", "main"]);
     // Enough changed paths that the diff's text passes one writer
-    // buffer: 600 lines of about 20 bytes each.
-    let before: Vec<(&str, Option<&str>)> = (0..600)
+    // buffer: 900 lines of about 12 bytes each, over 8 KiB.
+    let before: Vec<(&str, Option<&str>)> = (0..900)
         .map(|n| (format!("f{n:03}.txt").leak() as &str, Some("old")))
         .collect();
     commit(dir, "root", &before);
     let old = git(dir, &["rev-parse", "HEAD"]);
-    let after: Vec<(&str, Option<&str>)> = (0..600)
+    let after: Vec<(&str, Option<&str>)> = (0..900)
         .map(|n| (format!("f{n:03}.txt").leak() as &str, Some("new")))
         .collect();
     commit(dir, "change", &after);
@@ -744,29 +744,25 @@ fn the_diffs_text_ends_quietly_when_the_reader_leaves() {
     );
 }
 
-/// A diff whose text fits the stdout writer's buffer, into a pipe whose
-/// reader leaves: no write meets the closed pipe, the last flush does,
-/// and the command still ends quietly.
 #[test]
 fn the_diffs_flush_ends_quietly_when_the_reader_leaves() {
     let git_dir = tempfile::tempdir().unwrap();
     let dir = git_dir.path();
     git(dir, &["init", "-q", "-b", "main"]);
-    commit(
-        dir,
-        "root",
-        &[("kept.txt", Some("old")), ("gone.txt", Some("bye"))],
-    );
+    // 1200 lines of about 12 bytes: the first 8 KiB pass the writer's
+    // buffer and land in the pipe, and the tail rides in the writer's
+    // buffer until the flush. The reader holds the pipe open until the
+    // first bytes arrive, then leaves with the writer's buffer still
+    // full, so the flush is the write that meets the closed pipe.
+    let before: Vec<(&str, Option<&str>)> = (0..1200)
+        .map(|n| (format!("f{n:04}.txt").leak() as &str, Some("old")))
+        .collect();
+    commit(dir, "root", &before);
     let old = git(dir, &["rev-parse", "HEAD"]);
-    commit(
-        dir,
-        "change",
-        &[
-            ("kept.txt", Some("new")),
-            ("gone.txt", None),
-            ("added.txt", Some("hi")),
-        ],
-    );
+    let after: Vec<(&str, Option<&str>)> = (0..1200)
+        .map(|n| (format!("f{n:04}.txt").leak() as &str, Some("new")))
+        .collect();
+    commit(dir, "change", &after);
     let new = git(dir, &["rev-parse", "HEAD"]);
     let opts = ImportOptions {
         rev: "HEAD".into(),
@@ -794,9 +790,12 @@ fn the_diffs_flush_ends_quietly_when_the_reader_leaves() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    // Read past what the writer's buffer holds, then leave: the pipe
+    // stays open on the child's side, its buffer holds the tail, and
+    // the flush meets the reader's absence.
     let mut stdout = child.stdout.take().unwrap();
-    let mut first = [0u8; 1];
-    stdout.read_exact(&mut first).unwrap();
+    let mut seen = [0u8; 9000];
+    stdout.read_exact(&mut seen).unwrap();
     drop(stdout);
     let out = child.wait_with_output().unwrap();
     assert_eq!(out.status.code(), Some(0), "status: {}", out.status);
