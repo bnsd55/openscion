@@ -610,3 +610,47 @@ fn an_id_copied_from_human_output_resolves() {
     );
     server.run(&["show", &blame_id]);
 }
+
+/// Consecutive lines from the same changeset with consecutive origins
+/// print as one range: the stitch is the ranges output's whole point,
+/// and an unstitched answer still satisfies a per-line check, so the
+/// test asserts the ranges themselves - the unchanged block of the
+/// fixture's file is one range carrying every line it holds.
+#[test]
+fn blame_s_stitches_consecutive_lines_of_one_changeset_into_one_range() {
+    let git_dir = tempfile::tempdir().unwrap();
+    let dir = git_dir.path();
+    blame_fixture(dir);
+    let data = tempfile::tempdir().unwrap();
+    let store = Backend::open_test(data.path()).unwrap();
+    let opts = ImportOptions {
+        rev: "HEAD".into(),
+        target_ref: "main".into(),
+        verify_sample: 0,
+    };
+    import_git(&store, REPO, dir, &opts).unwrap();
+    let server = Server::start(data, store);
+    let ranges = server
+        .json(&["blame", "main:lib.rs"])
+        .as_array()
+        .unwrap()
+        .clone();
+    // The block that every revision kept - `fn a()`'s four lines - is
+    // one range: same changeset, consecutive origin lines.
+    let stitched: Vec<&Value> = ranges
+        .iter()
+        .filter(|r| r["line_count"].as_u64().unwrap() > 1)
+        .collect();
+    assert!(
+        stitched.iter().any(|r| {
+            r["start_line"].as_u64().unwrap() >= 3 && r["line_count"].as_u64().unwrap() >= 3
+        }),
+        "the unchanged block stitches into one range: {stitched:?}"
+    );
+    // The ranges still tile the file in order, whatever the stitch.
+    let mut next = 1;
+    for range in &ranges {
+        assert_eq!(range["start_line"].as_u64().unwrap(), next, "{stitched:?}");
+        next += range["line_count"].as_u64().unwrap();
+    }
+}
