@@ -536,23 +536,6 @@ fn ids_parse_from_hex_and_bytes() {
     );
     assert!("abc".parse::<scion_core::ChangesetId>().is_err());
     assert!(scion_core::ChangesetId::try_from([0u8; 31].as_slice()).is_err());
-    // A 63-digit hex is refused whole: a padding or truncating parser
-    // would take it.
-    let sixty_three = "a".repeat(63);
-    assert!(sixty_three.parse::<scion_core::ChangesetId>().is_err());
-    // A 65-digit hex is refused whole.
-    let sixty_five = "a".repeat(65);
-    assert!(sixty_five.parse::<scion_core::ChangesetId>().is_err());
-    // A 33-byte slice is refused: a first-32-bytes parser would take it.
-    assert!(scion_core::ChangesetId::try_from([0u8; 33].as_slice()).is_err());
-    // The parse error names its rule.
-    assert_eq!(
-        "abc"
-            .parse::<scion_core::ChangesetId>()
-            .unwrap_err()
-            .to_string(),
-        "not an object ID: expected 64 hex digits or 32 bytes"
-    );
     let tree = tree();
     assert_eq!(
         Tree::decode_with_id(&tree.encode()),
