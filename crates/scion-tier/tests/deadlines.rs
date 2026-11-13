@@ -124,7 +124,20 @@ impl Objects for Deepest {
         self.called.notify_one();
         let wait = Until::of(&request).wait(self.busy);
         if wait < self.ready {
-            tokio::time::sleep(wait).await;
+            if self.ready == Duration::MAX {
+                // A tier that never finds room refuses at once, after a
+                // short beat - never after the caller's whole remaining
+                // budget: an answer at the wire races the caller's
+                // deadline, and a loaded runner turns the race into a
+                // `CANCELLED` instead of this status (the #1179 flake).
+                // The beat only orders the refusal after the call.
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            } else {
+                // A tier that would serve after `ready` holds the call
+                // until the budget runs out: the fetch stays alive for
+                // the callers that remain.
+                tokio::time::sleep(wait).await;
+            }
             return Err(Status::resource_exhausted("no room for the object"));
         }
         tokio::time::sleep(self.ready).await;
@@ -393,13 +406,22 @@ async fn get_cancelled_tree(
 /// and for no deadline, where the fixed limits nest.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_caller_gets_the_status_of_the_deepest_tier_for_any_deadline() {
-    // It never finds room. Its own limit, 2 s, is below the cache's limit
+    // It never finds room. Its own limit, 20 s, is below the cache's limit
     // per step, 60 s, which is below the daemon's, 120 s. Only their order
     // matters: each outer limit must be longer than the inner's own, so
     // the inner's `RESOURCE_EXHAUSTED` wins. They are far longer than the
-    // 2 s the deepest waits, so a loaded machine never flips the outcome
+    // 20 s the deepest waits, so a loaded machine never flips the outcome
     // into an outer tier's `UNAVAILABLE`.
-    let deepest = Deepest::new(Duration::MAX, Duration::from_secs(2));
+    //
+    // The shortest deadline, 2 s, is a tenth of the deepest's own limit,
+    // not the 200 ms of the first shape: the deeper the deadline travels,
+    // the more each hop's margin (a tenth, at least 50 ms) takes off it,
+    // and the deepest's share of 200 ms was ~100 ms - an answer that only
+    // beats the deadline by a hair flips to the caller's `CANCELLED` on a
+    // loaded runner (the #1179 flake). At 2 s the deepest's share is over
+    // a second, and the refusal - a beat, not the whole share - has room
+    // for any load a runner adds.
+    let deepest = Deepest::new(Duration::MAX, Duration::from_secs(20));
     let id = deepest.id();
     let (ticket, keys) = (deepest.ticket(), vec![deepest.key.verifying_key()]);
     let cache = serve_tier(
@@ -411,9 +433,9 @@ async fn the_caller_gets_the_status_of_the_deepest_tier_for_any_deadline() {
     let daemon = serve_tier(&cache, Duration::from_secs(120), &keys).await;
     let mut client = connect(&daemon).await;
     for deadline in [
-        Some(Duration::from_millis(200)),
-        Some(Duration::from_secs(1)),
-        Some(Duration::from_secs(4)),
+        Some(Duration::from_secs(2)),
+        Some(Duration::from_secs(10)),
+        Some(Duration::from_secs(40)),
         None,
     ] {
         let code = get(&mut client, id, deadline, &ticket).await;
