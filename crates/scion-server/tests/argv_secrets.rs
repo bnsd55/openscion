@@ -567,3 +567,23 @@ fn the_gate_is_the_listener_line_not_any_serving_line() {
     assert!(!is_the_listener_line(metrics_line));
     assert!(is_the_listener_line(listener_line));
 }
+
+/// A blank `SCION_TOKEN` is no token at all: the env source must fall
+/// through to stdin, where the real token waits. An env guard that
+/// accepts blank values would digest the empty string and hand back
+/// its digest as if the server's secret were nothing.
+#[test]
+fn a_blank_scion_token_falls_to_stdin() {
+    let (ok, stdout, stderr) = hash_token(
+        &[],
+        Some(" the-stdin-token \n"),
+        &[("SCION_TOKEN", "   \n\t ")],
+    );
+    assert!(ok, "{stderr}");
+    assert_eq!(stdout.trim(), expected_digest("the-stdin-token"));
+    assert_eq!(
+        stdout.trim(),
+        expected_digest("the-stdin-token"),
+        "the digest is the stdin token's, never the blank env's"
+    );
+}
