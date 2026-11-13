@@ -825,7 +825,12 @@ jobs:
     # 2026) with margin; its cost is the same slow tail of
     # whole-model oracles the main job's 50 min budget names. Bring it
     # back toward 30 when that tail shrinks.
-    timeout-minutes: 45
+    # #1197: the cap must cover the ci profile's own kill - a hung test
+    # is killed and NAMED at 60 s x 20 (nextest.toml) inside this job.
+    # Measured over the green main schedule runs: the nextest step max
+    # 23.9 min, the other steps max 0.9, + the 20-min kill + 3 spare
+    # = 47.9 -> 48.
+    timeout-minutes: 48
     services:
       postgres:
         image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
@@ -1048,7 +1053,12 @@ jobs:
     runs-on: ubuntu-24.04-arm
     # The suite on Postgres stays well under 30 minutes; the cap only
     # bounds a pathological cache.
-    timeout-minutes: 60
+    # #1197: the cap covers the ci-full profile's own kill - a hung
+    # test is killed and NAMED at 60 s x 56 (nextest.toml) inside this
+    # job. Measured over the green main schedule runs: the nextest step
+    # max 39.8 min, the other steps max 0.9, + the 56-min kill + 3
+    # spare = 99.7 -> 100.
+    timeout-minutes: 100
     services:
       # The suite's Postgres tests read this database: the backend they
       # choose is Postgres, and the URL names the database this service
@@ -1349,7 +1359,12 @@ jobs:
     # the land proof; the remainder's own proofs measure 33 min and
     # less on that wall. Split a proof by cases when its job passes
     # 70% of its timeout.
-    timeout-minutes: 120
+    # #1197: the cap covers the ci-full profile's own kill - a hung
+    # test is killed and NAMED at 60 s x 56 (nextest.toml) inside this
+    # job. Measured over the green main schedule runs: the test step
+    # max 117.9 min (the 2000-case proptest run), the other steps max
+    # 2.0, + the 56-min kill + 3 spare = 178.9 -> 179.
+    timeout-minutes: 179
     services:
       # The suite's Postgres tests read this database: the backend they
       # choose is Postgres, and the URL names the database this service
