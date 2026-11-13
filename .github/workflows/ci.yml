@@ -812,6 +812,8 @@ jobs:
   # refusals; this job proves both on the schedule. It owns its
   # Postgres service (one runner, one database), so no other run's
   # connections compete with it.
+  # Runs on manual dispatch too, so a merge train runs it before it
+  # lands (#1210: four nightly-only breaks in a row).
   # SHORTCUT: the job runs the suite with the runner's default test
   # parallelism. If a nightly shows Postgres E53300 ("too many
   # clients"), cap this job's --test-threads first, and raise the
@@ -819,7 +821,7 @@ jobs:
   test-umask-002:
     name: test (umask 002)
     needs: tier
-    if: ${{ !cancelled() && github.event_name == 'schedule' }}
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-24.04
     # SHORTCUT: 45 min fits the Postgres suite (17-30 min on main, Oct
     # 2026) with margin; its cost is the same slow tail of
