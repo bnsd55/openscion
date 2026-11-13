@@ -622,6 +622,88 @@ mod tests {
         }
     }
 
+    /// An object whose chunks are empty still announces its header: its one
+    /// part carries the header with no data and ends the reply. The parts
+    /// loop must not end the stream before the header has gone out.
+    #[tokio::test]
+    async fn an_object_with_no_chunks_still_announces_its_header() {
+        let header = Header {
+            kind: ObjectKind::Blob,
+            id: [7; 32],
+            encoding: Encoding::Raw,
+            encoded_size: 0,
+            size: 0,
+        };
+        let object = Outgoing {
+            header,
+            body: Body::Chunks(Vec::new()),
+        };
+        let budget = Arc::new(Semaphore::new(IN_FLIGHT_BYTES));
+        let permit = take(&budget, 1, BUSY_TIMEOUT).await.unwrap();
+        let (tx, mut stream, _slot) = channel();
+        let first = (Ok(object), permit);
+        let reply = tokio::spawn(send_objects(
+            first,
+            [(); 0],
+            tx,
+            ReplyStall::new(Duration::from_secs(10), None, StallSlot::default()),
+            1,
+            |()| async { None },
+        ));
+
+        // The one part names the header: the id is the header's, the data
+        // is empty, and it is the last part of the reply.
+        let part = stream.next().await.unwrap().unwrap();
+        assert_eq!(part.id, vec![7; 32]);
+        assert!(part.data.is_empty());
+        assert_eq!(part.encoded_size, 0);
+        assert!(stream.next().await.is_none());
+        reply.await.unwrap();
+    }
+
+    /// A reply ends once it has sent `REPLY_BUDGET_BYTES`: the next object
+    /// does not go out, and the read behind it never sends. The count adds
+    /// each part's bytes, so the reply stops where the bound is.
+    #[tokio::test]
+    async fn a_reply_stops_at_its_budget_bytes() {
+        let len = REPLY_BUDGET_BYTES;
+        // A budget one read's share wider than the object takes, so the
+        // next read can take its share and would send if the reply ran on.
+        let budget = Arc::new(Semaphore::new(IN_FLIGHT_BYTES + 1000));
+        let permit = take(&budget, len, BUSY_TIMEOUT).await.unwrap();
+        let (tx, mut stream, _slot) = channel();
+        let first = (Ok(blob(len, true)), permit);
+        let side = budget.clone();
+        let reply = tokio::spawn(send_objects(
+            first,
+            [1usize],
+            tx,
+            ReplyStall::new(Duration::from_secs(10), None, StallSlot::default()),
+            1,
+            move |key: usize| {
+                let _ = key;
+                let side = side.clone();
+                async move {
+                    let permit = take(&side, 1, BUSY_TIMEOUT).await.unwrap();
+                    Some((Ok(blob(1, true)), permit))
+                }
+            },
+        ));
+
+        // The object's parts go out, and the reply ends at the bound: the
+        // parts number the bound's worth, and no part of the read's object
+        // follows. Had the count not added the parts' bytes, the read's
+        // object would go out as one part more.
+        let mut parts = 0;
+        while let Some(Ok(part)) = stream.next().await {
+            let _ = part;
+            parts += 1;
+        }
+        reply.await.unwrap();
+        assert_eq!(parts, REPLY_BUDGET_BYTES.div_ceil(CHUNK_BYTES));
+        assert_eq!(budget.available_permits(), IN_FLIGHT_BYTES + 1000);
+    }
+
     #[tokio::test]
     async fn a_client_that_stops_in_the_middle_of_an_object_gets_an_error_and_frees_the_budget() {
         let len = 2 * CHUNK_BYTES + 1;
