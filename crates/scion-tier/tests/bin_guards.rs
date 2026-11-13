@@ -482,15 +482,10 @@ async fn a_call_with_a_ticket_the_operator_key_signed_is_served() {
 
 #[tokio::test]
 async fn the_cache_serves_with_a_tls_cert_and_key() {
-    use std::os::unix::fs::DirBuilderExt as _;
-
     let fake = Fake::new(false);
     let dir = private_dir();
-    // The tls dir is private (0700): the cache's key read checks the
-    // ancestors, and a group-write umask must not trip that check first
-    // (#1210). A umask only takes bits away, so 0700 stays 0700.
     let tls = dir.path().join("tls");
-    fs::DirBuilder::new().mode(0o700).create(&tls).unwrap();
+    fs::create_dir_all(&tls).unwrap();
     let key = rcgen::KeyPair::generate().unwrap();
     let cert = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
         .unwrap()
