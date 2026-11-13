@@ -968,3 +968,100 @@ async fn a_cache_reply_over_the_stalled_bytes_cap_ends_its_connection() {
         fs::read_to_string(&run.log).unwrap_or_default()
     );
 }
+
+/// The daemon builds its own `Limits`, so its stalled-bytes cap needs
+/// its own proof: a reply parked past the operator's
+/// `--max-stalled-bytes` ends its connection, over the daemon's unix
+/// socket, the way the cache's does over TCP.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_daemon_reply_over_the_stalled_bytes_cap_ends_its_connection() {
+    // The upstream chain: the cache fetches the big object from the
+    // fake; the daemon relays it; the client on the daemon's socket
+    // stops reading after one part.
+    let fake = Fake::new(true);
+    let upstream = serve_fake(&fake).await;
+    let cache_run = spawn_cache(upstream, &["--ticket-public-key", &fake.public_key_hex()]);
+    let cache_addr = serving_addr(&cache_run.log);
+
+    let dir = private_dir();
+    let data = dir.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = dir.path().join("daemon.sock");
+    let log = dir.path().join("daemon.log");
+    let _bin = spawn_bin(
+        env!("CARGO_BIN_EXE_scion-daemon"),
+        &[
+            "--data",
+            data.to_str().unwrap(),
+            "--socket",
+            socket.to_str().unwrap(),
+            "--upstream",
+            &format!("http://{cache_addr}"),
+            "--max-stalled-bytes",
+            "1",
+        ],
+        &log,
+    );
+    wait_for_log(&log, "serving");
+
+    let unix = tokio::net::UnixStream::connect(&socket)
+        .await
+        .expect("the client connects");
+    let (mut h2, connection) = h2::client::handshake(unix)
+        .await
+        .expect("the handshake lands");
+    let connection = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = GetObjectsRequest {
+        refs: vec![ObjectRef {
+            kind: ObjectKind::Blob.into(),
+            id: fake.blob.clone(),
+            path: b"f".to_vec(),
+        }],
+        accept: Vec::new(),
+        ticket: fake.ticket(),
+    };
+    let message = request.encode_to_vec();
+    let mut body = vec![0_u8; 5];
+    let [a, b, c, d] = u32::try_from(message.len())
+        .expect("the message fits u32")
+        .to_be_bytes();
+    body[1..5].copy_from_slice(&[a, b, c, d]);
+    body.extend_from_slice(&message);
+    let built = http::Request::builder()
+        .method(http::Method::POST)
+        .uri("http://x/scion.v1.Objects/GetObjects")
+        .header("content-type", "application/grpc")
+        .header("te", "trailers")
+        .header("authorization", "Bearer t")
+        .body(())
+        .unwrap();
+    let (reply, mut send) = h2.send_request(built, false).expect("the call opens");
+    send.send_data(body.into(), true).expect("the body sends");
+    let response = tokio::time::timeout(Duration::from_secs(60), reply)
+        .await
+        .expect("the reply's headers arrive in 60 s")
+        .expect("the reply's headers arrive");
+    let mut reply = response.into_body();
+    // The window stays shut past the first part, the reply parks at the
+    // serve's own 120 s stall timeout, and the parked 4 MiB estimate
+    // crosses the one-byte cap at once, so the serve closes the
+    // connection. The bound is the serve's 120 s plus a margin, never
+    // an assert on when.
+    let first = tokio::time::timeout(Duration::from_secs(60), reply.data())
+        .await
+        .expect("the first part arrives in 60 s")
+        .expect("the first part reads")
+        .expect("the first part carries bytes");
+    assert!(!first.is_empty());
+    let ended = tokio::time::timeout(Duration::from_secs(180), connection)
+        .await
+        .is_ok();
+    assert!(
+        ended,
+        "the stalled connection never ended within 180 s; daemon log: {}",
+        fs::read_to_string(&log).unwrap_or_default()
+    );
+}
