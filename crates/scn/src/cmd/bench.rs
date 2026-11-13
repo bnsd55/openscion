@@ -303,6 +303,92 @@ mod tests {
         }
     }
 
+    /// `verify` must refuse a reported set that `main` does not hold.
+    /// The mutant that answers `Ok(())` skips the walk and the check.
+    #[tokio::test]
+    async fn verify_refuses_lands_main_does_not_hold() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let data = tempfile::tempdir().unwrap();
+        let store = scion_server::Backend::open_test(data.path()).unwrap();
+        {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("seed.txt"), b"one\n").unwrap();
+            let git = |args: &[&str]| {
+                let out = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(dir.path())
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_AUTHOR_NAME", "Ada")
+                    .env("GIT_AUTHOR_EMAIL", "ada@example.com")
+                    .env("GIT_COMMITTER_NAME", "Ada")
+                    .env("GIT_COMMITTER_EMAIL", "ada@example.com")
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "git {args:?}");
+            };
+            git(&["init", "-q"]);
+            git(&["add", "-A"]);
+            git(&["commit", "-q", "-m", "root"]);
+            git(&["branch", "-M", "main"]);
+            scion_server::import_git(
+                &store,
+                "r",
+                dir.path(),
+                &scion_server::ImportOptions {
+                    rev: "HEAD".into(),
+                    target_ref: "main".into(),
+                    verify_sample: 0,
+                },
+            )
+            .unwrap();
+        }
+        let runtime = tokio::runtime::Handle::current();
+        runtime.spawn(scion_server::test_support::service::serve(
+            store,
+            listener,
+            "secret",
+            scion_server::test_support::service::ServeOptions {
+                data: data.path().to_path_buf(),
+                audit: scion_server::test_support::audit::Audit::off(),
+                limits: scion_proto::runtime::listen::Limits::default(),
+                quotas: scion_server::Quotas::off(),
+                pending_lands: None,
+                land_stale_secs: 1 << 40,
+                tls: None,
+                metrics: std::sync::Arc::default(),
+                reply_memory_budget: scion_server::REPLY_MEMORY_BUDGET,
+            },
+            None,
+            std::future::pending(),
+        ));
+        let mut ctx = Ctx::connect(&url, None, "secret", None, "r".into(), false)
+            .await
+            .unwrap();
+        let start = ctx.resolve("main").await.unwrap();
+        let foreign = ChangesetId::from_bytes([9; 32]);
+        assert!(verify(ctx.clone(), start, &[foreign]).await.is_err());
+    }
+
+    #[test]
+    fn percentiles_answer_the_known_ranks() {
+        let sorted: [Duration; 5] = [
+            Duration::from_millis(10),
+            Duration::from_millis(20),
+            Duration::from_millis(30),
+            Duration::from_millis(40),
+            Duration::from_millis(50),
+        ];
+        // p50 of 5 items: rank (5-1)*0.5 = 2 -> 30 ms; p99: rank 3.96 -> 4 -> 50 ms;
+        // max: the last item.
+        assert_eq!(percentiles_ms(&sorted), [30.0, 50.0, 50.0]);
+        // The ranks feed the report's rate, so 0 ms entries stay 0 and the
+        // max is the tail, not the sum.
+        let zero: [Duration; 1] = [Duration::from_millis(0)];
+        assert_eq!(percentiles_ms(&zero), [0.0, 0.0, 0.0]);
+    }
+
     #[test]
     fn check_landed_needs_exactly_the_reported_set() {
         let history: HashSet<_> = [id(1), id(2)].into();
