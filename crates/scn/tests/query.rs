@@ -583,3 +583,102 @@ fn ls_show_and_log_read_whole_replies() {
     let log = server.text(&["log", &head.to_string(), "--limit", "1"]);
     assert!(log.contains(&head.to_string()[..12]), "{log:?}");
 }
+
+/// `is-ancestor` answers both ways and its exit code carries the
+/// answer: a parent is an ancestor of its child and answers 0; the
+/// same pair asked the other way is not and answers 1. A fold in the
+/// command that passes the server's answer through unchanged would
+/// make one side lie, and each side's assert catches its own lie.
+#[test]
+fn is_ancestor_answers_both_ways() {
+    let git_dir = tempfile::tempdir().unwrap();
+    let dir = git_dir.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "root", &[("a.txt", Some("a"))]);
+    let parent = git(dir, &["rev-parse", "HEAD"]);
+    commit(dir, "child", &[("a.txt", Some("b"))]);
+    let child = git(dir, &["rev-parse", "HEAD"]);
+
+    let opts = ImportOptions {
+        rev: "HEAD".into(),
+        target_ref: "main".into(),
+        verify_sample: 0,
+    };
+    let data = tempfile::tempdir().unwrap();
+    let store = Backend::open_test(data.path()).unwrap();
+    import_git(&store, REPO, dir, &opts).unwrap();
+    let ids = changesets(&store, dir);
+    let server = Server::start(data, store);
+
+    // The parent is an ancestor of the child: exit 0.
+    assert_eq!(
+        server
+            .scn(&["is-ancestor", &ids[&parent], &ids[&child]])
+            .status
+            .code(),
+        Some(0),
+        "the parent is an ancestor of the child"
+    );
+    // The child is not an ancestor of the parent: exit 1, and the same
+    // pair asked through the git command agrees.
+    let (git_yes, _) = git_status(dir, &["merge-base", "--is-ancestor", &child, &parent]);
+    assert!(
+        !git_yes,
+        "git agrees the child is not the parent's ancestor"
+    );
+    assert_eq!(
+        server
+            .scn(&["is-ancestor", &ids[&child], &ids[&parent]])
+            .status
+            .code(),
+        Some(1),
+        "the child is not an ancestor of the parent"
+    );
+}
+
+/// `scn diff --json` names every path's change: the added ones `A`, the
+/// deleted ones `D`, the changed ones `M`, against git's own
+/// `--name-status` on the same two revisions. A fold that shrinks the
+/// status flags would drop one of the three letters.
+#[test]
+fn diff_names_added_changed_and_deleted_paths() {
+    let git_dir = tempfile::tempdir().unwrap();
+    let dir = git_dir.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(
+        dir,
+        "root",
+        &[("kept.txt", Some("old")), ("gone.txt", Some("bye"))],
+    );
+    commit(
+        dir,
+        "change",
+        &[
+            ("added.txt", Some("new")),
+            ("kept.txt", Some("updated")),
+            ("gone.txt", None),
+        ],
+    );
+    let old = git(dir, &["rev-parse", "HEAD~1"]);
+    let new = git(dir, &["rev-parse", "HEAD"]);
+    let opts = ImportOptions {
+        rev: "HEAD".into(),
+        target_ref: "main".into(),
+        verify_sample: 0,
+    };
+
+    let data = tempfile::tempdir().unwrap();
+    let store = Backend::open_test(data.path()).unwrap();
+    import_git(&store, REPO, dir, &opts).unwrap();
+    let ids = changesets(&store, dir);
+    let server = Server::start(data, store);
+
+    let git_diff = git(dir, &["diff", "--name-status", &old, &new]);
+    let mut expected: Vec<&str> = git_diff.lines().collect();
+    expected.sort_unstable();
+    assert_eq!(
+        name_status(&server.json(&["diff", &ids[&old], &ids[&new]])),
+        expected,
+        "the added, deleted and changed paths match git's"
+    );
+}

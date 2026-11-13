@@ -99,3 +99,79 @@ fn a_closed_stdout_ends_the_command_quietly() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// A real write error is not a closed pipe: the command must report it
+/// and fail with a non-zero status, not swallow it as a quiet end. The
+/// device here answers every write with "no space left", which is the
+/// disk's own answer, so the behavior pinned is the real code's.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_real_write_error_fails_the_command() {
+    use std::fs::OpenOptions;
+    use std::io::Write as _;
+    let data = common::private_tempdir();
+    let store = Backend::open_test(data.path()).unwrap();
+    let _tip = start(&store);
+    let tiers = Tiers::start(data, store.clone());
+    let home = common::private_tempdir();
+
+    let full = OpenOptions::new().write(true).open("/dev/full").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_scn"))
+        .args([
+            "--server",
+            &tiers.server,
+            "--repo",
+            REPO,
+            "cat",
+            "main:big.txt",
+        ])
+        .env("SCION_TOKEN", TOKEN)
+        .env("HOME", home.path())
+        .stdout(Stdio::from(full))
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "a lost output must not be a quiet success"
+    );
+    assert!(
+        !out.stderr.is_empty(),
+        "the error names the write's failure"
+    );
+    // And the device really answers with the disk's error, so the test
+    // pins scn's behavior and not the device's silence.
+    assert!(full.write_all(b"x").is_err());
+}
+
+/// The same real error, through the line writer: a command that prints
+/// whole lines must fail the same way when its stdout is the full
+/// device.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_real_write_error_fails_a_line_writing_command() {
+    use std::fs::OpenOptions;
+    let data = common::private_tempdir();
+    let store = Backend::open_test(data.path()).unwrap();
+    let _tip = start(&store);
+    let tiers = Tiers::start(data, store.clone());
+    let home = common::private_tempdir();
+
+    let full = OpenOptions::new().write(true).open("/dev/full").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_scn"))
+        .args(["--server", &tiers.server, "--repo", REPO, "log", "main"])
+        .env("SCION_TOKEN", TOKEN)
+        .env("HOME", home.path())
+        .stdout(Stdio::from(full))
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "a lost output must not be a quiet success"
+    );
+    assert!(
+        !out.stderr.is_empty(),
+        "the error names the write's failure"
+    );
+}
