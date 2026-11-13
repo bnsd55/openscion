@@ -203,19 +203,6 @@ pub struct StallSlot(Arc<Mutex<Option<crate::runtime::listen::Stall>>>);
 impl StallSlot {
     /// Parks `stall`. A reply parks at most once, on the stall that ends
     /// it; a second park gives the first count back.
-    /// Takes the parked stall, if any, so its bytes count no more: the
-    /// caller holds a fresh count for the same reply, and the old one must
-    /// not add to it while both are live (the process total would see a
-    /// connection twice).
-    fn release(&self) {
-        drop(
-            self.0
-                .lock()
-                .expect("the stall slot lock is not poisoned")
-                .take(),
-        );
-    }
-
     fn park(&self, stall: crate::runtime::listen::Stall) {
         let _ = self
             .0
@@ -395,7 +382,6 @@ pub async fn send_objects<K, F>(
                     // It stopped reading: the parts stay in HTTP/2.
                     Err(_) => {
                         if let Some(stalled) = &stalled {
-                            slot.release();
                             slot.park(stalled.hold(STALLED_REPLY_BYTES));
                         }
                     }
@@ -419,7 +405,6 @@ pub async fn send_objects<K, F>(
                 // connection that stalls too much is closed with them.
                 Err(_) => {
                     if let Some(stalled) = &stalled {
-                        slot.release();
                         slot.park(stalled.hold(STALLED_REPLY_BYTES));
                     }
                     return;
@@ -527,7 +512,7 @@ impl<F: Future<Output = Option<Found>>> Window<F> {
                 }
                 // The fill consumed the keys; an empty window with a result
                 // nowhere in sight only happens when the keys ran out.
-                None if self.entries.is_empty() => Poll::Ready(None),
+                None => Poll::Ready(None),
                 _ => Poll::Pending,
             }
         })
