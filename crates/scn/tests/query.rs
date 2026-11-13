@@ -4,9 +4,10 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::io::Read as _;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use scion_core::{BlobId, Changeset, ChangesetId, FileState, GitOid, IdentityTime, RepoPath};
 use scion_proto::runtime::listen::Limits;
@@ -680,5 +681,176 @@ fn diff_names_added_changed_and_deleted_paths() {
         name_status(&server.json(&["diff", &ids[&old], &ids[&new]])),
         expected,
         "the added, deleted and changed paths match git's"
+    );
+}
+
+/// A diff whose text passes the stdout writer's buffer (8 KiB), into a
+/// pipe whose reader leaves: the write that carries the rest meets the
+/// closed pipe, and the command ends quietly. A fold that stops seeing
+/// the closed pipe fails the command loudly instead.
+#[test]
+fn the_diffs_text_ends_quietly_when_the_reader_leaves() {
+    let git_dir = tempfile::tempdir().unwrap();
+    let dir = git_dir.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    // Enough changed paths that the diff's text passes one writer
+    // buffer: 600 lines of about 20 bytes each.
+    let before: Vec<(&str, Option<&str>)> = (0..600)
+        .map(|n| (format!("f{n:03}.txt").leak() as &str, Some("old")))
+        .collect();
+    commit(dir, "root", &before);
+    let old = git(dir, &["rev-parse", "HEAD"]);
+    let after: Vec<(&str, Option<&str>)> = (0..600)
+        .map(|n| (format!("f{n:03}.txt").leak() as &str, Some("new")))
+        .collect();
+    commit(dir, "change", &after);
+    let new = git(dir, &["rev-parse", "HEAD"]);
+    let opts = ImportOptions {
+        rev: "HEAD".into(),
+        target_ref: "main".into(),
+        verify_sample: 0,
+    };
+    let data = tempfile::tempdir().unwrap();
+    let store = Backend::open_test(data.path()).unwrap();
+    import_git(&store, REPO, dir, &opts).unwrap();
+    let ids = changesets(&store, dir);
+    let server = Server::start(data, store);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scn"))
+        .args([
+            "--server",
+            &server.url,
+            "--repo",
+            REPO,
+            "diff",
+            &ids[&old],
+            &ids[&new],
+        ])
+        .env("SCION_TOKEN", TOKEN)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut first = [0u8; 1];
+    stdout.read_exact(&mut first).unwrap();
+    drop(stdout);
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "status: {}", out.status);
+    assert!(
+        out.stderr.is_empty(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A diff whose text fits the stdout writer's buffer, into a pipe whose
+/// reader leaves: no write meets the closed pipe, the last flush does,
+/// and the command still ends quietly.
+#[test]
+fn the_diffs_flush_ends_quietly_when_the_reader_leaves() {
+    let git_dir = tempfile::tempdir().unwrap();
+    let dir = git_dir.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(
+        dir,
+        "root",
+        &[("kept.txt", Some("old")), ("gone.txt", Some("bye"))],
+    );
+    let old = git(dir, &["rev-parse", "HEAD"]);
+    commit(
+        dir,
+        "change",
+        &[
+            ("kept.txt", Some("new")),
+            ("gone.txt", None),
+            ("added.txt", Some("hi")),
+        ],
+    );
+    let new = git(dir, &["rev-parse", "HEAD"]);
+    let opts = ImportOptions {
+        rev: "HEAD".into(),
+        target_ref: "main".into(),
+        verify_sample: 0,
+    };
+    let data = tempfile::tempdir().unwrap();
+    let store = Backend::open_test(data.path()).unwrap();
+    import_git(&store, REPO, dir, &opts).unwrap();
+    let ids = changesets(&store, dir);
+    let server = Server::start(data, store);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scn"))
+        .args([
+            "--server",
+            &server.url,
+            "--repo",
+            REPO,
+            "diff",
+            &ids[&old],
+            &ids[&new],
+        ])
+        .env("SCION_TOKEN", TOKEN)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut first = [0u8; 1];
+    stdout.read_exact(&mut first).unwrap();
+    drop(stdout);
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "status: {}", out.status);
+    assert!(
+        out.stderr.is_empty(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A diff whose rename search hits its bound says so: the warning goes
+/// to stderr, as git warns when it stops its inexact rename search. A
+/// fold in the replies' accumulation silences the warning.
+#[test]
+fn a_diff_whose_rename_search_hits_its_bound_warns() {
+    let git_dir = tempfile::tempdir().unwrap();
+    let dir = git_dir.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(
+        dir,
+        "root",
+        &[("gone.txt", Some("bye")), ("kept.txt", Some("old"))],
+    );
+    let old = git(dir, &["rev-parse", "HEAD"]);
+    commit(
+        dir,
+        "change",
+        &[
+            ("gone.txt", None),
+            ("added.txt", Some("hi")),
+            ("kept.txt", Some("new")),
+        ],
+    );
+    let new = git(dir, &["rev-parse", "HEAD"]);
+    let opts = ImportOptions {
+        rev: "HEAD".into(),
+        target_ref: "main".into(),
+        verify_sample: 0,
+    };
+    let data = tempfile::tempdir().unwrap();
+    let store = Backend::open_test(data.path()).unwrap();
+    import_git(&store, REPO, dir, &opts).unwrap();
+    let ids = changesets(&store, dir);
+    let server = Server::start(data, store);
+    let _small = scion_server::test_support::read::test_set_rename_byte_bound(512);
+    let out = server.scn(&["diff", &ids[&old], &ids[&new]]);
+    assert!(
+        out.status.success(),
+        "scn diff: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("inexact rename detection was skipped or stopped by its bound"),
+        "the warning names the bound: {stderr}"
     );
 }
