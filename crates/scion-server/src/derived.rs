@@ -1309,7 +1309,12 @@ mod tests {
         let (guard, timed_out) = BETWEEN_WOKEN
             .wait_timeout_while(
                 BETWEEN_HOLD.lock().unwrap_or_else(PoisonError::into_inner),
-                Duration::from_secs(30),
+                // A held walker sits here while the land runs, so the
+                // bound must sit well above the server's own waits on
+                // this path (the reader and writer waits are up to 30
+                // s) and above any loaded runner's slow land. A clock
+                // this low would be the 1.5 s flake in a new place.
+                Duration::from_secs(120),
                 |hold: &mut (bool, u64)| !hold.0 && hold.1 == 0,
             )
             .unwrap_or_else(PoisonError::into_inner);
