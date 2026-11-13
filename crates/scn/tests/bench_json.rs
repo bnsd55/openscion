@@ -150,5 +150,8 @@ fn the_bench_json_names_a_positive_rate_and_counts_every_land() {
         .iter()
         .map(|k| json[k].as_u64().unwrap_or(0))
         .sum();
-    assert_eq!(accounted, 4, "every land lands, conflicts or is rejected: {json}");
+    assert_eq!(
+        accounted, 4,
+        "every land lands, conflicts or is rejected: {json}"
+    );
 }
