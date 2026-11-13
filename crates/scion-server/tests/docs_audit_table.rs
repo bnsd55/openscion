@@ -297,17 +297,6 @@ const COUNT_SHAPE_EXCEPTIONS: &[(&str, &str)] = &[
         "the repository path and name rules, `path.rs`",
         "the row counts a run plus hand plants in prose, not outcome classes",
     ),
-    (
-        "the tier store, `scion-tier/src/store.rs`",
-        "the four runs' union overcounts its parts (223 + 41 + 50 = 314 over 273 \
-         mutants) and the timeouts' own count is nowhere in the row; the runs' \
-         artifacts have expired, so re-deriving needs a re-run",
-    ),
-    (
-        "the server's metrics registry, `runtime/metrics.rs`",
-        "the fold's timeout count is not in the row and the artifacts have \
-         expired; re-deriving needs a re-run",
-    ),
 ];
 
 /// The earliest count class in `item`, if one occurs in its head.
