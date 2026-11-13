@@ -159,7 +159,13 @@ fn excluded_from_audit(text: &str) -> Vec<String> {
         .split("### The files no row names")
         .nth(1)
         .unwrap_or_else(|| panic!("{AUDIT} lost its exclusion block"));
-    let block = block.split("\n## ").next().unwrap();
+    let block = block
+        .split(
+            "
+## ",
+        )
+        .next()
+        .unwrap();
     let mut excluded = Vec::new();
     for line in block.lines() {
         let mut rest = line;
@@ -231,6 +237,246 @@ fn section_10_has_no_duplicate_rows() {
             seen.insert(line),
             "{AUDIT} section 10 has two identical rows: {line}"
         );
+    }
+}
+
+/// The count classes a section 10 row may part its total into, longest
+/// first so "caught by timeout" wins over "caught".
+const COUNT_CLASSES: &[&str] = &[
+    "caught by timeout",
+    "timed out",
+    "timeout",
+    "caught",
+    "unviable",
+    "missed",
+    "equivalent",
+    "cost only",
+    "untested",
+    "not pinned",
+    "labeled",
+    "killed the runner",
+    "killed",
+];
+
+/// Rows whose count cell is another shape, each with its reason. The sum
+/// and the fold checks skip these until a re-run or a rewrite lands.
+const COUNT_SHAPE_EXCEPTIONS: &[(&str, &str)] = &[
+    (
+        "the read rules, `access.rs`",
+        "the union is inclusion-exclusion over two runs (51 by both), not a flat sum",
+    ),
+    (
+        "the listener, `listen.rs`",
+        "three runs each tested 101 of the 192, so no group sums to the total",
+    ),
+    (
+        "the client checkout path, `materialize.rs`",
+        "inclusion-exclusion over two runs (63 by both)",
+    ),
+    (
+        "the changeset reads, `scion-server/src/read.rs`",
+        "the classes sit behind 'by the ... run only / by both'",
+    ),
+    (
+        "the path history's levels, `history.rs`",
+        "the boundary run's shards tested 113 of the 138",
+    ),
+    (
+        "the rename scores, `similar.rs`",
+        "the unit run was cut at its job limit (189 of outcomes over the union's 178)",
+    ),
+    (
+        "the server binary's commands and serve flags",
+        "the union's parts run into prose",
+    ),
+    (
+        "the service's surface, `service.rs`",
+        "the boundary shards tested 198 of the 235",
+    ),
+    (
+        "the repository path and name rules, `path.rs`",
+        "the row counts a run plus hand plants in prose, not outcome classes",
+    ),
+    (
+        "the tier store, `scion-tier/src/store.rs`",
+        "the four runs' union overcounts its parts (223 + 41 + 50 = 314 over 273 \
+         mutants) and the timeouts' own count is nowhere in the row; the runs' \
+         artifacts have expired, so re-deriving needs a re-run",
+    ),
+    (
+        "the server's metrics registry, `runtime/metrics.rs`",
+        "the fold's timeout count is not in the row and the artifacts have \
+         expired; re-deriving needs a re-run",
+    ),
+];
+
+/// The earliest count class in `item`, if one occurs in its head.
+fn count_class(item: &str) -> Option<(&'static str, usize)> {
+    let head = item.get(..60.min(item.len())).unwrap_or(item);
+    COUNT_CLASSES
+        .iter()
+        .filter_map(|c| head.find(c).map(|at| (*c, at)))
+        .min_by_key(|(c, at)| (*at, std::cmp::Reverse(c.len())))
+}
+
+/// One row's count cell: `(total, parts, group starts)`. Number-first items
+/// ("25 caught") and verb-first run markers ("the boundary run caught 24")
+/// both parse; the prose after the parts ("of which 9 are killed ...")
+/// stops the walk.
+fn count_parts(cell: &str) -> Option<(u32, Vec<(u32, usize)>, Vec<usize>)> {
+    let (head, rest) = cell.split_once(':')?;
+    let head = head.trim().strip_suffix(" tested").unwrap_or(head.trim());
+    let total: u32 = head.parse().ok()?;
+    let mut segments = Vec::new();
+    let mut depth = 0usize;
+    let mut current = String::new();
+    for ch in rest.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' | ';' if depth == 0 => segments.push(std::mem::take(&mut current)),
+            _ => current.push(ch),
+        }
+    }
+    segments.push(current);
+    let mut parts: Vec<(u32, usize)> = Vec::new();
+    let mut groups: Vec<usize> = vec![0];
+    for (i, segment) in segments.iter().enumerate() {
+        // The head - the total and its " tested" - is already split off,
+        // so the first segment is the first part.
+        let item = segment.trim();
+        let item = item.strip_prefix("and ").unwrap_or(item).trim();
+        if item.is_empty() {
+            continue;
+        }
+        // Where is the number, and where is the class? Verb-first markers
+        // ("the boundary run caught 24") put the class first; number-first
+        // items ("25 caught", "71 the run missed") put the number first.
+        let starts_number = item.starts_with(|c: char| c.is_ascii_digit());
+        let class_at = if starts_number {
+            count_class(item)
+        } else {
+            count_class(item).map(|(c, at)| (c, at))
+        };
+        let Some((class, at)) = class_at else {
+            break;
+        };
+        let digits: String = if starts_number {
+            item.chars().take_while(|c| c.is_ascii_digit()).collect()
+        } else {
+            let after = &item[at + class.len()..];
+            let after_digits: String = after
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if after_digits.is_empty() {
+                // "the union is 8 caught": the number sits before the class.
+                let before = item[..at].trim_end();
+                before
+                    .chars()
+                    .rev()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect()
+            } else {
+                after_digits
+            }
+        };
+        let Ok(n) = digits.parse::<u32>() else {
+            break;
+        };
+        let _ = class;
+        if item.starts_with("the ") && i > 0 {
+            groups.push(parts.len());
+        }
+        parts.push((n, parts.len()));
+    }
+    Some((total, parts, groups))
+}
+
+/// Every count cell sums: the parts reach the total, and when a row states
+/// several runs each run's parts reach it too. A count cell never folds
+/// timeouts into caught.
+#[test]
+fn section_10_count_cells_sum_and_split_timeouts() {
+    let text = fs::read_to_string(Path::new(ROOT).join(AUDIT)).expect("the audit file exists");
+    let section = text
+        .split(SECTION)
+        .nth(1)
+        .unwrap_or_else(|| panic!("{AUDIT} lost its section 10 heading"));
+    for line in section.lines() {
+        if !line.starts_with('|') {
+            continue;
+        }
+        let mut depth = 0usize;
+        let mut ticks = false;
+        let mut separators: Vec<usize> = Vec::new();
+        for (i, ch) in line.char_indices() {
+            match ch {
+                '`' => ticks = !ticks,
+                '(' if !ticks => depth += 1,
+                ')' if !ticks => depth = depth.saturating_sub(1),
+                '|' if !ticks && depth == 0 => separators.push(i),
+                _ => {}
+            }
+        }
+        if separators.len() < 4 {
+            continue;
+        }
+        let subject = line[separators[0] + 1..separators[1]].trim();
+        let cell = line[separators[1] + 1..separators[2]].trim();
+        let head = cell.split(':').next().unwrap_or("").trim();
+        let head = head.strip_suffix(" tested").unwrap_or(head);
+        if head.parse::<u32>().is_err() {
+            continue;
+        }
+        let lowered = cell.to_lowercase();
+        if let Some((row, reason)) = COUNT_SHAPE_EXCEPTIONS
+            .iter()
+            .find(|(row, _)| subject.starts_with(row))
+        {
+            let _ = (row, reason);
+            continue;
+        }
+        assert!(
+            !lowered.contains("timeouts inside") && !lowered.contains("timeout inside"),
+            "{AUDIT} row '{subject}' folds timeouts into caught; give them their \
+             own count"
+        );
+        let Some((total, parts, groups)) = count_parts(cell) else {
+            continue;
+        };
+        assert!(
+            !parts.is_empty(),
+            "{AUDIT} row '{subject}' states a total ({total}) with no parseable parts"
+        );
+        let sum: u32 = parts.iter().map(|(n, _)| n).sum();
+        if groups.len() <= 1 {
+            assert_eq!(
+                sum, total,
+                "{AUDIT} row '{subject}'s count parts sum to {sum}, not its total {total}"
+            );
+        } else {
+            let ends = groups.iter().copied().skip(1).chain([parts.len()]);
+            let mut start = 0;
+            for at in ends {
+                let run: u32 = parts[start..at].iter().map(|(n, _)| n).sum();
+                assert_eq!(
+                    run, total,
+                    "{AUDIT} row '{subject}'s run parts sum to {run}, not its total {total}"
+                );
+                start = at;
+            }
+        }
     }
 }
 
