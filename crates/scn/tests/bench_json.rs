@@ -140,8 +140,10 @@ fn the_bench_json_names_a_positive_rate_and_counts_every_land() {
     let rate = json["lands_per_second"].as_f64().unwrap();
     assert!(rate > 0.0, "the rate measures real work: {json}");
     // The rate is the lands over the seconds, not any other combination.
+    #[allow(clippy::cast_precision_loss)]
+    let expect = landed as f64 / seconds;
     assert!(
-        (rate - landed as f64 / seconds).abs() < 1e-9,
+        (rate - expect).abs() < 1e-9,
         "lands_per_second must be landed/seconds: {json}"
     );
     // Every land is accounted for: landed plus conflicts plus rejected is
