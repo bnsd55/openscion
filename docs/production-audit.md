@@ -337,10 +337,14 @@ source file named by neither fails the test.
 - no branch: `crates/scion-proto/src/lib.rs` (`descriptor_set` returns a
   compiled-in byte slice)
 - tracked: `crates/scion-server/src/pg.rs` (#1060, the Postgres
-  backend's run is planned), `crates/scion-server/src/tickets.rs`,
-  `crates/scion-server/src/names.rs` (#1192), and the tier binaries
+  backend's run is planned), the tier binaries
   `crates/scion-tier/src/bin/scion-cache.rs` and
-  `scion-daemon.rs` (#1191)
+  `scion-daemon.rs` (#1191), the scn commands `scn/src/cmd/land.rs`,
+  `blame.rs`, `query.rs`, `read.rs` and `scn/src/out.rs` (#1199), and
+  the files no cited run mutated - `scion-proto/src/runtime/deadline.rs`
+  (the `Until` type), `host.rs` (the serve flags' host checks),
+  `reply.rs` (the client's reply framing layer), and
+  `crates/scion-server/src/metrics.rs` (#1200)
 
 ## The open list (the v1.0 blockers this audit leaves)
 
