@@ -1,8 +1,11 @@
 # Releasing
 
-How to cut a release of openscion. v0.1.x is a source release: one
-SSH-signed annotated git tag plus one immutable GitHub release with
-notes. Nothing publishes crates: the owner has decided that no
+How to cut a release of openscion. A v0.1.x release is one
+SSH-signed annotated git tag plus one immutable GitHub release whose
+notes name the artifacts (v0.1.0 shipped the four binaries for
+`linux-x86_64` and `macos-aarch64`, the source tarball, and an SBOM
+per shipped binary's crate, each with an attestation and a checksum).
+Nothing publishes crates: the owner has decided that no
 crate publishes before a real outside consumer exists, so a narrow
 client crate is the only publish ever planned. Nothing here tags by
 itself: each step is run by a person.
