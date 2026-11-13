@@ -180,6 +180,39 @@ fn excluded_from_audit(text: &str) -> Vec<String> {
     excluded
 }
 
+/// Every section 10 row has exactly three cells: the subject, the tested
+/// count, the verdict. Separators are the pipes outside backticks and
+/// outside parentheses (a row may name the `|` operator in prose).
+#[test]
+fn section_10_rows_have_three_cells() {
+    let text = fs::read_to_string(Path::new(ROOT).join(AUDIT)).expect("the audit file exists");
+    let section = text
+        .split(SECTION)
+        .nth(1)
+        .unwrap_or_else(|| panic!("{AUDIT} lost its section 10 heading"));
+    for line in section.lines() {
+        if !line.starts_with('|') {
+            continue;
+        }
+        let mut separators = 0;
+        let mut in_ticks = false;
+        let mut depth = 0usize;
+        for ch in line.chars() {
+            match ch {
+                '`' => in_ticks = !in_ticks,
+                '(' if !in_ticks => depth += 1,
+                ')' if !in_ticks => depth = depth.saturating_sub(1),
+                '|' if !in_ticks && depth == 0 => separators += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            separators, 4,
+            "{AUDIT} section 10 row must have 3 cells (4 separators, leading              and trailing included): {line}"
+        );
+    }
+}
+
 #[test]
 fn section_10_names_every_source_file() {
     let text = fs::read_to_string(Path::new(ROOT).join(AUDIT)).expect("the audit file exists");
