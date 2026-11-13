@@ -400,7 +400,13 @@ jobs:
     # walk a seeded model of thousands of changesets, and the crash
     # suite kills a server and lands again. Bring it back toward 30
     # when the slowest model oracles get a cheaper full walk.
-    timeout-minutes: 50
+    # #1197: the cap must also cover the ci profile's own kill - a hung
+    # test is killed and NAMED at 60 s x 20 (nextest.toml) inside this
+    # job, and the job must outlive the kill for the log to say so.
+    # Measured over the last 10 green main runs: the nextest step max
+    # 22.9 min, the other steps max 6.3, + the 20-min kill + 3 spare
+    # = 52.1 -> 53.
+    timeout-minutes: 53
     services:
       # The scripts' servers keep their metadata in Postgres: the smoke
       # below (start-scion-smoke) opens the database this service names.
@@ -630,7 +636,12 @@ jobs:
     # seeded models, and the crash suite's kill-and-land loops. Bring
     # it back toward 30 when the slowest model oracles get a cheaper
     # full walk.
-    timeout-minutes: 45
+    # #1197: the cap must cover the ci profile's own kill - a hung test
+    # is killed and NAMED at 60 s x 20 (nextest.toml) inside this job.
+    # One cap serves the whole matrix, sized to the hungriest cell:
+    # Postgres 16 measured (last 10 green main runs) step max 20.7,
+    # other steps max 3.6, + the 20-min kill + 3 spare = 47.3 -> 48.
+    timeout-minutes: 48
     strategy:
       fail-fast: false
       matrix:
@@ -814,7 +825,12 @@ jobs:
     # 2026) with margin; its cost is the same slow tail of
     # whole-model oracles the main job's 50 min budget names. Bring it
     # back toward 30 when that tail shrinks.
-    timeout-minutes: 45
+    # #1197: the cap must cover the ci profile's own kill - a hung test
+    # is killed and NAMED at 60 s x 20 (nextest.toml) inside this job.
+    # Measured over the green main schedule runs: the nextest step max
+    # 23.9 min, the other steps max 0.9, + the 20-min kill + 3 spare
+    # = 47.9 -> 48.
+    timeout-minutes: 48
     services:
       postgres:
         image: postgres:17.11@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
@@ -929,7 +945,15 @@ jobs:
     if: >-
       ${{ !cancelled() && (github.event_name != 'pull_request' || (needs.tier.result == 'success' && !github.event.pull_request.draft && needs.tier.outputs.docs_only != 'true' && needs.tier.outputs.macos == 'true')) }}
     runs-on: macos-15
-    timeout-minutes: 40
+    # #1197: the cap must cover the ci profile's own kill - a hung test
+    # is killed and NAMED at 60 s x 20 (nextest.toml) inside this job,
+    # and the job must outlive the kill for the log to say so. Measured
+    # over the last 10 green main runs: the nextest step max 25.7 min,
+    # the other steps max 3.2, + the 20-min kill + 3 spare = 51.9 -> 52;
+    # the cap carries 55 because this job's wall spread is the widest
+    # (p90 26.9, max 28.9) and GitHub warns of macOS arm64 capacity
+    # limits, which stretch the setup steps unpredictably.
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -1029,7 +1053,12 @@ jobs:
     runs-on: ubuntu-24.04-arm
     # The suite on Postgres stays well under 30 minutes; the cap only
     # bounds a pathological cache.
-    timeout-minutes: 60
+    # #1197: the cap covers the ci-full profile's own kill - a hung
+    # test is killed and NAMED at 60 s x 56 (nextest.toml) inside this
+    # job. Measured over the green main schedule runs: the nextest step
+    # max 39.8 min, the other steps max 0.9, + the 56-min kill + 3
+    # spare = 99.7 -> 100.
+    timeout-minutes: 100
     services:
       # The suite's Postgres tests read this database: the backend they
       # choose is Postgres, and the URL names the database this service
@@ -1330,7 +1359,12 @@ jobs:
     # the land proof; the remainder's own proofs measure 33 min and
     # less on that wall. Split a proof by cases when its job passes
     # 70% of its timeout.
-    timeout-minutes: 120
+    # #1197: the cap covers the ci-full profile's own kill - a hung
+    # test is killed and NAMED at 60 s x 56 (nextest.toml) inside this
+    # job. Measured over the green main schedule runs: the test step
+    # max 117.9 min (the 2000-case proptest run), the other steps max
+    # 2.0, + the 56-min kill + 3 spare = 178.9 -> 179.
+    timeout-minutes: 179
     services:
       # The suite's Postgres tests read this database: the backend they
       # choose is Postgres, and the URL names the database this service
