@@ -585,9 +585,11 @@ mod tests {
 
     /// A regular file where the socket should be is refused, whatever its
     /// owner: the token must never go to something that is not a socket.
+    /// The private tempdir keeps the run under a group-write umask from
+    /// tripping the directory check first (#1210).
     #[test]
     fn a_regular_file_where_the_socket_should_be_is_refused() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = scion_server::test_support::private_tempdir();
         let path = tmp.path().join("plain.txt");
         fs::write(&path, b"not a socket\n").unwrap();
         let owner = fs::symlink_metadata(&path).unwrap().uid();
@@ -598,10 +600,12 @@ mod tests {
     /// A symlink at the socket path is refused even when it points at a
     /// real socket the user owns: the check reads the link itself, not
     /// what it points at, so a swap of the path under a running command
-    /// cannot slip the token to a socket the caller never named.
+    /// cannot slip the token to a socket the caller never named. The
+    /// private tempdir keeps the run under a group-write umask from
+    /// tripping the directory check first (#1210).
     #[test]
     fn a_symlink_at_the_socket_path_is_refused() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = scion_server::test_support::private_tempdir();
         let socket = tmp.path().join("daemon.sock");
         let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         let link = tmp.path().join("link.sock");
