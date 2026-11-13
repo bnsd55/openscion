@@ -115,6 +115,8 @@ fn a_real_write_error_fails_the_command() {
     let tiers = Tiers::start(data, store.clone());
     let home = common::private_tempdir();
 
+    // The child's stdout is the device; a clone of the same description
+    // stays here, so the assert below can write it again.
     let full = OpenOptions::new().write(true).open("/dev/full").unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_scn"))
         .args([
@@ -127,7 +129,7 @@ fn a_real_write_error_fails_the_command() {
         ])
         .env("SCION_TOKEN", TOKEN)
         .env("HOME", home.path())
-        .stdout(Stdio::from(full))
+        .stdout(Stdio::from(full.try_clone().unwrap()))
         .stderr(Stdio::piped())
         .output()
         .unwrap();
@@ -157,12 +159,14 @@ fn a_real_write_error_fails_a_line_writing_command() {
     let tiers = Tiers::start(data, store.clone());
     let home = common::private_tempdir();
 
+    // The child's stdout is the device; a clone of the same description
+    // stays here, so the assert below can write it again.
     let full = OpenOptions::new().write(true).open("/dev/full").unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_scn"))
         .args(["--server", &tiers.server, "--repo", REPO, "log", "main"])
         .env("SCION_TOKEN", TOKEN)
         .env("HOME", home.path())
-        .stdout(Stdio::from(full))
+        .stdout(Stdio::from(full.try_clone().unwrap()))
         .stderr(Stdio::piped())
         .output()
         .unwrap();
