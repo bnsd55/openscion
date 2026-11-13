@@ -53,6 +53,15 @@ fn a_gc_whose_audit_fails_otherwise_refuses_before_any_change() {
             audit.to_str().unwrap(),
         ])
         .env("NO_COLOR", "1")
+        // The child runs under a file-size cap, and an instrumented
+        // build writes its coverage profile at exit: left to its own
+        // path in target/coverage, the cap cuts the profile in half,
+        // and the cut file fails the coverage gate's merge. The child's
+        // profile goes where the cap cannot reach the gate.
+        .env(
+            "LLVM_PROFILE_FILE",
+            dir.path().join("capped-child-%p.profraw"),
+        )
         .env(
             "SCION_POSTGRES_URL",
             scion_server::Backend::test_postgres_url(&data).unwrap(),
