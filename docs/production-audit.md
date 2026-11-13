@@ -179,8 +179,8 @@ in-process; stated in the PR).
 | Ticket and seed files are 0600; the access file refuses group/other writable and symlinks | `crates/scion-server/src/main.rs:1333,1433,1493` | bounded — ceiling: 0600 on every secret file, the access file refuses go-w and symlinks at the open; `operations.md` "The open checks" states the refusal |
 | Listeners default to loopback | `crates/scion-server/src/main.rs:60` (`default_value = "127.0.0.1:7878"`) | bounded — ceiling: the default bind is 127.0.0.1:7878; `docs/operations.md`'s serve examples restate it |
 | Production state in temp dirs: the server never writes store state outside `--data`; every temp-dir user is a harness script | `crates/scion-server/src/main.rs:29` (the only store path) | fixed by design (the data dir is the only durable state; `TMPDIR` appears in no serve path) |
-| Paths the process creates with the process umask inherit the gap: `export --out` (a new archive world-readable under a permissive umask) and the restore's staging directory (0755 members under a 0700 store) | `archive.rs` `make_dir` (the `--out` root, archive.rs:128,1458); the restore staging create | the restore row: fixed (#669, 4d5187f1 - the staging is created 0700 with a red proof); the export row: open, PR #666 (export: `--out` created 0700) - HIGH until it merges |
-| A data directory whose mode lets other users read it is refused at every open of the store | `refuse_bad_dir`, store.rs:258 (serve, import, fsck, gc, derive) | open, PR #670 |
+| Paths the process creates with the process umask inherit the gap: `export --out` (a new archive world-readable under a permissive umask) and the restore's staging directory (0755 members under a 0700 store) | `archive.rs` `make_dir` (the `--out` root, archive.rs:128,1458); the restore staging create | the restore row: fixed (#669, 4d5187f1 - the staging is created 0700 with a red proof); the export row: fixed (#666, 27f7067a, merged 2026-10-26 - the export's root is `create_private_dir_all`, mode 0700 whatever the umask, archive.rs:128-130, with the parents made 0700 where missing; the #1080 row's archive suite holds the export path) |
+| A data directory whose mode lets other users read it is refused at every open of the store | `refuse_bad_dir`, store.rs:258 (serve, import, fsck, gc, derive) | fixed (#670, 71ca3778, merged 2026-10-26 - `refuse_bad_dir` refuses a symlink and answers the daemon's socket-directory rule: group or others get no bits at all, store.rs:110-131; its mutants are planted in the #1011 row) |
 | `checkout` accepted the hostile-tree names (`..`, NUL, `..`-prefixed members) a crafted changeset can carry | the checkout name check | fixed (#662): `..`, NUL and `..`-prefixed members are refused; the mutation run found the guard unbound - no test failed a mutant that removed it - and #662's tests name that gap |
 
 ## 7. Compatibility
@@ -199,7 +199,8 @@ in-process; stated in the PR).
 
 The pairing is enforced on the diff: `scripts/check-golden-pairing.sh`
 (the CI lint job, on the pull request's own `HEAD^1..HEAD`). The gate
-itself had gaps found on 2026-10-26 (all being fixed in #668, open):
+itself had gaps found on 2026-10-26 (all fixed in #668, cd3e0fc8, merged the
+same day):
 two table rows (`crates/scion-server/tests/archive_v1.golden` and
 `archive_golden.rs`) carry no rule word, so the `rule` field read the
 golden's path and the row always took the "describe" branch; and the
@@ -310,9 +311,11 @@ gap.
 
 
 ## The open list (the v1.0 blockers this audit leaves)
-1. The `--unstable-writable` write path out of the release binary (§1,
-   the table's last open row) — closed by #640, which takes the write
-   path into a build feature, off in release.
+
+None: the audit leaves no open finding. The last one, the
+`--unstable-writable` write path out of the release binary (§1,
+the table's last open row), closed with #640, which takes the write
+path into a build feature, off in release.
 
 Closed since the audit:
 
