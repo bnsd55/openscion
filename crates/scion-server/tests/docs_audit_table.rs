@@ -122,7 +122,7 @@ fn row_paths(section: &str) -> Vec<String> {
             let after = &rest[open + 1..];
             let Some(close) = after.find('`') else { break };
             let token = &after[..close];
-            if token.ends_with(".rs") {
+            if token.len() > 3 && token[token.len() - 3..].eq_ignore_ascii_case(".rs") {
                 paths.push(token.strip_prefix("crates/").unwrap_or(token).to_owned());
             }
             rest = &after[close + 1..];
