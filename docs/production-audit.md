@@ -352,10 +352,6 @@ reads this block - it keeps no list of its own.
   compiled-in byte slice)
 - tracked by #1060: `crates/scion-server/src/pg.rs` (the Postgres
   backend's run is planned)
-- tracked by #1200: `crates/scion-proto/src/runtime/deadline.rs` (the
-  `Until` type), `crates/scion-proto/src/runtime/host.rs` (the serve
-  flags' host checks), `crates/scion-proto/src/runtime/reply.rs` (the
-  client's reply framing layer)
 
 ## The open list (the v1.0 blockers this audit leaves)
 
