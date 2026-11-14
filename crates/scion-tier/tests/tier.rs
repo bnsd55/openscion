@@ -2129,3 +2129,40 @@ fn a_disk_object_whose_bytes_do_not_match_its_id_is_not_served() {
         "a refused object is removed, not left for the next read"
     );
 }
+
+/// A get that finds the object's file gone drops the row: the store
+/// forgets the object, so its size answers None. A row kept past its
+/// file would answer Some here and hand the limit's accounting a
+/// phantom.
+#[test]
+fn a_get_that_finds_the_file_gone_drops_the_row() {
+    let data = b"the row goes when the file does\n".to_vec();
+    let packed = scion_proto::runtime::object::pack(&data).unwrap();
+    let key = scion_tier::Key::Blob(scion_core::BlobId::of(&data));
+    let dir = private_tempdir();
+    let disk = scion_tier::DiskStore::open(&dir.path().join("data"), 1 << 20).unwrap();
+    scion_tier::Store::put(&disk, key, &packed.clone().into()).unwrap();
+    let scion_tier::Key::Blob(id) = key else {
+        panic!("the test stores a blob");
+    };
+    let id_hex = id.to_string();
+    let path = dir
+        .path()
+        .join("data")
+        .join("objects")
+        .join("blob")
+        .join(&id_hex[..2])
+        .join(&id_hex[2..]);
+    std::fs::remove_file(&path).unwrap();
+    assert!(
+        scion_tier::Store::get(&disk, key, packed.len())
+            .unwrap()
+            .is_none(),
+        "the file is gone; the get answers None either way"
+    );
+    assert_eq!(
+        scion_tier::Store::size(&disk, key).unwrap(),
+        None,
+        "the row goes when the file does"
+    );
+}

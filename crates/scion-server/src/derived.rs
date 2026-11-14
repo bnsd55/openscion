@@ -954,6 +954,8 @@ fn derive_steps<K: Kind>(
         // before it stay; a walk that stops here goes on from them.
         #[cfg(any(test, feature = "test-hooks"))]
         crate::pause::hit("between-derives", K::NAME);
+        #[cfg(test)]
+        tests::between_gate_wait(K::NAME);
         // The command callers (no deadline) log each step, so an
         // operator can tell a slow run from a stuck one; a request's
         // fill stays quiet.
@@ -1282,6 +1284,73 @@ mod tests {
         let mut gate = COLD_GATE.lock().unwrap_or_else(PoisonError::into_inner);
         *gate = (true, 0);
         COLD_GATE_WOKEN.notify_all();
+    }
+
+    /// The hold at the walk's between-steps point, where a walk holds no
+    /// transaction, no pool reader and no ref slot. The land tests close
+    /// it, so every walking caller of the flight kind stops there
+    /// holding nothing, and the land's write goes beside them. The
+    /// default is open: the other tests' walks pass through.
+    static BETWEEN_HOLD: Mutex<(bool, u64)> = Mutex::new((true, 0));
+    /// Woken when the hold opens or lets walkers through.
+    static BETWEEN_WOKEN: Condvar = Condvar::new();
+    /// The walks that reached the hold. A test that closes it waits for
+    /// the walks cap's count, so it knows the walking owners are there.
+    static BETWEEN_ARRIVED: AtomicUsize = AtomicUsize::new(0);
+
+    /// The walk's stop at the between-steps point, called from the walk
+    /// itself under `cfg(test)`. Closed: the walk stops, holding
+    /// nothing. Open: it goes on.
+    pub(crate) fn between_gate_wait(name: &str) {
+        if name != "cold" {
+            return;
+        }
+        BETWEEN_ARRIVED.fetch_add(1, Ordering::SeqCst);
+        let (guard, timed_out) = BETWEEN_WOKEN
+            .wait_timeout_while(
+                BETWEEN_HOLD.lock().unwrap_or_else(PoisonError::into_inner),
+                // A held walker sits here while the land runs, so the
+                // bound must sit well above the server's own waits on
+                // this path (the reader and writer waits are up to 30
+                // s) and above any loaded runner's slow land. A clock
+                // this low would be the 1.5 s flake in a new place.
+                Duration::from_secs(120),
+                |hold: &mut (bool, u64)| !hold.0 && hold.1 == 0,
+            )
+            .unwrap_or_else(PoisonError::into_inner);
+        drop(guard);
+        assert!(
+            !timed_out.timed_out(),
+            "the between-steps hold never opened within 30 s"
+        );
+    }
+
+    /// Closes the between-steps hold, and empties its arrival count.
+    fn between_hold_close() {
+        *BETWEEN_HOLD.lock().unwrap_or_else(PoisonError::into_inner) = (false, 0);
+        BETWEEN_ARRIVED.store(0, Ordering::SeqCst);
+    }
+
+    /// Opens the between-steps hold for good: every held walk goes on.
+    fn between_hold_open() {
+        *BETWEEN_HOLD.lock().unwrap_or_else(PoisonError::into_inner) = (true, 0);
+        BETWEEN_WOKEN.notify_all();
+    }
+
+    /// Waits until `n` walks of the flight kind are at the between-steps
+    /// hold, with a generous ceiling: a bug is a timeout, not a hang
+    /// without a bound.
+    fn wait_between_arrived(n: usize) {
+        for _ in 0..12_000 {
+            if BETWEEN_ARRIVED.load(Ordering::SeqCst) >= n {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!(
+            "only {} walks reached the between-steps hold",
+            BETWEEN_ARRIVED.load(Ordering::SeqCst)
+        );
     }
 
     /// Waits until `n` derives of the flight kind are inside the gate,
@@ -2716,14 +2785,13 @@ mod tests {
         let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         COLD_DERIVES.store(0, Ordering::Relaxed);
         // A cap of two walks, and a storm of cold reads: forty repos, each
-        // read by one caller. Each walk holds the write connection for two
-        // sleeping derives per step, over two steps, and then it is done:
-        // it never contends again. A land that arrives while the first two
-        // walk queues behind at most their four transactions; the other
-        // thirty-eight callers wait at the permit, and never touch the
-        // write connection. Walks without a cap would all queue their
-        // transactions on the write connection, and the land would wait
-        // behind all of them.
+        // read by one caller. Each walk holds the write connection only
+        // inside its step's transaction; a land that arrives while the
+        // first two walk queues behind at most their four transactions.
+        // The other thirty-eight callers wait at the permit, and never
+        // touch the write connection. Walks without a cap would all queue
+        // their transactions on the write connection, and the land would
+        // wait behind all of them.
         let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test_with_walks(
             dir.path(),
@@ -2736,7 +2804,9 @@ mod tests {
             let (repo, ids) = another_chain(&store, &format!("r{i}"), &chain(4));
             repos.push((repo, *ids.last().unwrap()));
         }
-        COLD_SLEEP.store(100, Ordering::Relaxed);
+        // The between-steps hold: every walk of the storm stops there,
+        // holding nothing, until the test opens it.
+        between_hold_close();
         std::thread::scope(|scope| {
             let mut walkers: Vec<_> = repos
                 .iter()
@@ -2750,33 +2820,46 @@ mod tests {
                     })
                 })
                 .collect();
-            // The storm is provably deep: twenty walkers have entered
-            // their derives. With the cap that took ten waves of walking;
-            // without it, the walkers are all queued on the write
-            // connection by now.
-            wait_entered(20);
-            let at = Instant::now();
-            let (land_repo, _) = another_chain(&store, "land", &chain(1));
-            let waited = at.elapsed();
-            // The storm's walks take at least twenty waves of two
-            // transactions, four seconds of holding; the land finishes in
-            // well under the first two walkers' four transactions.
-            assert!(
-                waited < Duration::from_millis(1_500),
-                "the land waited {waited:?}"
-            );
-            COLD_SLEEP.store(0, Ordering::Relaxed);
+            // The cap's two walks are at the hold; the other thirty-eight
+            // hold at the walk permits, holding nothing.
+            wait_between_arrived(2);
+            // All forty are held. The land returns while they are held;
+            // the bound is the test's ceiling above the server's waits,
+            // never a clock the answer rides on.
+            let land_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let land = scope.spawn({
+                let land_done = land_done.clone();
+                let store = store.clone();
+                move || {
+                    let (land_repo, _) = another_chain(&store, "land", &chain(1));
+                    land_done.store(true, Ordering::SeqCst);
+                    land_repo
+                }
+            });
+            let started = Instant::now();
+            while !land_done.load(Ordering::SeqCst) {
+                assert!(
+                    started.elapsed() < Duration::from_secs(60),
+                    "the land never returned while the walkers were held"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            // The walkers are still held: the hold is closed, so none
+            // of them could have moved past it.
+            between_hold_open();
             for walker in walkers.drain(..) {
                 assert_eq!(walker.join().unwrap(), 4);
             }
+            let land_repo = land.join().unwrap();
             let _ = land_repo;
         });
-        COLD_SLEEP.store(0, Ordering::Relaxed);
+        between_hold_open();
     }
 
     /// The same storm against the database: forty repos of cold reads
-    /// walk while a land lands. The claim is the bound: the land waits
-    /// well under 1.5 s, whatever the cap's exact arithmetic.
+    /// walk while a land lands. The claim is structural: the land goes
+    /// while every walker is held, the cap's walks parked at the
+    /// between-steps point and the rest at the walk permits.
     #[test]
     fn a_land_finishes_while_cold_reads_walk_deep_history_on_postgres() {
         let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2787,7 +2870,11 @@ mod tests {
             let (repo, ids) = another_chain(&store, &format!("r{i}"), &chain(4));
             repos.push((repo, *ids.last().unwrap()));
         }
-        COLD_SLEEP.store(100, Ordering::Relaxed);
+        // The between-steps hold: every walk of the storm stops there,
+        // holding nothing, until the test opens it. The cap is the
+        // database's own.
+        let cap = crate::store::DERIVE_WALKS_CAP;
+        between_hold_close();
         std::thread::scope(|scope| {
             let mut walkers: Vec<_> = repos
                 .iter()
@@ -2801,22 +2888,40 @@ mod tests {
                     })
                 })
                 .collect();
-            wait_entered(20);
-            let at = Instant::now();
-            let (land_repo, _) = another_chain(&store, "land", &chain(1));
-            let waited = at.elapsed();
-            assert!(
-                waited < Duration::from_millis(1_500),
-                "the land waited {waited:?}"
-            );
-            eprintln!("the land waited {waited:?} against the 1.5 s bound");
-            COLD_SLEEP.store(0, Ordering::Relaxed);
+            // The cap's walks are at the hold; the rest hold at the walk
+            // permits, holding nothing.
+            wait_between_arrived(cap);
+            // All forty are held. The land returns while they are held; the
+            // bound is the test's ceiling above the server's waits, never
+            // a clock the answer rides on.
+            let land_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let land = scope.spawn({
+                let land_done = land_done.clone();
+                let store = store.clone();
+                move || {
+                    let (land_repo, _) = another_chain(&store, "land", &chain(1));
+                    land_done.store(true, Ordering::SeqCst);
+                    land_repo
+                }
+            });
+            let started = Instant::now();
+            while !land_done.load(Ordering::SeqCst) {
+                assert!(
+                    started.elapsed() < Duration::from_secs(60),
+                    "the land never returned while the walkers were held"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            // The walkers are still held: the hold is closed, so none
+            // of them could have moved past it.
+            between_hold_open();
             for walker in walkers.drain(..) {
                 assert_eq!(walker.join().unwrap(), 4);
             }
+            let land_repo = land.join().unwrap();
             let _ = land_repo;
         });
-        COLD_SLEEP.store(0, Ordering::Relaxed);
+        between_hold_open();
     }
 
     #[test]
