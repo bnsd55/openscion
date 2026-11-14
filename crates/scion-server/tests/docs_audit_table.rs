@@ -468,6 +468,34 @@ fn section_10_count_cells_sum_and_split_timeouts() {
     }
 }
 
+/// A file cannot sit on both sides: a row that names a file the
+/// exclusion block also lists means one of the two is stale - the file
+/// either has a row and must leave the block, or the row is wrong.
+#[test]
+fn section_10_rows_do_not_name_excluded_files() {
+    let text = fs::read_to_string(Path::new(ROOT).join(AUDIT)).expect("the audit file exists");
+    let section = text
+        .split(SECTION)
+        .nth(1)
+        .unwrap_or_else(|| panic!("{AUDIT} lost its section 10 heading"));
+    let paths = row_paths(section);
+    let all = source_files();
+    let excluded = excluded_from_audit(&text);
+    let both: Vec<&String> = excluded
+        .iter()
+        .filter(|path| {
+            let relative = path.strip_prefix("crates/").unwrap_or(path);
+            all.iter().any(|f| f == relative) && names_file(&paths, relative, &all)
+        })
+        .collect();
+    assert!(
+        both.is_empty(),
+        "{AUDIT}: a section-10 row names these files and the exclusion block \
+         also lists them - a file with a row must leave the block, or the row \
+         is wrong: {both:?}"
+    );
+}
+
 #[test]
 fn section_10_names_every_source_file() {
     let text = fs::read_to_string(Path::new(ROOT).join(AUDIT)).expect("the audit file exists");

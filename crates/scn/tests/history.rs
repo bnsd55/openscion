@@ -610,3 +610,249 @@ fn an_id_copied_from_human_output_resolves() {
     );
     server.run(&["show", &blame_id]);
 }
+
+/// Consecutive lines from the same changeset with consecutive origins
+/// print as one range: the stitch is the ranges output's whole point,
+/// and an unstitched answer still satisfies a per-line check, so the
+/// test asserts the ranges themselves - the unchanged block of the
+/// fixture's file is one range carrying every line it holds.
+#[test]
+fn blame_s_stitches_consecutive_lines_of_one_changeset_into_one_range() {
+    let git_dir = tempfile::tempdir().unwrap();
+    let dir = git_dir.path();
+    blame_fixture(dir);
+    let data = tempfile::tempdir().unwrap();
+    let store = Backend::open_test(data.path()).unwrap();
+    let opts = ImportOptions {
+        rev: "HEAD".into(),
+        target_ref: "main".into(),
+        verify_sample: 0,
+    };
+    import_git(&store, REPO, dir, &opts).unwrap();
+    let server = Server::start(data, store);
+    let ranges = server
+        .json(&["blame", "main:lib.rs"])
+        .as_array()
+        .unwrap()
+        .clone();
+    // The block that every revision kept - `fn a()`'s four lines - is
+    // one range: same changeset, consecutive origin lines.
+    let stitched: Vec<&Value> = ranges
+        .iter()
+        .filter(|r| r["line_count"].as_u64().unwrap() > 1)
+        .collect();
+    assert!(
+        stitched.iter().any(|r| {
+            r["start_line"].as_u64().unwrap() >= 3 && r["line_count"].as_u64().unwrap() >= 3
+        }),
+        "the unchanged block stitches into one range: {stitched:?}"
+    );
+    // The ranges still tile the file in order, whatever the stitch.
+    let mut next = 1;
+    for range in &ranges {
+        assert_eq!(range["start_line"].as_u64().unwrap(), next, "{stitched:?}");
+        next += range["line_count"].as_u64().unwrap();
+    }
+}
+
+/// The log walks across the server's pages and stops exactly at the
+/// limit: five commits asked of thirty come back as five lines, the
+/// newest five, each with its own changeset. A fold in the page walk's
+/// limit or filter shows up as a wrong count or a wrong ID.
+#[test]
+fn the_log_walks_across_pages_and_stops_at_the_limit() {
+    let data = tempfile::tempdir().unwrap();
+    let store = Backend::open_test(data.path()).unwrap();
+    let changes: Vec<Puts<FileState>> = (0..30)
+        .map(|n| {
+            (
+                format!("change {n:02}\nbody of {n:02}\n").into_bytes(),
+                vec![(
+                    "f",
+                    FileState::Regular {
+                        content: store.blobs().put(format!("x{n}").as_bytes()).unwrap(),
+                        executable: false,
+                    },
+                )],
+            )
+        })
+        .collect();
+    let ids = chain(&store, changes);
+    let tip = ids.last().unwrap().to_string();
+    let server = Server::start(data, store);
+    let log = server.run(&["log", &tip, "--limit", "5"]);
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 5, "{log}");
+    // Newest first: the tip and the four before it, each line naming
+    // its own changeset.
+    for (line, id) in lines.iter().zip(ids.iter().rev().take(5)) {
+        assert!(
+            line.starts_with(&id.to_string()[..12]) || line.contains(&id.to_string()),
+            "{line} names {id}"
+        );
+    }
+    // The subject is the message's first line, never the body.
+    assert!(log.contains("change 29"), "{log}");
+    assert!(!log.contains("body of 29"), "{log}");
+}
+
+/// `show` names the author and the committer with their zones: a name,
+/// an email, the unix seconds, and the zone's sign and offset. A commit
+/// east of UTC and one west of it pin the sign's comparison from both
+/// sides, and the zero case pins the boundary.
+#[test]
+fn the_show_names_the_identity_with_its_zone() {
+    let data = tempfile::tempdir().unwrap();
+    let store = Backend::open_test(data.path()).unwrap();
+    let mut ids = Vec::new();
+    store
+        .write(|c| {
+            let repo = c.create_repo(REPO)?;
+            for tz in [-330i32, 0, 330] {
+                let cs = Changeset::new(
+                    Vec::new(),
+                    IdentityTime::new(
+                        b"Ada".to_vec(),
+                        b"ada@example.com".to_vec(),
+                        1_700_000_000,
+                        tz,
+                    )
+                    .expect("identity fits the format"),
+                    Some(
+                        IdentityTime::new(
+                            b"Bob".to_vec(),
+                            b"bob@example.com".to_vec(),
+                            1_700_000_100,
+                            tz,
+                        )
+                        .expect("identity fits the format"),
+                    ),
+                    b"change\n".to_vec(),
+                    [(
+                        RepoPath::new("f").unwrap(),
+                        Some(FileState::Regular {
+                            content: store.blobs().put(b"x").unwrap(),
+                            executable: false,
+                        }),
+                    )]
+                    .into_iter()
+                    .collect(),
+                )
+                .expect("changeset fits the format");
+                ids.push(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0);
+            }
+            Ok(())
+        })
+        .unwrap();
+    let server = Server::start(data, store);
+    for (tz, id) in [-330i32, 0, 330].iter().zip(&ids) {
+        let shown = server.run(&["show", &id.to_string()]);
+        let sign = if *tz < 0 { '-' } else { '+' };
+        let minutes = tz.unsigned_abs();
+        let zone = format!("{sign}{:02}{:02}", minutes / 60, minutes % 60);
+        assert!(
+            shown.contains(&format!("Ada <ada@example.com> 1700000000 {zone}")),
+            "the author's line carries the zone {zone}: {shown}"
+        );
+        assert!(
+            shown.contains(&format!("Bob <bob@example.com> 1700000100 {zone}")),
+            "the committer's line carries the zone {zone}: {shown}"
+        );
+    }
+}
+
+/// `ls` names the mode of every kind: an executable file is 100755, a
+/// regular file 100644, a symlink 120000. A folded executable guard
+/// turns the executable file's mode into the plain file's.
+#[test]
+fn the_ls_names_the_mode_of_every_kind() {
+    let data = tempfile::tempdir().unwrap();
+    let store = Backend::open_test(data.path()).unwrap();
+    let mut ids = Vec::new();
+    store
+        .write(|c| {
+            let repo = c.create_repo(REPO)?;
+            let cs = Changeset::new(
+                Vec::new(),
+                IdentityTime::new(
+                    b"Ada".to_vec(),
+                    b"ada@example.com".to_vec(),
+                    1_700_000_000,
+                    0,
+                )
+                .expect("identity fits the format"),
+                None,
+                b"change\n".to_vec(),
+                [
+                    (
+                        RepoPath::new("run.sh").unwrap(),
+                        Some(FileState::Regular {
+                            content: store.blobs().put(b"x").unwrap(),
+                            executable: true,
+                        }),
+                    ),
+                    (
+                        RepoPath::new("plain.txt").unwrap(),
+                        Some(FileState::Regular {
+                            content: store.blobs().put(b"y").unwrap(),
+                            executable: false,
+                        }),
+                    ),
+                    (
+                        RepoPath::new("link").unwrap(),
+                        Some(FileState::Symlink {
+                            target: store.blobs().put(b"f").unwrap(),
+                        }),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            )
+            .expect("changeset fits the format");
+            ids.push(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0);
+            Ok(())
+        })
+        .unwrap();
+    let server = Server::start(data, store);
+    let shown = server.run(&["ls", &format!("{}:", ids[0])]);
+    assert!(shown.contains("100755"), "the executable's mode: {shown}");
+    assert!(shown.contains("100644"), "the plain file's mode: {shown}");
+    assert!(shown.contains("120000"), "the symlink's mode: {shown}");
+}
+
+/// `cat` prints the file's bytes: the whole content, in order.
+#[test]
+fn the_cat_prints_the_file() {
+    let data = tempfile::tempdir().unwrap();
+    let store = Backend::open_test(data.path()).unwrap();
+    let cs = store
+        .write(|c| {
+            let repo = c.create_repo(REPO)?;
+            let cs = Changeset::new(
+                Vec::new(),
+                IdentityTime::new(
+                    b"Ada".to_vec(),
+                    b"ada@example.com".to_vec(),
+                    1_700_000_000,
+                    0,
+                )
+                .expect("identity fits the format"),
+                None,
+                b"change\n".to_vec(),
+                [(
+                    RepoPath::new("f").unwrap(),
+                    Some(FileState::Regular {
+                        content: store.blobs().put(b"first\nsecond\n").unwrap(),
+                        executable: false,
+                    }),
+                )]
+                .into_iter()
+                .collect(),
+            )
+            .expect("changeset fits the format");
+            Ok(tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?.0)
+        })
+        .unwrap();
+    let server = Server::start(data, store);
+    assert_eq!(server.run(&["cat", &format!("{cs}:f")]), "first\nsecond\n");
+}
