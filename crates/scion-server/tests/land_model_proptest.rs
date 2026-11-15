@@ -90,6 +90,15 @@ enum Op {
         /// the land's row stays pending (M4).
         cut_ms: u64,
     },
+    /// A NEW land whose reply arrives and is dropped unread: the land
+    /// decided on the server for certain, while the ledger holds no
+    /// reply for it. No cancel races the handler; the outcome is
+    /// decided and unseen at once.
+    LandBlind {
+        caller: usize,
+        target: usize,
+        shared: bool,
+    },
     /// Poll an earlier land by ID.
     Poll { caller: usize, land: usize },
     /// SIGKILL the server now, and restart it.
@@ -233,6 +242,11 @@ fn parse_script(text: &str) -> Vec<Op> {
                     // pending, short enough that the cancel lands
                     // mid-flow and the row never decides.
                     cut_ms: 8,
+                },
+                ["land-blind", caller, target, shared] => Op::LandBlind {
+                    caller: num(caller),
+                    target: num(target),
+                    shared: *shared == "shared" || *shared == "1",
                 },
                 ["poll", caller, land] => Op::Poll {
                     caller: num(caller),
@@ -449,9 +463,14 @@ fn m2_phase_for(state: &mut Run, caller: usize, target: usize, shared: bool) -> 
         if rec.target != name || rec.m2_phase.is_none() {
             continue;
         }
-        let Some(reply) = rec.final_reply() else {
-            continue;
-        };
+        // A step with no final reply has an unknown outcome: a cut
+        // dropped its reply while the server may still have landed it.
+        // Picking a step now could repeat the dropped one on a head it
+        // already landed, and CreateChangeset would refuse the repeat
+        // (the path the step deletes is gone). The trio waits: a
+        // Retry, a Twin or the next check answers the land, and the
+        // phase reads on.
+        let reply = rec.final_reply()?;
         match (rec.m2_phase, reply.state()) {
             (Some(0), LandState::Landed) => put_landed = true,
             (Some(1), LandState::Landed) => file_landed = true,
@@ -728,6 +747,46 @@ async fn run_script(script: &[Op]) -> RunSummary {
                     // finishes it.
                     let _ = tokio::time::timeout(Duration::from_millis(*cut_ms), fut).await;
                 }
+                note_head(&mut state, name, &[idx]).await;
+            }
+            Op::LandBlind {
+                caller,
+                target,
+                shared,
+            } => {
+                let name = target_name(*target);
+                let head = match resolve_ref(&mut state.objects, name).await {
+                    Ok(head) => Some(head),
+                    Err(_) if *target == MISSING => None,
+                    Err(status) => panic!("ResolveRef {name}: {status:?}"),
+                };
+                let m2_phase = m2_phase_for(&mut state, *caller, *target, *shared);
+                let base = match head {
+                    Some(head) => {
+                        state.heads.entry(name).or_default().push(head);
+                        let heads = &state.heads[name];
+                        // The trio's steps ride the base their tree
+                        // facts hold (see the Land arm).
+                        if m2_phase == Some(2) { heads[0] } else { head }
+                    }
+                    None => resolve_ref(&mut state.objects, REFS[0]).await.unwrap(),
+                };
+                let idx = send_land(&mut state, *caller, *target, base, *shared, m2_phase).await;
+                let request = state.lands[idx].request();
+                // The reply arrives and is dropped unread: the land
+                // decided on the server for certain, while the ledger
+                // holds no reply for it. Nothing answers the row until
+                // a later op asks. The drop premised on a decision: a
+                // PENDING reply would leave the outcome unknown, which
+                // is the cut's shape, not this op's.
+                let reply = ceiling("land-blind", state.scion.land(request))
+                    .await
+                    .into_inner();
+                assert_ne!(
+                    reply.state(),
+                    LandState::Pending,
+                    "land-blind needs a decided land; the reply was PENDING"
+                );
                 note_head(&mut state, name, &[idx]).await;
             }
             Op::Retry { caller: _, land } => {
@@ -1669,10 +1728,11 @@ fn the_seed_corpus_holds() {
     // Postgres pays per-op commits and a full server restart per script:
     // the whole corpus measured 1m53s under it on the runner, and a
     // per-PR share that keeps every outcome kind - kill, twin, gc, a
-    // conflict, a missing ref - is these six files, under one minute.
+    // conflict, a missing ref, a step whose land decided unseen - is
+    // these seven files.
     // The nightly land-model workflow runs the whole corpus there
     // (SCION_LANDMODEL_CASES set).
-    let short_on_postgres = ["02", "03", "05", "06", "08", "10"];
+    let short_on_postgres = ["02", "03", "05", "06", "08", "10", "12"];
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/land_model_corpus");
     let mut names = Vec::new();
     for entry in std::fs::read_dir(&dir).unwrap() {
