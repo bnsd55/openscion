@@ -1,0 +1,12 @@
+# a step whose outcome the model never learns: the cut's cancel comes
+# after the land's handler committed, so the server landed the step
+# while the ledger holds no reply for it. The next land must pick no
+# step until a later call answers the cut one - repeating the step
+# would delete a path the fresh head no longer has, and
+# CreateChangeset refuses the repeat (seed 1794745380457, run
+# 43713429666)
+land 1 0 0 0
+cut-landed 1 0 0
+gc
+land 1 0 0 0
+check

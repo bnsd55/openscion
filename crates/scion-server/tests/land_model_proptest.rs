@@ -229,10 +229,20 @@ fn parse_script(text: &str) -> Vec<Op> {
                     caller: num(caller),
                     target: num(target),
                     shared: *shared == "shared" || *shared == "1",
-                    // Long enough for the land's row to be committed
-                    // pending, short enough that the cancel lands
-                    // mid-flow and the row never decides.
+                    // Long enough that the cancel lands mid-flow and
+                    // the row never decides.
                     cut_ms: 8,
+                },
+                ["cut-landed", caller, target, shared] => Op::CutFresh {
+                    caller: num(caller),
+                    target: num(target),
+                    shared: *shared == "shared" || *shared == "1",
+                    // Long enough that the land's handler commits
+                    // before the cancel, so the land lands for certain
+                    // while the ledger holds no reply for it: the row
+                    // stays reply-less and the step's outcome stays
+                    // unknown to the model.
+                    cut_ms: 300,
                 },
                 ["poll", caller, land] => Op::Poll {
                     caller: num(caller),
@@ -449,9 +459,14 @@ fn m2_phase_for(state: &mut Run, caller: usize, target: usize, shared: bool) -> 
         if rec.target != name || rec.m2_phase.is_none() {
             continue;
         }
-        let Some(reply) = rec.final_reply() else {
-            continue;
-        };
+        // A step with no final reply has an unknown outcome: a cut
+        // dropped its reply while the server may still have landed it.
+        // Picking a step now could repeat the dropped one on a head it
+        // already landed, and CreateChangeset would refuse the repeat
+        // (the path the step deletes is gone). The trio waits: a
+        // Retry, a Twin or the next check answers the land, and the
+        // phase reads on.
+        let reply = rec.final_reply()?;
         match (rec.m2_phase, reply.state()) {
             (Some(0), LandState::Landed) => put_landed = true,
             (Some(1), LandState::Landed) => file_landed = true,
@@ -1669,10 +1684,11 @@ fn the_seed_corpus_holds() {
     // Postgres pays per-op commits and a full server restart per script:
     // the whole corpus measured 1m53s under it on the runner, and a
     // per-PR share that keeps every outcome kind - kill, twin, gc, a
-    // conflict, a missing ref - is these six files, under one minute.
+    // conflict, a missing ref, a step whose cut land landed unseen - is
+    // these seven files, under two minutes.
     // The nightly land-model workflow runs the whole corpus there
     // (SCION_LANDMODEL_CASES set).
-    let short_on_postgres = ["02", "03", "05", "06", "08", "10"];
+    let short_on_postgres = ["02", "03", "05", "06", "08", "10", "12"];
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/land_model_corpus");
     let mut names = Vec::new();
     for entry in std::fs::read_dir(&dir).unwrap() {
