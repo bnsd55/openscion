@@ -776,11 +776,17 @@ async fn run_script(script: &[Op]) -> RunSummary {
                 // The reply arrives and is dropped unread: the land
                 // decided on the server for certain, while the ledger
                 // holds no reply for it. Nothing answers the row until
-                // a later op asks.
+                // a later op asks. The drop premised on a decision: a
+                // PENDING reply would leave the outcome unknown, which
+                // is the cut's shape, not this op's.
                 let reply = ceiling("land-blind", state.scion.land(request))
                     .await
                     .into_inner();
-                let _ = reply;
+                assert_ne!(
+                    reply.state(),
+                    LandState::Pending,
+                    "land-blind needs a decided land; the reply was PENDING"
+                );
                 note_head(&mut state, name, &[idx]).await;
             }
             Op::Retry { caller: _, land } => {
