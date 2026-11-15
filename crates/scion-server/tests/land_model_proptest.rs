@@ -90,6 +90,15 @@ enum Op {
         /// the land's row stays pending (M4).
         cut_ms: u64,
     },
+    /// A NEW land whose reply arrives and is dropped unread: the land
+    /// decided on the server for certain, while the ledger holds no
+    /// reply for it. No cancel races the handler; the outcome is
+    /// decided and unseen at once.
+    LandBlind {
+        caller: usize,
+        target: usize,
+        shared: bool,
+    },
     /// Poll an earlier land by ID.
     Poll { caller: usize, land: usize },
     /// SIGKILL the server now, and restart it.
@@ -229,20 +238,15 @@ fn parse_script(text: &str) -> Vec<Op> {
                     caller: num(caller),
                     target: num(target),
                     shared: *shared == "shared" || *shared == "1",
-                    // Long enough that the cancel lands mid-flow and
-                    // the row never decides.
+                    // Long enough for the land's row to be committed
+                    // pending, short enough that the cancel lands
+                    // mid-flow and the row never decides.
                     cut_ms: 8,
                 },
-                ["cut-landed", caller, target, shared] => Op::CutFresh {
+                ["land-blind", caller, target, shared] => Op::LandBlind {
                     caller: num(caller),
                     target: num(target),
                     shared: *shared == "shared" || *shared == "1",
-                    // Long enough that the land's handler commits
-                    // before the cancel, so the land lands for certain
-                    // while the ledger holds no reply for it: the row
-                    // stays reply-less and the step's outcome stays
-                    // unknown to the model.
-                    cut_ms: 300,
                 },
                 ["poll", caller, land] => Op::Poll {
                     caller: num(caller),
@@ -743,6 +747,40 @@ async fn run_script(script: &[Op]) -> RunSummary {
                     // finishes it.
                     let _ = tokio::time::timeout(Duration::from_millis(*cut_ms), fut).await;
                 }
+                note_head(&mut state, name, &[idx]).await;
+            }
+            Op::LandBlind {
+                caller,
+                target,
+                shared,
+            } => {
+                let name = target_name(*target);
+                let head = match resolve_ref(&mut state.objects, name).await {
+                    Ok(head) => Some(head),
+                    Err(_) if *target == MISSING => None,
+                    Err(status) => panic!("ResolveRef {name}: {status:?}"),
+                };
+                let m2_phase = m2_phase_for(&mut state, *caller, *target, *shared);
+                let base = match head {
+                    Some(head) => {
+                        state.heads.entry(name).or_default().push(head);
+                        let heads = &state.heads[name];
+                        // The trio's steps ride the base their tree
+                        // facts hold (see the Land arm).
+                        if m2_phase == Some(2) { heads[0] } else { head }
+                    }
+                    None => resolve_ref(&mut state.objects, REFS[0]).await.unwrap(),
+                };
+                let idx = send_land(&mut state, *caller, *target, base, *shared, m2_phase).await;
+                let request = state.lands[idx].request();
+                // The reply arrives and is dropped unread: the land
+                // decided on the server for certain, while the ledger
+                // holds no reply for it. Nothing answers the row until
+                // a later op asks.
+                let reply = ceiling("land-blind", state.scion.land(request))
+                    .await
+                    .into_inner();
+                let _ = reply;
                 note_head(&mut state, name, &[idx]).await;
             }
             Op::Retry { caller: _, land } => {
@@ -1684,8 +1722,8 @@ fn the_seed_corpus_holds() {
     // Postgres pays per-op commits and a full server restart per script:
     // the whole corpus measured 1m53s under it on the runner, and a
     // per-PR share that keeps every outcome kind - kill, twin, gc, a
-    // conflict, a missing ref, a step whose cut land landed unseen - is
-    // these seven files, under two minutes.
+    // conflict, a missing ref, a step whose land decided unseen - is
+    // these seven files.
     // The nightly land-model workflow runs the whole corpus there
     // (SCION_LANDMODEL_CASES set).
     let short_on_postgres = ["02", "03", "05", "06", "08", "10", "12"];
