@@ -7831,6 +7831,170 @@ pub(crate) mod pool_tests {
         );
     }
 
+    /// A history node the transaction puts twice pays for its bytes
+    /// once: the row the buffer already holds is replaced, the old
+    /// body's bytes come off the count before the new body's go on, and
+    /// the same content address means the same body, so the count is
+    /// unchanged. A count that adds the old length back, or divides it,
+    /// answers a buffer bigger than the truth - and flushes early.
+    #[test]
+    fn a_history_reput_pays_no_extra_bytes() {
+        let data = crate::test_support::private_tempdir();
+        let store = crate::Backend::open_test(data.path()).unwrap();
+        let body = vec![7u8; 32];
+        let id = NodeId::of(&body);
+        let _cap = crate::test_support::pg::test_set_history_pending_bound_for_tests(64);
+        store
+            .commit(|c| {
+                c.set_changeset_batching(true);
+                c.put_history_node(id, body.clone())?;
+                c.put_history_node(id, body)?;
+                c.set_changeset_batching(false);
+                Ok(())
+            })
+            .unwrap();
+        let peak = crate::test_support::pg::test_history_pending_peak_bytes();
+        assert_eq!(
+            peak, 32,
+            "the buffer held one 32-byte node, twice put: the peak was {peak}"
+        );
+    }
+
+    /// The buffer's flush runs strictly over its bound: at the bound
+    /// exactly the buffer keeps holding, one byte over it the flush
+    /// runs inside the transaction. A comparison that fires at the
+    /// bound flushes a buffer the caller can still fill; one that fires
+    /// under it never flushes at all and the buffer rides to the
+    /// commit.
+    #[test]
+    fn the_history_buffer_flushes_strictly_over_its_bound() {
+        // The flush's one chunk insert opens with the unnest shape; the
+        // direct put writes the VALUES shape, so the count below sees
+        // only flushes.
+        let flushes = |bound: usize, body_len: usize| -> usize {
+            let data = crate::test_support::private_tempdir();
+            let store = crate::Backend::open_test(data.path()).unwrap();
+            let body = vec![7u8; body_len];
+            let id = NodeId::of(&body);
+            let _cap = crate::test_support::pg::test_set_history_pending_bound_for_tests(bound);
+            crate::Backend::test_reset_statement_count();
+            store
+                .commit(|c| {
+                    c.set_changeset_batching(true);
+                    c.put_history_node(id, body)?;
+                    c.set_changeset_batching(false);
+                    Ok(())
+                })
+                .unwrap();
+            crate::Backend::test_statement_log()
+                .iter()
+                .filter(|sql| sql.contains("INSERT INTO history_nodes") && sql.contains("unnest"))
+                .count()
+        };
+        assert_eq!(
+            flushes(31, 31),
+            0,
+            "a buffer at its bound exactly keeps holding: no flush ran"
+        );
+        assert_eq!(
+            flushes(31, 32),
+            1,
+            "a buffer one byte over its bound flushes inside the transaction"
+        );
+    }
+
+    /// A settle whose transaction deferred two versions of one kind
+    /// keeps the flush's shape: the trim rides the verdict only for a
+    /// batch of one version per kind, and a repeated kind waits for the
+    /// commit's flush, whose fold deletes what the per-call deletes
+    /// delete (#855). A gate that sends a repeated kind into the trim
+    /// runs the ranking that counts a row once per join, and the rows
+    /// that remain differ from the per-call answer.
+    #[test]
+    fn a_settle_over_a_repeated_kind_deletes_what_the_per_call_deletes_delete() {
+        let remaining = |defer: bool| -> Vec<Option<Vec<u8>>> {
+            let data = crate::test_support::private_tempdir();
+            let store = crate::Backend::open_test(data.path()).unwrap();
+            let (cs, land_id) = store
+                .commit(|c| {
+                    let repo = c.create_repo("r")?;
+                    let cs = c.insert_changeset(
+                        repo,
+                        &Changeset::new(
+                            vec![],
+                            scion_core::IdentityTime::new(
+                                b"Ada".to_vec(),
+                                b"ada@example.com".to_vec(),
+                                0,
+                                0,
+                            )
+                            .expect("identity fits the format"),
+                            None,
+                            b"root".to_vec(),
+                            std::collections::BTreeMap::new(),
+                        )
+                        .expect("changeset fits the format"),
+                    )?;
+                    assert!(c.cas_ref(repo, "main", None, cs)?);
+                    let req = LandRequest {
+                        repo: "r".into(),
+                        changeset: cs,
+                        target_ref: "main".into(),
+                        request_key: "k".into(),
+                        deadline: crate::deadline::Deadline::new(
+                            Instant::now() + Duration::from_secs(60),
+                        ),
+                    };
+                    let (_, recorded) = c.record_land(&Caller("t".into()), &req, None)?;
+                    // Six rows of one kind no write path owns, one
+                    // version each: three below the lower delete's
+                    // version, three between the two versions.
+                    for i in 1..=6u32 {
+                        c.put_derived("test_kind", i, cs, format!("v{i}").as_bytes())?;
+                    }
+                    Ok((cs, recorded.land_id))
+                })
+                .unwrap();
+            store
+                .commit(|c| {
+                    let repo = c.repo_id("r")?;
+                    if defer {
+                        c.defer_derived_deletes();
+                    }
+                    // The call order is the higher version first: every
+                    // row below the lower version is below the higher
+                    // one too, the mix the join miscounted.
+                    c.delete_derived_below("test_kind", 7, 2)?;
+                    c.delete_derived_below("test_kind", 4, 2)?;
+                    c.set_land_state(
+                        repo,
+                        land_id,
+                        LandState::Landed,
+                        Some(cs),
+                        "the ref moved".into(),
+                        vec![],
+                        LandRejectReason::Unspecified,
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            store
+                .read(|c| {
+                    Ok((1..=6u32)
+                        .map(|v| c.get_derived("test_kind", v, cs).unwrap())
+                        .collect::<Vec<_>>())
+                })
+                .unwrap()
+        };
+        let deferred = remaining(true);
+        let per_call = remaining(false);
+        assert_eq!(
+            deferred, per_call,
+            "the settle over a repeated kind must delete what the per-call \
+             deletes delete"
+        );
+    }
+
     /// The settle's blob arm stores what the caller hands it: the
     /// membership rows land, and the store answers that the repo holds
     /// the blob. An arm that flips on emptiness drops every blob of a
