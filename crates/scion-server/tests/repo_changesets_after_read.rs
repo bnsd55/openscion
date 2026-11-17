@@ -1,9 +1,13 @@
-//! The gc sweep walks the changesets it may prune through
-//! `repo_changesets_after`: the read returns the stored rows strictly
-//! after the `(repo, cs)` cursor, at most `limit` of them, each with
-//! its body. This guard pins that round-trip: whatever the sweep later
-//! deletes, the read it walks must answer the stored rows, so an empty
-//! or short answer cannot pass for "nothing to prune".
+//! The collector's snapshot walk feeds itself through
+//! `repo_changesets_after` (gc.rs, `live_set`): the read returns the
+//! stored rows strictly after the `(repo, cs)` cursor, at most `limit`
+//! of them, each with its body. This guard pins that round-trip. An
+//! empty or short answer does not corrupt the prune - the deletes stay
+//! correct - but it empties the live set and the seen set, so every
+//! chunk re-reads all changeset ids and decodes every body under the
+//! collector's key, and every writer waits behind that re-read. The gc
+//! suites cannot see the cost, which is why the mutant needs this
+//! read-shaped guard.
 
 use std::collections::BTreeMap;
 
@@ -34,7 +38,7 @@ fn changeset(name: &str) -> Changeset {
 /// backend, and the ids come back in the order the repo stored them.
 fn store_with_two_changesets() -> (
     tempfile::TempDir,
-    scion_server::Backend,
+    Backend,
     scion_server::test_support::meta::RepoId,
     Vec<scion_core::ChangesetId>,
 ) {
@@ -50,11 +54,11 @@ fn store_with_two_changesets() -> (
     (data, store, repo, ids)
 }
 
-/// The sweep's read answers the rows after its cursor: from the start
-/// it returns both rows with their bodies, and from the first row's
-/// key it returns exactly the second. A read that answers nothing, or
-/// answers rows that are not the stored ones, sends the sweep home
-/// with the wrong prune list.
+/// The collector's snapshot read answers the rows after its cursor:
+/// from the start it returns both rows with their bodies, and from the
+/// first row's key it returns exactly the second. A read that answers
+/// nothing empties the live set and the seen set, and the prune buys
+/// its correctness with a full re-read of every changeset per chunk.
 #[test]
 fn the_sweep_read_answers_the_rows_after_its_cursor() {
     let (_data, store, repo, ids) = store_with_two_changesets();
