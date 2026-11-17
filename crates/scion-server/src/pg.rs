@@ -7674,6 +7674,483 @@ pub(crate) mod pool_tests {
         (gate, pg)
     }
 
+    /// The derivation's yield to a waiting writer answers the call's
+    /// deadline, not its own patience: with a writer waiting and a short
+    /// deadline, the wait answers `DeadlineExceeded` instead of carrying on
+    /// past the caller's clock.
+    #[test]
+    fn a_yield_to_writers_with_a_short_deadline_exceeds_it() {
+        let (_pool, pg) = pg();
+        let (_client, waiter) = pg.lock_writer(false);
+        assert_eq!(pg.writers_waiting(), 1);
+        let deadline = crate::deadline::Deadline::new(Instant::now() + Duration::from_millis(50));
+        let err = pg.wait_for_writers(Some(&deadline)).unwrap_err();
+        assert!(
+            matches!(err, Error::DeadlineExceeded(_)),
+            "the yield answers {err}"
+        );
+        drop(waiter);
+        assert_eq!(pg.writers_waiting(), 0);
+    }
+
+    /// A deadline-less yield ends when the writer is back, not when the
+    /// yield's bound runs out: the wait holds while the writer waits,
+    /// and the gate's count comes back to zero on the release. A build
+    /// that never lets the count fall takes the whole bound and fails
+    /// both halves of this test's measure.
+    #[test]
+    fn a_yield_to_writers_ends_when_the_writer_is_back() {
+        let (_pool, pg) = pg();
+        let (client, waiter) = pg.lock_writer(false);
+        drop(client);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(200));
+                drop(waiter);
+            });
+            let began = Instant::now();
+            pg.wait_for_writers(None).unwrap();
+            let took = began.elapsed();
+            assert!(
+                took >= Duration::from_millis(150),
+                "the yield gave the writer its turn: {took:?}"
+            );
+            assert!(
+                took < WRITE_YIELD_BOUND,
+                "the yield waited out its bound, not the writer: {took:?}"
+            );
+            assert_eq!(pg.writers_waiting(), 0, "the count fell back to zero");
+        });
+    }
+
+    /// A derived write that lands on a stored row of a different value
+    /// is corruption, not a write: the settle's ON CONFLICT DO NOTHING
+    /// skips the row, the count comes back short, and the stored value
+    /// must equal the new one or the whole write fails as Corrupt. A
+    /// check that answers ok keeps the stale value and serves it.
+    #[test]
+    fn a_derived_write_over_a_differing_stored_row_is_refused() {
+        let data = crate::test_support::private_tempdir();
+        let store = crate::Backend::open_test(data.path()).unwrap();
+        let cs = store
+            .commit(|c| {
+                let repo = c.create_repo("r")?;
+                let cs = c.insert_changeset(
+                    repo,
+                    &Changeset::new(
+                        vec![],
+                        scion_core::IdentityTime::new(
+                            b"Ada".to_vec(),
+                            b"ada@example.com".to_vec(),
+                            0,
+                            0,
+                        )
+                        .expect("identity fits the format"),
+                        None,
+                        b"root".to_vec(),
+                        std::collections::BTreeMap::new(),
+                    )
+                    .expect("changeset fits the format"),
+                )?;
+                Ok(cs)
+            })
+            .unwrap();
+        store
+            .commit(|c| c.put_derived("view", 1, cs, b"first"))
+            .unwrap();
+        // The disagreeing write rides the settle: ON CONFLICT DO NOTHING
+        // skips the stored row, the inserted count comes back short, and
+        // the settle's check reads the stored value. (put_derived_all
+        // has its own row-by-row check, so it does not exercise this
+        // one.)
+        let err: Result<()> = store.commit(|c| {
+            let repo = c.repo_id("r")?;
+            c.put_settle_rows(
+                &[],
+                &[("view".into(), 1, cs, b"second".to_vec())],
+                repo,
+                &[],
+            )
+        });
+        let err = err.unwrap_err();
+        assert!(
+            matches!(err, Error::Corrupt(ref m) if m.contains("differs from the stored value")),
+            "the disagreeing write answers {err}"
+        );
+        // The stored row kept its value.
+        let got = store.commit(|c| c.get_derived("view", 1, cs)).unwrap();
+        assert_eq!(got.as_deref(), Some(&b"first"[..]));
+    }
+
+    /// The transaction's inserted-gens memory answers the contract the
+    /// derived write rides on: a changeset this transaction wrote is
+    /// its own, and one it only found - the row already existed - is
+    /// not. A gate that admits a conflicting insert claims a write that
+    /// never happened, and the derived path then skips a stored-value
+    /// read that has an answer.
+    #[test]
+    fn inserted_this_tx_names_only_the_rows_the_transaction_wrote() {
+        let data = crate::test_support::private_tempdir();
+        let store = crate::Backend::open_test(data.path()).unwrap();
+        let cs = Changeset::new(
+            vec![],
+            scion_core::IdentityTime::new(b"Ada".to_vec(), b"ada@example.com".to_vec(), 0, 0)
+                .expect("identity fits the format"),
+            None,
+            b"root".to_vec(),
+            std::collections::BTreeMap::new(),
+        )
+        .expect("changeset fits the format");
+        let (repo, id) = store
+            .commit(|c| {
+                let repo = c.create_repo("r")?;
+                let id = c.insert_changeset(repo, &cs)?;
+                assert!(
+                    c.inserted_this_tx(id),
+                    "the changeset this transaction wrote is its own"
+                );
+                Ok((repo, id))
+            })
+            .unwrap();
+        // The same changeset again, through the batching lane the
+        // importer uses: the row already exists, the insert conflicts,
+        // the transaction flushes its rows, and it did not write the
+        // changeset.
+        let same = store
+            .commit(|c| {
+                c.set_changeset_batching(true);
+                c.insert_changeset(repo, &cs)?;
+                c.flush_changeset_rows(repo)?;
+                c.set_changeset_batching(false);
+                Ok(!c.inserted_this_tx(id))
+            })
+            .unwrap();
+        assert!(
+            same,
+            "a changeset the transaction only found is not its own"
+        );
+    }
+
+    /// A settle whose transaction deferred two versions of one kind
+    /// keeps the flush's shape: the trim rides the verdict only for a
+    /// batch of one version per kind, and a repeated kind waits for the
+    /// commit's flush, whose fold deletes what the per-call deletes
+    /// delete (#855). A gate that sends a repeated kind into the trim
+    /// runs the ranking that counts a row once per join, and the rows
+    /// that remain differ from the per-call answer.
+    #[test]
+    fn a_settle_over_a_repeated_kind_deletes_what_the_per_call_deletes_delete() {
+        let remaining = |defer: bool| -> Vec<Option<Vec<u8>>> {
+            let data = crate::test_support::private_tempdir();
+            let store = crate::Backend::open_test(data.path()).unwrap();
+            let (cs, land_id) = store
+                .commit(|c| {
+                    let repo = c.create_repo("r")?;
+                    let cs = c.insert_changeset(
+                        repo,
+                        &Changeset::new(
+                            vec![],
+                            scion_core::IdentityTime::new(
+                                b"Ada".to_vec(),
+                                b"ada@example.com".to_vec(),
+                                0,
+                                0,
+                            )
+                            .expect("identity fits the format"),
+                            None,
+                            b"root".to_vec(),
+                            std::collections::BTreeMap::new(),
+                        )
+                        .expect("changeset fits the format"),
+                    )?;
+                    assert!(c.cas_ref(repo, "main", None, cs)?);
+                    let req = LandRequest {
+                        repo: "r".into(),
+                        changeset: cs,
+                        target_ref: "main".into(),
+                        request_key: "k".into(),
+                        deadline: crate::deadline::Deadline::new(
+                            Instant::now() + Duration::from_secs(60),
+                        ),
+                    };
+                    let (_, recorded) = c.record_land(&Caller("t".into()), &req, None)?;
+                    // Six rows of one kind no write path owns, one
+                    // version each: three below the lower delete's
+                    // version, three between the two versions.
+                    for i in 1..=6u32 {
+                        c.put_derived("test_kind", i, cs, format!("v{i}").as_bytes())?;
+                    }
+                    Ok((cs, recorded.land_id))
+                })
+                .unwrap();
+            store
+                .commit(|c| {
+                    let repo = c.repo_id("r")?;
+                    if defer {
+                        c.defer_derived_deletes();
+                    }
+                    // The call order is the higher version first: every
+                    // row below the lower version is below the higher
+                    // one too, the mix the join miscounted.
+                    c.delete_derived_below("test_kind", 7, 2)?;
+                    c.delete_derived_below("test_kind", 4, 2)?;
+                    c.set_land_state(
+                        repo,
+                        land_id,
+                        LandState::Landed,
+                        Some(cs),
+                        "the ref moved".into(),
+                        vec![],
+                        LandRejectReason::Unspecified,
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            store
+                .read(|c| {
+                    Ok((1..=6u32)
+                        .map(|v| c.get_derived("test_kind", v, cs).unwrap())
+                        .collect::<Vec<_>>())
+                })
+                .unwrap()
+        };
+        let deferred = remaining(true);
+        let per_call = remaining(false);
+        assert_eq!(
+            deferred, per_call,
+            "the settle over a repeated kind must delete what the per-call \
+             deletes delete"
+        );
+    }
+
+    /// The settle's blob arm stores what the caller hands it: the
+    /// membership rows land, and the store answers that the repo holds
+    /// the blob. An arm that flips on emptiness drops every blob of a
+    /// non-empty settle, and the store serves a repo that never held
+    /// them.
+    #[test]
+    fn a_settle_stores_its_blobs() {
+        let data = crate::test_support::private_tempdir();
+        let store = crate::Backend::open_test(data.path()).unwrap();
+        let (repo, blob) = store
+            .commit(|c| {
+                let repo = c.create_repo("r")?;
+                let blob = BlobId::try_from([7u8; 32].as_slice())
+                    .map_err(|_| Error::Corrupt("the test's blob id".into()))?;
+                c.put_settle_rows(&[], &[], repo, &[blob])?;
+                Ok((repo, blob))
+            })
+            .unwrap();
+        let stored = store.commit(|c| c.repo_has_blob(repo, blob)).unwrap();
+        assert!(stored, "the settle's blob is in the store");
+    }
+
+    /// A land's state moves once: the recorded land takes its verdict,
+    /// and a second transition on the same land is refused - the UPDATE
+    /// matches only a pending land, so a gate that admits the second
+    /// write lets a finished land change its answer.
+    #[test]
+    fn a_land_s_state_moves_once() {
+        let data = crate::test_support::private_tempdir();
+        let store = crate::Backend::open_test(data.path()).unwrap();
+        let (cs, land_id) = store
+            .commit(|c| {
+                let repo = c.create_repo("r")?;
+                let cs = c.insert_changeset(
+                    repo,
+                    &Changeset::new(
+                        vec![],
+                        scion_core::IdentityTime::new(
+                            b"Ada".to_vec(),
+                            b"ada@example.com".to_vec(),
+                            0,
+                            0,
+                        )
+                        .expect("identity fits the format"),
+                        None,
+                        b"root".to_vec(),
+                        std::collections::BTreeMap::new(),
+                    )
+                    .expect("changeset fits the format"),
+                )?;
+                assert!(c.cas_ref(repo, "main", None, cs)?);
+                let req = LandRequest {
+                    repo: "r".into(),
+                    changeset: cs,
+                    target_ref: "main".into(),
+                    request_key: "k".into(),
+                    deadline: crate::deadline::Deadline::new(
+                        Instant::now() + Duration::from_secs(60),
+                    ),
+                };
+                let (_, recorded) = c.record_land(&Caller("t".into()), &req, None)?;
+                Ok((cs, recorded.land_id))
+            })
+            .unwrap();
+        store
+            .commit(|c| {
+                let repo = c.repo_id("r")?;
+                c.set_land_state(
+                    repo,
+                    land_id,
+                    LandState::Landed,
+                    Some(cs),
+                    "the ref moved".into(),
+                    vec![],
+                    LandRejectReason::Unspecified,
+                )
+            })
+            .unwrap();
+        let again = store.commit(|c| {
+            let repo = c.repo_id("r")?;
+            c.set_land_state(
+                repo,
+                land_id,
+                LandState::Rejected,
+                None,
+                "a second verdict".into(),
+                vec![],
+                LandRejectReason::Unspecified,
+            )
+        });
+        let err = again.unwrap_err();
+        assert!(
+            matches!(err, Error::Corrupt(ref m) if m.contains("no longer pending")),
+            "the second transition answers {err}"
+        );
+    }
+
+    /// A store's second open moves nothing and runs clean: the version
+    /// gate refuses only a database newer than this build, the current
+    /// version answers no migration, and a creation is not a move. A
+    /// bound that flips on the current version refuses the store's own
+    /// second open; a comparison that flips the version test invents a
+    /// migration that never ran.
+    #[test]
+    fn a_second_open_moves_nothing() {
+        let data = crate::test_support::private_tempdir();
+        let first = crate::Backend::open_test(data.path()).unwrap();
+        assert_eq!(first.migrated(), None, "a creation is not a move");
+        drop(first);
+        let second = crate::Backend::open_test(data.path()).unwrap();
+        assert_eq!(
+            second.migrated(),
+            None,
+            "an open of a current store moves nothing"
+        );
+    }
+
+    /// A land answers by its request key, and the same key for another
+    /// land is refused: the by-key rule is one key names one land. A
+    /// lookup that answers None, that refuses a key's own land, or that
+    /// accepts a key's second shape breaks the rule the lane's retries
+    /// ride on.
+    #[test]
+    fn a_land_answers_by_its_request_key_and_a_reused_key_is_refused() {
+        let data = crate::test_support::private_tempdir();
+        let store = crate::Backend::open_test(data.path()).unwrap();
+        let cs = store
+            .commit(|c| {
+                let repo = c.create_repo("r")?;
+                let cs = c.insert_changeset(
+                    repo,
+                    &Changeset::new(
+                        vec![],
+                        scion_core::IdentityTime::new(
+                            b"Ada".to_vec(),
+                            b"ada@example.com".to_vec(),
+                            0,
+                            0,
+                        )
+                        .expect("identity fits the format"),
+                        None,
+                        b"root".to_vec(),
+                        std::collections::BTreeMap::new(),
+                    )
+                    .expect("changeset fits the format"),
+                )?;
+                assert!(c.cas_ref(repo, "main", None, cs)?);
+                Ok(cs)
+            })
+            .unwrap();
+        let req = LandRequest {
+            repo: "r".into(),
+            changeset: cs,
+            target_ref: "main".into(),
+            request_key: "k".into(),
+            deadline: crate::deadline::Deadline::new(Instant::now() + Duration::from_secs(60)),
+        };
+        store
+            .commit(|c| c.record_land(&Caller("t".into()), &req, None))
+            .unwrap();
+        // The key names its own land.
+        let (repo, out) = store
+            .commit(|c| {
+                let repo = c.repo_id("r")?;
+                Ok((repo, c.land_by_key(repo, &Caller("t".into()), &req)?))
+            })
+            .unwrap();
+        assert!(out.is_some(), "the key's own land answers");
+        // The same key for a different land is refused.
+        let other = LandRequest {
+            target_ref: "other".into(),
+            ..req
+        };
+        let err = store
+            .commit(|c| c.land_by_key(repo, &Caller("t".into()), &other))
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidArgument(ref m) if m.contains("already used")),
+            "the reused key answers {err}"
+        );
+        // The record's precheck refuses the same reuse through its own
+        // guard.
+        let err = store
+            .commit(|c| {
+                let req = LandRequest {
+                    repo: "r".into(),
+                    changeset: cs,
+                    target_ref: "other".into(),
+                    request_key: "k".into(),
+                    deadline: crate::deadline::Deadline::new(
+                        Instant::now() + Duration::from_secs(60),
+                    ),
+                };
+                c.repo_and_land_by_key(&Caller("t".into()), &req)?;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidArgument(_)),
+            "the record's precheck answers {err}"
+        );
+    }
+
+    /// A failed commit rolls back: the write client comes back to the
+    /// lane clean, and the failed caller's writes are gone. Postgres
+    /// warns, not errors, on a BEGIN inside an open transaction, so a
+    /// rollback that answers ok without running would commit the failed
+    /// caller's writes with the next writer's transaction.
+    #[test]
+    fn a_failed_commit_leaves_the_write_client_clean() {
+        let data = crate::test_support::private_tempdir();
+        let store = crate::Backend::open_test(data.path()).unwrap();
+        let err: Result<()> = store.commit(|c| {
+            c.create_repo("doomed")?;
+            Err(Error::FailedPrecondition("no".into()))
+        });
+        assert!(err.is_err(), "the caller's error answers");
+        store
+            .commit(|c| c.create_repo("after").map(|_| ()))
+            .expect("the next transaction begins clean");
+        // The failed caller's write went with the rollback.
+        let poisoned = store.commit(|c| c.repo_id("doomed"));
+        assert!(
+            poisoned.is_err(),
+            "the failed commit's write survived: the rollback never ran"
+        );
+    }
+
     /// A transaction whose connection dies mid-way leaves the worker's
     /// client usable: the next read on the same reader takes a fresh
     /// session, and a BEGIN on it opens a real transaction. A build that
