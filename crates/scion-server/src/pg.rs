@@ -7676,7 +7676,7 @@ pub(crate) mod pool_tests {
 
     /// The derivation's yield to a waiting writer answers the call's
     /// deadline, not its own patience: with a writer waiting and a short
-    /// deadline, the wait answers DeadlineExceeded instead of carrying on
+    /// deadline, the wait answers `DeadlineExceeded` instead of carrying on
     /// past the caller's clock.
     #[test]
     fn a_yield_to_writers_with_a_short_deadline_exceeds_it() {
@@ -7710,14 +7710,14 @@ pub(crate) mod pool_tests {
             });
             let began = Instant::now();
             pg.wait_for_writers(None).unwrap();
-            let waited = began.elapsed();
+            let took = began.elapsed();
             assert!(
-                waited >= Duration::from_millis(150),
-                "the yield gave the writer its turn: {waited:?}"
+                took >= Duration::from_millis(150),
+                "the yield gave the writer its turn: {took:?}"
             );
             assert!(
-                waited < WRITE_YIELD_BOUND,
-                "the yield waited out its bound, not the writer: {waited:?}"
+                took < WRITE_YIELD_BOUND,
+                "the yield waited out its bound, not the writer: {took:?}"
             );
             assert_eq!(pg.writers_waiting(), 0, "the count fell back to zero");
         });
