@@ -7079,8 +7079,8 @@ impl Meta for Pg {
 #[cfg(test)]
 mod tests {
     use super::{
-        Client, Conn, Job, Kind, NoTls, Setup, SetupFailure, TxState, connect_on, connection_gone,
-        delete_prefixes, merged_options, run_with_retry,
+        Client, Conn, Flow, Job, Kind, NoTls, Reply, Setup, SetupFailure, TxState, connect_on,
+        connection_gone, delete_prefixes, merged_options, run_job, run_with_retry,
     };
     use crate::error::{Error, Storage};
     use crate::pg::{Pairing, Pg, pairing_decision};
@@ -7413,6 +7413,92 @@ mod tests {
         let out = run_with_retry(&mut client, &mut setup, &dead, &job, &mut tx, false, None);
         assert!(out.is_err());
         assert!(matches!(tx, TxState::Lost));
+    }
+
+    /// The first job after a recovered connection runs: a client whose
+    /// reconnect failed stays closed, and that client's next job
+    /// reconnects on the real url and the statement lands - not a
+    /// lock-lost error for a recovery that worked. The gate above the
+    /// reconnect checks the fresh session's lock state before the
+    /// reply goes out; a gate that fires on a successful setup would
+    /// turn the recovery into the error the caller was retrying from.
+    #[test]
+    fn the_first_job_after_a_recovered_connection_runs() {
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let mut client = connect_on(&url, None, "").unwrap();
+        let mut setup = Setup::new(None, false, &mut client);
+        assert!(setup.ok());
+        let mut tx = TxState::Idle;
+        let mut ever_held = false;
+
+        // The client's backend dies while the client sits idle, and the
+        // statement's reconnect dials a port nothing answers: the
+        // reconnect fails, the original error stands, and the client
+        // stays closed - the state the next job's own reconnect meets.
+        let pid: i32 = client
+            .query_one("SELECT pg_backend_pid()", &[])
+            .unwrap()
+            .get(0);
+        let mut killer = postgres::Client::connect(&url, NoTls).unwrap();
+        killer
+            .execute("SELECT pg_terminate_backend($1)", &[&pid])
+            .unwrap();
+        drop(killer);
+
+        let dead = Conn {
+            url: "postgres://127.0.0.1:1/scion".to_owned(),
+            ca: None,
+            options: String::new(),
+            schema: None,
+            exclusive: false,
+        };
+        let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
+        let job = Job {
+            sql: "SELECT 1".to_owned(),
+            params: Vec::new(),
+            kind: Kind::Count,
+            reply: reply_tx,
+            raw: None,
+        };
+        let out = run_with_retry(&mut client, &mut setup, &dead, &job, &mut tx, false, None);
+        assert!(out.is_err());
+        assert!(
+            client.is_closed(),
+            "the failed reconnect leaves the client closed"
+        );
+
+        // The next job reconnects on the real url and the statement
+        // runs: the caller's reply is Ok.
+        let conn = Conn {
+            url: url.clone(),
+            ca: None,
+            options: String::new(),
+            schema: None,
+            exclusive: false,
+        };
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let job = Job {
+            sql: "SELECT 1".to_owned(),
+            params: Vec::new(),
+            kind: Kind::Count,
+            reply: reply_tx,
+            raw: None,
+        };
+        let flow = run_job(
+            job,
+            &mut client,
+            &mut setup,
+            &conn,
+            &mut tx,
+            &mut ever_held,
+            None,
+        );
+        assert!(matches!(flow, Flow::Go));
+        let reply = reply_rx.recv().unwrap();
+        assert!(
+            matches!(reply, Ok(Reply::Count(_))),
+            "the first job after a recovered connection runs, not an error"
+        );
     }
 
     /// The consumption path the recording relies on: the lost
