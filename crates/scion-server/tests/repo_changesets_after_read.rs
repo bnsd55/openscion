@@ -60,7 +60,7 @@ fn store_with_two_changesets() -> (
 /// nothing empties the live set and the seen set, and the prune buys
 /// its correctness with a full re-read of every changeset per chunk.
 #[test]
-fn the_sweep_read_answers_the_rows_after_its_cursor() {
+fn the_snapshot_read_answers_the_rows_after_its_cursor() {
     let (_data, store, repo, ids) = store_with_two_changesets();
     let all = store
         .write(|c| c.repo_changesets_after(repo, &[], 10))
@@ -86,9 +86,9 @@ fn the_sweep_read_answers_the_rows_after_its_cursor() {
 
 /// The limit is a bound, not a target: with the cursor at the start
 /// and one row allowed, exactly the first row comes back, so the
-/// sweep's paging cannot read past its budget.
+/// collector's paging cannot read past its budget.
 #[test]
-fn the_sweep_read_stops_at_its_limit() {
+fn the_snapshot_read_stops_at_its_limit() {
     let (_data, store, repo, _ids) = store_with_two_changesets();
     let page = store
         .write(|c| c.repo_changesets_after(repo, &[], 1))
