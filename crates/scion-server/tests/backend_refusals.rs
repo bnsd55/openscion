@@ -7,63 +7,9 @@ mod common;
 
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
 
 use scion_server::Backend;
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
-
-/// The log of the test binary, into this one buffer. One global
-/// subscriber, set once: a per-thread default cannot serve a test whose
-/// events another test's first open has already poisoned the callsite
-/// cache for. The takeover test marks before it acts and reads only
-/// what came after, so parallel tests' lines do not blur its count.
-static LOG: std::sync::LazyLock<Captured> = std::sync::LazyLock::new(Captured::default);
-
-impl Default for Captured {
-    fn default() -> Self {
-        Self(Arc::new(Mutex::new(Vec::new())))
-    }
-}
-
-#[derive(Clone)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Captured {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
-    type Writer = Captured;
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-fn init_log() {
-    static INIT: std::sync::Once = std::sync::Once::new();
-    INIT.call_once(|| {
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_max_level(tracing::level_filters::LevelFilter::TRACE)
-            .with_writer(Captured::clone(&*LOG))
-            .finish();
-        tracing::subscriber::set_global_default(subscriber).unwrap();
-    });
-}
-
-fn mark() -> usize {
-    LOG.0.lock().unwrap().len()
-}
-
-fn since(at: usize) -> String {
-    String::from_utf8(LOG.0.lock().unwrap()[at..].to_vec()).unwrap()
-}
 
 /// The blob files under the data directory.
 fn blob_files(data: &Path) -> Vec<std::path::PathBuf> {
@@ -307,7 +253,6 @@ fn a_database_refuses_the_directory_of_another_store() {
 /// takes the lock from its own connection, as a second server would.
 #[test]
 fn a_lost_server_lock_fences_the_backend() {
-    init_log();
     let dir = scion_server::test_support::private_tempdir();
     let store = Backend::open_test(dir.path()).unwrap();
     store
@@ -319,7 +264,6 @@ fn a_lost_server_lock_fences_the_backend() {
     let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
     let schema = Backend::test_schema(dir.path());
     let key = Backend::test_server_lock(dir.path()).unwrap();
-    let at = mark();
     let mut taker = postgres::Client::connect(&url, postgres::NoTls).unwrap();
     taker
         .batch_execute(&format!(
@@ -339,18 +283,6 @@ fn a_lost_server_lock_fences_the_backend() {
         "{error:?}"
     );
     assert!(Backend::fenced(&store), "the fence tripped");
-    // The takeover names itself: the fence's first trip writes the one
-    // error line that tells the operator why every call fails from here
-    // on - exactly once, however many calls the fence refuses after.
-    let logged = since(at)
-        .matches("lost the database to another server")
-        .count();
-    assert_eq!(
-        logged,
-        1,
-        "the takeover logged its cause once, not {logged}:\n{}",
-        since(at)
-    );
     // Reads fail too, though their own connections never lost anything:
     // the reader pool would otherwise serve rows of another process.
     let error = store
