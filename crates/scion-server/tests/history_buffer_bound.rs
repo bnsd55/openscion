@@ -52,7 +52,7 @@ fn changeset(name: &str) -> Changeset {
 /// through the batching lane, and the lane's one buffered put: the
 /// changeset stored once buffers its nodes, stored again re-puts the
 /// same ids.
-fn store() -> Backend {
+fn store() -> (tempfile::TempDir, Backend) {
     let data = private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
     store
@@ -63,15 +63,15 @@ fn store() -> Backend {
             Ok(())
         })
         .unwrap();
-    store
+    (data, store)
 }
 
 /// One lane put of the changeset, under `bound`, ending in a rollback:
 /// the statements stay in the log, the buffered rows never reach a
 /// commit flush, so the log's one history flush shape is the mid-put
 /// flush and nothing else.
-fn lane_put_bytes(bound: usize) -> (Backend, usize, Vec<String>) {
-    let store = store();
+fn lane_put_bytes(bound: usize) -> (tempfile::TempDir, Backend, usize, Vec<String>) {
+    let (data, store) = store();
     let cs = changeset("one\n");
     let _cap = test_set_history_pending_bound_for_tests(bound);
     Backend::test_reset_statement_count();
@@ -83,7 +83,7 @@ fn lane_put_bytes(bound: usize) -> (Backend, usize, Vec<String>) {
         Err::<(), _>(scion_server::Error::Corrupt("the test's rollback".into()))
     });
     let log = Backend::test_statement_log();
-    (store, test_history_pending_peak_bytes(), log)
+    (data, store, test_history_pending_peak_bytes(), log)
 }
 
 fn history_flushes(log: &[String]) -> usize {
@@ -102,14 +102,14 @@ fn history_flushes(log: &[String]) -> usize {
 fn a_history_reput_pays_no_extra_bytes() {
     let _seam = seam();
     // Calibrate: one lane put's buffered bytes, unbounded.
-    let (store, bytes, _) = lane_put_bytes(usize::MAX);
+    let (_data, store, bytes, _) = lane_put_bytes(usize::MAX);
     assert!(bytes > 0, "the put buffered its nodes: {bytes}");
     // The same put again under its own size as the bound: the re-put
     // replaces the row, the count comes back to `bytes`, and no flush
     // fires.
     let cs = changeset("one\n");
     let _cap = test_set_history_pending_bound_for_tests(bytes);
-    let peak = store
+    let rolled_back = store
         .write(|c| {
             let repo = c.repo_id("r")?;
             c.set_changeset_batching(true);
@@ -119,7 +119,7 @@ fn a_history_reput_pays_no_extra_bytes() {
             Err::<(), _>(scion_server::Error::Corrupt("the test's rollback".into()))
         })
         .is_err();
-    assert!(peak, "the write rolled back");
+    assert!(rolled_back, "the write rolled back");
     let peak = test_history_pending_peak_bytes();
     assert_eq!(
         peak, bytes,
@@ -136,11 +136,11 @@ fn a_history_reput_pays_no_extra_bytes() {
 fn the_history_buffer_flushes_strictly_over_its_bound() {
     let _seam = seam();
     // Calibrate: one lane put's buffered bytes, unbounded.
-    let (_, bytes, _) = lane_put_bytes(usize::MAX);
+    let (_data, _, bytes, _) = lane_put_bytes(usize::MAX);
     assert!(bytes > 0, "the put buffered its nodes: {bytes}");
     // At the bound exactly: no mid-put flush - the rollback's log
     // holds no history flush.
-    let (_, _, log) = lane_put_bytes(bytes);
+    let (_data, _, _, log) = lane_put_bytes(bytes);
     assert_eq!(
         history_flushes(&log),
         0,
@@ -148,7 +148,7 @@ fn the_history_buffer_flushes_strictly_over_its_bound() {
     );
     // One byte under the bound as the limit: the put is over it, and
     // the flush runs inside the transaction.
-    let (_, _, log) = lane_put_bytes(bytes - 1);
+    let (_data, _, _, log) = lane_put_bytes(bytes - 1);
     assert_eq!(
         history_flushes(&log),
         1,
