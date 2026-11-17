@@ -7557,6 +7557,18 @@ pub(crate) mod pool_tests {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The history-buffer seam's one holder: the bound override, the
+    /// peak and the statement log are process-wide, and a threaded test
+    /// run runs this module's tests as threads of one process. Every
+    /// test that sets the bound, reads the peak, or counts the log
+    /// holds this lock for its whole body, so two such tests cannot
+    /// race each other's reset.
+    static HISTORY_SEAM: Mutex<()> = Mutex::new(());
+
+    fn history_seam() -> MutexGuard<'static, ()> {
+        HISTORY_SEAM.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// A Postgres backend of a test database, with the pool gate: the
     /// caller holds the pair for its whole test body.
     /// An open whose batch fails after its BEGIN ran leaves no open
@@ -7839,6 +7851,7 @@ pub(crate) mod pool_tests {
     /// answers a buffer bigger than the truth - and flushes early.
     #[test]
     fn a_history_reput_pays_no_extra_bytes() {
+        let _seam = history_seam();
         let data = crate::test_support::private_tempdir();
         let store = crate::Backend::open_test(data.path()).unwrap();
         let body = vec![7u8; 32];
@@ -7868,6 +7881,7 @@ pub(crate) mod pool_tests {
     /// commit.
     #[test]
     fn the_history_buffer_flushes_strictly_over_its_bound() {
+        let _seam = history_seam();
         // The flush's one chunk insert opens with the unnest shape; the
         // direct put writes the VALUES shape, so the count below sees
         // only flushes.
