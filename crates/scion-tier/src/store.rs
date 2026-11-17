@@ -3549,7 +3549,10 @@ mod tests {
             .conn
             .execute_batch("PRAGMA query_only = OFF")
             .unwrap();
-        until(|| store.walk_state().is_some_and(|(_, _, done)| done));
+        // The walk's state clears once it is done and a flush ran, so a
+        // settled walk reads as None: the wait is over when the state is
+        // gone or says done.
+        until(|| store.walk_state().is_none_or(|(_, _, done)| done));
         store.flush();
         drop(store);
         // The next start walks: `c`'s file has no row.
