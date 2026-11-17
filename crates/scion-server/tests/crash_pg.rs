@@ -214,6 +214,68 @@ fn bound_addr(log: &Path) -> Option<String> {
     Some(listen.trim().to_owned())
 }
 
+/// The live server children of this test process: each pid with the
+/// session name its connections carry. A stage whose watcher fires
+/// stops the run, and the run's servers must not outlive it: a leaked
+/// server holds its sessions under a name the next test takes too
+/// (every process names its first server scion-test-1), so the leak
+/// would name itself as that test's failure. Registered at spawn,
+/// forgotten at drop.
+static SERVER_CHILDREN: std::sync::Mutex<Vec<(u32, String)>> = std::sync::Mutex::new(Vec::new());
+
+fn forget_server_child(pid: u32) {
+    SERVER_CHILDREN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retain(|&(known, _)| known != pid);
+}
+
+/// Kills every live server child and waits, briefly, for the database
+/// to notice their sessions' sockets closing - only those sessions:
+/// the registry holds each child's name, and another test process's
+/// server must not stretch this stop. The poll runs on a thread of its
+/// own and the wait on this one is bounded, so a database that takes
+/// the socket and never answers - the stuck-database case this test
+/// hunts - cannot hang the stop: the caller stops the wait and exits
+/// either way.
+fn stop_server_children() {
+    let children: Vec<(u32, String)> = SERVER_CHILDREN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if children.is_empty() {
+        return;
+    }
+    for (pid, _) in &children {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", &pid.to_string()])
+            .status();
+    }
+    let names: Vec<String> = children.into_iter().map(|(_, name)| name).collect();
+    let (done, wait) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let Ok(mut client) = postgres::Client::connect(&pg_url(), postgres::NoTls) else {
+            return;
+        };
+        let deadline = Instant::now() + STAGE_FLOOR;
+        loop {
+            let left = client
+                .query_one(
+                    "SELECT count(*) FROM pg_stat_activity \
+                     WHERE application_name = ANY($1)",
+                    &[&names],
+                )
+                .map_or(0, |row| row.get::<_, i64>(0));
+            if left == 0 || Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = done.send(());
+    });
+    let _ = wait.recv_timeout(Duration::from_secs(10));
+}
+
 /// One `scion-server` process over the database. `kill` is SIGKILL: the
 /// process dies with its sockets open, which is the crash a FIN-less cut
 /// leaves.
@@ -258,6 +320,11 @@ impl PgServer {
             .stderr(Stdio::from(file.try_clone().unwrap()))
             .spawn()
             .unwrap();
+        let pid = child.id();
+        SERVER_CHILDREN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((pid, name.clone()));
         drop(file);
         Self {
             child,
@@ -341,6 +408,7 @@ impl PgServer {
 
 impl Drop for PgServer {
     fn drop(&mut self) {
+        forget_server_child(self.child.id());
         let _ = self.child.kill();
         let _ = self.child.wait();
         // A server that ends here is one a loop round is done with: its
@@ -588,10 +656,74 @@ fn warm_land(server: &PgServer, changeset: ChangesetId, key: &str) -> Duration {
     started.elapsed()
 }
 
+/// The floor under every stage bound: a shared runner can hold one
+/// call for the reader pool's own wait (30 s) without any fault, so a
+/// bound under a minute is a false alarm waiting to fire. A real hang
+/// is minutes, so the floor still names it.
+const STAGE_FLOOR: Duration = Duration::from_secs(60);
+
+/// One stage of the crash test with its bound. The guard watches from
+/// its own thread: a stage that never returns is named and fails the
+/// run at its bound, which an assert after the stage never could - a
+/// stuck stage never reaches it. The watcher waits on the guard's
+/// channel; `done` ends the wait and prints the stage's time. On a
+/// timeout the watcher prints the stage's name and exits the process:
+/// a panic in the watcher would not reach a stuck main thread, and
+/// the test runner runs each test in its own process, so the exit
+/// fails this test alone. Each bound sits at the floor or at about
+/// ten times the slowest time twenty runs measured, whichever is
+/// larger.
+struct Stage {
+    name: String,
+    started: Instant,
+    done: Option<std::sync::mpsc::Sender<()>>,
+}
+
+impl Stage {
+    fn start(name: &str, bound: Duration) -> Stage {
+        let (done, wait) = std::sync::mpsc::channel();
+        let watcher_name = name.to_owned();
+        std::thread::spawn(move || {
+            use std::io::Write as _;
+            if wait.recv_timeout(bound) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                // The run stops, but its servers must not outlive it.
+                stop_server_children();
+                // stderr, not the captured stdout: the exit below ends
+                // the process before the harness flushes its capture,
+                // and this message is the only trace of the stage.
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "the stage {watcher_name:?} never returned within \
+                     {bound:?}; the run stops here"
+                );
+                std::process::exit(1);
+            }
+        });
+        Stage {
+            name: name.to_owned(),
+            started: Instant::now(),
+            done: Some(done),
+        }
+    }
+
+    /// The stage returned: end the watcher and print the stage's time.
+    fn done(mut self) {
+        self.done.take();
+        println!("stage {}: {:?}", self.name, self.started.elapsed());
+    }
+}
+
+impl Drop for Stage {
+    fn drop(&mut self) {
+        self.done.take();
+    }
+}
+
 /// A kill while a wide land runs leaves the ref at its old or its new
 /// target, the metadata whole, and a replay of the same request key
 /// agreeing with what the ref says.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
     let _one = one_server();
     let dir = scion_server::test_support::private_tempdir();
@@ -604,13 +736,17 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
     let schema = Backend::test_schema(&data);
     drop_schema(&schema);
     create_schema(&schema);
+    let seed = Stage::start("the seed of the repo", STAGE_FLOOR);
     seed_repo(&data);
-    // The warm land, whole: its time sets the step of the kills.
-    // (The server's log: the tempdir keeps it; a failure prints it.)
+    seed.done();
+    let warm_seed = Stage::start("the warm seed", STAGE_FLOOR);
     let warm = seed_wide_changeset(&data, "warm");
+    warm_seed.done();
+    let warm_land_stage = Stage::start("the warm land", STAGE_FLOOR);
     let mut server = PgServer::spawn(&data, &schema, &log);
     warm_land(&server, warm, "warm");
     server.kill_and_wait();
+    warm_land_stage.done();
 
     // One wide changeset per rep, seeded before the loop, each on the
     // head its rep will find: the kill of rep k lands inside rep k's own
@@ -619,6 +755,7 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
     // measure: the probe's land on the rep's own server and head is the
     // twin of the land the rep kills, so the kill step is measured from
     // what the kill interrupts and not from the first land's time.
+    let cuts_seed = Stage::start("the cuts' seeds", Duration::from_secs(1062));
     let cuts: Vec<_> = (0..REPS)
         .map(|k| {
             (
@@ -629,6 +766,7 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
             )
         })
         .collect();
+    cuts_seed.done();
 
     // Kill mid-land, rep after rep, each with its own changeset and
     // request key, until the kills have produced both endings. Every rep
@@ -643,35 +781,48 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
     // endings, and the factors alone do not reach the early ones.
     let mut scale = 1.0;
     for (k, (name, cs, probe_name, probe_cs)) in cuts.iter().enumerate() {
+        let spawn = Stage::start("the spawn", STAGE_FLOOR);
         let mut server = PgServer::spawn(&data, &schema, &log);
+        spawn.done();
         // The measure is the kill's twin: the same server, the same
         // head depth, a land of the same width. The step comes from it,
         // so a batching change of the product moves the kills with it.
+        let probe = Stage::start("the probe land", STAGE_FLOOR);
         let probe_started = Instant::now();
         land(&server.url, probe_cs.as_bytes(), probe_name).expect("the probe lands");
         let step = probe_started.elapsed() / 8;
+        probe.done();
         // The head after the probe, read through the server: the test's
         // own open would take the schema's one-server lock beside a
         // running server, and a second writer on one store is refused.
+        let head_read = Stage::start("the head read", STAGE_FLOOR);
         let head = ChangesetId::try_from(resolve_ref(&server.url, "main").as_slice())
             .expect("the ref names a changeset");
+        head_read.done();
         let call_name = name.clone();
         let call_cs = *cs;
         let url = server.url.clone();
+        let land_to_kill = Instant::now();
         let handle = std::thread::spawn(move || land(&url, call_cs.as_bytes(), &call_name));
         // The move sits at the very end of a land, so the factors run
         // past the whole measured land (up to 11/8 of it): a kill after
-        // the reply still shows the new ending.
+        // the reply still shows the new ending. The wait is a sleep,
+        // which cannot hang, so it carries no bound - a sleep may run
+        // past the floor when the probe land ran long - only the print.
         let factor = k % 11 + 1;
         std::thread::sleep(step.mul_f64(scale) * u32::try_from(factor).unwrap());
+        println!("stage the land to the kill: {:?}", land_to_kill.elapsed());
+        let wait = Stage::start("the kill and wait", STAGE_FLOOR);
         server.kill_and_wait();
         let _ = handle.join();
+        wait.done();
 
         // The ref is at the head it had (the kill came before the
         // move) or at a changeset the move put there. A landed land
         // rebases onto the head it found, so the ref's target names a
         // changeset of its own, whose first parent is the head the
         // land rebased onto.
+        let read = Stage::start("the reads after the kill", STAGE_FLOOR);
         let target = ref_target(&data);
         let moved = target != head;
         reps += 1;
@@ -686,13 +837,18 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
                 "rep {k}: the landed changeset is not on the head"
             );
         }
+        read.done();
 
         // One restarted server answers the replay of the same key. A
         // ref that moved reports the first move's outcome and moves
         // nothing; a ref that did not move takes the retry and lands.
         // Either way the ref must end exactly where the reply says.
+        let spawn = Stage::start("the spawn", STAGE_FLOOR);
         let mut server = PgServer::spawn(&data, &schema, &log);
+        spawn.done();
+        let replay_stage = Stage::start("the replay land", STAGE_FLOOR);
         let replay = land(&server.url, cs.as_bytes(), name).expect("the replay answers");
+        replay_stage.done();
         assert_eq!(
             replay.state(),
             LandState::Landed,
@@ -702,7 +858,10 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
             .expect("the reply names a changeset");
         // The server is gone before the seam reads: its one-server lock
         // is the store's, and the test's own open must not meet it.
+        let wait = Stage::start("the kill and wait", STAGE_FLOOR);
         server.kill_and_wait();
+        wait.done();
+        let final_read = Stage::start("the reads after the replay", STAGE_FLOOR);
         let after = ref_target(&data);
         assert_eq!(after, landed, "rep {k}: the ref disagrees with the reply");
         assert!(
@@ -718,6 +877,7 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
                 "rep {k}: the retry did not land on the head"
             );
         }
+        final_read.done();
         if moved {
             saw_new = true;
             if !saw_old {
@@ -734,6 +894,174 @@ fn a_kill_during_a_land_leaves_the_ref_old_or_new() {
         saw_old && saw_new,
         "the kills never straddled the land (old seen: {saw_old}, new: {saw_new}) \
          over {reps} reps, steps of an eighth of the measured land up to 11/8"
+    );
+}
+
+/// A probe for the hang: one kill mid-land, and after the death a full
+/// listing of what the dead server's sessions and locks left behind in
+/// the shared database - `pg_stat_activity` first, then every lock a
+/// session of this database still holds, named by its application. The
+/// print is the finding: nothing of the killed process may remain here,
+/// so whatever the rows show is what the next rep met.
+///
+/// The killed server's sessions and locks, under either name its
+/// connections carry: its setup renames every session to the schema,
+/// its URL names the client side `scion-test-N`.
+fn server_rows(
+    client: &mut postgres::Client,
+    schema: &str,
+    name: &str,
+) -> (Vec<postgres::Row>, Vec<postgres::Row>) {
+    // The queries bind the two names; the owned copies are the shape
+    // the parameter slice takes.
+    let schema = schema.to_owned();
+    let name = name.to_owned();
+    let sessions = client
+        .query(
+            "SELECT pid, application_name, state, wait_event_type, wait_event, \
+             now() - xact_start AS xact_age, now() - state_change AS idle, left(query, 60) AS head \
+             FROM pg_stat_activity \
+             WHERE (application_name = $1 OR application_name = $2) \
+               AND pid <> pg_backend_pid() \
+             ORDER BY pid",
+            &[&schema, &name],
+        )
+        .expect("the session listing answers");
+    let locks = client
+        .query(
+            "SELECT l.pid, a.application_name, l.locktype, l.mode, l.granted \
+             FROM pg_locks l \
+             JOIN pg_stat_activity a ON a.pid = l.pid \
+             WHERE (a.application_name = $1 OR a.application_name = $2) \
+               AND a.pid <> pg_backend_pid() \
+             ORDER BY l.pid, l.locktype",
+            &[&schema, &name],
+        )
+        .expect("the lock listing answers");
+    (sessions, locks)
+}
+
+/// The bound after the kill: the poll waits the database's notice of
+/// the closed sockets out and fails with the listing instead of
+/// holding the job. The floor is the stage bound's: a backend inside
+/// a long statement ends only when it next reads its socket. The
+/// positive control lives with the caller, while the server runs.
+fn nothing_left_behind(client: &mut postgres::Client, schema: &str, name: &str) {
+    let started = Instant::now();
+    let deadline = started + STAGE_FLOOR;
+    let (sessions, locks) = loop {
+        let (sessions, locks) = server_rows(client, schema, name);
+        if sessions.is_empty() && locks.is_empty() {
+            break (sessions, locks);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the killed server's rows never ended: {} sessions, {} locks \
+             after {:?}\n{sessions:#?}\n{locks:#?}",
+            sessions.len(),
+            locks.len(),
+            started.elapsed(),
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    println!(
+        "probe: the killed server left nothing: {} sessions, {} locks, \
+         the database was clean at {:?}",
+        sessions.len(),
+        locks.len(),
+        started.elapsed(),
+    );
+}
+
+#[test]
+fn a_kill_during_a_land_leaves_no_session_or_lock_behind() {
+    let _one = one_server();
+    let dir = scion_server::test_support::private_tempdir();
+    let data = dir.path().join("data");
+    let log = dir.path().join("server.log");
+    scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
+    let schema = Backend::test_schema(&data);
+    drop_schema(&schema);
+    create_schema(&schema);
+    seed_repo(&data);
+    // Both changesets are seeded before the server spawns: its open
+    // takes the schema's one-server lock and a test-side open beside it
+    // is refused by the fence that guards the same store.
+    let warm = seed_wide_changeset(&data, "warm");
+    let cut = seed_wide_changeset(&data, "cut");
+    let mut server = PgServer::spawn(&data, &schema, &log);
+    warm_land(&server, warm, "warm");
+
+    // The positive control, before the kill: the same listing the
+    // poll reads must show the running server's sessions and locks,
+    // or a zero after the kill would only mean the filter matches
+    // nothing.
+    let mut client = raw(&pg_url());
+    let (live, live_locks) = server_rows(&mut client, &schema, &server.name);
+    assert!(
+        !live.is_empty() && !live_locks.is_empty(),
+        "the running server shows no rows: {} sessions, {} locks - \
+         the filter matches nothing and the bound would be hollow",
+        live.len(),
+        live_locks.len(),
+    );
+    println!(
+        "probe: the control sees the running server: {} sessions, {} locks",
+        live.len(),
+        live_locks.len(),
+    );
+
+    // The land runs while the kill lands: the same shape the old-or-new
+    // test kills.
+    let url = server.url.clone();
+    let handle = std::thread::spawn(move || land(&url, cut.as_bytes(), "cut"));
+    std::thread::sleep(Duration::from_millis(400));
+    server.kill_and_wait();
+    let _ = handle.join();
+
+    nothing_left_behind(&mut client, &schema, &server.name);
+
+    // The rows the database held the moment after the kill, whatever
+    // their owner: the full picture the next rep met.
+    let rows = client
+        .query(
+            "SELECT pid, application_name, state, wait_event_type, wait_event, \
+             left(query, 60) AS head \
+             FROM pg_stat_activity \
+             WHERE datname = current_database() AND pid <> pg_backend_pid() \
+             ORDER BY pid",
+            &[],
+        )
+        .expect("the session listing answers");
+    println!("--- sessions after the kill: {} rows", rows.len());
+    for row in rows {
+        println!(
+            "    pid {} name {:?} state {:?} wait {:?}/{:?} q {}",
+            row.get::<_, i32>("pid"),
+            row.get::<_, Option<String>>("application_name"),
+            row.get::<_, Option<String>>("state"),
+            row.get::<_, Option<String>>("wait_event_type"),
+            row.get::<_, Option<String>>("wait_event"),
+            row.get::<_, Option<String>>("head")
+                .as_deref()
+                .unwrap_or(""),
+        );
+    }
+    // A key held with no session would be a prepared transaction,
+    // which no session poll can see; the session locks die with the
+    // sessions the listing above already counts.
+    let keys = client
+        .query_one(
+            "SELECT count(*) FROM pg_locks \
+              WHERE locktype = 'advisory' AND granted AND pid IS NULL",
+            &[],
+        )
+        .expect("the key count answers")
+        .get::<_, i64>(0);
+    assert_eq!(
+        keys, 0,
+        "the killed server left an advisory key held with no session: \
+         {keys} keys, the mark of a prepared transaction"
     );
 }
 

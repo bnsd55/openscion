@@ -136,3 +136,34 @@ mod tests {
         assert!(Keys::load(&good, &[]).is_ok());
     }
 }
+
+/// A rotation keeps the old key's tickets alive, and a key the server
+/// never trusted is refused: `load` puts the current key first and the
+/// rotation's old keys behind it, and `for_verify` hands that list to
+/// the ticket check, which accepts what any one of them signed.
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+
+    #[test]
+    fn an_old_key_verifies_through_a_rotation_and_a_stranger_does_not() {
+        let previous = Keys::generate();
+        // The rotation: the new seed, with the previous key as the old
+        // one whose tickets stay valid.
+        let current = Keys::load(&to_hex(&[9; 32]), &[previous.public_hex()]).unwrap();
+        let now = scion_proto::ticket::now();
+        let old_ticket = previous.sign("repo", "alice", [2; 32]).unwrap();
+        assert!(
+            scion_proto::ticket::parse(&old_ticket, current.for_verify(), now).is_ok(),
+            "the old key's ticket still verifies during the rotation"
+        );
+        // A key that is neither the current one nor the rotation's old
+        // one: refused, though its ticket is otherwise well formed.
+        let stranger = Keys::generate();
+        let stranger_ticket = stranger.sign("repo", "alice", [2; 32]).unwrap();
+        assert!(
+            scion_proto::ticket::parse(&stranger_ticket, current.for_verify(), now).is_err(),
+            "a key the server never trusted verifies nothing"
+        );
+    }
+}

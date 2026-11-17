@@ -1881,3 +1881,117 @@ mod access_file_tests {
         assert!(err.contains("symlink"), "{err}");
     }
 }
+
+/// The labels an admin line names its failure under: the class, never
+/// the message, which can carry a path.
+#[cfg(test)]
+mod error_class_tests {
+    use super::*;
+    use scion_server::Storage;
+
+    #[test]
+    fn a_storage_error_is_classed_by_the_engine_s_answer() {
+        let busy = Error::Storage(Storage::busy_for_test(std::io::Error::other("gone")));
+        assert_eq!(error_class(&busy), "busy");
+        let full = Error::Storage(Storage::disk_full_for_test(std::io::Error::other(
+            "the drive is full",
+        )));
+        assert_eq!(error_class(&full), "disk_full");
+        let internal = Error::Storage(Storage::internal_for_test(std::io::Error::other("refused")));
+        assert_eq!(error_class(&internal), "failed");
+    }
+
+    #[test]
+    fn an_error_that_is_not_the_engine_s_is_classed_failed() {
+        let io = Error::Io(std::io::Error::other("the file went away"));
+        assert_eq!(error_class(&io), "failed");
+    }
+
+    #[test]
+    fn is_disk_full_says_which_io_errors_are_the_disk_s() {
+        let full = std::io::Error::from(std::io::ErrorKind::StorageFull);
+        assert!(is_disk_full(&full), "out-of-space is the disk's answer");
+        let quota = std::io::Error::from(std::io::ErrorKind::QuotaExceeded);
+        assert!(is_disk_full(&quota), "over-quota is the disk's answer");
+        let other = std::io::Error::other("the file went away");
+        assert!(!is_disk_full(&other), "another error is not the disk's");
+    }
+}
+
+/// The gc's audit intent on a failing audit log: a disk-full append
+/// defers the intent and the run goes on, the deferred line names why
+/// it was late, and every other append failure refuses before any
+/// change. The audit's own test hook makes the appends fail as an
+/// out-of-space answer would, without touching a real disk.
+#[cfg(test)]
+mod gc_intent_tests {
+    use super::*;
+
+    fn audit_with_faults(dir: &Path, faults: u32) -> scion_server::Audit {
+        let audit = scion_server::Audit::open(&dir.join("audit.log")).unwrap();
+        audit.fail_next_appends(faults).unwrap();
+        audit
+    }
+
+    #[tokio::test]
+    async fn a_disk_full_intent_defers_and_the_run_answers() {
+        let dir = scion_server::test_support::private_tempdir();
+        let store = Backend::open_test(&dir.path().join("data")).unwrap();
+        // One failed append: the intent's. The run defers it, finishes,
+        // and the deferred line lands when the disk has room again.
+        let audit = audit_with_faults(dir.path(), 1);
+        gc_command(audit, &store, Duration::from_secs(60), true, None)
+            .await
+            .expect("the run goes on past the failed intent");
+        let log = std::fs::read_to_string(dir.path().join("audit.log")).unwrap();
+        assert!(
+            log.contains("\"what\":\"gc\"") && log.contains("\"deferred\":\"disk_full\""),
+            "the deferred intent names why it was late: {log}"
+        );
+        assert!(
+            log.contains("\"status\":\"ok\"") || log.contains("admin"),
+            "the run's own line is recorded: {log}"
+        );
+    }
+
+    /// The deferred intent's exit answers the run's own status: a run that
+    /// succeeded answers 0 even when its deferred line still fails. The
+    /// probe runs in a child of this same test binary, because the answer
+    /// is the process's exit status, and the probe's own process is the
+    /// only one that can carry it.
+    #[cfg(test)]
+    mod deferred_intent_exit_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn the_exit_answers_the_run_s_own_status() {
+            let exe = std::env::current_exe().expect("the test binary is known");
+            let out = std::process::Command::new(exe)
+                .args(["deferred_intent_exit_probe", "--nocapture"])
+                .env("SCION_TEST_DEFERRED_EXIT_PROBE", "1")
+                .output()
+                .expect("the probe runs");
+            assert!(
+                out.status.success(),
+                "a run that succeeded answers 0 even when its deferred line still fails: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        #[tokio::test]
+        async fn deferred_intent_exit_probe() {
+            if std::env::var_os("SCION_TEST_DEFERRED_EXIT_PROBE").is_none() {
+                // The suite's own run: nothing to probe.
+                return;
+            }
+            let dir = scion_server::test_support::private_tempdir();
+            let audit = scion_server::Audit::open(&dir.path().join("audit.log")).unwrap();
+            // Both appends fail as an out-of-space answer would: the run's
+            // own write is gone by the time the deferred line is written,
+            // and the deferred line fails again. The run succeeded, so the
+            // process answers 0.
+            audit.fail_next_appends(2).unwrap();
+            write_deferred_intent(&audit, true, true).await;
+        }
+    }
+}

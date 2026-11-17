@@ -1,0 +1,10 @@
+# a land whose reply the model never reads: the call runs to its reply
+# and drops it, so the land decided on the server while the ledger
+# holds no reply for it. The next land must pick no step until a later
+# call answers the blind one - repeating the step would delete a path
+# the fresh head no longer has, and CreateChangeset refuses the repeat
+# (seed 1794745380457, run 43713429666)
+land 1 0 0 0
+land-blind 1 0 0
+land 1 0 0 0
+check

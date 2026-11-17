@@ -220,6 +220,27 @@ impl std::fmt::Display for Storage {
     }
 }
 
+/// The classified storage errors the binary's tests build to pin the
+/// audit line's class labels. Production compiles no constructor: the
+/// only Storage values a release build sees come from the engine.
+#[cfg(any(test, feature = "test-hooks"))]
+impl Storage {
+    /// A busy-class storage error.
+    pub fn busy_for_test(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::busy(source)
+    }
+
+    /// A disk-full-class storage error.
+    pub fn disk_full_for_test(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::disk_full(source)
+    }
+
+    /// An internal-class storage error.
+    pub fn internal_for_test(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::internal(source)
+    }
+}
+
 impl std::error::Error for Storage {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(self.source.as_ref())
@@ -429,6 +450,79 @@ mod tests {
     fn a_drained_reader_pool_is_unavailable() {
         let err = Error::Unavailable("no Postgres reader free".to_owned());
         assert_eq!(Status::from(err).code(), Code::Unavailable);
+    }
+
+    /// A busy store answers the retryable code with a fixed message, and
+    /// `is_busy` names it: a retry loop may run the work again, and the
+    /// reply carries no cause - no SQL, no path, no database text.
+    #[test]
+    fn a_busy_store_is_unavailable_with_a_fixed_reply_and_is_busy_names_it() {
+        let e = Error::Storage(Storage::busy(std::io::Error::other(
+            "could not serialize access due to concurrent update",
+        )));
+        assert!(e.is_busy(), "a busy storage must answer is_busy");
+        let status = Status::from(e);
+        assert_eq!(status.code(), Code::Unavailable);
+        assert_eq!(status.message(), "the database is busy; retry");
+        // The other two classes are not busy: a retry loop must not spin
+        // on a full disk or a backend bug.
+        let e = Error::Storage(Storage::disk_full(std::io::Error::other("no space")));
+        assert!(!e.is_busy(), "a full disk is not busy");
+        let e = Error::Storage(Storage::internal(std::io::Error::other(
+            "the backend broke",
+        )));
+        assert!(!e.is_busy(), "a backend bug is not busy");
+        // The classes map as their docs say: a full disk is exhausted,
+        // a backend bug is internal, each with a fixed reply.
+        let status = Status::from(Error::Storage(Storage::disk_full(std::io::Error::other(
+            "no space left on the volume at /var/scion",
+        ))));
+        assert_eq!(status.code(), Code::ResourceExhausted);
+        assert_eq!(
+            status.message(),
+            "the server is out of disk space; retry later"
+        );
+        let status = Status::from(Error::Storage(Storage::internal(std::io::Error::other(
+            "the connection is broken",
+        ))));
+        assert_eq!(status.code(), Code::Internal);
+        assert_eq!(status.message(), "internal error");
+        // A remount left the disk read-only: the retryable code, the
+        // fixed reply, no path.
+        let eio_ro = std::io::Error::from_raw_os_error(30);
+        assert_eq!(eio_ro.kind(), std::io::ErrorKind::ReadOnlyFilesystem);
+        let status = Status::from(Error::Io(eio_ro));
+        assert_eq!(status.code(), Code::Unavailable, "{status:?}");
+        assert_eq!(status.message(), "the disk is read-only; retry later");
+        // The class names themselves, as Display carries them into the
+        // log lines.
+        assert_eq!(
+            Error::Storage(Storage::busy(std::io::Error::other("x"))).to_string(),
+            "the database is busy"
+        );
+        assert_eq!(
+            Error::Storage(Storage::disk_full(std::io::Error::other("x"))).to_string(),
+            "the database is out of space"
+        );
+        assert_eq!(
+            Error::Storage(Storage::internal(std::io::Error::other("x"))).to_string(),
+            "the database failed"
+        );
+        // A git failure displays its own message behind the variant's
+        // git: mark (the log reads it; the reply's fixed text never
+        // carries it).
+        assert_eq!(
+            Error::Git(Git::message("the import cap is spent".to_owned())).to_string(),
+            "git: the import cap is spent"
+        );
+        assert_eq!(
+            Error::Git(Git::cause(
+                "cannot open the object database".to_owned(),
+                std::io::Error::other("not a repository"),
+            ))
+            .to_string(),
+            "git: cannot open the object database"
+        );
     }
 
     #[test]

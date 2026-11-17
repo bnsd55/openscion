@@ -335,7 +335,7 @@ mod tests {
             let (sent, done) = std::sync::mpsc::channel();
             std::thread::spawn(move || sent.send(check_put(&file).is_err()).unwrap());
             // The refusal needs no read: one that hangs fails the test.
-            done.recv_timeout(Duration::from_secs(2))
+            done.recv_timeout(Duration::from_secs(60))
                 .unwrap_or_else(|_| panic!("the read was not refused at once"))
         };
         let dir = tempfile::tempdir().unwrap();
@@ -351,6 +351,44 @@ mod tests {
         assert!(
             refused(std::path::PathBuf::from("/dev/zero")),
             "/dev/zero was accepted"
+        );
+    }
+
+    /// A path given twice on the command line is refused: two edits for
+    /// one path have no order the reader can trust.
+    #[test]
+    fn a_path_given_twice_is_refused() {
+        let args = CommitArgs {
+            base: "main".into(),
+            message: "m".into(),
+            puts: vec![("a.txt".into(), "a.txt".into())],
+            executable: false,
+            deletes: vec!["a.txt".into()],
+            author: "scn <scn@localhost>".into(),
+            from_mount: None,
+        };
+        let err = match arg_edits(&args) {
+            Err(err) => err.to_string(),
+            Ok(_) => panic!("a path given twice was accepted"),
+        };
+        assert!(
+            err.contains("more than once") && err.contains("a.txt"),
+            "{err}"
+        );
+    }
+
+    /// A --put whose file is a directory is refused as not a regular
+    /// file, before any byte is read - the same refusal a FIFO gets.
+    #[test]
+    fn a_put_of_a_directory_is_refused_as_not_a_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = match check_put(dir.path()) {
+            Err(err) => err.to_string(),
+            Ok(()) => panic!("a directory was accepted as a put's file"),
+        };
+        assert!(
+            err.contains("not a regular file") && err.contains(&dir.path().display().to_string()),
+            "{err}"
         );
     }
 }

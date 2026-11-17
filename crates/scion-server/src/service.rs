@@ -3146,6 +3146,140 @@ mod tests {
         assert!(lines[0].contains("rpc=\"GetLand\""), "{}", lines[0]);
     }
 
+    /// A `get_changeset` whose stored body cannot fit what is left of the
+    /// read pool is not served: the whole reply's share is taken before
+    /// the object is read, and a take that can never fit parks the call,
+    /// instead of building a reply that holds memory it did not pay for.
+    /// Kills the mutant whose length find misses (len 0, no share,
+    /// served at once). With the pool freed, the same call is served:
+    /// contention, not absence.
+    #[test]
+    fn a_changeset_whose_body_does_not_fit_the_read_pool_is_not_served() {
+        let (_dir, store, _, _) = file_store(b"x");
+        let big = Changeset::new(
+            vec![],
+            IdentityTime::new(b"t".to_vec(), b"t@x".to_vec(), 0, 0)
+                .expect("identity fits the format"),
+            None,
+            vec![b'b'; 2_000],
+            [].into(),
+        )
+        .expect("changeset fits the format");
+        let id = store
+            .write(|c| {
+                let repo = c.repo_id("r")?;
+                c.insert_changeset(repo, &big)
+            })
+            .unwrap();
+        let stored = store
+            .read(|c| c.stored_changeset_body_lengths(&[id.as_bytes().to_vec()]))
+            .unwrap();
+        let len = stored.first().map(|(_, len)| *len).unwrap_or_default();
+        assert!(len >= 2_000, "the seeded body's stored length: {stored:?}");
+        let service = test_service(store);
+        let reads = Arc::clone(&service.reads);
+        let hold = block_on(reads.acquire_many(u32::try_from(READ_BUDGET_BYTES - 1_000).unwrap()))
+            .expect("the pool is whole");
+        let request = as_default(GetChangesetRequest {
+            repo: "r".to_owned(),
+            changeset_id: id.as_bytes().to_vec(),
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let got = block_on(service.get_changeset(request));
+            let _ = tx.send(got.is_ok());
+        });
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(
+            rx.try_recv().is_err(),
+            "an over-pool body is not served: {rx:?}"
+        );
+        drop(hold);
+        let served = rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the reply lands once the pool frees");
+        assert!(served, "the body is served once the pool frees");
+    }
+
+    /// A `get_changeset` whose stored body is over the object cap is
+    /// refused, not served: the reply's share is checked against the cap
+    /// before any of the object's bytes are read.
+    #[test]
+    fn a_changeset_at_the_object_cap_is_served() {
+        let (_dir, store, _, _) = file_store(b"x");
+        // The cap bounds the STORED body, and the encoding adds its own
+        // overhead, so pad the message until the stored length is the
+        // cap exactly: the refusal starts one byte past it, and a body
+        // at the cap is served.
+        let mut message_len = MAX_OBJECT_BYTES - 128;
+        let mut id = None;
+        for _ in 0..8 {
+            let big = Changeset::new(
+                vec![],
+                IdentityTime::new(b"t".to_vec(), b"t@x".to_vec(), 0, 0)
+                    .expect("identity fits the format"),
+                None,
+                vec![b'b'; message_len],
+                [].into(),
+            )
+            .expect("changeset fits the format");
+            let seeded = store
+                .write(|c| {
+                    let repo = c.repo_id("r")?;
+                    c.insert_changeset(repo, &big)
+                })
+                .unwrap();
+            let stored = store
+                .read(|c| c.stored_changeset_body_lengths(&[seeded.as_bytes().to_vec()]))
+                .unwrap();
+            let len = stored.first().map(|(_, len)| *len).unwrap_or_default();
+            match usize::try_from(len).unwrap_or(0) {
+                l if l == MAX_OBJECT_BYTES => {
+                    id = Some(seeded);
+                    break;
+                }
+                l if l < MAX_OBJECT_BYTES => message_len += MAX_OBJECT_BYTES - l,
+                l => message_len -= l - MAX_OBJECT_BYTES,
+            }
+        }
+        let id = id.expect("a body sized to the cap exists");
+        let service = test_service(store);
+        let request = as_default(GetChangesetRequest {
+            repo: "r".to_owned(),
+            changeset_id: id.as_bytes().to_vec(),
+        });
+        // The cap itself is legal: the reply opens and streams.
+        let reply = block_on(service.get_changeset(request));
+        assert!(reply.is_ok(), "a body at the cap is served: {reply:?}");
+    }
+
+    #[test]
+    fn a_changeset_over_the_object_cap_is_refused() {
+        let (_dir, store, _, _) = file_store(b"x");
+        let big = Changeset::new(
+            vec![],
+            IdentityTime::new(b"t".to_vec(), b"t@x".to_vec(), 0, 0)
+                .expect("identity fits the format"),
+            None,
+            vec![b'b'; MAX_OBJECT_BYTES + 1],
+            [].into(),
+        )
+        .expect("changeset fits the format");
+        let id = store
+            .write(|c| {
+                let repo = c.repo_id("r")?;
+                c.insert_changeset(repo, &big)
+            })
+            .unwrap();
+        let service = test_service(store);
+        let request = as_default(GetChangesetRequest {
+            repo: "r".to_owned(),
+            changeset_id: id.as_bytes().to_vec(),
+        });
+        let status = block_on(service.get_changeset(request)).expect_err("over the cap");
+        assert_eq!(status.code(), Code::ResourceExhausted, "{status:?}");
+    }
+
     #[tokio::test]
     async fn a_read_file_reply_of_many_parts_stays_exactly_the_file() {
         let data = content(3);
@@ -4318,6 +4452,519 @@ mod tests {
             .expect("the first reply freed its share")
             .unwrap();
         assert!(read_all(second).await == data, "the second reply");
+    }
+
+    /// The three shapes a wrong `read_share` can take, each killed on
+    /// the pool every reply shares: a smaller long-file share (the reply
+    /// serves where the true share parks), a bigger one (the reply parks
+    /// where the true share serves), and the branch flipped (a short
+    /// file's measured share replaced by the reader's, which a pool
+    /// sized for the measured share cannot grant). Each test holds the
+    /// service's one pool - the one every call shares - the way a
+    /// busy server holds it.
+    #[tokio::test]
+    async fn a_long_file_whose_share_does_not_fit_the_pool_is_not_served() {
+        let data = content(2);
+        let (_dir, store, cs, _) = file_store(&data);
+        let service = test_service(store);
+        // One permit short of the reply's whole share, spelled from the
+        // constants and not from read_share: a test that measures its
+        // hold with the function under test measures with the mutant.
+        // The true share of a two-part file is READER_BYTES plus two
+        // parts; the mutant's every smaller answer fits the pool and
+        // serves at once, which is the lie this test refuses.
+        let true_share = READER_BYTES + 2 * CHUNK_BYTES;
+        let reads = Arc::clone(&service.reads);
+        let hold = reads
+            .acquire_many(u32::try_from(READ_BUDGET_BYTES - true_share + 1).unwrap())
+            .await
+            .expect("the pool is whole");
+        let request = as_default(ReadFileRequest {
+            repo: "r".into(),
+            changeset_id: cs.as_bytes().to_vec(),
+            path: b"f".to_vec(),
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let got = block_on(service.read_file(request));
+            let _ = tx.send(got.is_ok());
+        });
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "a share the pool cannot pay is not served"
+        );
+        drop(hold);
+        let served = rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the reply lands once the pool frees");
+        assert!(served, "the body is served once the pool frees");
+    }
+
+    #[tokio::test]
+    async fn a_short_file_is_served_from_the_share_its_size_measures() {
+        let data = b"short file".to_vec();
+        let (_dir, store, cs, _) = file_store(&data);
+        // Room for the measured share of this file - its own size - and
+        // not one reader-window more.
+        let service = Arc::new(ScionService {
+            reads: Arc::new(Semaphore::new(data.len())),
+            ..test_service(store)
+        });
+        let mut reply = tokio::time::timeout(
+            Duration::from_secs(30),
+            service.read_file(as_default(ReadFileRequest {
+                repo: "r".into(),
+                changeset_id: cs.as_bytes().to_vec(),
+                path: b"f".to_vec(),
+            })),
+        )
+        .await
+        .expect("a short file's measured share fits the pool")
+        .unwrap()
+        .into_inner();
+        let part = tokio::time::timeout(Duration::from_secs(30), reply.next())
+            .await
+            .expect("the part reads")
+            .expect("the file streams")
+            .expect("the part reads");
+        assert_eq!(part.data, data, "the file's content comes back");
+    }
+
+    /// A log entry whose encoded body is `want` bytes: the message is
+    /// padded until the encoding lands on the size, so a test speaks in
+    /// exact part sizes whatever the encoding's own overhead is.
+    fn an_entry(id: u8, want: usize) -> (ChangesetId, Changeset) {
+        let mut message = vec![b'm'; want];
+        let build = |message: &[u8]| {
+            Changeset::new(
+                vec![],
+                IdentityTime::new(b"t".to_vec(), b"t@x".to_vec(), 0, 0)
+                    .expect("identity fits the format"),
+                None,
+                message.to_vec(),
+                [].into(),
+            )
+            .expect("the changeset fits the format")
+        };
+        let mut changeset = build(&message);
+        while changeset.encode().len() > want {
+            message.pop();
+            changeset = build(&message);
+        }
+        while changeset.encode().len() < want {
+            message.push(b'x');
+            changeset = build(&message);
+        }
+        (ChangesetId::try_from(&[id; 32][..]).unwrap(), changeset)
+    }
+
+    /// A walk whose `left` covers the page and whose continuation is
+    /// some id: `log_page_parts` reads only these two.
+    fn a_walk(store: Backend) -> LogWalk {
+        LogWalk {
+            worker: Worker::new(store),
+            repo: "r".to_owned(),
+            graph_queries: Arc::new(Semaphore::new(1)),
+            _call: Call::default(),
+            next: Some(ChangesetId::try_from(&[9_u8; 32][..]).unwrap()),
+            left: 10,
+            path: None,
+            deadline: Deadline::new(std::time::Instant::now() + Duration::from_secs(600)),
+            stalled: None,
+        }
+    }
+
+    /// The page splitter groups entries so a part's encoded bytes stay
+    /// within one chunk: an entry too big for a whole part is its own
+    /// part, an entry that would fill the part exactly stays, and an
+    /// entry that would pass the bound starts the next part. The bound
+    /// is what keeps one streamed part under the message cap, and a
+    /// wrong grouping is a reply the client cannot take.
+    #[test]
+    fn a_log_page_splits_at_the_chunk_bound() {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let over = CHUNK_BYTES + 1_000;
+        let mut walk = a_walk(store);
+        let entries = vec![
+            an_entry(b'a', over),
+            an_entry(b'b', CHUNK_BYTES - 2_000),
+            an_entry(b'c', 2_000),
+            an_entry(b'd', 1_000),
+        ];
+        let parts = log_page_parts(entries, &mut walk);
+        // The walk spends its `left` on the whole page: four entries in,
+        // four out, and the sizes are the entries' own encodings - the
+        // entry that would pass the bound starts a part of its own.
+        assert_eq!(walk.left, 6, "the walk still owes after the page");
+        // The entries' real encodings decide the grouping; the test
+        // reads the sizes back out of the parts and checks the rule on
+        // them, so the encoder's own overhead cannot flatter it.
+        let part_of = |name: u8| {
+            parts
+                .iter()
+                .position(|p| p.entries.iter().any(|e| e.changeset_id[0] == name))
+                .unwrap_or_else(|| panic!("the entry {} is in a part", name as char))
+        };
+        let size_of = |name: u8| {
+            parts[part_of(name)]
+                .entries
+                .iter()
+                .find(|e| e.changeset_id[0] == name)
+                .map(|e| e.changeset.len())
+                .unwrap()
+        };
+        assert!(size_of(b'a') > CHUNK_BYTES, "a alone is over the chunk");
+        assert_eq!(part_of(b'a'), 0, "a is the first part");
+        assert_eq!(
+            parts[1]
+                .entries
+                .iter()
+                .map(|e| e.changeset.len())
+                .sum::<usize>(),
+            CHUNK_BYTES,
+            "b and c fill their part exactly: the bound is met, not passed"
+        );
+        assert_eq!(
+            parts[0].entries.len(),
+            1,
+            "the over-chunk entry shares its part with nobody"
+        );
+        assert_eq!(part_of(b'b'), 1, "b starts its own part: a's part is over");
+        assert_eq!(
+            part_of(b'c'),
+            1,
+            "c fills b's part exactly: the bound is not passed, so it stays"
+        );
+        assert_eq!(
+            part_of(b'd'),
+            2,
+            "d starts the next part: adding it would pass the bound"
+        );
+        assert_eq!(parts.len(), 3, "the page splits into three parts");
+
+        // The last part carries where the walk continues; none before
+        // it does.
+        assert_eq!(
+            parts.last().unwrap().next_changeset_id,
+            vec![9_u8; 32],
+            "the last part carries the walk's continuation"
+        );
+        for part in &parts[..parts.len() - 1] {
+            assert!(
+                part.next_changeset_id.is_empty(),
+                "only the last part carries the continuation"
+            );
+        }
+    }
+
+    /// The blame splitter groups ranges so each part's encoded bytes -
+    /// the ranges plus the changesets they name that no earlier part
+    /// carried - stay within one chunk. The first part here fills the
+    /// bound exactly: the splitter keeps an exact fill and splits only
+    /// past it. A named changeset rides the first part that names it,
+    /// once, and the walk's cursor rides only the last part.
+    #[test]
+    fn a_blame_page_splits_at_the_chunk_bound() {
+        let big = |name: u8, want: usize| BlameChangeset {
+            changeset_id: vec![name; 32],
+            author_name: vec![b'n'; want],
+            author_email: b"e@x".to_vec(),
+            author_unix_secs: 0,
+            author_tz_offset_minutes: 0,
+            path: b"f".to_vec(),
+        };
+        let range = |name: u8| BlameRange {
+            start_line: 1,
+            line_count: 1,
+            changeset_id: vec![name; 32],
+            origin_line: 1,
+        };
+        let named = range(b'z');
+        let range_bytes = named.encoded_len();
+        // Size the changeset's body so two ranges with it fill a part
+        // exactly and three pass the bound: the splitter must split
+        // between the second and the third. The author-name padding
+        // tunes the body to the byte, but the encoding's own length
+        // field steps as the padding crosses a varint boundary, so scan
+        // down for a name whose encode lands exactly on the target.
+        let base = big(b'z', 0).encoded_len();
+        let target = CHUNK_BYTES - 2 * range_bytes;
+        let cs = (0..8)
+            .map(|down| big(b'z', target - base - down))
+            .find(|c| c.encoded_len() == target)
+            .expect("a body sized to the byte exists near the target");
+        let cs_bytes = cs.encoded_len();
+        let mut send = BlameSend {
+            // Three ranges naming the same changeset: its body rides the
+            // first part only, the second range fills the part exactly,
+            // and the third passes the bound and starts the next part.
+            ranges: vec![named.clone(), named.clone(), named],
+            changesets: vec![cs],
+            cursor: b"cursor".to_vec(),
+            _call: Call::default(),
+            stalled: None,
+        };
+        let parts = blame_page_parts(&mut send);
+        assert_eq!(parts.len(), 2, "the third range passes the bound");
+        assert_eq!(
+            parts[0]
+                .ranges
+                .iter()
+                .map(prost::Message::encoded_len)
+                .sum::<usize>()
+                + parts[0]
+                    .changesets
+                    .iter()
+                    .map(prost::Message::encoded_len)
+                    .sum::<usize>(),
+            CHUNK_BYTES,
+            "the first part is exactly full: the exact fill is kept, not split"
+        );
+        assert_eq!(
+            parts[1]
+                .ranges
+                .iter()
+                .map(prost::Message::encoded_len)
+                .sum::<usize>(),
+            range_bytes,
+            "the second part holds the third range alone"
+        );
+        let carried: Vec<usize> = parts
+            .iter()
+            .map(|p| p.changesets.iter().map(prost::Message::encoded_len).sum())
+            .collect();
+        assert_eq!(
+            carried,
+            vec![cs_bytes, 0],
+            "the named changeset rides the first part that names it, once"
+        );
+        for (i, part) in parts.iter().enumerate() {
+            let total: usize = part
+                .ranges
+                .iter()
+                .map(prost::Message::encoded_len)
+                .sum::<usize>()
+                + part
+                    .changesets
+                    .iter()
+                    .map(prost::Message::encoded_len)
+                    .sum::<usize>();
+            assert!(
+                total <= CHUNK_BYTES,
+                "part {i} stays within the chunk: {total}"
+            );
+        }
+        assert_eq!(
+            parts.last().unwrap().next_cursor,
+            b"cursor".to_vec(),
+            "the last part carries the walk's cursor"
+        );
+        for part in &parts[..parts.len() - 1] {
+            assert!(
+                part.next_cursor.is_empty(),
+                "only the last part carries the cursor"
+            );
+        }
+    }
+
+    /// A streamed `Log` walks page after page until the history ends or
+    /// the call has served its `limit`: the reply carries every entry
+    /// once, in order, and stops there. The stop's own condition is what
+    /// the unit run's misses at 1579 break: one stops the reply at the
+    /// first page (a history past one scan page loses its tail), the
+    /// other keeps walking past the limit and dies mid-page.
+    #[tokio::test]
+    async fn a_log_walks_to_its_limit_and_no_further() {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        // A history of one scan page plus a tail: the first page ends
+        // before the limit, so the walk must fetch the second page.
+        let count = read::MAX_SCAN + 5;
+        let (_repo, tip) = store
+            .write(|c| {
+                let repo = c.create_repo("r")?;
+                let mut parent = None;
+                for i in 0..count {
+                    let cs = Changeset::new(
+                        parent.iter().copied().collect(),
+                        IdentityTime::new(b"t".to_vec(), b"t@x".to_vec(), 0, 0)
+                            .expect("identity fits the format"),
+                        None,
+                        format!("cs {i}\n").into_bytes(),
+                        [].into(),
+                    )
+                    .expect("changeset fits the format");
+                    let (id, _) = crate::tree::store_changeset(c, repo, &cs, &mut |_| Ok(0))?;
+                    parent = Some(id);
+                }
+                Ok((repo, parent.unwrap()))
+            })
+            .unwrap();
+        let service = test_service(store);
+        let mut reply = service
+            .log(as_default(LogRequest {
+                repo: "r".to_owned(),
+                changeset_id: tip.as_bytes().to_vec(),
+                limit: u32::try_from(count).expect("the count fits a u32"),
+                path: Vec::new(),
+            }))
+            .await
+            .expect("the reply opens")
+            .into_inner();
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        while let Some(part) = tokio::time::timeout(Duration::from_secs(30), reply.next())
+            .await
+            .expect("the reply keeps moving")
+        {
+            let part = part.expect("the reply streams");
+            for entry in part.entries {
+                seen.push(entry.changeset_id);
+            }
+        }
+        assert_eq!(seen.len(), count, "every entry of the history arrives");
+        let mut sorted = seen.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), count, "no entry repeats: {sorted:?}");
+
+        // A limit the history runs past: the reply ends at the limit,
+        // its last part carries the walk's continuation, and no part
+        // without entries follows - a walk that runs past its limit
+        // serves an entry-less part and stops one page later.
+        let head = tip.as_bytes().to_vec();
+        let mut reply = service
+            .log(as_default(LogRequest {
+                repo: "r".to_owned(),
+                changeset_id: head,
+                limit: 5,
+                path: Vec::new(),
+            }))
+            .await
+            .expect("the reply opens")
+            .into_inner();
+        let mut parts = 0;
+        let mut served = 0;
+        while let Some(part) = tokio::time::timeout(Duration::from_secs(30), reply.next())
+            .await
+            .expect("the reply keeps moving")
+        {
+            let part = part.expect("the reply streams");
+            parts += 1;
+            served += part.entries.len();
+            assert!(!part.entries.is_empty(), "an entry-less part arrives");
+        }
+        assert_eq!(served, 5, "the reply serves exactly the limit");
+        assert_eq!(parts, 1, "the five small entries ride one part");
+    }
+
+    /// The overrides are off unless a test arms them: the production
+    /// path returns the real constants, and a run that never armed the
+    /// overrides must poll and bound the statvfs with them. A mutant
+    /// that breaks the override's own comparison answers zero millis
+    /// here - a poll that ticks flat out and a stat bound of no time.
+    #[tokio::test]
+    async fn the_free_space_overrides_off_leave_the_real_constants() {
+        // The overrides are the stuck tests' globals: hold their slot,
+        // so this test's zeroing cannot race a running poll.
+        let _slot = free_space_poll_slot().await;
+        FREE_SPACE_POLL_OVERRIDE.store(0, Ordering::Relaxed);
+        FREE_SPACE_STAT_BOUND_OVERRIDE.store(0, Ordering::Relaxed);
+        assert_eq!(free_space_poll_period(), FREE_SPACE_POLL);
+        assert_eq!(free_space_stat_bound(), FREE_SPACE_STAT_BOUND);
+    }
+
+    /// A request's `x-request-id` names the call's audit lines, and a
+    /// call that sent none still gets one the server made, so every
+    /// line it leaves carries a `request_id` its pair can be found by.
+    #[test]
+    fn a_request_id_names_the_call_and_one_is_made_when_none_sent() {
+        let mut request = as_default(CreateChangesetRequest::default());
+        request.metadata_mut().insert(
+            scion_proto::runtime::request_id::REQUEST_ID,
+            "abc-123".parse().expect("a visible-ascii id parses"),
+        );
+        assert_eq!(request_id_of(&request), "abc-123");
+        let made = request_id_of(&as_default(CreateChangesetRequest::default()));
+        assert!(
+            !made.is_empty() && made != "xyzzy",
+            "a call without an id gets one the server made: {made:?}"
+        );
+        // The server-made id is not a constant either: two calls that
+        // send none do not share one.
+        let again = request_id_of(&as_default(CreateChangesetRequest::default()));
+        assert_ne!(made, again, "two made ids differ");
+    }
+
+    /// The audit's ref values are the content ids' lowercase hex: a
+    /// reader that pairs a line's `old` and `new` with a ref it knows
+    /// reads the same spelling the ids print in.
+    #[test]
+    fn a_hex_id_is_the_bytes_lowercase_hex() {
+        let mut bytes = [0xff_u8; 32];
+        bytes[0] = 0x0a;
+        let id = ChangesetId::try_from(&bytes[..]).unwrap();
+        let hex = hex_id(id.as_bytes());
+        assert_eq!(hex.len(), 64, "a 32-byte id prints 64 hex digits");
+        assert!(hex.starts_with("0aff"), "the bytes print in order: {hex}");
+        assert!(
+            hex.bytes().all(|b| b.is_ascii_hexdigit()),
+            "only hex digits: {hex}"
+        );
+        assert_eq!(hex, hex.to_lowercase(), "the digits are lowercase");
+        assert_eq!(hex_id(&[]), "", "an empty id prints nothing");
+    }
+
+    /// The tx-age gauge samples the oldest open Postgres read
+    /// transaction: a read parked across the sample's period shows in
+    /// the gauge, so a stuck oldest read is visible to a scrape.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_pg_tx_age_gauge_samples_the_oldest_open_read() {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let (blockers, arrived) = hold_read_connections(&store);
+        let metrics = Arc::new(Metrics::default());
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(());
+        tokio::spawn(pg_tx_age_sample(
+            store.clone(),
+            Arc::clone(&metrics),
+            stop_rx,
+        ));
+        assert!(
+            arrived.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "the read parked"
+        );
+        // The gauge moves on the sample's own ticks: poll it, every
+        // 200 ms, until the parked read's age crosses a second - a
+        // sample that never runs would answer zero for ever.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let age = loop {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the gauge never showed the parked read's age"
+            );
+            let text = metrics.render();
+            let line = text
+                .lines()
+                .find(|l| l.starts_with("scion_pg_tx_age_seconds "))
+                .expect("the gauge renders");
+            let age: f64 = line
+                .rsplit(' ')
+                .next()
+                .unwrap()
+                .parse()
+                .expect("the gauge renders a number");
+            if age >= 1.0 {
+                break age;
+            }
+        };
+        assert!(age >= 1.0, "the oldest open read's age shows: {age}");
+        for (blocker, release) in blockers {
+            let _ = release.send(());
+            let _ = blocker.join();
+        }
     }
 
     type Blocker = (

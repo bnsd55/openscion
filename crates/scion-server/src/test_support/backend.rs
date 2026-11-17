@@ -245,6 +245,18 @@ impl Backend {
         Ok(Self { pg })
     }
 
+    /// The backend's write-yield, for the yield-bound test: the wait a
+    /// derivation step runs, through the backend the step runs on.
+    /// Named apart from the crate-internal method it calls.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn yield_to_writers(
+        &self,
+        deadline: Option<&crate::deadline::Deadline>,
+    ) -> crate::error::Result<()> {
+        Backend::wait_for_writers(self, deadline)
+    }
+
     /// The URL a server, an import or a restore on `data` takes: the
     /// test database, with the data directory's own schema as the
     /// search path, which this creates first. The name is the one

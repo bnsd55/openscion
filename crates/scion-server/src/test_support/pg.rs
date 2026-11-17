@@ -243,9 +243,16 @@ fn drop_stale_schemas(maker: &PgClient, automatic: bool, cap: usize) -> (usize, 
             // - falls back to the registration's age, but only when the
             // clock answers: a database that cannot tell the time keeps
             // every schema it cannot date.
+            //
+            // A directory that does not exist yet reads the same as one
+            // that is gone (#1106): a URL taken before its directory's
+            // making had its schema swept between the two. A missing
+            // directory is stale only once the registration is older
+            // than the grace the no-directory rule keeps.
+            let grace = now.is_some_and(|now| started < now.saturating_sub(600));
             let stale = match &dir {
-                Some(recorded) => !Path::new(recorded).exists(),
-                None => now.is_some_and(|now| started < now.saturating_sub(600)),
+                Some(recorded) => !Path::new(recorded).exists() && grace,
+                None => grace,
             };
             if !stale || dropped >= cap {
                 left += 1;

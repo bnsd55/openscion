@@ -8,7 +8,6 @@ edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/bnsd55/openscion"
-homepage = "https://github.com/bnsd55/openscion"
 keywords = ["vcs", "version-control", "monorepo", "git", "source-control"]
 categories = ["development-tools"]
 authors = ["Ben Shaharizad <bnsd55@gmail.com>"]

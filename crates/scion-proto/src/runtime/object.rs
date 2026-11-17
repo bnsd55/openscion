@@ -401,6 +401,38 @@ mod tests {
         }
     }
 
+    /// The zstd-bomb guard: `frame_size` reads a frame's window descriptor
+    /// and refuses a window above [`MAX_WINDOW_BYTES`]. A real frame of 8
+    /// MiB carries the descriptor 0x68 (base 8 MiB, mantissa 0), whose
+    /// window is exactly the limit and must pass; one mantissa step past
+    /// it (0x69, 9 MiB) and a top-exponent descriptor (0x7f, base 32 MiB
+    /// with mantissa 7, 60 MiB) must fail with the window named; the
+    /// largest descriptor 0xff (exponent 31, 15/8 of 2 TiB) is refused by
+    /// the frame parser itself, still a safe refusal, no overflow.
+    #[test]
+    fn a_window_past_the_limit_is_refused_and_the_limit_passes() {
+        let data: Vec<u8> = (0..8 << 20)
+            .map(|i| u8::try_from(i % 251).unwrap())
+            .collect();
+        let frame = pack(&data).unwrap();
+        assert_eq!(frame[4] & 0b10_0000, 0, "the frame carries a window byte");
+        let mut at_limit = frame.clone();
+        at_limit[5] = 0x68;
+        assert_eq!(frame_size(&at_limit).unwrap(), data.len());
+        for descriptor in [0x69u8, 0x7f] {
+            let mut bomb = frame.clone();
+            bomb[5] = descriptor;
+            let err = frame_size(&bomb).unwrap_err();
+            assert!(
+                err.contains("window"),
+                "descriptor {descriptor:#04x}: {err}"
+            );
+        }
+        let mut widest = frame.clone();
+        widest[5] = 0xff;
+        assert!(frame_size(&widest).is_err());
+    }
+
     #[test]
     fn an_object_goes_in_parts_of_one_chunk_but_the_last() {
         for len in [0, 1, CHUNK_BYTES, CHUNK_BYTES + 1, 3 * CHUNK_BYTES + 5] {
@@ -478,12 +510,35 @@ mod tests {
             change(&mut part);
             assert!(start().push(&part).is_err());
         }
+        // A part that sets exactly one field of the first part: each one
+        // alone must refuse, so no arm of the check leans on another.
+        for change in [
+            (|p: &mut ObjectPart| p.id = b"x".to_vec()) as fn(&mut ObjectPart),
+            |p| p.encoding = Encoding::Zstd.into(),
+            |p| p.encoded_size = 1,
+        ] {
+            let mut part = parts[0].clone();
+            change(&mut part);
+            let why = start().push(&part).unwrap_err();
+            assert!(why.contains("sets a field"), "{why}");
+        }
         // Not done before the last part, and nothing after it.
         let mut object = start();
         assert!(!object.is_done());
         object.push(&parts[0]).unwrap();
         assert!(object.is_done());
         assert!(object.push(&parts[0]).is_err());
+    }
+
+    #[test]
+    fn a_raw_decode_of_the_wrong_length_is_refused() {
+        // The Raw arm's guard is the only length check at decode time: a
+        // header that lies about its size must not hand out short bytes.
+        let header = header(Encoding::Raw, 3, 3);
+        let why = decode(&header, b"ab".to_vec()).unwrap_err();
+        assert!(why.contains("2 raw bytes for 3"), "{why}");
+        let why = decode(&header, b"abcd".to_vec()).unwrap_err();
+        assert!(why.contains("4 raw bytes for 3"), "{why}");
     }
 
     /// `data` packed at `level` with a window of 2^`window_log` bytes.
@@ -585,6 +640,14 @@ mod tests {
     }
 
     #[test]
+    fn unpack_bytes_is_the_nine_mib_the_architecture_doc_promises() {
+        // docs/architecture.md, the fetch-budget paragraph: "a blob's codec
+        // (9 MiB: a zstd window is at most 8 MiB)". The window plus the
+        // 1 MiB block: changing either breaks the documented reserve.
+        assert_eq!(UNPACK_BYTES, (8 << 20) + (1 << 20));
+    }
+
+    #[test]
     fn a_frame_with_a_window_over_8_mib_is_refused() {
         // A window of 8 MiB is the largest accepted, in a frame larger than
         // it (not single-segment), and in a single-segment frame of 8 MiB.
@@ -608,6 +671,19 @@ mod tests {
         // The window byte of the frame, set to 16 MiB.
         wide[5] = (24 - 10) << 3;
         let why = frame_size(&wide).unwrap_err();
+        assert!(why.contains("window"), "{why}");
+        // A fractional descriptor: the window is base + base/8*fraction, so
+        // log 23 with fraction 4 is 8 MiB + 1 MiB, refused; the same frame
+        // shape with the window byte of log 22 fraction 4 is 4 MiB + 512 KiB,
+        // accepted. Both pins read the exact formula: a wrong divisor or
+        // multiplier moves one of the two. (The single-segment bit of the
+        // frame header stays off, so the byte at 5 is the window's.)
+        let mut half_under = pack_with(&vec![0; (8 << 20) + 1], 1, 23);
+        half_under[5] = ((22 - 10) << 3) | 4;
+        assert!(frame_size(&half_under).is_ok(), "4.5 MiB window fits");
+        let mut half_over = pack_with(&vec![0; (8 << 20) + 1], 1, 23);
+        half_over[5] = ((23 - 10) << 3) | 4;
+        let why = frame_size(&half_over).unwrap_err();
         assert!(why.contains("window"), "{why}");
     }
 }

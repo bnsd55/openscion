@@ -11,7 +11,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 work=$(mktemp -d "$PWD/.golden-pairing-fixture.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
-git -C "$work" init -q
+git -C "$work" init -q -b fixture
 git -C "$work" config user.email t@example.com
 git -C "$work" config user.name t
 

@@ -190,6 +190,20 @@ fn scn_command(url: &str, repo: &str, args: &[&str]) -> Command {
     command
 }
 
+/// A SIGINT-stopped checkout dies by the signal (the default action is
+/// restored and the signal raised), which a shell reports as 128 plus
+/// the signal's number, and leaves the destination as it was.
+fn assert_signal_death_and_untouched(out: &std::process::Output, dest: &Path) {
+    use std::os::unix::process::ExitStatusExt as _;
+    assert_eq!(out.status.signal(), Some(2), "{}", stderr(out));
+    assert!(
+        stderr(out).contains("interrupted by SIGINT"),
+        "{}",
+        stderr(out)
+    );
+    assert_untouched(dest);
+}
+
 /// Asserts that a failed checkout left `dest` the empty directory it was,
 /// with no temp directory next to it.
 fn assert_untouched(dest: &Path) {
@@ -565,6 +579,37 @@ fn a_tree_with_a_dot_nul_or_slash_name_is_refused_before_anything_is_written() {
     }
 }
 
+/// A checkout stalled on its fetch stops on SIGINT with the shell's
+/// contract: 128 plus the signal number, the message naming the signal,
+/// and the destination untouched - so a shell that runs `scn` stops too,
+/// and a stopped checkout never reads as a success.
+#[test]
+fn a_stopped_checkout_reports_the_signal_and_writes_nothing() {
+    let (_runtime, url) = start_liar(0);
+    let tmp = tempfile::tempdir().unwrap();
+    let dest = tmp.path().join("dest");
+    fs::create_dir(&dest).unwrap();
+    let child = scn_command(
+        &url,
+        "stall",
+        &["checkout", ANY_CHANGESET, "--into", text(&dest)],
+    )
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::piped())
+    .spawn()
+    .unwrap();
+    // The checkout is parked in its fetch, waiting for the reply that
+    // never comes; the signal reaches it there.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    // `kill` by name: `--` keeps a pid that starts with a digit a pid.
+    std::process::Command::new("kill")
+        .args(["-INT", "--", &child.id().to_string()])
+        .status()
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_signal_death_and_untouched(&out, &dest);
+}
+
 #[test]
 fn unsafe_names_fail_before_anything_is_written() {
     let (data, store) = open_store();
@@ -857,6 +902,13 @@ impl Objects for Liar {
         request: Request<GetObjectsRequest>,
     ) -> Result<Response<Replies>, Status> {
         let GetObjectsRequest { refs, .. } = request.into_inner();
+        // The call itself fails: the retry guard in fetch sees errors of
+        // the initial call, not of the stream's middle.
+        match self.repo.lock().unwrap().as_str() {
+            "rpc-error" => return Err(Status::internal("lost the disk")),
+            "denied" => return Err(Status::permission_denied("no view of r")),
+            _ => {}
+        }
         let mut honest: Vec<Object> = refs.iter().map(|r| self.objects[&r.id].clone()).collect();
         let replies: Vec<Result<Object, Status>> = if refs[0].kind == i32::from(ObjectKind::Tree) {
             // A tree reply that ends in the middle of its second part. A
@@ -985,6 +1037,10 @@ fn a_misbehaving_server_is_caught_and_nothing_is_written() {
     let tmp = tempfile::tempdir().unwrap();
 
     for (misbehavior, expected) in [
+        // The call itself fails, and the error surfaces as it is: a
+        // non-expiry error is not an expired ticket to retry on.
+        ("rpc-error", "lost the disk"),
+        ("denied", "no view of r"),
         ("extra", "not asked for"),
         ("duplicate", "not asked for"),
         ("wrong-kind", "not asked for"),

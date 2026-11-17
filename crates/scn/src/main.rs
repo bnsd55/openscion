@@ -341,6 +341,15 @@ mod tests {
     }
 
     #[test]
+    fn a_credentials_text_with_no_second_phrase_still_gets_the_token_hint() {
+        // One phrase only: the `||` of the token arm must not read as an
+        // `&&`, which would demand both phrases and drop the hint.
+        let text = "error authenticating: valid authentication credentials were not provided";
+        let got = hint(text).unwrap();
+        assert!(got.contains("SCION_TOKEN"), "{got}");
+    }
+
+    #[test]
     fn a_cause_that_extends_the_last_part_prints_its_rest() {
         let err = Doubled::of("tcp connect error: refused");
         assert_eq!(chain_text(&err), "outer: tcp connect error: refused");

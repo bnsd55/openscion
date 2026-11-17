@@ -40,6 +40,12 @@ chmod 600 /etc/scion/db-url
   --postgres-url-file /etc/scion/db-url --token-file /srv/scion-token
 ```
 
+The preflight command arrived after v0.1.0: the released v0.1.0 binary
+has no `preflight` subcommand, and its first boot is the `serve` below
+(serve creates the schema and serves; the token file and the URL file
+are the same). The steps after it are written for the build that has
+the command.
+
 The `umask 077` and the printfs make the token file and the database
 URL file private (0600): any user of the machine reads argv with `ps`,
 and a URL file the group can read is refused. The URL file lives
@@ -73,7 +79,10 @@ grpc_health_probe -addr 127.0.0.1:7878 -service scion.v1.Scion
 ```
 
 The probe binary is not part of this repository and does not come with
-the platform; section 6 names where it comes from. The readiness probe
+the platform; get it from the `grpc-ecosystem/grpc-health-probe`
+project's GitHub releases (a single static binary per platform — no
+other install), or use Kubernetes probes, which speak the same
+protocol natively. The readiness probe
 answers `SERVING` once the server listens; the empty
 service name is the liveness probe (`grpc_health_probe -addr
 127.0.0.1:7878` with no `-service`).
@@ -97,11 +106,14 @@ the store — `import`, `fsck`, `gc`, `derive`, `create-repo`, `create-ref`,
 `export`, `restore` — takes the same metadata flags as `serve` (see "The
 metadata in Postgres"): a Postgres-backed import without them answers
 "no Postgres URL". (`ticket-key` and `hash-token` read no store, so they
-take none of them.)
+take none of them. `create-repo` and `create-ref` arrived after v0.1.0;
+the v0.1.0 binary makes a repo and its first ref only through an
+`import`.)
 
 Proof: crates/scion-server/tests/first_boot.rs::a_first_boot_serves_probes_and_reads_back
 
-A repo with no Git history on the server host: `create-repo` makes the
+A repo with no Git history on the server host: `create-repo` (after
+v0.1.0) makes the
 repository, one root changeset (no parents, the empty tree), and its
 first ref at it, so a client can land on the ref at once. The root
 carries the message `create repo <name>` and the command's own time.
@@ -113,7 +125,7 @@ history.
 ```
 
 Another ref in a repository that already holds changesets, without a
-Git import: `create-ref` points a new ref at a changeset the repository
+Git import: `create-ref` (after v0.1.0) points a new ref at a changeset the repository
 holds, named by its hex ID (a client's `log` prints it). A ref that
 exists is refused — moving a ref is a land's compare-and-set — and a
 changeset another repository holds is refused.
@@ -298,7 +310,11 @@ WantedBy=multi-user.target
 ```
 
 The `--migrate` on the serve line is the unattended start's rule
-(section 4): a machine that reboots after an upgrade moves the schema
+(section 4; the flag arrived after v0.1.0, whose serve has no
+`--migrate` — a v0.1.0 start on a database that moved forward refuses
+with the newer-schema rule above, and on its own schema it never sees
+one that is behind): a
+machine that reboots after an upgrade moves the schema
 instead of refusing to come up. The upgrade window itself still runs
 the four steps of section 4 — check, back up, migrate, serve — by hand.
 
@@ -1075,7 +1091,7 @@ so none takes long). Three rules:
 - A database with a **newer** schema than the binary refuses to open,
   with the build's own numbers — for a build one version behind a
   database at 7, the refusal is
-  `corrupt data: database schema version 7 is newer than this build (6)`.
+  `database schema version 7 is newer than this build (6)`.
   Run the old binary until you can upgrade, or restore a backup.
 - A database **behind** the build refuses every open but the two that
   are asked to move it: `serve`, `import`, `gc`, `fsck` and `derive`
@@ -1178,8 +1194,11 @@ message that names the migrate.
 Proof: crates/scion-server/tests/migrations.rs::a_serve_refuses_a_behind_database_until_asked_to_migrate (behaviour, no command: the runbook's steps are operator actions on a stopped server; the test holds the refusal the section quotes and the serve --migrate that ends it)
 Proof: crates/scion-server/tests/migrations.rs::a_check_on_a_fresh_database_prints_the_steps_and_exits_3 (behaviour, no command: the check's exit table the section states — 0 clean, 3 pending — is the test's own assertion)
 
-Where the binaries come from. v0.1.0 is a source release: build the
-version you need from its signed tag (`docs/RELEASING.md`):
+Where the binaries come from. v0.1.0 ships binaries for `linux-x86_64`
+and `macos-aarch64` (scion-server, scion-cache, scion-daemon, scn) in
+its release, each with a checksum and an artifact attestation, and its
+notes say so. A version whose release ships no binaries is built from
+its signed tag (docs/RELEASING.md):
 
 ```sh
 git checkout <tag>
@@ -1474,8 +1493,10 @@ sample lands.
 token: the server's health covers the services `scion.v1.Scion` and
 `scion.v1.Objects`, a tier's covers `scion.v1.Objects`. The server
 serves no gRPC reflection, so a probe tool must know the health protocol
-itself (`grpc_health_probe` does). Get it from that project's GitHub
-releases (a single static binary per platform — no other install), or
+itself (`grpc_health_probe` does). Get it from the
+`grpc-ecosystem/grpc-health-probe` project's GitHub releases
+(github.com/grpc-ecosystem/grpc-health-probe; a single static binary
+per platform — no other install), or
 use Kubernetes probes, which speak the same protocol natively.
 
 Probe the service's name for readiness and the empty name for liveness.
