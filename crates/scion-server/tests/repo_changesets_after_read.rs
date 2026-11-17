@@ -65,22 +65,19 @@ fn the_sweep_read_answers_the_rows_after_its_cursor() {
     assert!(all.iter().all(|row| row.0 == repo));
     // The read orders by the changeset's key bytes, not by insert order.
     let stored: Vec<Vec<u8>> = ids.iter().map(|id| id.as_bytes().to_vec()).collect();
-    for row in all.iter() {
-        assert!(
-            stored.contains(&row.1),
-            "the row names a stored changeset"
-        );
+    for row in &all {
+        assert!(stored.contains(&row.1), "the row names a stored changeset");
         assert!(!row.2.is_empty(), "the row carries its body");
     }
-    assert!(
-        all[0].1 < all[1].1,
-        "the read orders by the changeset key"
-    );
+    assert!(all[0].1 < all[1].1, "the read orders by the changeset key");
     let rest = store
         .write(|c| c.repo_changesets_after(repo, &all[0].1, 10))
         .unwrap();
     assert_eq!(rest.len(), 1, "one row sits after the first");
-    assert_eq!(rest[0].1, all[1].1, "the row after the cursor is the other one");
+    assert_eq!(
+        rest[0].1, all[1].1,
+        "the row after the cursor is the other one"
+    );
 }
 
 /// The limit is a bound, not a target: with the cursor at the start
