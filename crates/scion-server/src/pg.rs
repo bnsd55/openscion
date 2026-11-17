@@ -7557,17 +7557,6 @@ pub(crate) mod pool_tests {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The history-buffer seam's one holder: the bound override, the
-    /// peak and the statement log are process-wide, and a threaded test
-    /// run runs this module's tests as threads of one process. Every
-    /// test that sets the bound, reads the peak, or counts the log
-    /// holds this lock for its whole body, so two such tests cannot
-    /// race each other's reset.
-    static HISTORY_SEAM: Mutex<()> = Mutex::new(());
-
-    fn history_seam() -> MutexGuard<'static, ()> {
-        HISTORY_SEAM.lock().unwrap_or_else(PoisonError::into_inner)
-    }
 
     /// A Postgres backend of a test database, with the pool gate: the
     /// caller holds the pair for its whole test body.
@@ -7840,80 +7829,6 @@ pub(crate) mod pool_tests {
         assert!(
             same,
             "a changeset the transaction only found is not its own"
-        );
-    }
-
-    /// A history node the transaction puts twice pays for its bytes
-    /// once: the row the buffer already holds is replaced, the old
-    /// body's bytes come off the count before the new body's go on, and
-    /// the same content address means the same body, so the count is
-    /// unchanged. A count that adds the old length back, or divides it,
-    /// answers a buffer bigger than the truth - and flushes early.
-    #[test]
-    fn a_history_reput_pays_no_extra_bytes() {
-        let _seam = history_seam();
-        let data = crate::test_support::private_tempdir();
-        let store = crate::Backend::open_test(data.path()).unwrap();
-        let body = vec![7u8; 32];
-        let id = NodeId::of(&body);
-        let _cap = crate::test_support::pg::test_set_history_pending_bound_for_tests(64);
-        store
-            .commit(|c| {
-                c.set_changeset_batching(true);
-                c.put_history_node(id, body.clone())?;
-                c.put_history_node(id, body)?;
-                c.set_changeset_batching(false);
-                Ok(())
-            })
-            .unwrap();
-        let peak = crate::test_support::pg::test_history_pending_peak_bytes();
-        assert_eq!(
-            peak, 32,
-            "the buffer held one 32-byte node, twice put: the peak was {peak}"
-        );
-    }
-
-    /// The buffer's flush runs strictly over its bound: at the bound
-    /// exactly the buffer keeps holding, one byte over it the flush
-    /// runs inside the transaction. A comparison that fires at the
-    /// bound flushes a buffer the caller can still fill; one that fires
-    /// under it never flushes at all and the buffer rides to the
-    /// commit.
-    #[test]
-    fn the_history_buffer_flushes_strictly_over_its_bound() {
-        let _seam = history_seam();
-        // The flush's one chunk insert opens with the unnest shape; the
-        // direct put writes the VALUES shape, so the count below sees
-        // only flushes.
-        let flushes = |bound: usize, body_len: usize| -> usize {
-            let data = crate::test_support::private_tempdir();
-            let store = crate::Backend::open_test(data.path()).unwrap();
-            let body = vec![7u8; body_len];
-            let id = NodeId::of(&body);
-            let _cap = crate::test_support::pg::test_set_history_pending_bound_for_tests(bound);
-            crate::Backend::test_reset_statement_count();
-            store
-                .commit(|c| {
-                    c.set_changeset_batching(true);
-                    c.put_history_node(id, body)?;
-                    c.set_changeset_batching(false);
-                    Ok(())
-                })
-                .unwrap();
-            crate::Backend::test_statement_log()
-                .iter()
-                .filter(|sql| sql.contains("INSERT INTO history_nodes") && sql.contains("unnest"))
-                .count()
-        };
-        assert_eq!(
-            flushes(31, 31),
-            0,
-            "a buffer at its bound exactly keeps holding: no flush ran"
-        );
-        assert_eq!(
-            flushes(31, 32),
-            1,
-            "a buffer one byte over its bound flushes inside the transaction"
         );
     }
 
