@@ -7557,7 +7557,6 @@ pub(crate) mod pool_tests {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-
     /// A Postgres backend of a test database, with the pool gate: the
     /// caller holds the pair for its whole test body.
     /// An open whose batch fails after its BEGIN ran leaves no open

@@ -11,17 +11,18 @@
 use std::sync::{Mutex, MutexGuard};
 
 use scion_core::{BlobId, Changeset, FileState, IdentityTime, RepoPath};
+use scion_server::Backend;
 use scion_server::test_support::meta::{Meta as _, MetaTx as _};
 use scion_server::test_support::pg::{
     test_history_pending_peak_bytes, test_set_history_pending_bound_for_tests,
 };
 use scion_server::test_support::{private_tempdir, tree};
-use scion_server::Backend;
 
 static SEAM: Mutex<()> = Mutex::new(());
 
 fn seam() -> MutexGuard<'static, ()> {
-    SEAM.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    SEAM.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn changeset(name: &str) -> Changeset {
