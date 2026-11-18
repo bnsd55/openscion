@@ -8251,15 +8251,10 @@ pub(crate) mod pool_tests {
         assert_eq!(got.as_deref(), Some(&b"first"[..]));
     }
 
-    /// A re-put of the same derived value is idempotent, not corruption:
-    /// a retried settle re-derives and re-records what it already
-    /// stored. ON CONFLICT DO NOTHING skips the stored row, the short
-    /// inserted count makes the stored-value read, and the read answers
-    /// the same bytes - the check passes. A check that refused every
-    /// conflict would fail the retried settle on a row it wrote
-    /// itself.
-    #[test]
-    fn a_derived_rewrite_of_the_same_stored_value_is_ok() {
+    /// A store with one repo and one root changeset: the shared setup of
+    /// the derived-write tests. The directory stays alive with the
+    /// caller (the store reads it on every open).
+    fn store_with_root() -> (tempfile::TempDir, crate::Backend, ChangesetId) {
         let data = crate::test_support::private_tempdir();
         let store = crate::Backend::open_test(data.path()).unwrap();
         let cs = Changeset::new(
@@ -8277,6 +8272,19 @@ pub(crate) mod pool_tests {
                 c.insert_changeset(repo, &cs)
             })
             .unwrap();
+        (data, store, cs)
+    }
+
+    /// A re-put of the same derived value is idempotent, not corruption:
+    /// a retried settle re-derives and re-records what it already
+    /// stored. ON CONFLICT DO NOTHING skips the stored row, the short
+    /// inserted count makes the stored-value read, and the read answers
+    /// the same bytes - the check passes. A check that refused every
+    /// conflict would fail the retried settle on a row it wrote
+    /// itself.
+    #[test]
+    fn a_derived_rewrite_of_the_same_stored_value_is_ok() {
+        let (_data, store, cs) = store_with_root();
         store
             .commit(|c| c.put_derived("view", 1, cs, b"first"))
             .unwrap();
@@ -8285,6 +8293,45 @@ pub(crate) mod pool_tests {
         // ok.
         store
             .commit(|c| c.put_derived("view", 1, cs, b"first"))
+            .unwrap();
+        let got = store.commit(|c| c.get_derived("view", 1, cs)).unwrap();
+        assert_eq!(got.as_deref(), Some(&b"first"[..]));
+    }
+
+    /// A batched derived write that lands on a stored row of a different
+    /// value is corruption, like the single put: the batch's ON CONFLICT
+    /// DO NOTHING skips the stored row, the short count makes the
+    /// row-by-row check, and the check refuses. A check that ran only
+    /// when the count matched would never see a conflict at all.
+    #[test]
+    fn a_derived_batch_over_a_differing_stored_row_is_refused() {
+        let (_data, store, cs) = store_with_root();
+        store
+            .commit(|c| c.put_derived("view", 1, cs, b"first"))
+            .unwrap();
+        let err = store
+            .commit(|c| c.put_derived_all(&[("view".into(), 1, cs, b"second".to_vec())]))
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("differs from the stored value"),
+            "the disagreeing batch answers {err}"
+        );
+    }
+
+    /// A batched derived write of the value the row already stores is
+    /// legal: a fill may have stored the same value before this
+    /// transaction began. The short count makes the row-by-row check,
+    /// and the read-back agrees, so the write answers ok. A check that
+    /// compared backwards would refuse the agreeing row and pass the
+    /// disagreeing one.
+    #[test]
+    fn a_derived_batch_of_the_same_stored_value_is_ok() {
+        let (_data, store, cs) = store_with_root();
+        store
+            .commit(|c| c.put_derived("view", 1, cs, b"first"))
+            .unwrap();
+        store
+            .commit(|c| c.put_derived_all(&[("view".into(), 1, cs, b"first".to_vec())]))
             .unwrap();
         let got = store.commit(|c| c.get_derived("view", 1, cs)).unwrap();
         assert_eq!(got.as_deref(), Some(&b"first"[..]));
