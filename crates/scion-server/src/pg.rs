@@ -7491,6 +7491,52 @@ mod tests {
         );
     }
 
+    /// The statement retry's gate fences a refused lock, not a setup
+    /// that merely names no schema: a held lock followed by a retry
+    /// whose fresh setup answers `NoSchema` returns the setup error and
+    /// leaves the fence down - a URL mistake is not a takeover.
+    #[test]
+    fn the_statement_retry_does_not_fence_a_setup_that_names_no_schema() {
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let mut client = connect_on(&url, None, "").unwrap();
+        let mut setup = Setup::new(None, false, &mut client);
+        assert!(setup.ok());
+        let mut tx = TxState::Idle;
+        let mut ever_held = true;
+        let fence = Arc::new(Fence::new());
+
+        // The client's backend dies under it, and the retry's reconnect
+        // runs on a url whose schema names nothing: the fresh setup
+        // answers `NoSchema`, the reply is the setup error, and the
+        // fence stays down.
+        let pid: i32 = client
+            .query_one("SELECT pg_backend_pid()", &[])
+            .unwrap()
+            .get(0);
+        let mut killer = postgres::Client::connect(&url, NoTls).unwrap();
+        killer
+            .execute("SELECT pg_terminate_backend($1)", &[&pid])
+            .unwrap();
+        drop(killer);
+
+        let absent = conn(&url, Some("no_such_schema_for_the_statement_retry"), true);
+        let (job, _reply_rx) = job("SELECT 1");
+        let out = run_with_retry(
+            &mut client,
+            &mut setup,
+            &absent,
+            &job,
+            &mut tx,
+            ever_held,
+            Some(&fence),
+        );
+        assert!(
+            matches!(&out, Err(Error::FailedPrecondition(_))),
+            "the setup error answers, not the statement"
+        );
+        assert!(!fence.tripped(), "a schemaless setup is not a takeover");
+    }
+
     /// The loss's own `ROLLBACK` runs on the recovered connection: the
     /// lost transaction's guard sends it, the reconnect succeeds, and
     /// the rollback consumes the loss so the caller's next `BEGIN`
