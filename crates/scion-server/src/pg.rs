@@ -7823,6 +7823,8 @@ mod lane_key_tests {
 pub(crate) mod pool_tests {
     use super::*;
 
+    use crate::store::READERS;
+
     /// A write whose closure panics rolls back whole: the transaction is
     /// dropped un-ended, and the drop's rollback takes the closure's
     /// rows with it. A drop that left the transaction open would join
@@ -7852,7 +7854,6 @@ pub(crate) mod pool_tests {
         );
         pg.read(|tx| tx.repo_id("kept").map(|_| ())).unwrap();
     }
-    use crate::store::READERS;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Mutex, MutexGuard, PoisonError};
 
