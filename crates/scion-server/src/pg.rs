@@ -3150,9 +3150,10 @@ impl TxState {
         if sql.starts_with("ROLLBACK") || (sql.starts_with("COMMIT") && !self.lost()) {
             return TxState::Idle;
         }
-        if self.lost() && !sql.starts_with("COMMIT") {
-            return self;
-        }
+        // Every other pairing keeps the state: a COMMIT does not
+        // clear a lost transaction (its caller must roll back and run
+        // again), and a BEGIN that failed or any other statement
+        // changes nothing.
         self
     }
 }
