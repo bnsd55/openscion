@@ -7822,7 +7822,38 @@ mod lane_key_tests {
 #[cfg(test)]
 pub(crate) mod pool_tests {
     use super::*;
+
     use crate::store::READERS;
+
+    /// A write whose closure panics rolls back whole: the transaction is
+    /// dropped un-ended, and the drop's rollback takes the closure's
+    /// rows with it. A drop that left the transaction open would join
+    /// the next write to it - Postgres answers that `BEGIN` with only a
+    /// warning - and the next write's commit would commit the panicked
+    /// closure's work too.
+    #[test]
+    fn a_panic_in_a_write_rolls_back_and_the_next_write_stays_clean() {
+        use crate::meta::MetaTx as _;
+        let (_gate, pg) = pg();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = pg.write(|tx| {
+                tx.create_repo("panicked").map(|_| ())?;
+                panic!("the test's panic");
+                #[allow(unreachable_code)]
+                Ok(())
+            });
+        }));
+        assert!(unwind.is_err(), "the closure's panic left the write");
+
+        // The next write commits its own work only: the panicked
+        // closure's repo is gone with its transaction.
+        pg.write(|tx| tx.create_repo("kept").map(|_| ())).unwrap();
+        assert!(
+            pg.read(|tx| tx.repo_id("panicked").map(|_| ())).is_err(),
+            "the panicked write's work is gone"
+        );
+        pg.read(|tx| tx.repo_id("kept").map(|_| ())).unwrap();
+    }
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Mutex, MutexGuard, PoisonError};
 
