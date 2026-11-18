@@ -7591,7 +7591,7 @@ mod tests {
 
     /// The reconnect's gate fences a lock that is no longer ours, not a
     /// setup that merely names no schema: a held lock followed by a
-    /// reconnect whose fresh setup answers NoSchema replies the setup
+    /// reconnect whose fresh setup answers `NoSchema` replies the setup
     /// error and leaves the fence down - the caller retries against a
     /// fixed URL, and a URL mistake is not a takeover.
     #[test]
@@ -7673,15 +7673,12 @@ mod tests {
         );
         assert!(matches!(flow, Flow::Go));
         let reply = reply_rx.recv().unwrap();
-        assert!(
-            matches!(reply, Err(_)),
-            "the setup error answers, not the statement"
-        );
+        assert!(reply.is_err(), "the setup error answers, not the statement");
         assert!(!fence.tripped(), "a schemaless setup is not a takeover");
     }
 
     /// The retry gate's one re-apply fences a refused lock, not a setup
-    /// that names no schema: a stale NoSchema setup on a live client
+    /// that names no schema: a stale `NoSchema` setup on a live client
     /// re-applies once, answers the setup error again, and the fence
     /// stays down - the same URL mistake twice, still not a takeover.
     #[test]
@@ -7720,10 +7717,7 @@ mod tests {
         );
         assert!(matches!(flow, Flow::Go));
         let reply = reply_rx.recv().unwrap();
-        assert!(
-            matches!(reply, Err(_)),
-            "the setup error answers, not the statement"
-        );
+        assert!(reply.is_err(), "the setup error answers, not the statement");
         assert!(!fence.tripped(), "a schemaless setup is not a takeover");
     }
 
