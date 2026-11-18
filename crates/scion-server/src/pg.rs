@@ -7502,7 +7502,7 @@ mod tests {
         let mut setup = Setup::new(None, false, &mut client);
         assert!(setup.ok());
         let mut tx = TxState::Idle;
-        let mut ever_held = true;
+        let ever_held = true;
         let fence = Arc::new(Fence::new());
 
         // The client's backend dies under it, and the retry's reconnect
