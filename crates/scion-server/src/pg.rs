@@ -7501,6 +7501,94 @@ mod tests {
         );
     }
 
+    /// The loss's own `ROLLBACK` runs on the recovered connection: the
+    /// lost transaction's guard sends it, the reconnect succeeds, and
+    /// the rollback consumes the loss so the caller's next `BEGIN`
+    /// opens a fresh transaction. Answering the rollback with the loss
+    /// would leave the state lost forever - every later job refused.
+    #[test]
+    fn the_losss_own_rollback_runs_on_the_recovered_connection() {
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let mut client = connect_on(&url, None, "").unwrap();
+        let mut setup = Setup::new(None, false, &mut client);
+        assert!(setup.ok());
+        let mut tx = TxState::InTx;
+        let mut ever_held = false;
+
+        // The client's backend dies under the transaction, and the
+        // reconnect dials a port nothing answers: the loss is recorded
+        // at the failure, and the client stays closed.
+        let pid: i32 = client
+            .query_one("SELECT pg_backend_pid()", &[])
+            .unwrap()
+            .get(0);
+        let mut killer = postgres::Client::connect(&url, NoTls).unwrap();
+        killer
+            .execute("SELECT pg_terminate_backend($1)", &[&pid])
+            .unwrap();
+        drop(killer);
+
+        let dead = Conn {
+            url: "postgres://127.0.0.1:1/scion".to_owned(),
+            ca: None,
+            options: String::new(),
+            schema: None,
+            exclusive: false,
+        };
+        let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
+        let job = Job {
+            sql: "SELECT 1".to_owned(),
+            params: Vec::new(),
+            kind: Kind::Count,
+            reply: reply_tx,
+            raw: None,
+        };
+        let out = run_with_retry(
+            &mut client,
+            &mut setup,
+            &dead,
+            &job,
+            &mut tx,
+            ever_held,
+            None,
+        );
+        assert!(out.is_err());
+        assert!(matches!(tx, TxState::Lost));
+
+        // The guard's ROLLBACK reconnects and runs: the reply is Ok, and
+        // the loss is consumed (the worker folds the state to Idle).
+        let conn = Conn {
+            url: url.clone(),
+            ca: None,
+            options: String::new(),
+            schema: None,
+            exclusive: false,
+        };
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let job = Job {
+            sql: "ROLLBACK".to_owned(),
+            params: Vec::new(),
+            kind: Kind::Count,
+            reply: reply_tx,
+            raw: None,
+        };
+        let flow = run_job(
+            job,
+            &mut client,
+            &mut setup,
+            &conn,
+            &mut tx,
+            &mut ever_held,
+            None,
+        );
+        assert!(matches!(flow, Flow::Go));
+        let reply = reply_rx.recv().unwrap();
+        assert!(
+            matches!(reply, Ok(Reply::Count(_))),
+            "the loss's own rollback runs on the recovered connection"
+        );
+    }
+
     /// The reconnect's gate fences a lock that is no longer ours, not a
     /// setup that merely names no schema: a held lock followed by a
     /// reconnect whose fresh setup answers NoSchema replies the setup
