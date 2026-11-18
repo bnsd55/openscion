@@ -7079,12 +7079,38 @@ impl Meta for Pg {
 #[cfg(test)]
 mod tests {
     use super::{
-        Client, Conn, Flow, Job, Kind, NoTls, Reply, Setup, SetupFailure, TxState, connect_on,
-        connection_gone, delete_prefixes, merged_options, run_job, run_with_retry,
+        Client, Conn, Fence, Flow, Job, Kind, NoTls, Reply, Setup, SetupFailure, TxState,
+        connect_on, connection_gone, delete_prefixes, merged_options, run_job, run_with_retry,
     };
     use crate::error::{Error, Storage};
     use crate::pg::{Pairing, Pg, pairing_decision};
     use std::sync::Arc;
+
+    /// A connection description for one test: the real url or a dead
+    /// port, an optional schema, and whether the session is exclusive.
+    fn conn(url: &str, schema: Option<&str>, exclusive: bool) -> Conn {
+        Conn {
+            url: url.to_owned(),
+            ca: None,
+            options: String::new(),
+            schema: schema.map(str::to_owned),
+            exclusive,
+        }
+    }
+
+    /// A counted job and its reply's receiver, kept or dropped by the
+    /// caller's binding.
+    fn job(sql: &str) -> (Job, std::sync::mpsc::Receiver<Result<Reply, Error>>) {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let job = Job {
+            sql: sql.to_owned(),
+            params: Vec::new(),
+            kind: Kind::Count,
+            reply: reply_tx,
+            raw: None,
+        };
+        (job, reply_rx)
+    }
 
     /// The pairing decision's whole table: every arm of the match, on
     /// both sides of the repos flag. A rename or an arm that flips
@@ -7395,22 +7421,17 @@ mod tests {
             .unwrap();
         drop(killer);
 
-        let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
-        let job = Job {
-            sql: "SELECT 1".to_owned(),
-            params: Vec::new(),
-            kind: Kind::Count,
-            reply: reply_tx,
-            raw: None,
-        };
-        let dead = Conn {
-            url: "postgres://127.0.0.1:1/scion".to_owned(),
-            ca: None,
-            options: String::new(),
-            schema: None,
-            exclusive: false,
-        };
-        let out = run_with_retry(&mut client, &mut setup, &dead, &job, &mut tx, false, None);
+        let (dead_job, _reply_rx) = job("SELECT 1");
+        let dead = conn("postgres://127.0.0.1:1/scion", None, false);
+        let out = run_with_retry(
+            &mut client,
+            &mut setup,
+            &dead,
+            &dead_job,
+            &mut tx,
+            false,
+            None,
+        );
         assert!(out.is_err());
         assert!(matches!(tx, TxState::Lost));
     }
@@ -7445,22 +7466,17 @@ mod tests {
             .unwrap();
         drop(killer);
 
-        let dead = Conn {
-            url: "postgres://127.0.0.1:1/scion".to_owned(),
-            ca: None,
-            options: String::new(),
-            schema: None,
-            exclusive: false,
-        };
-        let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
-        let job = Job {
-            sql: "SELECT 1".to_owned(),
-            params: Vec::new(),
-            kind: Kind::Count,
-            reply: reply_tx,
-            raw: None,
-        };
-        let out = run_with_retry(&mut client, &mut setup, &dead, &job, &mut tx, false, None);
+        let dead = conn("postgres://127.0.0.1:1/scion", None, false);
+        let (dead_job, _reply_rx) = job("SELECT 1");
+        let out = run_with_retry(
+            &mut client,
+            &mut setup,
+            &dead,
+            &dead_job,
+            &mut tx,
+            false,
+            None,
+        );
         assert!(out.is_err());
         assert!(
             client.is_closed(),
@@ -7469,21 +7485,8 @@ mod tests {
 
         // The next job reconnects on the real url and the statement
         // runs: the caller's reply is Ok.
-        let conn = Conn {
-            url: url.clone(),
-            ca: None,
-            options: String::new(),
-            schema: None,
-            exclusive: false,
-        };
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        let job = Job {
-            sql: "SELECT 1".to_owned(),
-            params: Vec::new(),
-            kind: Kind::Count,
-            reply: reply_tx,
-            raw: None,
-        };
+        let conn = conn(&url, None, false);
+        let (job, reply_rx) = job("SELECT 1");
         let flow = run_job(
             job,
             &mut client,
@@ -7501,6 +7504,217 @@ mod tests {
         );
     }
 
+    /// The loss's own `ROLLBACK` runs on the recovered connection: the
+    /// lost transaction's guard sends it, the reconnect succeeds, and
+    /// the rollback consumes the loss so the caller's next `BEGIN`
+    /// opens a fresh transaction. Answering the rollback with the loss
+    /// would leave the state lost forever - every later job refused.
+    #[test]
+    fn a_lost_transactions_rollback_runs_on_the_recovered_connection() {
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let mut client = connect_on(&url, None, "").unwrap();
+        let mut setup = Setup::new(None, false, &mut client);
+        assert!(setup.ok());
+        let mut tx = TxState::InTx;
+        let mut ever_held = false;
+
+        // The client's backend dies under the transaction, and the
+        // reconnect dials a port nothing answers: the loss is recorded
+        // at the failure, and the client stays closed.
+        let pid: i32 = client
+            .query_one("SELECT pg_backend_pid()", &[])
+            .unwrap()
+            .get(0);
+        let mut killer = postgres::Client::connect(&url, NoTls).unwrap();
+        killer
+            .execute("SELECT pg_terminate_backend($1)", &[&pid])
+            .unwrap();
+        drop(killer);
+
+        let dead = conn("postgres://127.0.0.1:1/scion", None, false);
+        let (dead_job, _reply_rx) = job("SELECT 1");
+        let out = run_with_retry(
+            &mut client,
+            &mut setup,
+            &dead,
+            &dead_job,
+            &mut tx,
+            ever_held,
+            None,
+        );
+        assert!(out.is_err());
+        assert!(matches!(tx, TxState::Lost));
+
+        // The guard's ROLLBACK reconnects and runs: the reply is Ok, and
+        // the loss is consumed (the worker folds the state to Idle).
+        let conn = conn(&url, None, false);
+        let (job, reply_rx) = job("ROLLBACK");
+        let flow = run_job(
+            job,
+            &mut client,
+            &mut setup,
+            &conn,
+            &mut tx,
+            &mut ever_held,
+            None,
+        );
+        assert!(matches!(flow, Flow::Go));
+        let reply = reply_rx.recv().unwrap();
+        assert!(
+            matches!(reply, Ok(Reply::Count(_))),
+            "the loss's own rollback runs on the recovered connection"
+        );
+    }
+
+    /// The reconnect's gate fences a lock that is no longer ours, not a
+    /// setup that merely names no schema: a held lock followed by a
+    /// reconnect whose fresh setup answers `NoSchema` replies the setup
+    /// error and leaves the fence down - the caller retries against a
+    /// fixed URL, and a URL mistake is not a takeover.
+    #[test]
+    fn the_reconnect_gate_does_not_fence_a_setup_that_names_no_schema() {
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let mut client = connect_on(&url, None, "").unwrap();
+        let mut setup = Setup::new(None, false, &mut client);
+        assert!(setup.ok());
+        let mut tx = TxState::Idle;
+        let mut ever_held = true;
+        let fence = Arc::new(Fence::new());
+
+        // The client's backend dies under it, and the statement's
+        // reconnect dials a port nothing answers: the client stays
+        // closed, with the lock once held.
+        let pid: i32 = client
+            .query_one("SELECT pg_backend_pid()", &[])
+            .unwrap()
+            .get(0);
+        let mut killer = postgres::Client::connect(&url, NoTls).unwrap();
+        killer
+            .execute("SELECT pg_terminate_backend($1)", &[&pid])
+            .unwrap();
+        drop(killer);
+
+        let dead = conn("postgres://127.0.0.1:1/scion", None, false);
+        let (dead_job, _reply_rx) = job("SELECT 1");
+        let out = run_with_retry(
+            &mut client,
+            &mut setup,
+            &dead,
+            &dead_job,
+            &mut tx,
+            ever_held,
+            None,
+        );
+        assert!(out.is_err());
+        assert!(client.is_closed());
+
+        // The next job reconnects on a url whose schema names nothing:
+        // the fresh setup answers NoSchema, the reply is the setup
+        // error, and the fence stays down.
+        let conn = conn(&url, Some("no_such_schema_for_the_reconnect_gate"), true);
+        let (job, reply_rx) = job("SELECT 1");
+        let flow = run_job(
+            job,
+            &mut client,
+            &mut setup,
+            &conn,
+            &mut tx,
+            &mut ever_held,
+            Some(&fence),
+        );
+        assert!(matches!(flow, Flow::Go));
+        let reply = reply_rx.recv().unwrap();
+        assert!(reply.is_err(), "the setup error answers, not the statement");
+        assert!(!fence.tripped(), "a schemaless setup is not a takeover");
+    }
+
+    /// The retry gate's one re-apply fences a refused lock, not a setup
+    /// that names no schema: a stale `NoSchema` setup on a live client
+    /// re-applies once, answers the setup error again, and the fence
+    /// stays down - the same URL mistake twice, still not a takeover.
+    #[test]
+    fn the_retry_gate_does_not_fence_a_setup_that_names_no_schema() {
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let absent = "no_such_schema_for_the_retry_gate";
+        let mut client = connect_on(&url, None, "").unwrap();
+        let mut setup = Setup::new(Some(absent), true, &mut client);
+        assert!(!setup.ok());
+        let mut tx = TxState::Idle;
+        let mut ever_held = true;
+        let fence = Arc::new(Fence::new());
+        let conn = conn(&url, Some(absent), true);
+        let (job, reply_rx) = job("SELECT 1");
+        let flow = run_job(
+            job,
+            &mut client,
+            &mut setup,
+            &conn,
+            &mut tx,
+            &mut ever_held,
+            Some(&fence),
+        );
+        assert!(matches!(flow, Flow::Go));
+        let reply = reply_rx.recv().unwrap();
+        assert!(reply.is_err(), "the setup error answers, not the statement");
+        assert!(!fence.tripped(), "a schemaless setup is not a takeover");
+    }
+
+    /// A new `BEGIN` after a reconnect passes: the reconnect ended the
+    /// old transaction, so the `BEGIN` opens a fresh one for the
+    /// caller's next statements - answering it with the loss would
+    /// refuse every caller that retries after a database restart.
+    #[test]
+    fn a_new_begin_after_a_reconnect_passes() {
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let mut client = connect_on(&url, None, "").unwrap();
+        let mut setup = Setup::new(None, false, &mut client);
+        assert!(setup.ok());
+        let mut tx = TxState::InTx;
+        let mut ever_held = false;
+
+        let pid: i32 = client
+            .query_one("SELECT pg_backend_pid()", &[])
+            .unwrap()
+            .get(0);
+        let mut killer = postgres::Client::connect(&url, NoTls).unwrap();
+        killer
+            .execute("SELECT pg_terminate_backend($1)", &[&pid])
+            .unwrap();
+        drop(killer);
+
+        let dead = conn("postgres://127.0.0.1:1/scion", None, false);
+        let (dead_job, _reply_rx) = job("SELECT 1");
+        let out = run_with_retry(
+            &mut client,
+            &mut setup,
+            &dead,
+            &dead_job,
+            &mut tx,
+            ever_held,
+            None,
+        );
+        assert!(out.is_err());
+        assert!(matches!(tx, TxState::Lost));
+
+        let conn = conn(&url, None, false);
+        let (job, reply_rx) = job("BEGIN");
+        let flow = run_job(
+            job,
+            &mut client,
+            &mut setup,
+            &conn,
+            &mut tx,
+            &mut ever_held,
+            None,
+        );
+        assert!(matches!(flow, Flow::Go));
+        let reply = reply_rx.recv().unwrap();
+        assert!(
+            matches!(reply, Ok(Reply::Count(_))),
+            "the new BEGIN opens a fresh transaction, not the loss"
+        );
+    }
+
     /// The consumption path the recording relies on: the lost
     /// transaction's own next statement - the ROLLBACK its guard sends
     /// when the connection has recovered - answers the loss and resets
@@ -7513,13 +7727,7 @@ mod tests {
         let mut setup = Setup::new(None, false, &mut client);
         assert!(setup.ok());
         let mut tx = TxState::Lost;
-        let conn = Conn {
-            url: url.clone(),
-            ca: None,
-            options: String::new(),
-            schema: None,
-            exclusive: false,
-        };
+        let conn = conn(&url, None, false);
         let job_of = |sql: &str| {
             let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
             Job {
