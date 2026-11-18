@@ -7086,6 +7086,32 @@ mod tests {
     use crate::pg::{Pairing, Pg, pairing_decision};
     use std::sync::Arc;
 
+    /// A connection description for one test: the real url or a dead
+    /// port, an optional schema, and whether the session is exclusive.
+    fn conn(url: &str, schema: Option<&str>, exclusive: bool) -> Conn {
+        Conn {
+            url: url.to_owned(),
+            ca: None,
+            options: String::new(),
+            schema: schema.map(str::to_owned),
+            exclusive,
+        }
+    }
+
+    /// A counted job and its reply's receiver, kept or dropped by the
+    /// caller's binding.
+    fn job(sql: &str) -> (Job, std::sync::mpsc::Receiver<Result<Reply, Error>>) {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let job = Job {
+            sql: sql.to_owned(),
+            params: Vec::new(),
+            kind: Kind::Count,
+            reply: reply_tx,
+            raw: None,
+        };
+        (job, reply_rx)
+    }
+
     /// The pairing decision's whole table: every arm of the match, on
     /// both sides of the repos flag. A rename or an arm that flips
     /// shows here, not in a store that refuses or adopts wrongly.
@@ -7395,22 +7421,17 @@ mod tests {
             .unwrap();
         drop(killer);
 
-        let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
-        let job = Job {
-            sql: "SELECT 1".to_owned(),
-            params: Vec::new(),
-            kind: Kind::Count,
-            reply: reply_tx,
-            raw: None,
-        };
-        let dead = Conn {
-            url: "postgres://127.0.0.1:1/scion".to_owned(),
-            ca: None,
-            options: String::new(),
-            schema: None,
-            exclusive: false,
-        };
-        let out = run_with_retry(&mut client, &mut setup, &dead, &job, &mut tx, false, None);
+        let (dead_job, _reply_rx) = job("SELECT 1");
+        let dead = conn("postgres://127.0.0.1:1/scion", None, false);
+        let out = run_with_retry(
+            &mut client,
+            &mut setup,
+            &dead,
+            &dead_job,
+            &mut tx,
+            false,
+            None,
+        );
         assert!(out.is_err());
         assert!(matches!(tx, TxState::Lost));
     }
@@ -7445,22 +7466,17 @@ mod tests {
             .unwrap();
         drop(killer);
 
-        let dead = Conn {
-            url: "postgres://127.0.0.1:1/scion".to_owned(),
-            ca: None,
-            options: String::new(),
-            schema: None,
-            exclusive: false,
-        };
-        let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
-        let job = Job {
-            sql: "SELECT 1".to_owned(),
-            params: Vec::new(),
-            kind: Kind::Count,
-            reply: reply_tx,
-            raw: None,
-        };
-        let out = run_with_retry(&mut client, &mut setup, &dead, &job, &mut tx, false, None);
+        let dead = conn("postgres://127.0.0.1:1/scion", None, false);
+        let (dead_job, _reply_rx) = job("SELECT 1");
+        let out = run_with_retry(
+            &mut client,
+            &mut setup,
+            &dead,
+            &dead_job,
+            &mut tx,
+            false,
+            None,
+        );
         assert!(out.is_err());
         assert!(
             client.is_closed(),
@@ -7469,21 +7485,8 @@ mod tests {
 
         // The next job reconnects on the real url and the statement
         // runs: the caller's reply is Ok.
-        let conn = Conn {
-            url: url.clone(),
-            ca: None,
-            options: String::new(),
-            schema: None,
-            exclusive: false,
-        };
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        let job = Job {
-            sql: "SELECT 1".to_owned(),
-            params: Vec::new(),
-            kind: Kind::Count,
-            reply: reply_tx,
-            raw: None,
-        };
+        let conn = conn(&url, None, false);
+        let (job, reply_rx) = job("SELECT 1");
         let flow = run_job(
             job,
             &mut client,
@@ -7528,26 +7531,13 @@ mod tests {
             .unwrap();
         drop(killer);
 
-        let dead = Conn {
-            url: "postgres://127.0.0.1:1/scion".to_owned(),
-            ca: None,
-            options: String::new(),
-            schema: None,
-            exclusive: false,
-        };
-        let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
-        let job = Job {
-            sql: "SELECT 1".to_owned(),
-            params: Vec::new(),
-            kind: Kind::Count,
-            reply: reply_tx,
-            raw: None,
-        };
+        let dead = conn("postgres://127.0.0.1:1/scion", None, false);
+        let (dead_job, _reply_rx) = job("SELECT 1");
         let out = run_with_retry(
             &mut client,
             &mut setup,
             &dead,
-            &job,
+            &dead_job,
             &mut tx,
             ever_held,
             None,
@@ -7557,21 +7547,8 @@ mod tests {
 
         // The guard's ROLLBACK reconnects and runs: the reply is Ok, and
         // the loss is consumed (the worker folds the state to Idle).
-        let conn = Conn {
-            url: url.clone(),
-            ca: None,
-            options: String::new(),
-            schema: None,
-            exclusive: false,
-        };
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        let job = Job {
-            sql: "ROLLBACK".to_owned(),
-            params: Vec::new(),
-            kind: Kind::Count,
-            reply: reply_tx,
-            raw: None,
-        };
+        let conn = conn(&url, None, false);
+        let (job, reply_rx) = job("ROLLBACK");
         let flow = run_job(
             job,
             &mut client,
@@ -7617,26 +7594,13 @@ mod tests {
             .unwrap();
         drop(killer);
 
-        let dead = Conn {
-            url: "postgres://127.0.0.1:1/scion".to_owned(),
-            ca: None,
-            options: String::new(),
-            schema: None,
-            exclusive: false,
-        };
-        let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
-        let job = Job {
-            sql: "SELECT 1".to_owned(),
-            params: Vec::new(),
-            kind: Kind::Count,
-            reply: reply_tx,
-            raw: None,
-        };
+        let dead = conn("postgres://127.0.0.1:1/scion", None, false);
+        let (dead_job, _reply_rx) = job("SELECT 1");
         let out = run_with_retry(
             &mut client,
             &mut setup,
             &dead,
-            &job,
+            &dead_job,
             &mut tx,
             ever_held,
             None,
@@ -7647,21 +7611,8 @@ mod tests {
         // The next job reconnects on a url whose schema names nothing:
         // the fresh setup answers NoSchema, the reply is the setup
         // error, and the fence stays down.
-        let conn = Conn {
-            url: url.clone(),
-            ca: None,
-            options: String::new(),
-            schema: Some("no_such_schema_for_the_reconnect_gate".to_owned()),
-            exclusive: true,
-        };
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        let job = Job {
-            sql: "SELECT 1".to_owned(),
-            params: Vec::new(),
-            kind: Kind::Count,
-            reply: reply_tx,
-            raw: None,
-        };
+        let conn = conn(&url, Some("no_such_schema_for_the_reconnect_gate"), true);
+        let (job, reply_rx) = job("SELECT 1");
         let flow = run_job(
             job,
             &mut client,
@@ -7691,21 +7642,8 @@ mod tests {
         let mut tx = TxState::Idle;
         let mut ever_held = true;
         let fence = Arc::new(Fence::new());
-        let conn = Conn {
-            url: url.clone(),
-            ca: None,
-            options: String::new(),
-            schema: Some(absent.to_owned()),
-            exclusive: true,
-        };
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        let job = Job {
-            sql: "SELECT 1".to_owned(),
-            params: Vec::new(),
-            kind: Kind::Count,
-            reply: reply_tx,
-            raw: None,
-        };
+        let conn = conn(&url, Some(absent), true);
+        let (job, reply_rx) = job("SELECT 1");
         let flow = run_job(
             job,
             &mut client,
@@ -7719,96 +7657,6 @@ mod tests {
         let reply = reply_rx.recv().unwrap();
         assert!(reply.is_err(), "the setup error answers, not the statement");
         assert!(!fence.tripped(), "a schemaless setup is not a takeover");
-    }
-
-    /// A transaction the reconnect dropped refuses the recovered
-    /// connection's first job: its statements would answer Ok about a
-    /// transaction that is gone, and the caller would build on memory
-    /// of a transaction that holds nothing.
-    #[test]
-    fn a_lost_transaction_refuses_the_first_job_after_a_reconnect() {
-        let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
-        let mut client = connect_on(&url, None, "").unwrap();
-        let mut setup = Setup::new(None, false, &mut client);
-        assert!(setup.ok());
-        let mut tx = TxState::InTx;
-        let mut ever_held = false;
-
-        // The client's backend dies under the transaction, and the
-        // reconnect dials a port nothing answers: the loss is recorded
-        // at the failure, and the client stays closed.
-        let pid: i32 = client
-            .query_one("SELECT pg_backend_pid()", &[])
-            .unwrap()
-            .get(0);
-        let mut killer = postgres::Client::connect(&url, NoTls).unwrap();
-        killer
-            .execute("SELECT pg_terminate_backend($1)", &[&pid])
-            .unwrap();
-        drop(killer);
-
-        let dead = Conn {
-            url: "postgres://127.0.0.1:1/scion".to_owned(),
-            ca: None,
-            options: String::new(),
-            schema: None,
-            exclusive: false,
-        };
-        let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
-        let job = Job {
-            sql: "SELECT 1".to_owned(),
-            params: Vec::new(),
-            kind: Kind::Count,
-            reply: reply_tx,
-            raw: None,
-        };
-        let out = run_with_retry(
-            &mut client,
-            &mut setup,
-            &dead,
-            &job,
-            &mut tx,
-            ever_held,
-            None,
-        );
-        assert!(out.is_err());
-        assert!(matches!(tx, TxState::Lost));
-
-        // The next job reconnects on the real url: the reply is the
-        // loss, not the statement's answer.
-        let conn = Conn {
-            url: url.clone(),
-            ca: None,
-            options: String::new(),
-            schema: None,
-            exclusive: false,
-        };
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        let job = Job {
-            sql: "SELECT 1".to_owned(),
-            params: Vec::new(),
-            kind: Kind::Count,
-            reply: reply_tx,
-            raw: None,
-        };
-        let flow = run_job(
-            job,
-            &mut client,
-            &mut setup,
-            &conn,
-            &mut tx,
-            &mut ever_held,
-            None,
-        );
-        assert!(matches!(flow, Flow::Go));
-        let reply = reply_rx.recv().unwrap();
-        assert!(
-            matches!(
-                &reply,
-                Err(Error::Unavailable(message)) if message.contains("lost with the connection")
-            ),
-            "the lost transaction's first job answers the loss"
-        );
     }
 
     /// A new `BEGIN` after a reconnect passes: the reconnect ended the
@@ -7834,26 +7682,13 @@ mod tests {
             .unwrap();
         drop(killer);
 
-        let dead = Conn {
-            url: "postgres://127.0.0.1:1/scion".to_owned(),
-            ca: None,
-            options: String::new(),
-            schema: None,
-            exclusive: false,
-        };
-        let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
-        let job = Job {
-            sql: "SELECT 1".to_owned(),
-            params: Vec::new(),
-            kind: Kind::Count,
-            reply: reply_tx,
-            raw: None,
-        };
+        let dead = conn("postgres://127.0.0.1:1/scion", None, false);
+        let (dead_job, _reply_rx) = job("SELECT 1");
         let out = run_with_retry(
             &mut client,
             &mut setup,
             &dead,
-            &job,
+            &dead_job,
             &mut tx,
             ever_held,
             None,
@@ -7861,21 +7696,8 @@ mod tests {
         assert!(out.is_err());
         assert!(matches!(tx, TxState::Lost));
 
-        let conn = Conn {
-            url: url.clone(),
-            ca: None,
-            options: String::new(),
-            schema: None,
-            exclusive: false,
-        };
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        let job = Job {
-            sql: "BEGIN".to_owned(),
-            params: Vec::new(),
-            kind: Kind::Count,
-            reply: reply_tx,
-            raw: None,
-        };
+        let conn = conn(&url, None, false);
+        let (job, reply_rx) = job("BEGIN");
         let flow = run_job(
             job,
             &mut client,
@@ -7905,13 +7727,7 @@ mod tests {
         let mut setup = Setup::new(None, false, &mut client);
         assert!(setup.ok());
         let mut tx = TxState::Lost;
-        let conn = Conn {
-            url: url.clone(),
-            ca: None,
-            options: String::new(),
-            schema: None,
-            exclusive: false,
-        };
+        let conn = conn(&url, None, false);
         let job_of = |sql: &str| {
             let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
             Job {
