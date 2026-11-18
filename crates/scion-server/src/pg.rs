@@ -1054,6 +1054,12 @@ pub(crate) fn pairing_decision(
 /// the registry is the test helpers', so a production refusal reads
 /// exactly as it did - the read answers null or fails, and the error
 /// goes back unchanged.
+///
+/// Test-build only (any test, feature = "test-hooks"): the registry it
+/// reads is the test helpers' table, and production builds carry no
+/// knowledge of it. The other builds take the paired stub below, which
+/// returns the refusal unchanged, so the call sites stay one line.
+#[cfg(any(test, feature = "test-hooks"))]
 fn refuse_naming_the_schema_record(writer: &mut PgClient, error: Error) -> Error {
     let row = writer
         .query_opt(
@@ -1078,6 +1084,15 @@ fn refuse_naming_the_schema_record(writer: &mut PgClient, error: Error) -> Error
         age.map(|seconds| format!(", registered {seconds} s before this open"))
             .unwrap_or_default()
     ))
+}
+
+/// The production-build stub of [`refuse_naming_the_schema_record`]:
+/// the refusal goes back unchanged, because the record it would name
+/// is the test helpers' registry, and a production build knows no
+/// such table.
+#[cfg(not(any(test, feature = "test-hooks")))]
+fn refuse_naming_the_schema_record(_writer: &mut PgClient, error: Error) -> Error {
+    error
 }
 
 /// The identity of this database, minted at the first open. The marker
