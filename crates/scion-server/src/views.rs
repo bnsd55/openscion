@@ -1403,6 +1403,117 @@ mod tests {
         assert_eq!(stale_left, None, "the refresh swept the stale row");
     }
 
+    /// Writes one memo row of `digest` at `version`, with the shared
+    /// dead-tree key of the sweep test.
+    fn put_dead_row(store: &Backend, repo: RepoId, digest: &[u8; 32], version: u32) {
+        let tree = scion_core::TreeId::from_bytes([11_u8; 32]);
+        let ctx = [12_u8; 32];
+        let view = scion_core::TreeId::from_bytes([13_u8; 32]);
+        store
+            .write(|c| c.put_view_tree(repo, digest, version, tree, ctx, view))
+            .unwrap();
+    }
+
+    /// A refresh sweeps current-version rows whose digest no grant of
+    /// the repo hashes to any more, up to the step's remaining budget,
+    /// and keeps the live digest's rows. The sweep's first arm clears
+    /// the older-version rows, so the second arm's budget is the step
+    /// minus what the first arm removed.
+    #[test]
+    fn a_refresh_sweeps_rows_of_digests_no_grant_holds_any_more() {
+        let (dir, store) = store();
+        let (_dir, store, repo, tip, digest) = repo_of_two_folders_on(dir, store);
+        let prefixes: Vec<RepoPath> = ["left/x", "right/y"]
+            .iter()
+            .map(|p| RepoPath::new(*p).unwrap())
+            .collect();
+        let deadline = alive();
+        let live = [digest];
+        let metrics = crate::metrics::Metrics::default();
+        let view = view_root(
+            &store, repo, &digest, tip, &prefixes, &live, &metrics, &deadline,
+        )
+        .unwrap();
+        let fresh = rows(&store);
+        // One row of an older projection version: the first arm's work.
+        put_dead_row(&store, repo, &digest, u32::from(PROJECTION_VERSION) - 1);
+        // The step's budget of rows plus one, all at the current
+        // version, each under a digest no grant of this repo hashes to:
+        // the second arm's candidates, one past what its budget takes
+        // after the first arm's removal.
+        let dead_digests: Vec<[u8; 32]> = (0..=VIEW_EXPIRE_STEP)
+            .map(|i| {
+                let mut d = [0_u8; 32];
+                d[0] = u8::try_from(i % 256).unwrap();
+                d[1] = u8::try_from(i / 256).unwrap();
+                d
+            })
+            .collect();
+        for d in &dead_digests {
+            put_dead_row(&store, repo, d, u32::from(PROJECTION_VERSION));
+        }
+        assert_eq!(
+            rows(&store),
+            fresh + 1 + VIEW_EXPIRE_STEP + 1,
+            "the stale row and the dead-digest rows are stored"
+        );
+        // A real refresh: a new changeset that changes only a hidden
+        // path keeps the view but makes the derivation write, and the
+        // write sweeps.
+        let cs2 = store
+            .write(|c| {
+                let z2 = store.blobs().put(b"z changed again\n").unwrap();
+                let state = FileState::Regular {
+                    content: z2,
+                    executable: false,
+                };
+                c.insert_changeset(
+                    repo,
+                    &Changeset::new(
+                        vec![tip],
+                        scion_core::IdentityTime::new(
+                            b"Ada".to_vec(),
+                            b"ada@example.com".to_vec(),
+                            1_700_000_002,
+                            0,
+                        )
+                        .expect("identity fits the format"),
+                        None,
+                        b"hidden change\n".to_vec(),
+                        [(RepoPath::new("secret/z").unwrap(), Some(state))].into(),
+                    )
+                    .expect("changeset fits the format"),
+                )
+            })
+            .unwrap();
+        let again = view_root(
+            &store, repo, &digest, cs2, &prefixes, &live, &metrics, &deadline,
+        )
+        .unwrap();
+        assert_eq!(again, view, "the live digest's rows still serve the view");
+        // The first arm took the older-version row, so the second
+        // arm's budget is the step minus one: that many dead-digest
+        // rows go, one past the budget stays. Which dead rows the store
+        // picked is its choice, so the count carries the assertion.
+        let stale_left = store
+            .read(|c| {
+                c.get_view_tree(
+                    repo,
+                    &digest,
+                    u32::from(PROJECTION_VERSION) - 1,
+                    scion_core::TreeId::from_bytes([11_u8; 32]),
+                    [12_u8; 32],
+                )
+            })
+            .unwrap();
+        assert_eq!(stale_left, None, "the first arm swept the stale row");
+        assert_eq!(
+            rows(&store),
+            fresh + 1 + 2,
+            "the sweep took the budget's dead-digest rows, kept one and the live rows"
+        );
+    }
+
     /// The memo write is idempotent for the same view and refuses a
     /// different view under a key another derivation already answered:
     /// derivation is deterministic, so a mismatch is corruption.
