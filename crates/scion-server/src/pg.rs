@@ -8220,6 +8220,45 @@ pub(crate) mod pool_tests {
         assert_eq!(got.as_deref(), Some(&b"first"[..]));
     }
 
+    /// A re-put of the same derived value is idempotent, not corruption:
+    /// a retried settle re-derives and re-records what it already
+    /// stored. ON CONFLICT DO NOTHING skips the stored row, the short
+    /// inserted count makes the stored-value read, and the read answers
+    /// the same bytes - the check passes. A check that refused every
+    /// conflict would fail the retried settle on a row it wrote
+    /// itself.
+    #[test]
+    fn a_derived_rewrite_of_the_same_stored_value_is_ok() {
+        let data = crate::test_support::private_tempdir();
+        let store = crate::Backend::open_test(data.path()).unwrap();
+        let cs = Changeset::new(
+            vec![],
+            scion_core::IdentityTime::new(b"Ada".to_vec(), b"ada@example.com".to_vec(), 0, 0)
+                .expect("identity fits the format"),
+            None,
+            b"root".to_vec(),
+            std::collections::BTreeMap::new(),
+        )
+        .expect("changeset fits the format");
+        let cs = store
+            .commit(|c| {
+                let repo = c.create_repo("r")?;
+                c.insert_changeset(repo, &cs)
+            })
+            .unwrap();
+        store
+            .commit(|c| c.put_derived("view", 1, cs, b"first"))
+            .unwrap();
+        // The same value again, a new transaction: the conflict keeps
+        // the stored row, the read-back agrees, and the write answers
+        // ok.
+        store
+            .commit(|c| c.put_derived("view", 1, cs, b"first"))
+            .unwrap();
+        let got = store.commit(|c| c.get_derived("view", 1, cs)).unwrap();
+        assert_eq!(got.as_deref(), Some(&b"first"[..]));
+    }
+
     /// The transaction's inserted-gens memory answers the contract the
     /// derived write rides on: a changeset this transaction wrote is
     /// its own, and one it only found - the row already existed - is
