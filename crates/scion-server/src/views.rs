@@ -1404,13 +1404,13 @@ mod tests {
     }
 
     /// Writes one memo row of `digest` at `version`, with the shared
-    /// dead-tree key of the sweep test.
-    fn put_dead_row(store: &Backend, repo: RepoId, digest: &[u8; 32], version: u32) {
+    /// dead-tree key of the sweep tests, into the transaction the
+    /// caller holds.
+    fn put_dead_row(c: &mut crate::pg::PgTx<'_>, repo: RepoId, digest: &[u8; 32], version: u32) {
         let tree = scion_core::TreeId::from_bytes([11_u8; 32]);
         let ctx = [12_u8; 32];
         let view = scion_core::TreeId::from_bytes([13_u8; 32]);
-        store
-            .write(|c| c.put_view_tree(repo, digest, version, tree, ctx, view))
+        c.put_view_tree(repo, digest, version, tree, ctx, view)
             .unwrap();
     }
 
@@ -1436,22 +1436,22 @@ mod tests {
         .unwrap();
         let fresh = rows(&store);
         // One row of an older projection version: the first arm's work.
-        put_dead_row(&store, repo, &digest, u32::from(PROJECTION_VERSION) - 1);
-        // The step's budget of rows plus one, all at the current
-        // version, each under a digest no grant of this repo hashes to:
-        // the second arm's candidates, one past what its budget takes
-        // after the first arm's removal.
-        let dead_digests: Vec<[u8; 32]> = (0..=VIEW_EXPIRE_STEP)
-            .map(|i| {
-                let mut d = [0_u8; 32];
-                d[0] = u8::try_from(i % 256).unwrap();
-                d[1] = u8::try_from(i / 256).unwrap();
-                d
+        store
+            .write(|c| {
+                put_dead_row(c, repo, &digest, u32::from(PROJECTION_VERSION) - 1);
+                // The step's budget of rows plus one, all at the current
+                // version, each under a digest no grant of this repo
+                // hashes to: the second arm's candidates, two past what
+                // its budget takes after the first arm's removal.
+                for i in 0..=VIEW_EXPIRE_STEP {
+                    let mut d = [0_u8; 32];
+                    d[0] = u8::try_from(i % 256).unwrap();
+                    d[1] = u8::try_from(i / 256).unwrap();
+                    put_dead_row(c, repo, &d, u32::from(PROJECTION_VERSION));
+                }
+                Ok::<(), crate::error::Error>(())
             })
-            .collect();
-        for d in &dead_digests {
-            put_dead_row(&store, repo, d, u32::from(PROJECTION_VERSION));
-        }
+            .unwrap();
         assert_eq!(
             rows(&store),
             fresh + 1 + VIEW_EXPIRE_STEP + 1,
@@ -1493,8 +1493,9 @@ mod tests {
         assert_eq!(again, view, "the live digest's rows still serve the view");
         // The first arm took the older-version row, so the second
         // arm's budget is the step minus one: that many dead-digest
-        // rows go, one past the budget stays. Which dead rows the store
-        // picked is its choice, so the count carries the assertion.
+        // rows go, and two stay. Which dead rows the store picked is
+        // its choice, so the count carries the assertion; the plus one
+        // is the refresh's own new root row.
         let stale_left = store
             .read(|c| {
                 c.get_view_tree(
@@ -1507,10 +1508,12 @@ mod tests {
             })
             .unwrap();
         assert_eq!(stale_left, None, "the first arm swept the stale row");
+        let new_root = 1;
+        let dead_left = (VIEW_EXPIRE_STEP + 1) - (VIEW_EXPIRE_STEP - 1);
         assert_eq!(
             rows(&store),
-            fresh + 1 + 2,
-            "the sweep took the budget's dead-digest rows, kept one and the live rows"
+            fresh + new_root + dead_left,
+            "the sweep took the budget's dead-digest rows, kept the other two and the live rows"
         );
     }
 
