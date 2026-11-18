@@ -7510,7 +7510,7 @@ mod tests {
     /// opens a fresh transaction. Answering the rollback with the loss
     /// would leave the state lost forever - every later job refused.
     #[test]
-    fn the_losss_own_rollback_runs_on_the_recovered_connection() {
+    fn a_lost_transactions_rollback_runs_on_the_recovered_connection() {
         let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
         let mut client = connect_on(&url, None, "").unwrap();
         let mut setup = Setup::new(None, false, &mut client);
