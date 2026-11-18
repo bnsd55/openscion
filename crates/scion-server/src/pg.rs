@@ -1045,6 +1045,41 @@ pub(crate) fn pairing_decision(
     }
 }
 
+/// Appends the schema's own record to an open refusal, when the schema
+/// carries one: a test schema's comment names the directory its open
+/// registered, and the test registry holds the registration's time.
+/// The note makes a schema-and-directory mismatch self-naming (#1233):
+/// the log then says which directory registered the schema, and how
+/// long before this open. A production schema carries no comment, and
+/// the registry is the test helpers', so a production refusal reads
+/// exactly as it did - the read answers null or fails, and the error
+/// goes back unchanged.
+fn refuse_naming_the_schema_record(writer: &mut PgClient, error: Error) -> Error {
+    let row = writer
+        .query_opt(
+            "SELECT obj_description(current_schema()::regnamespace, 'pg_namespace') AS dir,
+                    (SELECT extract(epoch from now())::bigint - started
+                     FROM public.scion_test_schemas
+                     WHERE schema = current_schema()) AS age",
+            &[],
+        )
+        .ok()
+        .flatten();
+    let Some(row) = row else {
+        return error;
+    };
+    let recorded: Option<String> = row.get("dir");
+    let Some(recorded) = recorded.filter(|dir| !dir.is_empty()) else {
+        return error;
+    };
+    let age: Option<i64> = row.get("age");
+    Error::FailedPrecondition(format!(
+        "{error}; the schema's own record names the directory {recorded}{}",
+        age.map(|seconds| format!(", registered {seconds} s before this open"))
+            .unwrap_or_default()
+    ))
+}
+
 /// The identity of this database, minted at the first open. The marker
 /// file of the data directory carries the same UUID, and an open that
 /// finds the two different refuses: a database restored on a directory
@@ -1103,7 +1138,9 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
                 );
             }
             Pairing::Fresh => unreachable!("the database names its store"),
-            Pairing::Refuse(error) => return Err(error),
+            Pairing::Refuse(error) => {
+                return Err(refuse_naming_the_schema_record(writer, error));
+            }
         }
         Ok(uuid)
     } else {
@@ -1125,7 +1162,9 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
         let fresh = match pairing_decision(marker.uuid, None, has_repos) {
             Pairing::Agree | Pairing::AdoptCut => unreachable!("the database holds no store"),
             Pairing::Fresh => marker.uuid.unwrap_or_else(uuid_new),
-            Pairing::Refuse(error) => return Err(error),
+            Pairing::Refuse(error) => {
+                return Err(refuse_naming_the_schema_record(writer, error));
+            }
         };
         writer
             .query(
@@ -7913,6 +7952,32 @@ pub(crate) mod pool_tests {
         SERVER_SIZED_POOL
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A refusal of a markerless directory names the schema's own
+    /// record (#1233): the schema's comment (the directory its open
+    /// registered) and the registry's age join the error, so the next
+    /// schema-and-directory mismatch names its owner from the log
+    /// alone. A schema with no comment leaves the refusal as it was.
+    #[test]
+    fn a_refusal_of_a_markerless_dir_names_the_schemas_recorded_directory() {
+        let data = crate::test_support::private_tempdir();
+        let store = crate::Backend::open_test(data.path()).unwrap();
+        store.commit(|c| c.create_repo("r").map(|_| ())).unwrap();
+        drop(store);
+        // The schema stays served (a repo row), the directory forgets
+        // its store: the next open pairs (no marker, held, repos) and
+        // refuses. The marker file is backend.rs's MARKER.
+        std::fs::remove_file(data.path().join("backend")).unwrap();
+        let Err(refused) = crate::Backend::open_test(data.path()) else {
+            panic!("the markerless open of a served schema answered ok")
+        };
+        let text = format!("{refused}");
+        assert!(text.contains("carries no marker"), "{text}");
+        assert!(
+            text.contains(&data.path().to_string_lossy().to_string()),
+            "{text}"
+        );
     }
 
     /// A Postgres backend of a test database, with the pool gate: the
