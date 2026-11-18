@@ -5201,19 +5201,6 @@ impl MetaTx for PgTx<'_> {
             .ok_or_else(|| Error::NotFound(format!("changeset {id}")))
     }
 
-    /// The first parent of a changeset, or `None` for a root.
-    #[cfg(any(test, feature = "test-hooks"))]
-    fn first_parent(&mut self, id: ChangesetId) -> Result<Option<ChangesetId>> {
-        let parent = self
-            .c
-            .query_opt(
-                "SELECT parent FROM changeset_parents WHERE cs = $1 AND n = 0",
-                &[P::bytes(&id_bytes(id.as_bytes()))],
-            )?
-            .map(|row| row.get::<_, Vec<u8>>(0));
-        parent.map(|bytes| to_id(&bytes)).transpose()
-    }
-
     /// Every parent of changeset `id`, in order, with its generation.
     ///
     /// # Errors
