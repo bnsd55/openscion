@@ -140,14 +140,18 @@ impl Lazyfs {
             }
             None => round_dir.join(format!("lazyfs-r{round}-mount.log")),
         };
-        fs::write(&config, format!(
-            "[faults]\nfifo_path=\"{}\"\nfifo_path_completed=\"{}\"\n\
-             [cache]\napply_eviction=false\n[cache.simple]\ncustom_size=\"256mb\"\nblocks_per_page=1\n\
-             [filesystem]\nlog_all_operations=true\nlogfile=\"{}\"\n",
-            fifo.display(),
-            completed_path.display(),
-            trace.display(),
-        ))
+        fs::write(
+            &config,
+            format!(
+                "[faults]\nfifo_path=\"{}\"\nfifo_path_completed=\"{}\"\n\
+                 [cache]\napply_eviction=false\n[cache.simple]\n\
+                 custom_size=\"256mb\"\nblocks_per_page=1\n\
+                 [filesystem]\nlog_all_operations=true\nlogfile=\"{}\"\n",
+                fifo.display(),
+                completed_path.display(),
+                trace.display(),
+            ),
+        )
         .unwrap();
         let script = lazyfs.join("lazyfs/scripts/mount-lazyfs.sh");
         let library = lazyfs.join("libs/libpcache/build");
