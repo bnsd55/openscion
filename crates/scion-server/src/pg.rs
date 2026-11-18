@@ -8250,15 +8250,10 @@ pub(crate) mod pool_tests {
         assert_eq!(got.as_deref(), Some(&b"first"[..]));
     }
 
-    /// A re-put of the same derived value is idempotent, not corruption:
-    /// a retried settle re-derives and re-records what it already
-    /// stored. ON CONFLICT DO NOTHING skips the stored row, the short
-    /// inserted count makes the stored-value read, and the read answers
-    /// the same bytes - the check passes. A check that refused every
-    /// conflict would fail the retried settle on a row it wrote
-    /// itself.
-    #[test]
-    fn a_derived_rewrite_of_the_same_stored_value_is_ok() {
+    /// A store with one repo and one root changeset: the shared setup of
+    /// the derived-write tests. The directory stays alive with the
+    /// caller (the store reads it on every open).
+    fn store_with_root() -> (tempfile::TempDir, crate::Backend, ChangesetId) {
         let data = crate::test_support::private_tempdir();
         let store = crate::Backend::open_test(data.path()).unwrap();
         let cs = Changeset::new(
@@ -8276,6 +8271,19 @@ pub(crate) mod pool_tests {
                 c.insert_changeset(repo, &cs)
             })
             .unwrap();
+        (data, store, cs)
+    }
+
+    /// A re-put of the same derived value is idempotent, not corruption:
+    /// a retried settle re-derives and re-records what it already
+    /// stored. ON CONFLICT DO NOTHING skips the stored row, the short
+    /// inserted count makes the stored-value read, and the read answers
+    /// the same bytes - the check passes. A check that refused every
+    /// conflict would fail the retried settle on a row it wrote
+    /// itself.
+    #[test]
+    fn a_derived_rewrite_of_the_same_stored_value_is_ok() {
+        let (_data, store, cs) = store_with_root();
         store
             .commit(|c| c.put_derived("view", 1, cs, b"first"))
             .unwrap();
@@ -8296,23 +8304,7 @@ pub(crate) mod pool_tests {
     /// when the count matched would never see a conflict at all.
     #[test]
     fn a_derived_batch_over_a_differing_stored_row_is_refused() {
-        let data = crate::test_support::private_tempdir();
-        let store = crate::Backend::open_test(data.path()).unwrap();
-        let cs = Changeset::new(
-            vec![],
-            scion_core::IdentityTime::new(b"Ada".to_vec(), b"ada@example.com".to_vec(), 0, 0)
-                .expect("identity fits the format"),
-            None,
-            b"root".to_vec(),
-            std::collections::BTreeMap::new(),
-        )
-        .expect("changeset fits the format");
-        let cs = store
-            .commit(|c| {
-                let repo = c.create_repo("r")?;
-                c.insert_changeset(repo, &cs)
-            })
-            .unwrap();
+        let (_data, store, cs) = store_with_root();
         store
             .commit(|c| c.put_derived("view", 1, cs, b"first"))
             .unwrap();
@@ -8333,23 +8325,7 @@ pub(crate) mod pool_tests {
     /// disagreeing one.
     #[test]
     fn a_derived_batch_of_the_same_stored_value_is_ok() {
-        let data = crate::test_support::private_tempdir();
-        let store = crate::Backend::open_test(data.path()).unwrap();
-        let cs = Changeset::new(
-            vec![],
-            scion_core::IdentityTime::new(b"Ada".to_vec(), b"ada@example.com".to_vec(), 0, 0)
-                .expect("identity fits the format"),
-            None,
-            b"root".to_vec(),
-            std::collections::BTreeMap::new(),
-        )
-        .expect("changeset fits the format");
-        let cs = store
-            .commit(|c| {
-                let repo = c.create_repo("r")?;
-                c.insert_changeset(repo, &cs)
-            })
-            .unwrap();
+        let (_data, store, cs) = store_with_root();
         store
             .commit(|c| c.put_derived("view", 1, cs, b"first"))
             .unwrap();
