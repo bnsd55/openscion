@@ -7591,6 +7591,36 @@ mod tests {
         assert!(!fence.tripped(), "a schemaless setup is not a takeover");
     }
 
+    /// The worker's transaction bookkeeping clears only what the
+    /// connection actually ended: a `BEGIN` that ran opens, any
+    /// rollback closes, a commit closes a transaction the connection
+    /// still holds - and a lost transaction stays lost through a
+    /// commit, because the caller must roll back and run again.
+    #[test]
+    fn the_tx_state_machine_clears_only_what_the_connection_ended() {
+        // Only a `BEGIN` that ran opens a transaction.
+        assert!(matches!(TxState::Idle.after("BEGIN", true), TxState::InTx));
+        assert!(matches!(TxState::Idle.after("BEGIN", false), TxState::Idle));
+        // Any rollback ends whatever the state believed.
+        assert!(matches!(
+            TxState::InTx.after("ROLLBACK", true),
+            TxState::Idle
+        ));
+        assert!(matches!(
+            TxState::Lost.after("ROLLBACK", false),
+            TxState::Idle
+        ));
+        // A commit ends a transaction the connection still holds.
+        assert!(matches!(TxState::InTx.after("COMMIT", true), TxState::Idle));
+        // A lost transaction is not cleared by a commit: its caller
+        // must roll back and run again.
+        assert!(matches!(TxState::Lost.after("COMMIT", true), TxState::Lost));
+        assert!(matches!(
+            TxState::Lost.after("SELECT 1", true),
+            TxState::Lost
+        ));
+    }
+
     /// The loss's own `ROLLBACK` runs on the recovered connection: the
     /// lost transaction's guard sends it, the reconnect succeeds, and
     /// the rollback consumes the loss so the caller's next `BEGIN`
