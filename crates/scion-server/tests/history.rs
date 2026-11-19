@@ -2163,3 +2163,105 @@ fn a_call_that_holds_budget_never_waits_for_more() {
         "the retry names each line its own change, not the absence's answer"
     );
 }
+
+/// The memory guards around blame's diff step refuse a version whose
+/// bytes and the call's shares pass the budget: `need + held > cap`,
+/// where `need` is the diff's state (one `BYTES_PER_LINE` per line the
+/// older version adds over the counted lines) and `held` sums the
+/// call's shares plus the older text's take. The equality reads; one
+/// byte under it counts the version absent. This test builds a walk
+/// whose mid step carries a non-zero `need` (root holds 100 lines more
+/// than the counted tip), names the line mid added when the diff runs,
+/// and pins the edge from both sides: at `need + state + text + older`
+/// exactly the diff runs (under `>=` it is refused, and under a folded
+/// sum - a `held` multiplied by a zero `held`, or a `Held::len` that
+/// reports 0 or 1 - the one-byte-under assert lets the diff through);
+/// half a `need` under the edge the fold of the need's product (`*` to
+/// `+`) lets the diff through where the real guard refuses. The parts
+/// of the sum come from their own sources: `BYTES_PER_LINE`, the tip's
+/// line count, the blobs' real sizes, and the one byte the caller holds
+/// (a zero share would let a product fold of the sum hide behind the
+/// pool's own accounting); the walk's node takes are 106 bytes for this
+/// fixture (one path, two node lookups), a constant of the history row
+/// encoding, re-measured the same way if the encoding changes.
+#[test]
+fn the_diff_steps_memory_guard_reads_at_the_edge_and_refuses_below() {
+    let (_data, store) = open_store();
+    // Root holds 500 `a` lines; mid drops 100 of them and adds one `b`
+    // (401 lines); tip changes mid's 400th `a` to a `c` (401 lines). The
+    // walk explains tip first (the `c` is named there, the 400 kept
+    // lines stay open), then mid: the diff of mid against root carries
+    // `need = (500 - 401) * BYTES_PER_LINE` lines of state, reads root's
+    // 1,000 bytes, and names the `b` - a line root does not hold - while
+    // the kept `a` lines go on to name root. If the step's memory guard
+    // refuses the diff instead, the refused version counts as absent and
+    // the open lines name mid, so the first range is the separator
+    // between the diff running and its refusal.
+    let root_body: Vec<u8> = std::iter::repeat(b"a\n".to_vec()).take(500).flatten().collect();
+    let mut mid_body = std::iter::repeat(b"a\n".to_vec()).take(400).flatten().collect::<Vec<u8>>();
+    mid_body.push(b'b');
+    let mut tip_body = mid_body.clone();
+    tip_body[398 * 2] = b'c';
+    let mid_blob = store.blobs().put(&mid_body).unwrap();
+    let ids = chain(
+        &store,
+        vec![
+            vec![("f", regular(store.blobs().put(&root_body).unwrap()))],
+            vec![("f", regular(mid_blob))],
+            vec![("f", regular(store.blobs().put(&tip_body).unwrap()))],
+        ],
+    );
+    let need = (500 - 401) * BYTES_PER_LINE;
+    let state = 401 * BYTES_PER_LINE;
+    let text = tip_body.len();
+    let older_take = root_body.len();
+    // The walk's path-history node takes for this fixture: two lookups
+    // on one path across the walk's two steps. They are a constant of
+    // the history row encoding, not of the guard: 106 bytes as measured
+    // for these rows (the smallest cap, over the arithmetic sum below,
+    // where the mid diff runs). If the encoding changes, the edge
+    // asserts below fail and the number is re-measured the same way.
+    const NODE_TAKE: usize = 106;
+    // The caller's own share: one held byte, so the sum's first term is
+    // exercised (a zero share hides a product fold of the sum).
+    let caller = 1;
+    let edge = need + state + text + older_take + NODE_TAKE + caller;
+    let diff_ran = |cap: usize| {
+        match blame::blame(
+            &store,
+            REPO,
+            ids[2],
+            &path("f"),
+            &Resume::default(),
+            1,
+            &Bytes::new(cap),
+            None,
+        ) {
+            Ok(b) => b.ranges.first().map(|r| r.changeset) == Some(Some(ids[0])),
+            Err(_) => false, // the state share alone does not fit: refused
+        }
+    };
+    // At the edge the guard's `>` passes: the diff runs, and the kept
+    // `a` lines name root. Under `>=` (or `==`) the edge is refused and
+    // they name mid - red.
+    assert!(
+        diff_ran(edge),
+        "at need + held == cap exactly the diff runs"
+    );
+    // One byte under the edge the guard refuses: the `a` lines name mid.
+    // Under a folded held sum (`held *` with a zero `held`, or a
+    // `Held::len` that reports 0 or 1) the sum drops, the diff runs one
+    // byte under the edge - red.
+    assert!(
+        !diff_ran(edge - 1),
+        "one byte under the edge the diff is refused"
+    );
+    // The need's product fold (`*` to `+`: one line's bytes instead of
+    // the added lines' bytes): half a need under the edge the real guard
+    // still refuses, the fold's tiny sum passes and the diff runs - red.
+    assert!(
+        !diff_ran(edge - need / 2),
+        "half a need under the edge the diff is still refused"
+    );
+}
+
