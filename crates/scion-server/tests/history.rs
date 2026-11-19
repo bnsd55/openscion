@@ -2242,7 +2242,10 @@ fn the_diff_steps_memory_guard_reads_at_the_edge_and_refuses_below() {
             None,
         ) {
             Ok(b) => b.ranges.first().map(|r| r.changeset) == Some(Some(ids[0])),
-            Err(_) => false, // the state share alone does not fit: refused
+            // The guard's refusal, and nothing else: any other error is a
+            // failure of the fixture, not a refused diff.
+            Err(Error::ResourceExhausted(_)) => false,
+            Err(e) => panic!("an unrelated error at cap {cap}: {e}"),
         }
     };
     // At the edge the guard's `>` passes: the diff runs, and the kept
@@ -2357,7 +2360,10 @@ fn the_rename_search_reads_the_candidate_at_the_budget_edge() {
             None,
         ) {
             Ok(b) => b.changesets.iter().any(|(_, _, p)| *p == path("old")),
-            Err(_) => false, // the shares alone do not fit: refused
+            // The read's refusal, and nothing else: any other error is a
+            // failure of the fixture, not a refused candidate.
+            Err(Error::ResourceExhausted(_)) => false,
+            Err(e) => panic!("an unrelated error at cap {cap}: {e}"),
         }
     };
     // At the edge the candidate's read passes the guard's `>`: the search
