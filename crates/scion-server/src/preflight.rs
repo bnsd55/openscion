@@ -110,6 +110,25 @@ pub fn run(opts: &PreflightOptions) -> Report {
 /// through `check_schema`, the store's pairing, and a live server on
 /// the lock. A database that does not answer stops here; the later
 /// checks still print.
+/// The version answer for a `server_version_num` reading. Pure, so
+/// the gate's boundary is testable without a server of a foreign
+/// major (#1257): the test cannot make a live PostgreSQL 17 report 9
+/// or 19, so the check it guards sat unreachable to every suite and
+/// the guard's mutant survived. Since PostgreSQL 10 the number is
+/// major * 10000 + minor: 17.11 reads 170011, so the minor is the
+/// whole rest, not the two digits the pre-10 layout gave it (#1072).
+fn version_answer(num: i32) -> Answer {
+    if (16..=18).contains(&(num / 10000)) {
+        let (major, minor) = (num / 10000, num % 10000);
+        Answer::Ok(format!("PostgreSQL {major}.{minor} is supported"))
+    } else {
+        Answer::Fail(format!(
+            "this build supports PostgreSQL 16 to 18; the database runs {}",
+            num / 10000
+        ))
+    }
+}
+
 fn database_checks(
     data: &Path,
     migrate: bool,
@@ -120,17 +139,7 @@ fn database_checks(
         .query_one("SHOW server_version_num", &[])
         .map(|row| row.get::<_, String>(0).parse().unwrap_or(0))
     {
-        Ok(num) if (16..=18).contains(&(num / 10000)) => {
-            // Since PostgreSQL 10 the number is major * 10000 + minor:
-            // 17.11 reads 170011, so the minor is the whole rest, not
-            // the two digits the pre-10 layout gave it (#1072).
-            let (major, minor) = (num / 10000, num % 10000);
-            Answer::Ok(format!("PostgreSQL {major}.{minor} is supported"))
-        }
-        Ok(num) => Answer::Fail(format!(
-            "this build supports PostgreSQL 16 to 18; the database runs {}",
-            num / 10000
-        )),
+        Ok(num) => version_answer(num),
         Err(error) => Answer::Fail(format!("cannot read the server version: {error}")),
     };
     answers.push(("Postgres version", version));
@@ -1391,6 +1400,38 @@ mod tests {
             "the gone filesystem fails:\n{:#?}",
             report.lines
         );
+    }
+
+    /// The version gate's boundary, reachable now that the answer is
+    /// pure: a supported major names the release, a foreign major - a
+    /// pre-16 layout, a future 19, an unreadable reading - takes the
+    /// refusal with the server's own major. Kills the gate's guard
+    /// mutant, which no live-server test could reach (#1257).
+    #[test]
+    fn the_version_gate_names_a_supported_major_and_refuses_a_foreign_one() {
+        let ok = |line: String| assert!(line.contains("is supported"), "{line}");
+        let refused = |line: String| {
+            assert!(
+                line.contains("supports PostgreSQL 16 to 18"),
+                "a foreign major takes the refusal: {line}"
+            )
+        };
+        for (num, want) in [(17_0011, &ok), (16_0004, &ok), (18_0000, &ok)] {
+            match version_answer(num) {
+                Answer::Ok(line) => want(line),
+                Answer::Fail(line) => refused(line),
+                Answer::Warn(line) => refused(line),
+            }
+        }
+        for num in [9_0603, 15_0009, 19_0000, 0] {
+            // Either arm's line must carry the refusal's words: an Ok
+            // for a foreign major is exactly the mutant's failure.
+            match version_answer(num) {
+                Answer::Ok(line) => refused(line),
+                Answer::Fail(line) => refused(line),
+                Answer::Warn(line) => refused(line),
+            }
+        }
     }
 
     /// The version line names the server's own major and minor: a
