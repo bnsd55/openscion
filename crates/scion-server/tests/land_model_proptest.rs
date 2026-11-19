@@ -169,10 +169,10 @@ fn script_strategy() -> impl Strategy<Value = Vec<Op>> {
     // every seed: a script's cost is its length plus its restart-type
     // ops, each of which can wait ~10 s and then boot a server, and a
     // seed that draws many of both ran past the CI job's 30 minutes.
-    // The per-PR run therefore draws a shorter script and caps the
-    // restart-type ops (the overflow becomes a cheap collector sweep,
-    // which keeps that coverage alive); the nightly run keeps the full
-    // range, its own job.
+    // Both runs therefore cap the kill-family ops (the overflow becomes
+    // a cheap collector sweep, which keeps that coverage alive): the
+    // per-PR run draws a shorter script and sits under the cap on every
+    // seed, the nightly run keeps the full range, its own job.
     let cases = std::env::var("SCION_LANDMODEL_CASES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -180,20 +180,52 @@ fn script_strategy() -> impl Strategy<Value = Vec<Op>> {
     if cases == 1 {
         prop::collection::vec(op_strategy(), 8..=40)
             .prop_map(|mut script| {
-                let mut restarts = 0;
-                for op in &mut script {
-                    if matches!(op, Op::Kill | Op::KillAtPending) {
-                        restarts += 1;
-                        if restarts > 3 {
-                            *op = Op::Gc;
-                        }
-                    }
-                }
+                cap_kill_ops(&mut script, PER_PR_KILL_OPS);
                 script
             })
             .boxed()
     } else {
-        prop::collection::vec(op_strategy(), 8..=120).boxed()
+        prop::collection::vec(op_strategy(), 8..=120)
+            .prop_map(|mut script| {
+                cap_kill_ops(&mut script, NIGHTLY_KILL_OPS);
+                script
+            })
+            .boxed()
+    }
+}
+
+/// The nightly script's kill-family cap, from the two failing seeds'
+/// replay timings (#1264): the 240 s budget; ~24 s of measured non-kill
+/// work (the lands, bursts, cuts, polls, twins and sweeps of the
+/// failing scripts); ~12 s per kill op - a kill, a kill-at-pending or
+/// a burst-cut each waits out a killed server and boots a new one (10
+/// ran 9.4-10.5 s, max observed 11.7 s) - PLUS ~6 s of checks riding
+/// each kill's retry window (a check waits out the in-flight lands'
+/// retries; 12 of them cost 78.7 s on the 14-kill replay). ~18 s per
+/// kill, all measured: (240 - 24) / 18 is 12, and the cap sits at 10
+/// for the runner spread - CI finished the same 110-op script about
+/// 11% behind the replay that measured these numbers. A run past 240 s
+/// is then slow for a reason the kills do not explain.
+const NIGHTLY_KILL_OPS: usize = 10;
+
+/// The per-PR script's kill-family cap, the rule it has run under
+/// since the per-PR branch drew its shorter scripts.
+const PER_PR_KILL_OPS: usize = 3;
+
+/// Caps the kill-family ops (kill-at-pending, kill, burst-cut - each
+/// one kills a server and boots a replacement) at `cap`: the ops over
+/// the cap become collector sweeps, the cheap replacement that keeps
+/// that coverage alive. One rule for both the per-PR and the nightly
+/// script, only the cap differs (#1264).
+fn cap_kill_ops(script: &mut [Op], cap: usize) {
+    let mut kills = 0usize;
+    for op in script {
+        if matches!(op, Op::Kill | Op::KillAtPending | Op::BurstCut { .. }) {
+            kills += 1;
+            if kills > cap {
+                *op = Op::Gc;
+            }
+        }
     }
 }
 
