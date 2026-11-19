@@ -12,6 +12,25 @@ unsound = "all"
 # turn every PR red with no code change to make.
 yanked = "warn"
 unmaintained = "workspace"
+ignore = [
+    # heapless 0.8.0 carries nine unsoundness advisories (RUSTSEC-2026-0574
+    # through -0582), but none of the unsound code is reachable: it rides in
+    # through gix-hash -> faster-hex 0.10.1, whose only use of heapless
+    # (src/encode.rs:13) is cfg(not(feature = "alloc")), and gix-hash turns
+    # faster-hex's alloc feature on, so the line is compiled out. faster-hex
+    # 1.x makes heapless optional, but no gix-hash release uses it yet. Remove
+    # these when gix-hash moves to faster-hex 1.x, or when heapless 0.8 gets
+    # a fixed release.
+    { id = "RUSTSEC-2026-0574", reason = "heapless 0.8.0 via faster-hex 0.10.1: the unsound code is cfg'd out (gix-hash enables faster-hex/alloc)" },
+    { id = "RUSTSEC-2026-0575", reason = "heapless 0.8.0 via faster-hex 0.10.1: the unsound code is cfg'd out (gix-hash enables faster-hex/alloc)" },
+    { id = "RUSTSEC-2026-0576", reason = "heapless 0.8.0 via faster-hex 0.10.1: the unsound code is cfg'd out (gix-hash enables faster-hex/alloc)" },
+    { id = "RUSTSEC-2026-0577", reason = "heapless 0.8.0 via faster-hex 0.10.1: the unsound code is cfg'd out (gix-hash enables faster-hex/alloc)" },
+    { id = "RUSTSEC-2026-0578", reason = "heapless 0.8.0 via faster-hex 0.10.1: the unsound code is cfg'd out (gix-hash enables faster-hex/alloc)" },
+    { id = "RUSTSEC-2026-0579", reason = "heapless 0.8.0 via faster-hex 0.10.1: the unsound code is cfg'd out (gix-hash enables faster-hex/alloc)" },
+    { id = "RUSTSEC-2026-0580", reason = "heapless 0.8.0 via faster-hex 0.10.1: the unsound code is cfg'd out (gix-hash enables faster-hex/alloc)" },
+    { id = "RUSTSEC-2026-0581", reason = "heapless 0.8.0 via faster-hex 0.10.1: the unsound code is cfg'd out (gix-hash enables faster-hex/alloc)" },
+    { id = "RUSTSEC-2026-0582", reason = "heapless 0.8.0 via faster-hex 0.10.1: the unsound code is cfg'd out (gix-hash enables faster-hex/alloc)" },
+]
 
 [licenses]
 version = 2
@@ -21,6 +40,9 @@ version = 2
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
+    # zstd-sys 2.1.3 declares "BSD-3-Clause AND BSD-2-Clause"; BSD-2-Clause
+    # is permissive, OSI-approved, and compatible with MIT OR Apache-2.0.
+    "BSD-2-Clause",
     "BSD-3-Clause",
     "CC0-1.0",
     "ISC",

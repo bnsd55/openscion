@@ -310,10 +310,6 @@ pub trait MetaTx {
     /// The generation of a changeset, in any repo. For derived data.
     fn generation_of(&mut self, id: ChangesetId) -> Result<i64>;
 
-    /// The first parent of a changeset, if it has one.
-    #[cfg(any(test, feature = "test-hooks"))]
-    fn first_parent(&mut self, id: ChangesetId) -> Result<Option<ChangesetId>>;
-
     /// Every parent of `id`, in order, with its generation.
     fn parents(&mut self, id: ChangesetId, id_gen: i64) -> Result<Vec<(ChangesetId, i64)>>;
 

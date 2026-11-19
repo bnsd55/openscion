@@ -124,6 +124,19 @@ pub mod test_support {
     /// - one live, one a leftover store - hash to one schema (#1162).
     ///   62^16 makes a reuse in a job impossible in practice.
     ///
+    /// The name also carries the process id: tempfile seeds every
+    /// creation from `hash(Instant::now(), thread id)`, so two test
+    /// processes that initialize their generator in one clock tick
+    /// draw the same names (#1233). The pid splits the processes, and
+    /// a pid cannot outlive its process, so one job never sees the
+    /// same pid-and-random pair twice. The pid and the random part sit
+    /// on an underscore, not a hyphen: the `LazyFS` daemon's own
+    /// argument parser refuses a config path that holds a "-o"
+    /// substring anywhere (a case-insensitive strcasestr), and a
+    /// hyphen followed by a random name's first 'o' tripped it - the
+    /// power-loss suite's failed mounts (#1240). An alphanumeric
+    /// random part on an underscore cannot make that substring.
+    ///
     /// # Panics
     ///
     /// Panics if the temp directory cannot be made: a test wants to
@@ -133,7 +146,7 @@ pub mod test_support {
     pub fn private_tempdir() -> tempfile::TempDir {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::Builder::new()
-            .prefix(".tmp")
+            .prefix(&format!(".tmp{}_", std::process::id()))
             .rand_bytes(16)
             .tempdir()
             .unwrap();
@@ -148,7 +161,9 @@ pub mod test_support {
     fn a_private_tempdir_name_carries_16_random_characters() {
         let dir = private_tempdir();
         let name = dir.path().file_name().unwrap().to_string_lossy();
-        let random = name.strip_prefix(".tmp").unwrap_or(&name);
+        let random = name
+            .strip_prefix(&format!(".tmp{}_", std::process::id()))
+            .unwrap_or(&name);
         assert_eq!(random.len(), 16, "{name}");
         assert!(random.bytes().all(|b| b.is_ascii_alphanumeric()), "{name}");
     }

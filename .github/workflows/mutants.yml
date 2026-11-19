@@ -77,6 +77,17 @@ on:
         required: false
         default: ""
         type: string
+      diff_base:
+        description: >-
+          a commit on main; when set, the run mutates only code the diff
+          base changed in the named files: git diff base HEAD over those
+          files becomes the patch, and cargo-mutants --in-diff keeps only
+          mutants whose span intersects a changed line (#1257 step 4).
+          --shard then divides the filtered list, so k/n means k/n of the
+          changed-line mutants. Empty mutates the whole files, as before.
+        required: false
+        default: ""
+        type: string
       as_cap_kb:
         description: >-
           each test binary's address-space cap in KiB, via prlimit --as on
@@ -153,12 +164,17 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
+      # A diff_base run reads git diff <base> HEAD, which needs the base
+      # commit; fetch-depth 1 (the default) has only HEAD. The history is
+      # small, so the full fetch costs seconds and stays unconditional.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: protoc
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: cargo-mutants@27.1.0
       # The workspace's generated gRPC code builds only with protoc; the
@@ -229,16 +245,19 @@ jobs:
           EXCLUDE_RE: ${{ inputs.exclude_re }}
           TEST_PACKAGE: ${{ inputs.test_package }}
           AS_CAP_KB: ${{ inputs.as_cap_kb }}
+          DIFF_BASE: ${{ inputs.diff_base }}
         run: |
           # The dispatch names files, one per -f: cargo-mutants examines
           # only those files' functions. Every name must be a file in the
           # tree, so a typo fails the run instead of mutating nothing.
           set -eu
           file_args=""
+          files_arr=()
           # shellcheck disable=SC2086
           for f in $FILES; do
             [ -f "$f" ] || { echo "not a file: $f"; exit 2; }
             file_args="$file_args -f $f"
+            files_arr+=("$f")
           done
           df -h /
           if { [ -n "$SHARD" ] && [ -z "$SHARDS" ]; } || { [ -z "$SHARD" ] && [ -n "$SHARDS" ]; }; then
@@ -257,6 +276,45 @@ jobs:
           if [ -n "$EXCLUDE_RE" ]; then
             exclude_args=(--exclude-re "$EXCLUDE_RE")
           fi
+          # A diff_base run mutates only the lines the base changed: the
+          # patch's new side is HEAD, so it matches this tree (#1257
+          # step 4). cargo-mutants filters mutants by span intersection
+          # and then shards the filtered list.
+          diff_args=()
+          diff_mutants=1
+          if [ -n "$DIFF_BASE" ]; then
+            git rev-parse -q --verify "$DIFF_BASE^{commit}" >/dev/null || {
+              echo "diff_base does not resolve to a commit: $DIFF_BASE" >&2; exit 2; }
+            # The patch lives in RUNNER_TEMP, outside the tree cargo-mutants
+            # copies. The diff's new side is HEAD, so it matches this tree.
+            patch="$RUNNER_TEMP/mutants-diff.patch"
+            git diff "$DIFF_BASE" HEAD -- "${files_arr[@]}" > "$patch"
+            [ -s "$patch" ] || {
+              echo "no diff between $DIFF_BASE and HEAD for: ${files_arr[*]}" >&2; exit 2; }
+            echo "mutating only the lines changed since $DIFF_BASE ($(grep -c '^+[^+]' "$patch") added lines)"
+            # A diff that touches no mutable line (only comments or docs)
+            # filters to 0 mutants: cargo-mutants 27.1.0 logs it and exits
+            # 0 before writing any lists, which the outcome step would
+            # read as a bug. List first: 0 mutants becomes a clear
+            # success with empty lists; anything else runs.
+            list_out="$RUNNER_TEMP/mutants-diff-list.txt"
+            # shellcheck disable=SC2086
+            if ! cargo mutants --no-shuffle $mutants_args $file_args ${exclude_args[@]+"${exclude_args[@]}"} --in-diff "$patch" --list > "$list_out"; then
+              echo "cargo mutants --list refused the diff:" >&2
+              cat "$list_out" >&2
+              exit 2
+            fi
+            # Count mutant-shaped lines (path:line:col: ...): cargo-mutants
+            # writes only mutants to stdout, but the count keys on the
+            # shape, not on stdout being silent (its notices go to stderr).
+            diff_mutants=$(grep -Ec '^[^ ]+\.rs:[0-9]+:' "$list_out" || true)
+            if [ "$diff_mutants" = 0 ]; then
+              echo "no mutants on the changed lines: the diff touches only comments, docs or code cargo-mutants does not mutate"
+            else
+              echo "the diff changes $diff_mutants mutants"
+              diff_args=(--in-diff "$patch")
+            fi
+          fi
           # A test binary whose address space the cap ends fails its own
           # test, instead of starving the runner until GitHub cancels the
           # job (#1112). prlimit exists on the Linux runner only. --as
@@ -268,9 +326,22 @@ jobs:
               echo "the test runner's address-space cap: $cap_bytes bytes"
               export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="prlimit --as=$cap_bytes" ;;
           esac
+          if [ "$diff_mutants" = 0 ]; then
+            # The same keys a real outcomes.json carries, with zero
+            # counts and an empty outcomes list: a reader's jq .caught
+            # sees a number, not a shape error.
+            mkdir -p mutants-out/mutants.out
+            : > mutants-out/mutants.out/missed.txt
+            : > mutants-out/mutants.out/caught.txt
+            : > mutants-out/mutants.out/timeout.txt
+            now=$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")
+            ver=$(cargo mutants --version | awk '{print $2}')
+            printf '{"total_mutants": 0, "missed": 0, "caught": 0, "timeout": 0, "unviable": 0, "success": 0, "start_time": "%s", "end_time": "%s", "cargo_mutants_version": "%s", "outcomes": []}\n' "$now" "$now" "$ver" > mutants-out/mutants.out/outcomes.json
+          else
           # shellcheck disable=SC2086
           # An empty array under `set -u` reads as unbound on bash 3.2.
-          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args ${exclude_args[@]+"${exclude_args[@]}"} -- $TEST_ARGS
+          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args ${exclude_args[@]+"${exclude_args[@]}"} ${diff_args[@]+"${diff_args[@]}"} -- $TEST_ARGS
+          fi
           df -h /
       - name: the outcome lists
         if: always()
@@ -316,11 +387,13 @@ jobs:
     timeout-minutes: ${{ fromJSON(inputs.job_timeout_minutes || '120') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: protoc
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: cargo-mutants@27.1.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -335,13 +408,16 @@ jobs:
           SHARDS: ${{ inputs.shards }}
           EXCLUDE_RE: ${{ inputs.exclude_re }}
           TEST_PACKAGE: ${{ inputs.test_package }}
+          DIFF_BASE: ${{ inputs.diff_base }}
         run: |
           set -eu
           file_args=""
+          files_arr=()
           # shellcheck disable=SC2086
           for f in $FILES; do
             [ -f "$f" ] || { echo "not a file: $f"; exit 2; }
             file_args="$file_args -f $f"
+            files_arr+=("$f")
           done
           df -h /
           if { [ -n "$SHARD" ] && [ -z "$SHARDS" ]; } || { [ -z "$SHARD" ] && [ -n "$SHARDS" ]; }; then
@@ -360,9 +436,55 @@ jobs:
           if [ -n "$EXCLUDE_RE" ]; then
             exclude_args=(--exclude-re "$EXCLUDE_RE")
           fi
+          diff_args=()
+          diff_mutants=1
+          if [ -n "$DIFF_BASE" ]; then
+            git rev-parse -q --verify "$DIFF_BASE^{commit}" >/dev/null || {
+              echo "diff_base does not resolve to a commit: $DIFF_BASE" >&2; exit 2; }
+            patch="$RUNNER_TEMP/mutants-diff.patch"
+            git diff "$DIFF_BASE" HEAD -- "${files_arr[@]}" > "$patch"
+            [ -s "$patch" ] || {
+              echo "no diff between $DIFF_BASE and HEAD for: ${files_arr[*]}" >&2; exit 2; }
+            echo "mutating only the lines changed since $DIFF_BASE ($(grep -c '^+[^+]' "$patch") added lines)"
+            # A diff that touches no mutable line (only comments or docs)
+            # filters to 0 mutants: cargo-mutants 27.1.0 logs it and exits
+            # 0 before writing any lists, which the outcome step would
+            # read as a bug. List first: 0 mutants becomes a clear
+            # success with empty lists; anything else runs.
+            list_out="$RUNNER_TEMP/mutants-diff-list.txt"
+            # shellcheck disable=SC2086
+            if ! cargo mutants --no-shuffle $mutants_args $file_args ${exclude_args[@]+"${exclude_args[@]}"} --in-diff "$patch" --list > "$list_out"; then
+              echo "cargo mutants --list refused the diff:" >&2
+              cat "$list_out" >&2
+              exit 2
+            fi
+            # Count mutant-shaped lines (path:line:col: ...): cargo-mutants
+            # writes only mutants to stdout, but the count keys on the
+            # shape, not on stdout being silent (its notices go to stderr).
+            diff_mutants=$(grep -Ec '^[^ ]+\.rs:[0-9]+:' "$list_out" || true)
+            if [ "$diff_mutants" = 0 ]; then
+              echo "no mutants on the changed lines: the diff touches only comments, docs or code cargo-mutants does not mutate"
+            else
+              echo "the diff changes $diff_mutants mutants"
+              diff_args=(--in-diff "$patch")
+            fi
+          fi
+          if [ "$diff_mutants" = 0 ]; then
+            # The same keys a real outcomes.json carries, with zero
+            # counts and an empty outcomes list: a reader's jq .caught
+            # sees a number, not a shape error.
+            mkdir -p mutants-out/mutants.out
+            : > mutants-out/mutants.out/missed.txt
+            : > mutants-out/mutants.out/caught.txt
+            : > mutants-out/mutants.out/timeout.txt
+            now=$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")
+            ver=$(cargo mutants --version | awk '{print $2}')
+            printf '{"total_mutants": 0, "missed": 0, "caught": 0, "timeout": 0, "unviable": 0, "success": 0, "start_time": "%s", "end_time": "%s", "cargo_mutants_version": "%s", "outcomes": []}\n' "$now" "$now" "$ver" > mutants-out/mutants.out/outcomes.json
+          else
           # shellcheck disable=SC2086
           # An empty array under `set -u` reads as unbound on bash 3.2.
-          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args ${exclude_args[@]+"${exclude_args[@]}"} -- $TEST_ARGS
+          cargo mutants --no-shuffle --timeout "$MUTANT_TIMEOUT" --output mutants-out $mutants_args $file_args $shard_args ${exclude_args[@]+"${exclude_args[@]}"} ${diff_args[@]+"${diff_args[@]}"} -- $TEST_ARGS
+          fi
           df -h /
       - name: the outcome lists
         if: always()

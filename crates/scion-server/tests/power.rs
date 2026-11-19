@@ -92,11 +92,13 @@ fn may_run() -> bool {
 /// directory in it.
 struct Lazyfs {
     child: Child,
+    daemon: Option<u32>,
     fifo: PathBuf,
     completed: fs::File,
     mount: PathBuf,
     backing: PathBuf,
     trace: PathBuf,
+    mount_log: PathBuf,
 }
 
 impl Lazyfs {
@@ -112,6 +114,23 @@ impl Lazyfs {
         let fifo = round_dir.join("faults.fifo");
         let completed_path = round_dir.join("faults.fifo.completed");
         let config = round_dir.join("lazyfs.toml");
+        // The `LazyFS` daemon's own argument parser refuses a config
+        // path that holds a "-o" substring anywhere (a case-insensitive
+        // strcasestr), and a path that trips it rides to FUSE as a
+        // stray argument - FUSE exits on `invalid argument` before the
+        // ops log opens, and the mount never appears (#1240). Fail
+        // fast here, naming the cause, instead of burning the mount
+        // ceiling: a developer whose TMPDIR holds a '-o' path fixes it
+        // by setting TMPDIR to a path without one.
+        for (what, path) in [("config", &config), ("mount", &mount)] {
+            assert!(
+                !path.to_str().unwrap().to_lowercase().contains("-o"),
+                "the LazyFS {what} path {} holds a '-o' substring, which \
+                 the daemon's argument parser rejects: the mount can never \
+                 appear. Set TMPDIR to a path without '-o' (#1240)",
+                path.display()
+            );
+        }
         // The ops trace lives in the round tempdir, which goes away with
         // the test; a CI job that wants it after a failure names a fixed
         // directory to upload from. `LazyFS` does not create the folder of
@@ -125,6 +144,18 @@ impl Lazyfs {
                 trace
             }
             None => round_dir.join("lazyfs.log"),
+        };
+        // The script's own output - its checks and the daemon's console
+        // sink - is the only record of a start that dies before the ops
+        // log opens, so it lands next to the ops trace, where the CI
+        // artifact step uploads it.
+        let mount_log = match std::env::var_os("SCION_LAZYFS_TRACE_DIR") {
+            Some(dir) => {
+                let log = PathBuf::from(dir).join(format!("lazyfs-r{round}-mount.log"));
+                fs::create_dir_all(log.parent().unwrap()).unwrap();
+                log
+            }
+            None => round_dir.join(format!("lazyfs-r{round}-mount.log")),
         };
         fs::write(
             &config,
@@ -153,26 +184,28 @@ impl Lazyfs {
             .arg(&backing)
             .arg("-s")
             .env("LD_LIBRARY_PATH", library)
-            .stdout(fs::File::create(format!("/tmp/mount-{round}.log")).unwrap())
+            .stdout(fs::File::create(&mount_log).unwrap())
             .stderr({
                 let mut o = fs::OpenOptions::new();
                 o.append(true);
-                o.open(format!("/tmp/mount-{round}.log")).unwrap()
+                o.open(&mount_log).unwrap()
             })
             .spawn()
             .unwrap();
-        wait_mounted(&mount);
+        wait_mounted(&mount, &mount_log);
         // The daemon keeps the completed fifo's write end open forever, so
         // the file never sees an EOF: the cut below reads one message, not
         // to the end.
         let completed = fs::File::open(&completed_path).unwrap();
         Self {
             child,
+            daemon: daemon_pid(&mount),
             fifo,
             completed,
             mount,
             backing,
             trace,
+            mount_log,
         }
     }
 
@@ -213,7 +246,28 @@ impl Lazyfs {
 impl Drop for Lazyfs {
     fn drop(&mut self) {
         // Best effort: the daemon dies with the mount, and the round's
-        // directories go away with the test's temp directory.
+        // directories go away with the test's temp directory. The daemon
+        // is killed by its own PID first: it is the script's background
+        // child, not `child` (the script exits once it has launched it),
+        // and the exact mount path keeps a parallel round's daemon safe.
+        if let Some(pid) = self.daemon {
+            let killed = Command::new("kill").arg("-9").arg(pid.to_string()).output();
+            // The teardown APPENDS to the mount log, so the artifact
+            // carries the round's whole lifecycle - the daemon's start
+            // lines stay above it.
+            let mut log = fs::OpenOptions::new()
+                .append(true)
+                .open(&self.mount_log)
+                .ok();
+            if let Some(log) = log.as_mut() {
+                use std::io::Write as _;
+                let _ = writeln!(
+                    log,
+                    "[test] drop: killed the daemon pid {pid}: {:?}",
+                    killed.map(|o| o.status)
+                );
+            }
+        }
         let _ = Command::new("fusermount3")
             .arg("-u")
             .arg(&self.mount)
@@ -224,9 +278,50 @@ impl Drop for Lazyfs {
     }
 }
 
+/// The `LazyFS` daemon's PID: its command line carries the round's exact
+/// mount path, so `pgrep -f` cannot catch a parallel round's daemon. `None`
+/// when the daemon is already gone - which is itself evidence for the
+/// mount-failure diagnostics.
+fn daemon_pid(mount: &Path) -> Option<u32> {
+    let want = mount.to_str().unwrap().to_owned();
+    let out = Command::new("pgrep").arg("-f").arg(&want).output().ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .and_then(|line| line.trim().parse().ok())
+}
+
+/// What the mount left behind: the mount log's tail, the running daemons,
+/// and the fuse mounts. The panic of a failed start carries it, so the
+/// job's log names the failure without another artifact download.
+fn mount_diagnostics(mount: &Path, mount_log: &Path) -> String {
+    let mut out = format!("mount diagnostics for {}:\n", mount.display());
+    if let Ok(log) = fs::read_to_string(mount_log) {
+        let tail: Vec<&str> = log.lines().rev().take(40).collect();
+        out.push_str("-- mount log tail --\n");
+        out.push_str(&tail.iter().rev().fold(String::new(), |a, l| a + l + "\n"));
+    } else {
+        out.push_str("-- no mount log --\n");
+    }
+    if let Ok(pids) = Command::new("pgrep").arg("-a").arg("lazyfs").output() {
+        out.push_str("-- running lazyfs processes --\n");
+        out.push_str(&String::from_utf8_lossy(&pids.stdout));
+    }
+    if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
+        out.push_str("-- fuse mounts --\n");
+        for line in mounts.lines().filter(|l| l.contains("fuse")) {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// Waits until the mount appears, for at most 60 s: `LazyFS` pre-allocates its
-/// cache before it serves, which takes a few seconds.
-fn wait_mounted(mount: &Path) {
+/// cache before it serves, which takes a few seconds. A timeout carries the
+/// mount diagnostics, since a daemon that dies before its ops log opens
+/// writes nothing anywhere else the job keeps.
+fn wait_mounted(mount: &Path, mount_log: &Path) {
     let want = mount.to_str().unwrap().to_owned();
     let start = std::time::Instant::now();
     loop {
@@ -235,8 +330,9 @@ fn wait_mounted(mount: &Path) {
         }
         assert!(
             start.elapsed() < Duration::from_secs(60),
-            "`LazyFS` did not mount {}",
-            mount.display()
+            "`LazyFS` did not mount {}\n{}",
+            mount.display(),
+            mount_diagnostics(mount, mount_log)
         );
         std::thread::sleep(Duration::from_millis(100));
     }

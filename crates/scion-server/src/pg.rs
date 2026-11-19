@@ -1045,6 +1045,56 @@ pub(crate) fn pairing_decision(
     }
 }
 
+/// Appends the schema's own record to an open refusal, when the schema
+/// carries one: a test schema's comment names the directory its open
+/// registered, and the test registry holds the registration's time.
+/// The note makes a schema-and-directory mismatch self-naming (#1233):
+/// the log then says which directory registered the schema, and how
+/// long before this open. A production schema carries no comment, and
+/// the registry is the test helpers', so a production refusal reads
+/// exactly as it did - the read answers null or fails, and the error
+/// goes back unchanged.
+///
+/// Test-build only (any test, feature = "test-hooks"): the registry it
+/// reads is the test helpers' table, and production builds carry no
+/// knowledge of it. The other builds take the paired stub below, which
+/// returns the refusal unchanged, so the call sites stay one line.
+#[cfg(any(test, feature = "test-hooks"))]
+fn refuse_naming_the_schema_record(writer: &mut PgClient, error: Error) -> Error {
+    let row = writer
+        .query_opt(
+            "SELECT obj_description(current_schema()::regnamespace, 'pg_namespace') AS dir,
+                    (SELECT extract(epoch from now())::bigint - started
+                     FROM public.scion_test_schemas
+                     WHERE schema = current_schema()) AS age",
+            &[],
+        )
+        .ok()
+        .flatten();
+    let Some(row) = row else {
+        return error;
+    };
+    let recorded: Option<String> = row.get("dir");
+    let Some(recorded) = recorded.filter(|dir| !dir.is_empty()) else {
+        return error;
+    };
+    let age: Option<i64> = row.get("age");
+    Error::FailedPrecondition(format!(
+        "{error}; the schema's own record names the directory {recorded}{}",
+        age.map(|seconds| format!(", registered {seconds} s before this open"))
+            .unwrap_or_default()
+    ))
+}
+
+/// The production-build stub of [`refuse_naming_the_schema_record`]:
+/// the refusal goes back unchanged, because the record it would name
+/// is the test helpers' registry, and a production build knows no
+/// such table.
+#[cfg(not(any(test, feature = "test-hooks")))]
+fn refuse_naming_the_schema_record(_writer: &mut PgClient, error: Error) -> Error {
+    error
+}
+
 /// The identity of this database, minted at the first open. The marker
 /// file of the data directory carries the same UUID, and an open that
 /// finds the two different refuses: a database restored on a directory
@@ -1103,7 +1153,9 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
                 );
             }
             Pairing::Fresh => unreachable!("the database names its store"),
-            Pairing::Refuse(error) => return Err(error),
+            Pairing::Refuse(error) => {
+                return Err(refuse_naming_the_schema_record(writer, error));
+            }
         }
         Ok(uuid)
     } else {
@@ -1125,7 +1177,9 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
         let fresh = match pairing_decision(marker.uuid, None, has_repos) {
             Pairing::Agree | Pairing::AdoptCut => unreachable!("the database holds no store"),
             Pairing::Fresh => marker.uuid.unwrap_or_else(uuid_new),
-            Pairing::Refuse(error) => return Err(error),
+            Pairing::Refuse(error) => {
+                return Err(refuse_naming_the_schema_record(writer, error));
+            }
         };
         writer
             .query(
@@ -3096,9 +3150,10 @@ impl TxState {
         if sql.starts_with("ROLLBACK") || (sql.starts_with("COMMIT") && !self.lost()) {
             return TxState::Idle;
         }
-        if self.lost() && !sql.starts_with("COMMIT") {
-            return self;
-        }
+        // Every other pairing keeps the state: a COMMIT does not
+        // clear a lost transaction (its caller must roll back and run
+        // again), and a BEGIN that failed or any other statement
+        // changes nothing.
         self
     }
 }
@@ -3448,54 +3503,65 @@ const CONNECT_PARKED_MAX: usize = 2;
 
 /// The connects parked on silent sockets: their tokens and the moments
 /// they started, so the next connect past the cap can name how long
-/// the oldest has waited.
-static PARKED_CONNECTS: std::sync::LazyLock<Mutex<Vec<(u64, std::time::Instant)>>> =
-    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+/// the oldest has waited. A value, not free functions over a static,
+/// so the tests drive their own instance without racing the threaded
+/// runner's real connects.
+struct ParkedConnects(std::sync::Mutex<Vec<(u64, std::time::Instant)>>);
+
+impl ParkedConnects {
+    const fn new() -> Self {
+        Self(std::sync::Mutex::new(Vec::new()))
+    }
+
+    /// Refuses a new connect while the cap of parked connects is held:
+    /// the error names the host and how long the oldest parked connect
+    /// has waited.
+    fn refuse(&self, host: &str) -> Result<()> {
+        let parked = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if parked.len() >= CONNECT_PARKED_MAX {
+            let oldest = parked
+                .iter()
+                .map(|(_, since)| since.elapsed().as_secs())
+                .max()
+                .unwrap_or(0);
+            return Err(Error::Unavailable(format!(
+                "the database at {host} already has {} connects parked on a \
+                 socket that never answers, the oldest for {oldest} s: not starting another",
+                parked.len()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Registers a connect whose caller gave up waiting: its thread is
+    /// still parked on the socket. Past the cap the register keeps no
+    /// row - the thread parks anyway, one of the batch the cap bounded.
+    fn register(&self, token: u64) {
+        let mut parked = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if parked.len() < CONNECT_PARKED_MAX {
+            parked.push((token, std::time::Instant::now()));
+        }
+    }
+
+    /// Gives a parked connect's row back: the connect's thread ended,
+    /// so its socket is no longer held.
+    fn release(&self, token: u64) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(held, _)| *held != token);
+    }
+}
+
+static PARKED_CONNECTS: ParkedConnects = ParkedConnects::new();
 
 static PARKED_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Refuses a new connect while the cap of parked connects is held: the
-/// error names the host and how long the oldest parked connect has
-/// waited.
-fn park_refuse(host: &str) -> Result<()> {
-    let parked = PARKED_CONNECTS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if parked.len() >= CONNECT_PARKED_MAX {
-        let oldest = parked
-            .iter()
-            .map(|(_, since)| since.elapsed().as_secs())
-            .max()
-            .unwrap_or(0);
-        return Err(Error::Unavailable(format!(
-            "the database at {host} already has {} connects parked on a \
-             socket that never answers, the oldest for {oldest} s: not starting another",
-            parked.len()
-        )));
-    }
-    Ok(())
-}
-
-/// Registers a connect whose caller gave up waiting: its thread is
-/// still parked on the socket. Past the cap the register keeps no row
-/// - the thread parks anyway, one of the batch the cap bounded.
-fn park_register(token: u64) {
-    let mut parked = PARKED_CONNECTS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if parked.len() < CONNECT_PARKED_MAX {
-        parked.push((token, std::time::Instant::now()));
-    }
-}
-
-/// Gives a parked connect's row back: the connect's thread ended, so
-/// its socket is no longer held.
-fn park_release(token: u64) {
-    PARKED_CONNECTS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .retain(|(held, _)| *held != token);
-}
 
 /// [`connect_with`]'s work: parse, then connect.
 fn connect_on(url: &str, ca: Option<&Path>, options: &str) -> Result<Client> {
@@ -3521,6 +3587,7 @@ pub fn connect_on_deadline_for_tests(
 #[cfg(any(test, feature = "test-hooks"))]
 pub fn test_reset_parked_connects() {
     PARKED_CONNECTS
+        .0
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clear();
@@ -3586,7 +3653,7 @@ fn connect_on_deadline(
     // answers its startup fails here instead of holding the open, the
     // readers' connect and every reconnect forever.
     let (connected, wait) = std::sync::mpsc::channel();
-    park_refuse(&host)?;
+    PARKED_CONNECTS.refuse(&host)?;
     let token = PARKED_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let attempt = match (local, ca) {
         // The connector upgrades every connection, and checks the
@@ -3597,7 +3664,7 @@ fn connect_on_deadline(
                 .name("postgres-connect".to_owned())
                 .spawn(move || {
                     let answer = config.connect(tls);
-                    park_release(token);
+                    PARKED_CONNECTS.release(token);
                     let _ = connected.send(answer);
                 })
         }
@@ -3605,7 +3672,7 @@ fn connect_on_deadline(
             .name("postgres-connect".to_owned())
             .spawn(move || {
                 let answer = config.connect(NoTls);
-                park_release(token);
+                PARKED_CONNECTS.release(token);
                 let _ = connected.send(answer);
             }),
         (false, None) => {
@@ -3622,7 +3689,7 @@ fn connect_on_deadline(
     } else {
         // The connect's thread is now parked on the socket: registered,
         // so the next connects past the cap refuse at once.
-        park_register(token);
+        PARKED_CONNECTS.register(token);
         let why = format!(
             "the database at {host} did not finish its connect within {} s: \
              the socket may have connected, but its startup, its TLS \
@@ -5199,19 +5266,6 @@ impl MetaTx for PgTx<'_> {
             )?
             .map(|row| row.get::<_, i64>(0))
             .ok_or_else(|| Error::NotFound(format!("changeset {id}")))
-    }
-
-    /// The first parent of a changeset, or `None` for a root.
-    #[cfg(any(test, feature = "test-hooks"))]
-    fn first_parent(&mut self, id: ChangesetId) -> Result<Option<ChangesetId>> {
-        let parent = self
-            .c
-            .query_opt(
-                "SELECT parent FROM changeset_parents WHERE cs = $1 AND n = 0",
-                &[P::bytes(&id_bytes(id.as_bytes()))],
-            )?
-            .map(|row| row.get::<_, Vec<u8>>(0));
-        parent.map(|bytes| to_id(&bytes)).transpose()
     }
 
     /// Every parent of changeset `id`, in order, with its generation.
@@ -7079,12 +7133,39 @@ impl Meta for Pg {
 #[cfg(test)]
 mod tests {
     use super::{
-        Client, Conn, Job, Kind, NoTls, Setup, SetupFailure, TxState, connect_on, connection_gone,
-        delete_prefixes, merged_options, run_with_retry,
+        Client, Conn, Fence, Flow, Job, Kind, NoTls, Reply, SCHEMA_LOCK, Setup, SetupFailure,
+        TxState, connect_on, connection_gone, delete_prefixes, merged_options, migration_lock_key,
+        reset_schema, run_job, run_with_retry, schema_lock_key,
     };
     use crate::error::{Error, Storage};
     use crate::pg::{Pairing, Pg, pairing_decision};
     use std::sync::Arc;
+
+    /// A connection description for one test: the real url or a dead
+    /// port, an optional schema, and whether the session is exclusive.
+    fn conn(url: &str, schema: Option<&str>, exclusive: bool) -> Conn {
+        Conn {
+            url: url.to_owned(),
+            ca: None,
+            options: String::new(),
+            schema: schema.map(str::to_owned),
+            exclusive,
+        }
+    }
+
+    /// A counted job and its reply's receiver, kept or dropped by the
+    /// caller's binding.
+    fn job(sql: &str) -> (Job, std::sync::mpsc::Receiver<Result<Reply, Error>>) {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let job = Job {
+            sql: sql.to_owned(),
+            params: Vec::new(),
+            kind: Kind::Count,
+            reply: reply_tx,
+            raw: None,
+        };
+        (job, reply_rx)
+    }
 
     /// The pairing decision's whole table: every arm of the match, on
     /// both sides of the repos flag. A rename or an arm that flips
@@ -7395,24 +7476,559 @@ mod tests {
             .unwrap();
         drop(killer);
 
-        let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
-        let job = Job {
-            sql: "SELECT 1".to_owned(),
-            params: Vec::new(),
-            kind: Kind::Count,
-            reply: reply_tx,
-            raw: None,
-        };
-        let dead = Conn {
-            url: "postgres://127.0.0.1:1/scion".to_owned(),
-            ca: None,
-            options: String::new(),
-            schema: None,
-            exclusive: false,
-        };
-        let out = run_with_retry(&mut client, &mut setup, &dead, &job, &mut tx, false, None);
+        let (dead_job, _reply_rx) = job("SELECT 1");
+        let dead = conn("postgres://127.0.0.1:1/scion", None, false);
+        let out = run_with_retry(
+            &mut client,
+            &mut setup,
+            &dead,
+            &dead_job,
+            &mut tx,
+            false,
+            None,
+        );
         assert!(out.is_err());
         assert!(matches!(tx, TxState::Lost));
+    }
+
+    /// The first job after a recovered connection runs: a client whose
+    /// reconnect failed stays closed, and that client's next job
+    /// reconnects on the real url and the statement lands - not a
+    /// lock-lost error for a recovery that worked. The gate above the
+    /// reconnect checks the fresh session's lock state before the
+    /// reply goes out; a gate that fires on a successful setup would
+    /// turn the recovery into the error the caller was retrying from.
+    #[test]
+    fn the_first_job_after_a_recovered_connection_runs() {
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let mut client = connect_on(&url, None, "").unwrap();
+        let mut setup = Setup::new(None, false, &mut client);
+        assert!(setup.ok());
+        let mut tx = TxState::Idle;
+        let mut ever_held = false;
+
+        // The client's backend dies while the client sits idle, and the
+        // statement's reconnect dials a port nothing answers: the
+        // reconnect fails, the original error stands, and the client
+        // stays closed - the state the next job's own reconnect meets.
+        let pid: i32 = client
+            .query_one("SELECT pg_backend_pid()", &[])
+            .unwrap()
+            .get(0);
+        let mut killer = postgres::Client::connect(&url, NoTls).unwrap();
+        killer
+            .execute("SELECT pg_terminate_backend($1)", &[&pid])
+            .unwrap();
+        drop(killer);
+
+        let dead = conn("postgres://127.0.0.1:1/scion", None, false);
+        let (dead_job, _reply_rx) = job("SELECT 1");
+        let out = run_with_retry(
+            &mut client,
+            &mut setup,
+            &dead,
+            &dead_job,
+            &mut tx,
+            false,
+            None,
+        );
+        assert!(out.is_err());
+        assert!(
+            client.is_closed(),
+            "the failed reconnect leaves the client closed"
+        );
+
+        // The next job reconnects on the real url and the statement
+        // runs: the caller's reply is Ok.
+        let conn = conn(&url, None, false);
+        let (job, reply_rx) = job("SELECT 1");
+        let flow = run_job(
+            job,
+            &mut client,
+            &mut setup,
+            &conn,
+            &mut tx,
+            &mut ever_held,
+            None,
+        );
+        assert!(matches!(flow, Flow::Go));
+        let reply = reply_rx.recv().unwrap();
+        assert!(
+            matches!(reply, Ok(Reply::Count(_))),
+            "the first job after a recovered connection runs, not an error"
+        );
+    }
+
+    /// The statement retry's gate fences a refused lock, not a setup
+    /// that merely names no schema: a held lock followed by a retry
+    /// whose fresh setup answers `NoSchema` returns the setup error and
+    /// leaves the fence down - a URL mistake is not a takeover.
+    #[test]
+    fn the_statement_retry_does_not_fence_a_setup_that_names_no_schema() {
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let mut client = connect_on(&url, None, "").unwrap();
+        let mut setup = Setup::new(None, false, &mut client);
+        assert!(setup.ok());
+        let mut tx = TxState::Idle;
+        let ever_held = true;
+        let fence = Arc::new(Fence::new());
+
+        // The client's backend dies under it, and the retry's reconnect
+        // runs on a url whose schema names nothing: the fresh setup
+        // answers `NoSchema`, the reply is the setup error, and the
+        // fence stays down.
+        let pid: i32 = client
+            .query_one("SELECT pg_backend_pid()", &[])
+            .unwrap()
+            .get(0);
+        let mut killer = postgres::Client::connect(&url, NoTls).unwrap();
+        killer
+            .execute("SELECT pg_terminate_backend($1)", &[&pid])
+            .unwrap();
+        drop(killer);
+
+        let absent = conn(&url, Some("no_such_schema_for_the_statement_retry"), true);
+        let (job, _reply_rx) = job("SELECT 1");
+        let out = run_with_retry(
+            &mut client,
+            &mut setup,
+            &absent,
+            &job,
+            &mut tx,
+            ever_held,
+            Some(&fence),
+        );
+        assert!(
+            matches!(&out, Err(Error::FailedPrecondition(_))),
+            "the setup error answers, not the statement"
+        );
+        assert!(!fence.tripped(), "a schemaless setup is not a takeover");
+    }
+
+    /// The worker's transaction bookkeeping clears only what the
+    /// connection actually ended: a `BEGIN` that ran opens, any
+    /// rollback closes, a commit closes a transaction the connection
+    /// still holds - and a lost transaction stays lost through a
+    /// commit, because the caller must roll back and run again.
+    #[test]
+    fn the_tx_state_machine_clears_only_what_the_connection_ended() {
+        // Only a `BEGIN` that ran opens a transaction.
+        assert!(matches!(TxState::Idle.after("BEGIN", true), TxState::InTx));
+        assert!(matches!(TxState::Idle.after("BEGIN", false), TxState::Idle));
+        // Any rollback ends whatever the state believed.
+        assert!(matches!(
+            TxState::InTx.after("ROLLBACK", true),
+            TxState::Idle
+        ));
+        assert!(matches!(
+            TxState::Lost.after("ROLLBACK", false),
+            TxState::Idle
+        ));
+        // A commit ends a transaction the connection still holds.
+        assert!(matches!(TxState::InTx.after("COMMIT", true), TxState::Idle));
+        // A lost transaction is not cleared by a commit: its caller
+        // must roll back and run again.
+        assert!(matches!(TxState::Lost.after("COMMIT", true), TxState::Lost));
+        assert!(matches!(
+            TxState::Lost.after("SELECT 1", true),
+            TxState::Lost
+        ));
+    }
+
+    /// The migration lock's key and the server lock's key mix their
+    /// hashes differently: over a thousand names, no name gives the
+    /// two derivations the same key, and none lands a migration lock
+    /// on the shared turn's own key.
+    #[test]
+    fn the_migration_lock_key_mixes_differently_from_the_server_lock() {
+        for i in 0..1000 {
+            let name = format!("schema_{i:04}");
+            assert_ne!(
+                migration_lock_key(&name),
+                schema_lock_key(&name),
+                "the two derivations collide on {name}"
+            );
+            assert_ne!(
+                migration_lock_key(&name),
+                SCHEMA_LOCK,
+                "the migration lock lands on the shared turn on {name}"
+            );
+        }
+    }
+
+    /// Distinct schemas name distinct migration locks. These pairs are
+    /// samples whose hashes the weaker mixes fold onto one key: an or
+    /// or an and would give both names of a pair the same lock, and
+    /// two stores' migrations would serialize on it.
+    #[test]
+    fn distinct_schemas_name_distinct_migration_locks() {
+        for [a, b] in [
+            ["schema_000532", "schema_001276"],
+            ["schema_043279", "schema_073399"],
+        ] {
+            assert_ne!(
+                migration_lock_key(a),
+                migration_lock_key(b),
+                "{a} and {b} share a migration lock"
+            );
+        }
+    }
+
+    /// A restore's leftover carries the staging mark and no store
+    /// identity, and the reset drops it even though the mark itself is
+    /// a table in the schema: the mark is the restore's own, not a
+    /// foreign object. A reset that counted the mark as foreign would
+    /// refuse to clean up what a killed restore left behind. The first
+    /// reset makes the real mark; the second must drop the schema and
+    /// mint a fresh one - a new id is the proof the drop ran.
+    #[test]
+    fn a_staging_schema_resets_even_though_its_mark_is_a_table() {
+        let base = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let fresh = "staging_reset_marks_a_table";
+        let mut raw = postgres::Client::connect(&base, NoTls).unwrap();
+        raw.batch_execute(&format!("DROP SCHEMA IF EXISTS {fresh} CASCADE"))
+            .unwrap();
+        raw.batch_execute(&format!("CREATE SCHEMA {fresh}"))
+            .unwrap();
+        drop(raw);
+        let sep = if base.contains('?') { '&' } else { '?' };
+        let url = format!("{base}{sep}options=--search_path%3D{fresh}");
+
+        reset_schema(&url, None).unwrap();
+        let first = staging_mark_id(&base, fresh);
+
+        reset_schema(&url, None).unwrap();
+        let second = staging_mark_id(&base, fresh);
+
+        assert_ne!(first, second, "the second reset dropped the old mark");
+        let mut raw = postgres::Client::connect(&base, NoTls).unwrap();
+        raw.batch_execute(&format!("DROP SCHEMA IF EXISTS {fresh} CASCADE"))
+            .unwrap();
+    }
+
+    /// The parked-connect bookkeeping holds its own rows: the register
+    /// stops at the cap, a release drops its own token's row, and a
+    /// release's token is the one it names. The refusal's text is the
+    /// lens: it names how many rows the cap holds. The test drives its
+    /// own bookkeeping value, so the threaded runner's real connects
+    /// cannot touch these rows.
+    #[test]
+    fn the_parked_connect_slots_release_and_bound_the_register() {
+        let parked = super::ParkedConnects::new();
+        parked.register(1);
+        parked.register(2);
+        // The third register keeps no row, and the refusal names the
+        // two the cap holds.
+        parked.register(3);
+        let err = parked.refuse("db").unwrap_err().to_string();
+        assert!(err.contains("2 connects parked"), "{err}");
+
+        // A release gives its row back: the next connect starts.
+        parked.release(1);
+        assert!(
+            parked.refuse("db").is_ok(),
+            "the released slot starts a connect"
+        );
+
+        // A release names its own token: releasing 2 leaves 3's row.
+        // One more register fills the cap again, and the refusal names
+        // two parked - a release that kept the wrong row would leave a
+        // different count (or none) behind.
+        parked.register(3);
+        parked.release(2);
+        parked.register(4);
+        let err = parked.refuse("db").unwrap_err().to_string();
+        assert!(err.contains("2 connects parked"), "{err}");
+    }
+
+    /// A setup failure names the statement it waited on, and its source
+    /// stays the database's own error - the whole chain survives (#905).
+    #[test]
+    fn a_setup_failure_names_the_statement_and_keeps_the_database_error() {
+        let Err(source) = Client::connect("postgres://127.0.0.1:1/x", NoTls) else {
+            panic!("a connect to port 1 is refused");
+        };
+        let failure = super::SetupFailure {
+            sql: "SELECT 1".to_owned(),
+            source,
+        };
+        let shown = format!("{failure}");
+        assert!(
+            shown.contains("the database was unreachable at setup, waiting on:")
+                && shown.contains("SELECT 1"),
+            "{shown}"
+        );
+        let source = std::error::Error::source(&failure)
+            .expect("the database's own error stays the source")
+            .to_string();
+        assert!(source.contains("error connecting to server"), "{source}");
+    }
+
+    /// A named step names the step and the statement, and its source
+    /// stays the mapped engine error - the whole chain survives (#905).
+    #[test]
+    fn a_named_step_names_the_step_and_keeps_the_mapped_error() {
+        let named = super::NamedStep {
+            step: "the test step",
+            sql: "SELECT 1".to_owned(),
+            source: crate::Error::InvalidArgument("the engine refused".to_owned()),
+        };
+        let shown = format!("{named}");
+        assert!(
+            shown.contains("the open step `the test step` waited or failed:")
+                && shown.contains("SELECT 1"),
+            "{shown}"
+        );
+        let source = std::error::Error::source(&named)
+            .expect("the mapped error stays the source")
+            .to_string();
+        assert!(source.contains("the engine refused"), "{source}");
+    }
+
+    /// A connect error carries no SQLSTATE: it maps to busy, which the
+    /// client retries. As internal, the client would give up on an
+    /// outage that a retry outlives.
+    #[test]
+    fn a_connect_error_without_a_sqlstate_is_busy() {
+        use super::map_pg_error;
+        use crate::{Error, StorageClass};
+        let Err(refused) = Client::connect("postgres://127.0.0.1:1/x", NoTls) else {
+            panic!("a connect to port 1 is refused");
+        };
+        assert!(refused.code().is_none(), "a refusal carries no SQLSTATE");
+        assert!(!refused.is_closed(), "a refusal is not a closed connection");
+        let error = map_pg_error(refused);
+        assert!(
+            matches!(&error, Error::Storage(s) if s.class() == StorageClass::Busy),
+            "{error:?}"
+        );
+    }
+
+    /// The one id row the staging mark holds.
+    fn staging_mark_id(base: &str, schema: &str) -> String {
+        let mut raw = postgres::Client::connect(base, NoTls).unwrap();
+        let mark: Option<String> = raw
+            .query_opt(
+                "SELECT to_regclass(format('%I.restore_staging', $1::text))::text",
+                &[&schema],
+            )
+            .unwrap()
+            .and_then(|row| row.get::<_, Option<String>>(0));
+        let mark = mark.expect("the schema carries the staging mark");
+        raw.query_one(&format!("SELECT id FROM {mark}"), &[])
+            .unwrap()
+            .get("id")
+    }
+
+    /// The loss's own `ROLLBACK` runs on the recovered connection: the
+    /// lost transaction's guard sends it, the reconnect succeeds, and
+    /// the rollback consumes the loss so the caller's next `BEGIN`
+    /// opens a fresh transaction. Answering the rollback with the loss
+    /// would leave the state lost forever - every later job refused.
+    #[test]
+    fn a_lost_transactions_rollback_runs_on_the_recovered_connection() {
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let mut client = connect_on(&url, None, "").unwrap();
+        let mut setup = Setup::new(None, false, &mut client);
+        assert!(setup.ok());
+        let mut tx = TxState::InTx;
+        let mut ever_held = false;
+
+        // The client's backend dies under the transaction, and the
+        // reconnect dials a port nothing answers: the loss is recorded
+        // at the failure, and the client stays closed.
+        let pid: i32 = client
+            .query_one("SELECT pg_backend_pid()", &[])
+            .unwrap()
+            .get(0);
+        let mut killer = postgres::Client::connect(&url, NoTls).unwrap();
+        killer
+            .execute("SELECT pg_terminate_backend($1)", &[&pid])
+            .unwrap();
+        drop(killer);
+
+        let dead = conn("postgres://127.0.0.1:1/scion", None, false);
+        let (dead_job, _reply_rx) = job("SELECT 1");
+        let out = run_with_retry(
+            &mut client,
+            &mut setup,
+            &dead,
+            &dead_job,
+            &mut tx,
+            ever_held,
+            None,
+        );
+        assert!(out.is_err());
+        assert!(matches!(tx, TxState::Lost));
+
+        // The guard's ROLLBACK reconnects and runs: the reply is Ok, and
+        // the loss is consumed (the worker folds the state to Idle).
+        let conn = conn(&url, None, false);
+        let (job, reply_rx) = job("ROLLBACK");
+        let flow = run_job(
+            job,
+            &mut client,
+            &mut setup,
+            &conn,
+            &mut tx,
+            &mut ever_held,
+            None,
+        );
+        assert!(matches!(flow, Flow::Go));
+        let reply = reply_rx.recv().unwrap();
+        assert!(
+            matches!(reply, Ok(Reply::Count(_))),
+            "the loss's own rollback runs on the recovered connection"
+        );
+    }
+
+    /// The reconnect's gate fences a lock that is no longer ours, not a
+    /// setup that merely names no schema: a held lock followed by a
+    /// reconnect whose fresh setup answers `NoSchema` replies the setup
+    /// error and leaves the fence down - the caller retries against a
+    /// fixed URL, and a URL mistake is not a takeover.
+    #[test]
+    fn the_reconnect_gate_does_not_fence_a_setup_that_names_no_schema() {
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let mut client = connect_on(&url, None, "").unwrap();
+        let mut setup = Setup::new(None, false, &mut client);
+        assert!(setup.ok());
+        let mut tx = TxState::Idle;
+        let mut ever_held = true;
+        let fence = Arc::new(Fence::new());
+
+        // The client's backend dies under it, and the statement's
+        // reconnect dials a port nothing answers: the client stays
+        // closed, with the lock once held.
+        let pid: i32 = client
+            .query_one("SELECT pg_backend_pid()", &[])
+            .unwrap()
+            .get(0);
+        let mut killer = postgres::Client::connect(&url, NoTls).unwrap();
+        killer
+            .execute("SELECT pg_terminate_backend($1)", &[&pid])
+            .unwrap();
+        drop(killer);
+
+        let dead = conn("postgres://127.0.0.1:1/scion", None, false);
+        let (dead_job, _reply_rx) = job("SELECT 1");
+        let out = run_with_retry(
+            &mut client,
+            &mut setup,
+            &dead,
+            &dead_job,
+            &mut tx,
+            ever_held,
+            None,
+        );
+        assert!(out.is_err());
+        assert!(client.is_closed());
+
+        // The next job reconnects on a url whose schema names nothing:
+        // the fresh setup answers NoSchema, the reply is the setup
+        // error, and the fence stays down.
+        let conn = conn(&url, Some("no_such_schema_for_the_reconnect_gate"), true);
+        let (job, reply_rx) = job("SELECT 1");
+        let flow = run_job(
+            job,
+            &mut client,
+            &mut setup,
+            &conn,
+            &mut tx,
+            &mut ever_held,
+            Some(&fence),
+        );
+        assert!(matches!(flow, Flow::Go));
+        let reply = reply_rx.recv().unwrap();
+        assert!(reply.is_err(), "the setup error answers, not the statement");
+        assert!(!fence.tripped(), "a schemaless setup is not a takeover");
+    }
+
+    /// The retry gate's one re-apply fences a refused lock, not a setup
+    /// that names no schema: a stale `NoSchema` setup on a live client
+    /// re-applies once, answers the setup error again, and the fence
+    /// stays down - the same URL mistake twice, still not a takeover.
+    #[test]
+    fn the_retry_gate_does_not_fence_a_setup_that_names_no_schema() {
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let absent = "no_such_schema_for_the_retry_gate";
+        let mut client = connect_on(&url, None, "").unwrap();
+        let mut setup = Setup::new(Some(absent), true, &mut client);
+        assert!(!setup.ok());
+        let mut tx = TxState::Idle;
+        let mut ever_held = true;
+        let fence = Arc::new(Fence::new());
+        let conn = conn(&url, Some(absent), true);
+        let (job, reply_rx) = job("SELECT 1");
+        let flow = run_job(
+            job,
+            &mut client,
+            &mut setup,
+            &conn,
+            &mut tx,
+            &mut ever_held,
+            Some(&fence),
+        );
+        assert!(matches!(flow, Flow::Go));
+        let reply = reply_rx.recv().unwrap();
+        assert!(reply.is_err(), "the setup error answers, not the statement");
+        assert!(!fence.tripped(), "a schemaless setup is not a takeover");
+    }
+
+    /// A new `BEGIN` after a reconnect passes: the reconnect ended the
+    /// old transaction, so the `BEGIN` opens a fresh one for the
+    /// caller's next statements - answering it with the loss would
+    /// refuse every caller that retries after a database restart.
+    #[test]
+    fn a_new_begin_after_a_reconnect_passes() {
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let mut client = connect_on(&url, None, "").unwrap();
+        let mut setup = Setup::new(None, false, &mut client);
+        assert!(setup.ok());
+        let mut tx = TxState::InTx;
+        let mut ever_held = false;
+
+        let pid: i32 = client
+            .query_one("SELECT pg_backend_pid()", &[])
+            .unwrap()
+            .get(0);
+        let mut killer = postgres::Client::connect(&url, NoTls).unwrap();
+        killer
+            .execute("SELECT pg_terminate_backend($1)", &[&pid])
+            .unwrap();
+        drop(killer);
+
+        let dead = conn("postgres://127.0.0.1:1/scion", None, false);
+        let (dead_job, _reply_rx) = job("SELECT 1");
+        let out = run_with_retry(
+            &mut client,
+            &mut setup,
+            &dead,
+            &dead_job,
+            &mut tx,
+            ever_held,
+            None,
+        );
+        assert!(out.is_err());
+        assert!(matches!(tx, TxState::Lost));
+
+        let conn = conn(&url, None, false);
+        let (job, reply_rx) = job("BEGIN");
+        let flow = run_job(
+            job,
+            &mut client,
+            &mut setup,
+            &conn,
+            &mut tx,
+            &mut ever_held,
+            None,
+        );
+        assert!(matches!(flow, Flow::Go));
+        let reply = reply_rx.recv().unwrap();
+        assert!(
+            matches!(reply, Ok(Reply::Count(_))),
+            "the new BEGIN opens a fresh transaction, not the loss"
+        );
     }
 
     /// The consumption path the recording relies on: the lost
@@ -7427,13 +8043,7 @@ mod tests {
         let mut setup = Setup::new(None, false, &mut client);
         assert!(setup.ok());
         let mut tx = TxState::Lost;
-        let conn = Conn {
-            url: url.clone(),
-            ca: None,
-            options: String::new(),
-            schema: None,
-            exclusive: false,
-        };
+        let conn = conn(&url, None, false);
         let job_of = |sql: &str| {
             let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
             Job {
@@ -7541,7 +8151,38 @@ mod lane_key_tests {
 #[cfg(test)]
 pub(crate) mod pool_tests {
     use super::*;
+
     use crate::store::READERS;
+
+    /// A write whose closure panics rolls back whole: the transaction is
+    /// dropped un-ended, and the drop's rollback takes the closure's
+    /// rows with it. A drop that left the transaction open would join
+    /// the next write to it - Postgres answers that `BEGIN` with only a
+    /// warning - and the next write's commit would commit the panicked
+    /// closure's work too.
+    #[test]
+    fn a_panic_in_a_write_rolls_back_and_the_next_write_stays_clean() {
+        use crate::meta::MetaTx as _;
+        let (_gate, pg) = pg();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = pg.write(|tx| {
+                tx.create_repo("panicked").map(|_| ())?;
+                panic!("the test's panic");
+                #[allow(unreachable_code)]
+                Ok(())
+            });
+        }));
+        assert!(unwind.is_err(), "the closure's panic left the write");
+
+        // The next write commits its own work only: the panicked
+        // closure's repo is gone with its transaction.
+        pg.write(|tx| tx.create_repo("kept").map(|_| ())).unwrap();
+        assert!(
+            pg.read(|tx| tx.repo_id("panicked").map(|_| ())).is_err(),
+            "the panicked write's work is gone"
+        );
+        pg.read(|tx| tx.repo_id("kept").map(|_| ())).unwrap();
+    }
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -7555,6 +8196,32 @@ pub(crate) mod pool_tests {
         SERVER_SIZED_POOL
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A refusal of a markerless directory names the schema's own
+    /// record (#1233): the schema's comment (the directory its open
+    /// registered) and the registry's age join the error, so the next
+    /// schema-and-directory mismatch names its owner from the log
+    /// alone. A schema with no comment leaves the refusal as it was.
+    #[test]
+    fn a_refusal_of_a_markerless_dir_names_the_schemas_recorded_directory() {
+        let data = crate::test_support::private_tempdir();
+        let store = crate::Backend::open_test(data.path()).unwrap();
+        store.commit(|c| c.create_repo("r").map(|_| ())).unwrap();
+        drop(store);
+        // The schema stays served (a repo row), the directory forgets
+        // its store: the next open pairs (no marker, held, repos) and
+        // refuses. The marker file is backend.rs's MARKER.
+        std::fs::remove_file(data.path().join("backend")).unwrap();
+        let Err(refused) = crate::Backend::open_test(data.path()) else {
+            panic!("the markerless open of a served schema answered ok")
+        };
+        let text = format!("{refused}");
+        assert!(text.contains("carries no marker"), "{text}");
+        assert!(
+            text.contains(&data.path().to_string_lossy().to_string()),
+            "{text}"
+        );
     }
 
     /// A Postgres backend of a test database, with the pool gate: the
@@ -7778,6 +8445,92 @@ pub(crate) mod pool_tests {
             "the disagreeing write answers {err}"
         );
         // The stored row kept its value.
+        let got = store.commit(|c| c.get_derived("view", 1, cs)).unwrap();
+        assert_eq!(got.as_deref(), Some(&b"first"[..]));
+    }
+
+    /// A store with one repo and one root changeset: the shared setup of
+    /// the derived-write tests. The directory stays alive with the
+    /// caller (the store reads it on every open).
+    fn store_with_root() -> (tempfile::TempDir, crate::Backend, ChangesetId) {
+        let data = crate::test_support::private_tempdir();
+        let store = crate::Backend::open_test(data.path()).unwrap();
+        let cs = Changeset::new(
+            vec![],
+            scion_core::IdentityTime::new(b"Ada".to_vec(), b"ada@example.com".to_vec(), 0, 0)
+                .expect("identity fits the format"),
+            None,
+            b"root".to_vec(),
+            std::collections::BTreeMap::new(),
+        )
+        .expect("changeset fits the format");
+        let cs = store
+            .commit(|c| {
+                let repo = c.create_repo("r")?;
+                c.insert_changeset(repo, &cs)
+            })
+            .unwrap();
+        (data, store, cs)
+    }
+
+    /// A re-put of the same derived value is idempotent, not corruption:
+    /// a retried settle re-derives and re-records what it already
+    /// stored. ON CONFLICT DO NOTHING skips the stored row, the short
+    /// inserted count makes the stored-value read, and the read answers
+    /// the same bytes - the check passes. A check that refused every
+    /// conflict would fail the retried settle on a row it wrote
+    /// itself.
+    #[test]
+    fn a_derived_rewrite_of_the_same_stored_value_is_ok() {
+        let (_data, store, cs) = store_with_root();
+        store
+            .commit(|c| c.put_derived("view", 1, cs, b"first"))
+            .unwrap();
+        // The same value again, a new transaction: the conflict keeps
+        // the stored row, the read-back agrees, and the write answers
+        // ok.
+        store
+            .commit(|c| c.put_derived("view", 1, cs, b"first"))
+            .unwrap();
+        let got = store.commit(|c| c.get_derived("view", 1, cs)).unwrap();
+        assert_eq!(got.as_deref(), Some(&b"first"[..]));
+    }
+
+    /// A batched derived write that lands on a stored row of a different
+    /// value is corruption, like the single put: the batch's ON CONFLICT
+    /// DO NOTHING skips the stored row, the short count makes the
+    /// row-by-row check, and the check refuses. A check that ran only
+    /// when the count matched would never see a conflict at all.
+    #[test]
+    fn a_derived_batch_over_a_differing_stored_row_is_refused() {
+        let (_data, store, cs) = store_with_root();
+        store
+            .commit(|c| c.put_derived("view", 1, cs, b"first"))
+            .unwrap();
+        let err = store
+            .commit(|c| c.put_derived_all(&[("view".into(), 1, cs, b"second".to_vec())]))
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("differs from the stored value"),
+            "the disagreeing batch answers {err}"
+        );
+    }
+
+    /// A batched derived write of the value the row already stores is
+    /// legal: a fill may have stored the same value before this
+    /// transaction began. The short count makes the row-by-row check,
+    /// and the read-back agrees, so the write answers ok. A check that
+    /// compared backwards would refuse the agreeing row and pass the
+    /// disagreeing one.
+    #[test]
+    fn a_derived_batch_of_the_same_stored_value_is_ok() {
+        let (_data, store, cs) = store_with_root();
+        store
+            .commit(|c| c.put_derived("view", 1, cs, b"first"))
+            .unwrap();
+        store
+            .commit(|c| c.put_derived_all(&[("view".into(), 1, cs, b"first".to_vec())]))
+            .unwrap();
         let got = store.commit(|c| c.get_derived("view", 1, cs)).unwrap();
         assert_eq!(got.as_deref(), Some(&b"first"[..]));
     }
