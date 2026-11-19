@@ -7712,7 +7712,10 @@ mod tests {
 
         // A release gives its row back: the next connect starts.
         park_release(1);
-        assert!(park_refuse("db").is_ok(), "the released slot starts a connect");
+        assert!(
+            park_refuse("db").is_ok(),
+            "the released slot starts a connect"
+        );
 
         // A release names its own token: releasing 2 leaves 3's row.
         // One more register fills the cap again, and the refusal names
