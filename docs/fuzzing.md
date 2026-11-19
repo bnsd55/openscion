@@ -76,16 +76,23 @@ crate's path dependency (`open-scion-core = { path = ".." }`) inherits from
 that manifest, so any update that needs resolution dies with "failed to find
 a workspace root" ([#1245](https://github.com/bnsd55/openscion/issues/1245)).
 The lockfiles are still watched: the supply-chain job's deny loop runs
-`cargo deny check` in every `crates/*/fuzz/` weekly and fails red on an
-advisory, a license, or a lock that does not match its manifest. What needs
+`cargo deny check` in every `crates/*/fuzz/` nightly and on every
+dependency change, and fails red on an advisory, a license, or a lock that
+does not match its manifest. What needs
 a human is the update itself, in two cases:
 
-1. The regular refresh. `Dependabot` does not open fuzz PRs, so on your own
-   cadence — roughly when the root group PRs land — run, per fuzz workspace
-   that offers something:
+1. The regular refresh. Dependabot does not open fuzz PRs, so on your own
+   cadence — roughly when the root group PRs land — see what each fuzz
+   workspace offers, then pick from its list:
 
    ```
    cd crates/<crate>/fuzz
+   cargo update --dry-run
+   ```
+
+   For every crate from that list you want:
+
+   ```
    cargo update -p <crate> ...
    cargo metadata --locked --format-version 1 > /dev/null
    cargo deny --config deny.toml check

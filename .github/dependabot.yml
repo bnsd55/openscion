@@ -12,9 +12,9 @@ updates:
   # root workspace manifest, and a fuzz crate's path dependency inherits
   # from that manifest, so an update that needs resolution dies with
   # "failed to find a workspace root" (#1245). Their lockfiles are
-  # covered instead by the deny loop in ci.yml (an advisory fails red
-  # weekly) and by the manual upkeep step in docs/fuzzing.md
-  # ("Dependency upkeep").
+  # covered instead by the deny loop in ci.yml (nightly and on every
+  # dependency change: an advisory fails red) and by the manual upkeep
+  # step in docs/fuzzing.md ("Dependency upkeep").
   - package-ecosystem: github-actions
     directory: /
     schedule:
