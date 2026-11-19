@@ -3503,54 +3503,65 @@ const CONNECT_PARKED_MAX: usize = 2;
 
 /// The connects parked on silent sockets: their tokens and the moments
 /// they started, so the next connect past the cap can name how long
-/// the oldest has waited.
-static PARKED_CONNECTS: std::sync::LazyLock<Mutex<Vec<(u64, std::time::Instant)>>> =
-    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+/// the oldest has waited. A value, not free functions over a static,
+/// so the tests drive their own instance without racing the threaded
+/// runner's real connects.
+struct ParkedConnects(std::sync::Mutex<Vec<(u64, std::time::Instant)>>);
+
+impl ParkedConnects {
+    const fn new() -> Self {
+        Self(std::sync::Mutex::new(Vec::new()))
+    }
+
+    /// Refuses a new connect while the cap of parked connects is held:
+    /// the error names the host and how long the oldest parked connect
+    /// has waited.
+    fn refuse(&self, host: &str) -> Result<()> {
+        let parked = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if parked.len() >= CONNECT_PARKED_MAX {
+            let oldest = parked
+                .iter()
+                .map(|(_, since)| since.elapsed().as_secs())
+                .max()
+                .unwrap_or(0);
+            return Err(Error::Unavailable(format!(
+                "the database at {host} already has {} connects parked on a \
+                 socket that never answers, the oldest for {oldest} s: not starting another",
+                parked.len()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Registers a connect whose caller gave up waiting: its thread is
+    /// still parked on the socket. Past the cap the register keeps no
+    /// row - the thread parks anyway, one of the batch the cap bounded.
+    fn register(&self, token: u64) {
+        let mut parked = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if parked.len() < CONNECT_PARKED_MAX {
+            parked.push((token, std::time::Instant::now()));
+        }
+    }
+
+    /// Gives a parked connect's row back: the connect's thread ended,
+    /// so its socket is no longer held.
+    fn release(&self, token: u64) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(held, _)| *held != token);
+    }
+}
+
+static PARKED_CONNECTS: ParkedConnects = ParkedConnects::new();
 
 static PARKED_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Refuses a new connect while the cap of parked connects is held: the
-/// error names the host and how long the oldest parked connect has
-/// waited.
-fn park_refuse(host: &str) -> Result<()> {
-    let parked = PARKED_CONNECTS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if parked.len() >= CONNECT_PARKED_MAX {
-        let oldest = parked
-            .iter()
-            .map(|(_, since)| since.elapsed().as_secs())
-            .max()
-            .unwrap_or(0);
-        return Err(Error::Unavailable(format!(
-            "the database at {host} already has {} connects parked on a \
-             socket that never answers, the oldest for {oldest} s: not starting another",
-            parked.len()
-        )));
-    }
-    Ok(())
-}
-
-/// Registers a connect whose caller gave up waiting: its thread is
-/// still parked on the socket. Past the cap the register keeps no row
-/// - the thread parks anyway, one of the batch the cap bounded.
-fn park_register(token: u64) {
-    let mut parked = PARKED_CONNECTS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if parked.len() < CONNECT_PARKED_MAX {
-        parked.push((token, std::time::Instant::now()));
-    }
-}
-
-/// Gives a parked connect's row back: the connect's thread ended, so
-/// its socket is no longer held.
-fn park_release(token: u64) {
-    PARKED_CONNECTS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .retain(|(held, _)| *held != token);
-}
 
 /// [`connect_with`]'s work: parse, then connect.
 fn connect_on(url: &str, ca: Option<&Path>, options: &str) -> Result<Client> {
@@ -3576,6 +3587,7 @@ pub fn connect_on_deadline_for_tests(
 #[cfg(any(test, feature = "test-hooks"))]
 pub fn test_reset_parked_connects() {
     PARKED_CONNECTS
+        .0
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clear();
@@ -3641,7 +3653,7 @@ fn connect_on_deadline(
     // answers its startup fails here instead of holding the open, the
     // readers' connect and every reconnect forever.
     let (connected, wait) = std::sync::mpsc::channel();
-    park_refuse(&host)?;
+    PARKED_CONNECTS.refuse(&host)?;
     let token = PARKED_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let attempt = match (local, ca) {
         // The connector upgrades every connection, and checks the
@@ -3652,7 +3664,7 @@ fn connect_on_deadline(
                 .name("postgres-connect".to_owned())
                 .spawn(move || {
                     let answer = config.connect(tls);
-                    park_release(token);
+                    PARKED_CONNECTS.release(token);
                     let _ = connected.send(answer);
                 })
         }
@@ -3660,7 +3672,7 @@ fn connect_on_deadline(
             .name("postgres-connect".to_owned())
             .spawn(move || {
                 let answer = config.connect(NoTls);
-                park_release(token);
+                PARKED_CONNECTS.release(token);
                 let _ = connected.send(answer);
             }),
         (false, None) => {
@@ -3677,7 +3689,7 @@ fn connect_on_deadline(
     } else {
         // The connect's thread is now parked on the socket: registered,
         // so the next connects past the cap refuse at once.
-        park_register(token);
+        PARKED_CONNECTS.register(token);
         let why = format!(
             "the database at {host} did not finish its connect within {} s: \
              the socket may have connected, but its startup, its TLS \
@@ -7123,8 +7135,7 @@ mod tests {
     use super::{
         Client, Conn, Fence, Flow, Job, Kind, NoTls, Reply, SCHEMA_LOCK, Setup, SetupFailure,
         TxState, connect_on, connection_gone, delete_prefixes, merged_options, migration_lock_key,
-        park_refuse, park_register, park_release, reset_schema, run_job, run_with_retry,
-        schema_lock_key,
+        reset_schema, run_job, run_with_retry, schema_lock_key,
     };
     use crate::error::{Error, Storage};
     use crate::pg::{Pairing, Pg, pairing_decision};
@@ -7698,22 +7709,24 @@ mod tests {
     /// The parked-connect bookkeeping holds its own rows: the register
     /// stops at the cap, a release drops its own token's row, and a
     /// release's token is the one it names. The refusal's text is the
-    /// lens: it names how many rows the cap holds.
+    /// lens: it names how many rows the cap holds. The test drives its
+    /// own bookkeeping value, so the threaded runner's real connects
+    /// cannot touch these rows.
     #[test]
     fn the_parked_connect_slots_release_and_bound_the_register() {
-        super::test_reset_parked_connects();
-        park_register(1);
-        park_register(2);
-        park_register(3);
-        // At the cap the register keeps no fourth row, and the refusal
-        // names two parked.
-        let err = park_refuse("db").unwrap_err().to_string();
+        let parked = super::ParkedConnects::new();
+        parked.register(1);
+        parked.register(2);
+        // The third register keeps no row, and the refusal names the
+        // two the cap holds.
+        parked.register(3);
+        let err = parked.refuse("db").unwrap_err().to_string();
         assert!(err.contains("2 connects parked"), "{err}");
 
         // A release gives its row back: the next connect starts.
-        park_release(1);
+        parked.release(1);
         assert!(
-            park_refuse("db").is_ok(),
+            parked.refuse("db").is_ok(),
             "the released slot starts a connect"
         );
 
@@ -7721,12 +7734,11 @@ mod tests {
         // One more register fills the cap again, and the refusal names
         // two parked - a release that kept the wrong row would leave a
         // different count (or none) behind.
-        park_register(3);
-        park_release(2);
-        park_register(4);
-        let err = park_refuse("db").unwrap_err().to_string();
+        parked.register(3);
+        parked.release(2);
+        parked.register(4);
+        let err = parked.refuse("db").unwrap_err().to_string();
         assert!(err.contains("2 connects parked"), "{err}");
-        super::test_reset_parked_connects();
     }
 
     /// The one id row the staging mark holds.
