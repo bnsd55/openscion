@@ -969,6 +969,26 @@ mod silent_failures {
         }
     }
 
+    /// A `Ctx` whose clients never connect: the command paths under test
+    /// refuse or stop before the first RPC, so the lazy channel is never
+    /// dialed.
+    fn dummy_ctx() -> Ctx {
+        use scion_proto::runtime::auth::Bearer;
+        use scion_proto::v1::{objects_client::ObjectsClient, scion_client::ScionClient};
+        let channel = tonic::transport::Endpoint::from_shared("http://127.0.0.1:1")
+            .unwrap()
+            .connect_lazy();
+        let call =
+            crate::client::Call::new(Bearer::new("token").unwrap(), "mount-test".parse().unwrap());
+        Ctx {
+            client: ScionClient::with_interceptor(channel.clone(), call.clone()),
+            objects: ObjectsClient::with_interceptor(channel.clone(), call.clone()),
+            roots: ObjectsClient::with_interceptor(channel, call),
+            repo: "t".to_owned(),
+            json: false,
+        }
+    }
+
     fn temp_file(name: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("scn-mount-test-{}-{}", std::process::id(), name));
@@ -1623,5 +1643,70 @@ mod silent_failures {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    /// A mount whose mount point is missing is refused before anything
+    /// is served or recorded (check_mount_point runs first). With the
+    /// command stubbed to Ok, the refusal would vanish.
+    #[tokio::test]
+    async fn a_mount_on_a_missing_mount_point_is_refused() {
+        let _serial = serial();
+        let _home = Home::take();
+        let base = tempfile::tempdir().unwrap();
+        let gone = base.path().join("gone");
+        #[derive(clap::Parser)]
+        struct MountCli {
+            #[command(flatten)]
+            args: MountArgs,
+        }
+        use clap::Parser as _;
+        let args = MountCli::parse_from(["mount", gone.to_str().unwrap()]).args;
+        let mut ctx = dummy_ctx();
+        let err = mount(&mut ctx, args).await.unwrap_err().to_string();
+        assert!(
+            err.contains("the mount point does not exist or is not a directory"),
+            "{err}"
+        );
+    }
+
+    /// An unmount of a stale record (the serve lock is free) drops the
+    /// session record and succeeds: with the command stubbed to Ok the
+    /// record would stay, and with the stop check inverted the failed
+    /// stop would keep the record and refuse the unmount.
+    #[tokio::test]
+    async fn an_unmount_of_a_stale_record_drops_the_record_and_succeeds() {
+        let _serial = serial();
+        let _home = Home::take();
+        let base = tempfile::tempdir().unwrap();
+        let overlay = base.path().join("overlay");
+        fs::create_dir_all(&overlay).unwrap();
+        // The lock file exists and no one holds it: the record is stale,
+        // so the unmount must not signal the pid it names.
+        std::fs::File::create(overlay.join("serve.lock")).unwrap();
+        // The record's dir spelled the way the command resolves it, so
+        // the unmount's mount_dir lands on the same record.
+        let dir = mount_dir(&base.path().join("view")).unwrap();
+        let known = MountRecord {
+            dir: dir.clone(),
+            overlay: overlay.clone(),
+            rev: "main".to_owned(),
+            pid: 4245,
+            writable: false,
+        };
+        save_session(&known).unwrap();
+        assert_eq!(load_sessions().unwrap(), vec![known.clone()]);
+        #[derive(clap::Parser)]
+        struct UnmountCli {
+            #[command(flatten)]
+            args: UnmountArgs,
+        }
+        use clap::Parser as _;
+        let args = UnmountCli::parse_from(["unmount", dir.to_str().unwrap()]).args;
+        let mut ctx = dummy_ctx();
+        unmount(&mut ctx, args).await.unwrap();
+        assert!(
+            load_sessions().unwrap().is_empty(),
+            "the unmount left the record behind"
+        );
     }
 }
