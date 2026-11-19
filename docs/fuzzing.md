@@ -67,3 +67,36 @@ cargo-fuzz builds the target on nightly and runs it once on that input, under
 the address sanitizer. A crash reproduces with the same panic the CI log
 showed; a fix lands with the input's bytes folded into the target's
 `fuzz/seeds/<target>/` directory, so the corpus keeps the case forever.
+
+## Dependency upkeep
+
+Each fuzz workspace's lockfile is outside Dependabot's reach: its updater
+resolves inside a copy that lacks the root workspace manifest, and the fuzz
+crate's path dependency (`open-scion-core = { path = ".." }`) inherits from
+that manifest, so any update that needs resolution dies with "failed to find
+a workspace root" ([#1245](https://github.com/bnsd55/openscion/issues/1245)).
+The lockfiles are still watched: the supply-chain job's deny loop runs
+`cargo deny check` in every `crates/*/fuzz/` weekly and fails red on an
+advisory, a license, or a lock that does not match its manifest. What needs
+a human is the update itself, in two cases:
+
+1. The regular refresh. `Dependabot` does not open fuzz PRs, so on your own
+   cadence — roughly when the root group PRs land — run, per fuzz workspace
+   that offers something:
+
+   ```
+   cd crates/<crate>/fuzz
+   cargo update -p <crate> ...
+   cargo metadata --locked --format-version 1 > /dev/null
+   cargo deny --config deny.toml check
+   ```
+
+   Review the diff as you would a Dependabot PR, and commit the lockfile.
+
+2. A root requirement move. When a root PR changes what a crate requires
+   (rusqlite 0.41 to 0.43, jiff 0.2 to 1.0 — [#1252](https://github.com/bnsd55/openscion/pull/1252)
+   is the shape), the fuzz lockfiles that resolve that crate go stale, and
+   the supply-chain job's lock-match check fails the root PR itself. Take
+   the root PR's updates into a human PR that also runs
+   `cargo update -p <pkg>` in each fuzz directory the check names, then
+   commit those lockfiles with the root's.
