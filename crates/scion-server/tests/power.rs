@@ -252,15 +252,21 @@ impl Drop for Lazyfs {
         // and the exact mount path keeps a parallel round's daemon safe.
         if let Some(pid) = self.daemon {
             let killed = Command::new("kill").arg("-9").arg(pid.to_string()).output();
-            // The teardown lands in the mount log, so the artifact
-            // carries the round's whole lifecycle, start to exit.
-            let _ = fs::write(
-                &self.mount_log,
-                format!(
-                    "[test] drop: killed the daemon pid {pid}: {:?}\n",
+            // The teardown APPENDS to the mount log, so the artifact
+            // carries the round's whole lifecycle - the daemon's start
+            // lines stay above it.
+            let mut log = fs::OpenOptions::new()
+                .append(true)
+                .open(&self.mount_log)
+                .ok();
+            if let Some(log) = log.as_mut() {
+                use std::io::Write as _;
+                let _ = writeln!(
+                    log,
+                    "[test] drop: killed the daemon pid {pid}: {:?}",
                     killed.map(|o| o.status)
-                ),
-            );
+                );
+            }
         }
         let _ = Command::new("fusermount3")
             .arg("-u")
