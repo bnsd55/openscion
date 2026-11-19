@@ -293,11 +293,18 @@ jobs:
               echo "no diff between $DIFF_BASE and HEAD for: ${files_arr[*]}" >&2; exit 2; }
             echo "mutating only the lines changed since $DIFF_BASE ($(grep -c '^+[^+]' "$patch") added lines)"
             # A diff that touches no mutable line (only comments or docs)
-            # filters to 0 mutants and cargo-mutants exits 0 without lists;
-            # the count here turns that into a clear success line instead
-            # of a missing-lists failure (#1257 step 4).
+            # filters to 0 mutants: cargo-mutants 27.1.0 logs it and exits
+            # 0 before writing any lists, which the outcome step would
+            # read as a bug. List first: 0 mutants becomes a clear
+            # success with empty lists; anything else runs.
+            list_out="$RUNNER_TEMP/mutants-diff-list.txt"
             # shellcheck disable=SC2086
-            diff_mutants=$(cargo mutants --no-shuffle $mutants_args $file_args ${exclude_args[@]+"${exclude_args[@]}"} --in-diff "$patch" --list | grep -c '^' || true)
+            if ! cargo mutants --no-shuffle $mutants_args $file_args ${exclude_args[@]+"${exclude_args[@]}"} --in-diff "$patch" --list > "$list_out"; then
+              echo "cargo mutants --list refused the diff:" >&2
+              cat "$list_out" >&2
+              exit 2
+            fi
+            diff_mutants=$(grep -c '^' "$list_out" || true)
             if [ "$diff_mutants" = 0 ]; then
               echo "no mutants on the changed lines: the diff touches only comments, docs or code cargo-mutants does not mutate"
             else
