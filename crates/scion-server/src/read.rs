@@ -1233,3 +1233,137 @@ fn file(entry: Option<Entry>) -> Option<FileState> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::Backend;
+    use crate::deadline::Deadline;
+    use crate::derived;
+    use crate::history::PathHistory;
+    use crate::tree;
+    use scion_core::{BlobId, FileState, IdentityTime};
+
+    fn later() -> Deadline {
+        Deadline::new(std::time::Instant::now() + std::time::Duration::from_secs(600))
+    }
+
+    fn path(p: &str) -> RepoPath {
+        RepoPath::new(p).unwrap()
+    }
+
+    fn changeset(parent: Option<ChangesetId>, edits: &[(String, Option<BlobId>)]) -> Changeset {
+        Changeset::new(
+            parent.into_iter().collect(),
+            IdentityTime::new(b"a".to_vec(), b"a@x".to_vec(), 0, 0)
+                .expect("identity fits the format"),
+            None,
+            vec![],
+            edits
+                .iter()
+                .map(|(p, blob)| {
+                    let state = blob.map(|content| FileState::Regular {
+                        content,
+                        executable: false,
+                    });
+                    (path(p), state)
+                })
+                .collect(),
+        )
+        .expect("changeset fits the format")
+    }
+
+    /// A log page with a path stops once its walk has read
+    /// [`MAX_LOG_NODE_BYTES`] of tree nodes, after its first entry, with a
+    /// cursor for the rest. The fixture pins the bound exactly. A top-level
+    /// file's lookup reads one node per link it visits - the level's own
+    /// row - and the row's encoding is fixed-width, so the test sizes one
+    /// level to a stored row of exactly 1,024 bytes: 15 entries, each
+    /// `51 + name.len()` bytes of payload (`2` name length, `1` flags,
+    /// `32` id, `8` generation, `8` own generation), `f0` at 2 bytes plus
+    /// fourteen fillers at 256 bytes of name in total, for a payload of
+    /// 1,023 and 1,024 stored with its kind byte. 512 links of 1,024 bytes
+    /// land exactly on the 512 KiB test bound, so the stop fires at the
+    /// 513th link and one entry more or less names the mutant. If the
+    /// encoding, the cut, or the bound changes, the row-length assert
+    /// below fails and the numbers are re-measured the same way.
+    #[test]
+    fn the_log_page_stops_at_its_node_byte_bound() {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let repo = store.write(|c| c.create_repo("r")).unwrap();
+        // `f0` plus twelve 20-byte fillers and two 8-byte fillers: a root
+        // row of exactly 1,023 payload bytes. Every commit rewrites that
+        // row, so every link's lookup reads a fresh 1,024-byte row.
+        let filler = |name: &str, width: usize| {
+            let mut n = name.to_string();
+            while n.len() < width {
+                n.push('x');
+            }
+            n
+        };
+        let fillers: Vec<String> = (0..12)
+            .map(|i| filler(&format!("w{i:02}"), 20))
+            .chain(["w12", "w13"].iter().map(|n| filler(n, 8)))
+            .collect();
+        let ids = store
+            .write(|c| {
+                let mut ids: Vec<ChangesetId> = Vec::new();
+                for i in 0..520_i64 {
+                    let edits: Vec<(String, Option<BlobId>)> = if i == 0 {
+                        std::iter::once(("f0".to_string(), Some(BlobId::of(b"0"))))
+                            .chain(
+                                fillers
+                                    .iter()
+                                    .map(|f| (f.clone(), Some(BlobId::of(f.as_bytes())))),
+                            )
+                            .collect()
+                    } else {
+                        vec![("f0".to_string(), Some(BlobId::of(i.to_string().as_bytes())))]
+                    };
+                    let cs = changeset(ids.last().copied(), &edits);
+                    ids.push(tree::store_changeset(c, repo, &cs, &mut tree::lens_none())?.0);
+                }
+                for &id in &ids {
+                    derived::derive::<PathHistory>(c, repo, id, &mut tree::lens_none(), None)?;
+                }
+                Ok(ids)
+            })
+            .unwrap();
+        // The tripwire: every link's level row stores exactly 1,024 bytes.
+        store
+            .read(|c| {
+                for (at, value) in crate::history::chain_values(c, ids[519], 520)? {
+                    let Some(root) = value else {
+                        panic!("path history: no value for {at}");
+                    };
+                    let (body, len) = c.get_history_node(root)?;
+                    assert_eq!(len, 1024, "row {root} of {at} is {} bytes", body.len());
+                }
+                Ok(())
+            })
+            .unwrap();
+        // The walk visits every link - each commit changes `f0` - and
+        // stops at the 513th, whose check first sees 512 rows of 1,024
+        // bytes: 512 entries, one per link, and a cursor at the 513th.
+        let page = log_page(&store, "r", ids[519], Some(&path("f0")), 1000, &later()).unwrap();
+        assert_eq!(
+            page.entries.len(),
+            512,
+            "the bound stops the page, not the limit"
+        );
+        assert_eq!(page.entries[0].0, ids[519], "newest first");
+        assert_eq!(page.entries[511].0, ids[8], "the 512th visited link");
+        assert_eq!(
+            page.next,
+            Some(ids[7]),
+            "the cursor rides the first unchecked link"
+        );
+        // A call from the cursor continues down the 8 remaining links and
+        // ends the history there.
+        let rest = log_page(&store, "r", ids[7], Some(&path("f0")), 1000, &later()).unwrap();
+        assert_eq!(rest.entries.len(), 8, "the rest of the history, 520 - 512");
+        assert_eq!(rest.entries[0].0, ids[7]);
+        assert_eq!(rest.next, None, "the walk reached the root");
+    }
+}
