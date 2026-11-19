@@ -7741,6 +7741,68 @@ mod tests {
         assert!(err.contains("2 connects parked"), "{err}");
     }
 
+    /// A setup failure names the statement it waited on, and its source
+    /// stays the database's own error - the whole chain survives (#905).
+    #[test]
+    fn a_setup_failure_names_the_statement_and_keeps_the_database_error() {
+        let Err(source) = Client::connect("postgres://127.0.0.1:1/x", NoTls) else {
+            panic!("a connect to port 1 is refused");
+        };
+        let failure = super::SetupFailure {
+            sql: "SELECT 1".to_owned(),
+            source,
+        };
+        let shown = format!("{failure}");
+        assert!(
+            shown.contains("the database was unreachable at setup, waiting on:")
+                && shown.contains("SELECT 1"),
+            "{shown}"
+        );
+        let source = std::error::Error::source(&failure)
+            .expect("the database's own error stays the source")
+            .to_string();
+        assert!(source.contains("error connecting to server"), "{source}");
+    }
+
+    /// A named step names the step and the statement, and its source
+    /// stays the mapped engine error - the whole chain survives (#905).
+    #[test]
+    fn a_named_step_names_the_step_and_keeps_the_mapped_error() {
+        let named = super::NamedStep {
+            step: "the test step",
+            sql: "SELECT 1".to_owned(),
+            source: crate::Error::InvalidArgument("the engine refused".to_owned()),
+        };
+        let shown = format!("{named}");
+        assert!(
+            shown.contains("the open step `the test step` waited or failed:")
+                && shown.contains("SELECT 1"),
+            "{shown}"
+        );
+        let source = std::error::Error::source(&named)
+            .expect("the mapped error stays the source")
+            .to_string();
+        assert!(source.contains("the engine refused"), "{source}");
+    }
+
+    /// A connect error carries no SQLSTATE: the mapping answers busy -
+    /// as retryable as a busy one - not internal, or the client would
+    /// retry what a retry cannot fix.
+    #[test]
+    fn a_connect_error_without_a_sqlstate_is_busy() {
+        use super::pg_error_of_source;
+        use crate::{Error, StorageClass};
+        let error = pg_error_of_source(
+            None,
+            false,
+            Box::new(std::io::Error::other("the socket never answered")),
+        );
+        assert!(
+            matches!(&error, Error::Storage(s) if s.class() == StorageClass::Busy),
+            "{error:?}"
+        );
+    }
+
     /// The one id row the staging mark holds.
     fn staging_mark_id(base: &str, schema: &str) -> String {
         let mut raw = postgres::Client::connect(base, NoTls).unwrap();
