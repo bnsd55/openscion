@@ -1651,11 +1651,16 @@ mod tests {
             assert_eq!(blobs.size(id).unwrap(), raw.len());
         }
 
-        // A frame with no size in its header is refused, not guessed.
+        // A frame with no size in its header is refused, not guessed. The
+        // frame is built with the pledge off on purpose: zstd 0.14.4's
+        // encode_all pledges the source's length for sources under 128 KiB,
+        // which records the size this test must leave out.
         let id = BlobId::of(b"streamed");
         let (fan_out, file) = blobs.location(id);
         fs::create_dir_all(fan_out).unwrap();
-        fs::write(file, zstd::stream::encode_all(&b"streamed"[..], 3).unwrap()).unwrap();
+        let mut streamed = zstd::stream::Encoder::new(Vec::new(), 3).unwrap();
+        io::Write::write_all(&mut streamed, &b"streamed"[..]).unwrap();
+        fs::write(file, streamed.finish().unwrap()).unwrap();
         assert!(matches!(blobs.size(id), Err(Error::Corrupt(_))));
         let absent = BlobId::of(b"absent");
         assert!(matches!(blobs.size(absent), Err(Error::NotFound(_))));
