@@ -1646,23 +1646,29 @@ mod silent_failures {
     }
 
     /// A mount whose mount point is missing is refused before anything
-    /// is served or recorded (check_mount_point runs first). With the
-    /// command stubbed to Ok, the refusal would vanish.
-    #[tokio::test]
-    async fn a_mount_on_a_missing_mount_point_is_refused() {
-        let _serial = serial();
-        let _home = Home::take();
-        let base = tempfile::tempdir().unwrap();
-        let gone = base.path().join("gone");
+    /// is served or recorded (`check_mount_point` runs first). With the
+    /// command stubbed to `Ok`, the refusal would vanish.
+    #[test]
+    fn a_mount_on_a_missing_mount_point_is_refused() {
         #[derive(clap::Parser)]
         struct MountCli {
             #[command(flatten)]
             args: MountArgs,
         }
         use clap::Parser as _;
+        let _serial = serial();
+        let _home = Home::take();
+        let base = tempfile::tempdir().unwrap();
+        let gone = base.path().join("gone");
         let args = MountCli::parse_from(["mount", gone.to_str().unwrap()]).args;
-        let mut ctx = dummy_ctx();
-        let err = mount(&mut ctx, args).await.unwrap_err().to_string();
+        let err = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async {
+                let mut ctx = dummy_ctx();
+                mount(&mut ctx, args).await
+            })
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("the mount point does not exist or is not a directory"),
             "{err}"
@@ -1670,11 +1676,17 @@ mod silent_failures {
     }
 
     /// An unmount of a stale record (the serve lock is free) drops the
-    /// session record and succeeds: with the command stubbed to Ok the
+    /// session record and succeeds: with the command stubbed to `Ok` the
     /// record would stay, and with the stop check inverted the failed
     /// stop would keep the record and refuse the unmount.
-    #[tokio::test]
-    async fn an_unmount_of_a_stale_record_drops_the_record_and_succeeds() {
+    #[test]
+    fn an_unmount_of_a_stale_record_drops_the_record_and_succeeds() {
+        #[derive(clap::Parser)]
+        struct UnmountCli {
+            #[command(flatten)]
+            args: UnmountArgs,
+        }
+        use clap::Parser as _;
         let _serial = serial();
         let _home = Home::take();
         let base = tempfile::tempdir().unwrap();
@@ -1698,15 +1710,14 @@ mod silent_failures {
         };
         save_session(&known).unwrap();
         assert_eq!(load_sessions().unwrap(), vec![known.clone()]);
-        #[derive(clap::Parser)]
-        struct UnmountCli {
-            #[command(flatten)]
-            args: UnmountArgs,
-        }
-        use clap::Parser as _;
         let args = UnmountCli::parse_from(["unmount", dir.to_str().unwrap()]).args;
-        let mut ctx = dummy_ctx();
-        unmount(&mut ctx, args).await.unwrap();
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async {
+                let mut ctx = dummy_ctx();
+                unmount(&mut ctx, args).await
+            })
+            .unwrap();
         assert!(
             load_sessions().unwrap().is_empty(),
             "the unmount left the record behind"
