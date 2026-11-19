@@ -2197,8 +2197,12 @@ fn the_diff_steps_memory_guard_reads_at_the_edge_and_refuses_below() {
     // refuses the diff instead, the refused version counts as absent and
     // the open lines name mid, so the first range is the separator
     // between the diff running and its refusal.
-    let root_body: Vec<u8> = std::iter::repeat(b"a\n".to_vec()).take(500).flatten().collect();
-    let mut mid_body = std::iter::repeat(b"a\n".to_vec()).take(400).flatten().collect::<Vec<u8>>();
+    let root_body: Vec<u8> = std::iter::repeat_n(b"a\n".to_vec(), 500)
+        .flatten()
+        .collect();
+    let mut mid_body = std::iter::repeat_n(b"a\n".to_vec(), 400)
+        .flatten()
+        .collect::<Vec<u8>>();
     mid_body.push(b'b');
     let mut tip_body = mid_body.clone();
     tip_body[398 * 2] = b'c';
@@ -2221,11 +2225,11 @@ fn the_diff_steps_memory_guard_reads_at_the_edge_and_refuses_below() {
     // for these rows (the smallest cap, over the arithmetic sum below,
     // where the mid diff runs). If the encoding changes, the edge
     // asserts below fail and the number is re-measured the same way.
-    const NODE_TAKE: usize = 106;
+    let node_take = 106;
     // The caller's own share: one held byte, so the sum's first term is
     // exercised (a zero share hides a product fold of the sum).
     let caller = 1;
-    let edge = need + state + text + older_take + NODE_TAKE + caller;
+    let edge = need + state + text + older_take + node_take + caller;
     let diff_ran = |cap: usize| {
         match blame::blame(
             &store,
@@ -2265,7 +2269,6 @@ fn the_diff_steps_memory_guard_reads_at_the_edge_and_refuses_below() {
     );
 }
 
-
 /// The rename search's read refuses a candidate whose bytes and the
 /// call's shares pass the budget: `size + held > cap`. A candidate that
 /// lands exactly on the budget READS under `>` and is refused under `>=`
@@ -2281,14 +2284,20 @@ fn the_diff_steps_memory_guard_reads_at_the_edge_and_refuses_below() {
 #[test]
 fn the_rename_search_reads_the_candidate_at_the_budget_edge() {
     let (_data, store) = open_store();
-    // Root holds `old` (300 `a` lines) and a `decoy` (40 `z` lines); the
-    // rename deletes both and adds `new` (400 `a` lines and one `b`);
-    // the tip changes `new`'s 400th `a` to a `c`. `new` is 75% like
-    // `old` and nothing like the decoy, so the search pairs it with
-    // `old` - when the read of `old` is allowed.
-    let root_body: Vec<u8> = std::iter::repeat(b"a\n".to_vec()).take(300).flatten().collect();
-    let decoy: Vec<u8> = std::iter::repeat(b"z\n".to_vec()).take(40).flatten().collect();
-    let mut mid_body = std::iter::repeat(b"a\n".to_vec()).take(400).flatten().collect::<Vec<u8>>();
+    // Root holds `old` (300 `a` lines) and three decoys (40 `z` lines
+    // each); the rename deletes all four and adds `new` (400 `a` lines
+    // and one `b`); the tip changes `new`'s 400th `a` to a `c`. `new` is
+    // 75% like `old` and nothing like the decoys, so the search pairs it
+    // with `old` - when the read of `old` is allowed. The decoys deepen
+    // the walk's node takes at the mid step, so the read's edge sits
+    // above the tip diff's edge and the read's guard decides.
+    let root_body: Vec<u8> = std::iter::repeat_n(b"a\n".to_vec(), 300)
+        .flatten()
+        .collect();
+    let decoy: Vec<u8> = std::iter::repeat_n(b"z\n".to_vec(), 40).flatten().collect();
+    let mut mid_body = std::iter::repeat_n(b"a\n".to_vec(), 400)
+        .flatten()
+        .collect::<Vec<u8>>();
     mid_body.push(b'b');
     let mut tip_body = mid_body.clone();
     tip_body[398 * 2] = b'c';
@@ -2298,21 +2307,40 @@ fn the_rename_search_reads_the_candidate_at_the_budget_edge() {
         vec![
             vec![
                 ("old", Option::<FileState>::Some(regular(old_blob))),
-                ("decoy", Option::<FileState>::Some(regular(store.blobs().put(&decoy).unwrap()))),
+                (
+                    "d1",
+                    Option::<FileState>::Some(regular(store.blobs().put(&decoy).unwrap())),
+                ),
+                (
+                    "d2",
+                    Option::<FileState>::Some(regular(store.blobs().put(&decoy).unwrap())),
+                ),
+                (
+                    "d3",
+                    Option::<FileState>::Some(regular(store.blobs().put(&decoy).unwrap())),
+                ),
             ],
             vec![
                 ("old", Option::<FileState>::None),
-                ("decoy", Option::<FileState>::None),
-                ("new", Option::<FileState>::Some(regular(store.blobs().put(&mid_body).unwrap()))),
+                ("d1", Option::<FileState>::None),
+                ("d2", Option::<FileState>::None),
+                ("d3", Option::<FileState>::None),
+                (
+                    "new",
+                    Option::<FileState>::Some(regular(store.blobs().put(&mid_body).unwrap())),
+                ),
             ],
-            vec![("new", Option::<FileState>::Some(regular(store.blobs().put(&tip_body).unwrap())))],
+            vec![(
+                "new",
+                Option::<FileState>::Some(regular(store.blobs().put(&tip_body).unwrap())),
+            )],
         ],
     );
     let state = 401 * BYTES_PER_LINE;
     let text = tip_body.len();
     let caller = 1;
-    const NODE_TAKE: usize = 366;
-    let edge = caller + state + text + NODE_TAKE + root_body.len();
+    let node_take = 536;
+    let edge = caller + state + text + node_take + root_body.len();
     let named_old = |cap: usize| {
         match blame::blame(
             &store,
