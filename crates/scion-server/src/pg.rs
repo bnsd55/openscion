@@ -7786,17 +7786,18 @@ mod tests {
     }
 
     /// A connect error carries no SQLSTATE: the mapping answers busy -
-    /// as retryable as a busy one - not internal, or the client would
+    /// which the client retries, not internal - or the client would
     /// retry what a retry cannot fix.
     #[test]
     fn a_connect_error_without_a_sqlstate_is_busy() {
-        use super::pg_error_of_source;
+        use super::map_pg_error;
         use crate::{Error, StorageClass};
-        let error = pg_error_of_source(
-            None,
-            false,
-            Box::new(std::io::Error::other("the socket never answered")),
-        );
+        let Err(refused) = Client::connect("postgres://127.0.0.1:1/x", NoTls) else {
+            panic!("a connect to port 1 is refused");
+        };
+        assert!(refused.code().is_none(), "a refusal carries no SQLSTATE");
+        assert!(!refused.is_closed(), "a refusal is not a closed connection");
+        let error = map_pg_error(refused);
         assert!(
             matches!(&error, Error::Storage(s) if s.class() == StorageClass::Busy),
             "{error:?}"
