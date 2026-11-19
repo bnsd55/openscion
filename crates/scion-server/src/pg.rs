@@ -1045,6 +1045,56 @@ pub(crate) fn pairing_decision(
     }
 }
 
+/// Appends the schema's own record to an open refusal, when the schema
+/// carries one: a test schema's comment names the directory its open
+/// registered, and the test registry holds the registration's time.
+/// The note makes a schema-and-directory mismatch self-naming (#1233):
+/// the log then says which directory registered the schema, and how
+/// long before this open. A production schema carries no comment, and
+/// the registry is the test helpers', so a production refusal reads
+/// exactly as it did - the read answers null or fails, and the error
+/// goes back unchanged.
+///
+/// Test-build only (any test, feature = "test-hooks"): the registry it
+/// reads is the test helpers' table, and production builds carry no
+/// knowledge of it. The other builds take the paired stub below, which
+/// returns the refusal unchanged, so the call sites stay one line.
+#[cfg(any(test, feature = "test-hooks"))]
+fn refuse_naming_the_schema_record(writer: &mut PgClient, error: Error) -> Error {
+    let row = writer
+        .query_opt(
+            "SELECT obj_description(current_schema()::regnamespace, 'pg_namespace') AS dir,
+                    (SELECT extract(epoch from now())::bigint - started
+                     FROM public.scion_test_schemas
+                     WHERE schema = current_schema()) AS age",
+            &[],
+        )
+        .ok()
+        .flatten();
+    let Some(row) = row else {
+        return error;
+    };
+    let recorded: Option<String> = row.get("dir");
+    let Some(recorded) = recorded.filter(|dir| !dir.is_empty()) else {
+        return error;
+    };
+    let age: Option<i64> = row.get("age");
+    Error::FailedPrecondition(format!(
+        "{error}; the schema's own record names the directory {recorded}{}",
+        age.map(|seconds| format!(", registered {seconds} s before this open"))
+            .unwrap_or_default()
+    ))
+}
+
+/// The production-build stub of [`refuse_naming_the_schema_record`]:
+/// the refusal goes back unchanged, because the record it would name
+/// is the test helpers' registry, and a production build knows no
+/// such table.
+#[cfg(not(any(test, feature = "test-hooks")))]
+fn refuse_naming_the_schema_record(_writer: &mut PgClient, error: Error) -> Error {
+    error
+}
+
 /// The identity of this database, minted at the first open. The marker
 /// file of the data directory carries the same UUID, and an open that
 /// finds the two different refuses: a database restored on a directory
@@ -1103,7 +1153,9 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
                 );
             }
             Pairing::Fresh => unreachable!("the database names its store"),
-            Pairing::Refuse(error) => return Err(error),
+            Pairing::Refuse(error) => {
+                return Err(refuse_naming_the_schema_record(writer, error));
+            }
         }
         Ok(uuid)
     } else {
@@ -1125,7 +1177,9 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
         let fresh = match pairing_decision(marker.uuid, None, has_repos) {
             Pairing::Agree | Pairing::AdoptCut => unreachable!("the database holds no store"),
             Pairing::Fresh => marker.uuid.unwrap_or_else(uuid_new),
-            Pairing::Refuse(error) => return Err(error),
+            Pairing::Refuse(error) => {
+                return Err(refuse_naming_the_schema_record(writer, error));
+            }
         };
         writer
             .query(
@@ -3096,9 +3150,10 @@ impl TxState {
         if sql.starts_with("ROLLBACK") || (sql.starts_with("COMMIT") && !self.lost()) {
             return TxState::Idle;
         }
-        if self.lost() && !sql.starts_with("COMMIT") {
-            return self;
-        }
+        // Every other pairing keeps the state: a COMMIT does not
+        // clear a lost transaction (its caller must roll back and run
+        // again), and a BEGIN that failed or any other statement
+        // changes nothing.
         self
     }
 }
@@ -5201,19 +5256,6 @@ impl MetaTx for PgTx<'_> {
             .ok_or_else(|| Error::NotFound(format!("changeset {id}")))
     }
 
-    /// The first parent of a changeset, or `None` for a root.
-    #[cfg(any(test, feature = "test-hooks"))]
-    fn first_parent(&mut self, id: ChangesetId) -> Result<Option<ChangesetId>> {
-        let parent = self
-            .c
-            .query_opt(
-                "SELECT parent FROM changeset_parents WHERE cs = $1 AND n = 0",
-                &[P::bytes(&id_bytes(id.as_bytes()))],
-            )?
-            .map(|row| row.get::<_, Vec<u8>>(0));
-        parent.map(|bytes| to_id(&bytes)).transpose()
-    }
-
     /// Every parent of changeset `id`, in order, with its generation.
     ///
     /// # Errors
@@ -7079,8 +7121,9 @@ impl Meta for Pg {
 #[cfg(test)]
 mod tests {
     use super::{
-        Client, Conn, Fence, Flow, Job, Kind, NoTls, Reply, Setup, SetupFailure, TxState,
-        connect_on, connection_gone, delete_prefixes, merged_options, run_job, run_with_retry,
+        Client, Conn, Fence, Flow, Job, Kind, NoTls, Reply, SCHEMA_LOCK, Setup, SetupFailure,
+        TxState, connect_on, connection_gone, delete_prefixes, merged_options, migration_lock_key,
+        reset_schema, run_job, run_with_retry, schema_lock_key,
     };
     use crate::error::{Error, Storage};
     use crate::pg::{Pairing, Pg, pairing_decision};
@@ -7504,6 +7547,169 @@ mod tests {
         );
     }
 
+    /// The statement retry's gate fences a refused lock, not a setup
+    /// that merely names no schema: a held lock followed by a retry
+    /// whose fresh setup answers `NoSchema` returns the setup error and
+    /// leaves the fence down - a URL mistake is not a takeover.
+    #[test]
+    fn the_statement_retry_does_not_fence_a_setup_that_names_no_schema() {
+        let url = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let mut client = connect_on(&url, None, "").unwrap();
+        let mut setup = Setup::new(None, false, &mut client);
+        assert!(setup.ok());
+        let mut tx = TxState::Idle;
+        let ever_held = true;
+        let fence = Arc::new(Fence::new());
+
+        // The client's backend dies under it, and the retry's reconnect
+        // runs on a url whose schema names nothing: the fresh setup
+        // answers `NoSchema`, the reply is the setup error, and the
+        // fence stays down.
+        let pid: i32 = client
+            .query_one("SELECT pg_backend_pid()", &[])
+            .unwrap()
+            .get(0);
+        let mut killer = postgres::Client::connect(&url, NoTls).unwrap();
+        killer
+            .execute("SELECT pg_terminate_backend($1)", &[&pid])
+            .unwrap();
+        drop(killer);
+
+        let absent = conn(&url, Some("no_such_schema_for_the_statement_retry"), true);
+        let (job, _reply_rx) = job("SELECT 1");
+        let out = run_with_retry(
+            &mut client,
+            &mut setup,
+            &absent,
+            &job,
+            &mut tx,
+            ever_held,
+            Some(&fence),
+        );
+        assert!(
+            matches!(&out, Err(Error::FailedPrecondition(_))),
+            "the setup error answers, not the statement"
+        );
+        assert!(!fence.tripped(), "a schemaless setup is not a takeover");
+    }
+
+    /// The worker's transaction bookkeeping clears only what the
+    /// connection actually ended: a `BEGIN` that ran opens, any
+    /// rollback closes, a commit closes a transaction the connection
+    /// still holds - and a lost transaction stays lost through a
+    /// commit, because the caller must roll back and run again.
+    #[test]
+    fn the_tx_state_machine_clears_only_what_the_connection_ended() {
+        // Only a `BEGIN` that ran opens a transaction.
+        assert!(matches!(TxState::Idle.after("BEGIN", true), TxState::InTx));
+        assert!(matches!(TxState::Idle.after("BEGIN", false), TxState::Idle));
+        // Any rollback ends whatever the state believed.
+        assert!(matches!(
+            TxState::InTx.after("ROLLBACK", true),
+            TxState::Idle
+        ));
+        assert!(matches!(
+            TxState::Lost.after("ROLLBACK", false),
+            TxState::Idle
+        ));
+        // A commit ends a transaction the connection still holds.
+        assert!(matches!(TxState::InTx.after("COMMIT", true), TxState::Idle));
+        // A lost transaction is not cleared by a commit: its caller
+        // must roll back and run again.
+        assert!(matches!(TxState::Lost.after("COMMIT", true), TxState::Lost));
+        assert!(matches!(
+            TxState::Lost.after("SELECT 1", true),
+            TxState::Lost
+        ));
+    }
+
+    /// The migration lock's key and the server lock's key mix their
+    /// hashes differently: over a thousand names, no name gives the
+    /// two derivations the same key, and none lands a migration lock
+    /// on the shared turn's own key.
+    #[test]
+    fn the_migration_lock_key_mixes_differently_from_the_server_lock() {
+        for i in 0..1000 {
+            let name = format!("schema_{i:04}");
+            assert_ne!(
+                migration_lock_key(&name),
+                schema_lock_key(&name),
+                "the two derivations collide on {name}"
+            );
+            assert_ne!(
+                migration_lock_key(&name),
+                SCHEMA_LOCK,
+                "the migration lock lands on the shared turn on {name}"
+            );
+        }
+    }
+
+    /// Distinct schemas name distinct migration locks. These pairs are
+    /// samples whose hashes the weaker mixes fold onto one key: an or
+    /// or an and would give both names of a pair the same lock, and
+    /// two stores' migrations would serialize on it.
+    #[test]
+    fn distinct_schemas_name_distinct_migration_locks() {
+        for [a, b] in [
+            ["schema_000532", "schema_001276"],
+            ["schema_043279", "schema_073399"],
+        ] {
+            assert_ne!(
+                migration_lock_key(a),
+                migration_lock_key(b),
+                "{a} and {b} share a migration lock"
+            );
+        }
+    }
+
+    /// A restore's leftover carries the staging mark and no store
+    /// identity, and the reset drops it even though the mark itself is
+    /// a table in the schema: the mark is the restore's own, not a
+    /// foreign object. A reset that counted the mark as foreign would
+    /// refuse to clean up what a killed restore left behind. The first
+    /// reset makes the real mark; the second must drop the schema and
+    /// mint a fresh one - a new id is the proof the drop ran.
+    #[test]
+    fn a_staging_schema_resets_even_though_its_mark_is_a_table() {
+        let base = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let fresh = "staging_reset_marks_a_table";
+        let mut raw = postgres::Client::connect(&base, NoTls).unwrap();
+        raw.batch_execute(&format!("DROP SCHEMA IF EXISTS {fresh} CASCADE"))
+            .unwrap();
+        raw.batch_execute(&format!("CREATE SCHEMA {fresh}"))
+            .unwrap();
+        drop(raw);
+        let sep = if base.contains('?') { '&' } else { '?' };
+        let url = format!("{base}{sep}options=--search_path%3D{fresh}");
+
+        reset_schema(&url, None).unwrap();
+        let first = staging_mark_id(&base, fresh);
+
+        reset_schema(&url, None).unwrap();
+        let second = staging_mark_id(&base, fresh);
+
+        assert_ne!(first, second, "the second reset dropped the old mark");
+        let mut raw = postgres::Client::connect(&base, NoTls).unwrap();
+        raw.batch_execute(&format!("DROP SCHEMA IF EXISTS {fresh} CASCADE"))
+            .unwrap();
+    }
+
+    /// The one id row the staging mark holds.
+    fn staging_mark_id(base: &str, schema: &str) -> String {
+        let mut raw = postgres::Client::connect(base, NoTls).unwrap();
+        let mark: Option<String> = raw
+            .query_opt(
+                "SELECT to_regclass(format('%I.restore_staging', $1::text))::text",
+                &[&schema],
+            )
+            .unwrap()
+            .and_then(|row| row.get::<_, Option<String>>(0));
+        let mark = mark.expect("the schema carries the staging mark");
+        raw.query_one(&format!("SELECT id FROM {mark}"), &[])
+            .unwrap()
+            .get("id")
+    }
+
     /// The loss's own `ROLLBACK` runs on the recovered connection: the
     /// lost transaction's guard sends it, the reconnect succeeds, and
     /// the rollback consumes the loss so the caller's next `BEGIN`
@@ -7835,7 +8041,38 @@ mod lane_key_tests {
 #[cfg(test)]
 pub(crate) mod pool_tests {
     use super::*;
+
     use crate::store::READERS;
+
+    /// A write whose closure panics rolls back whole: the transaction is
+    /// dropped un-ended, and the drop's rollback takes the closure's
+    /// rows with it. A drop that left the transaction open would join
+    /// the next write to it - Postgres answers that `BEGIN` with only a
+    /// warning - and the next write's commit would commit the panicked
+    /// closure's work too.
+    #[test]
+    fn a_panic_in_a_write_rolls_back_and_the_next_write_stays_clean() {
+        use crate::meta::MetaTx as _;
+        let (_gate, pg) = pg();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = pg.write(|tx| {
+                tx.create_repo("panicked").map(|_| ())?;
+                panic!("the test's panic");
+                #[allow(unreachable_code)]
+                Ok(())
+            });
+        }));
+        assert!(unwind.is_err(), "the closure's panic left the write");
+
+        // The next write commits its own work only: the panicked
+        // closure's repo is gone with its transaction.
+        pg.write(|tx| tx.create_repo("kept").map(|_| ())).unwrap();
+        assert!(
+            pg.read(|tx| tx.repo_id("panicked").map(|_| ())).is_err(),
+            "the panicked write's work is gone"
+        );
+        pg.read(|tx| tx.repo_id("kept").map(|_| ())).unwrap();
+    }
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -7849,6 +8086,32 @@ pub(crate) mod pool_tests {
         SERVER_SIZED_POOL
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A refusal of a markerless directory names the schema's own
+    /// record (#1233): the schema's comment (the directory its open
+    /// registered) and the registry's age join the error, so the next
+    /// schema-and-directory mismatch names its owner from the log
+    /// alone. A schema with no comment leaves the refusal as it was.
+    #[test]
+    fn a_refusal_of_a_markerless_dir_names_the_schemas_recorded_directory() {
+        let data = crate::test_support::private_tempdir();
+        let store = crate::Backend::open_test(data.path()).unwrap();
+        store.commit(|c| c.create_repo("r").map(|_| ())).unwrap();
+        drop(store);
+        // The schema stays served (a repo row), the directory forgets
+        // its store: the next open pairs (no marker, held, repos) and
+        // refuses. The marker file is backend.rs's MARKER.
+        std::fs::remove_file(data.path().join("backend")).unwrap();
+        let Err(refused) = crate::Backend::open_test(data.path()) else {
+            panic!("the markerless open of a served schema answered ok")
+        };
+        let text = format!("{refused}");
+        assert!(text.contains("carries no marker"), "{text}");
+        assert!(
+            text.contains(&data.path().to_string_lossy().to_string()),
+            "{text}"
+        );
     }
 
     /// A Postgres backend of a test database, with the pool gate: the
@@ -8072,6 +8335,92 @@ pub(crate) mod pool_tests {
             "the disagreeing write answers {err}"
         );
         // The stored row kept its value.
+        let got = store.commit(|c| c.get_derived("view", 1, cs)).unwrap();
+        assert_eq!(got.as_deref(), Some(&b"first"[..]));
+    }
+
+    /// A store with one repo and one root changeset: the shared setup of
+    /// the derived-write tests. The directory stays alive with the
+    /// caller (the store reads it on every open).
+    fn store_with_root() -> (tempfile::TempDir, crate::Backend, ChangesetId) {
+        let data = crate::test_support::private_tempdir();
+        let store = crate::Backend::open_test(data.path()).unwrap();
+        let cs = Changeset::new(
+            vec![],
+            scion_core::IdentityTime::new(b"Ada".to_vec(), b"ada@example.com".to_vec(), 0, 0)
+                .expect("identity fits the format"),
+            None,
+            b"root".to_vec(),
+            std::collections::BTreeMap::new(),
+        )
+        .expect("changeset fits the format");
+        let cs = store
+            .commit(|c| {
+                let repo = c.create_repo("r")?;
+                c.insert_changeset(repo, &cs)
+            })
+            .unwrap();
+        (data, store, cs)
+    }
+
+    /// A re-put of the same derived value is idempotent, not corruption:
+    /// a retried settle re-derives and re-records what it already
+    /// stored. ON CONFLICT DO NOTHING skips the stored row, the short
+    /// inserted count makes the stored-value read, and the read answers
+    /// the same bytes - the check passes. A check that refused every
+    /// conflict would fail the retried settle on a row it wrote
+    /// itself.
+    #[test]
+    fn a_derived_rewrite_of_the_same_stored_value_is_ok() {
+        let (_data, store, cs) = store_with_root();
+        store
+            .commit(|c| c.put_derived("view", 1, cs, b"first"))
+            .unwrap();
+        // The same value again, a new transaction: the conflict keeps
+        // the stored row, the read-back agrees, and the write answers
+        // ok.
+        store
+            .commit(|c| c.put_derived("view", 1, cs, b"first"))
+            .unwrap();
+        let got = store.commit(|c| c.get_derived("view", 1, cs)).unwrap();
+        assert_eq!(got.as_deref(), Some(&b"first"[..]));
+    }
+
+    /// A batched derived write that lands on a stored row of a different
+    /// value is corruption, like the single put: the batch's ON CONFLICT
+    /// DO NOTHING skips the stored row, the short count makes the
+    /// row-by-row check, and the check refuses. A check that ran only
+    /// when the count matched would never see a conflict at all.
+    #[test]
+    fn a_derived_batch_over_a_differing_stored_row_is_refused() {
+        let (_data, store, cs) = store_with_root();
+        store
+            .commit(|c| c.put_derived("view", 1, cs, b"first"))
+            .unwrap();
+        let err = store
+            .commit(|c| c.put_derived_all(&[("view".into(), 1, cs, b"second".to_vec())]))
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("differs from the stored value"),
+            "the disagreeing batch answers {err}"
+        );
+    }
+
+    /// A batched derived write of the value the row already stores is
+    /// legal: a fill may have stored the same value before this
+    /// transaction began. The short count makes the row-by-row check,
+    /// and the read-back agrees, so the write answers ok. A check that
+    /// compared backwards would refuse the agreeing row and pass the
+    /// disagreeing one.
+    #[test]
+    fn a_derived_batch_of_the_same_stored_value_is_ok() {
+        let (_data, store, cs) = store_with_root();
+        store
+            .commit(|c| c.put_derived("view", 1, cs, b"first"))
+            .unwrap();
+        store
+            .commit(|c| c.put_derived_all(&[("view".into(), 1, cs, b"first".to_vec())]))
+            .unwrap();
         let got = store.commit(|c| c.get_derived("view", 1, cs)).unwrap();
         assert_eq!(got.as_deref(), Some(&b"first"[..]));
     }
