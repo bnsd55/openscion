@@ -7122,7 +7122,8 @@ impl Meta for Pg {
 mod tests {
     use super::{
         Client, Conn, Fence, Flow, Job, Kind, NoTls, Reply, Setup, SetupFailure, TxState,
-        connect_on, connection_gone, delete_prefixes, merged_options, run_job, run_with_retry,
+        connect_on, connection_gone, delete_prefixes, merged_options, migration_lock_key,
+        run_job, run_with_retry, schema_lock_key, SCHEMA_LOCK,
     };
     use crate::error::{Error, Storage};
     use crate::pg::{Pairing, Pg, pairing_decision};
@@ -7620,6 +7621,41 @@ mod tests {
             TxState::Lost.after("SELECT 1", true),
             TxState::Lost
         ));
+    }
+
+    /// The migration lock's key and the server lock's key mix their
+    /// hashes differently: over a thousand names, no name gives the
+    /// two derivations the same key, and none lands a migration lock
+    /// on the shared turn's own key. Distinct schemas also name
+    /// distinct migration locks - the pairs below are samples whose
+    /// hashes the weaker mixes fold onto one key, and two stores'
+    /// migrations would serialize on it.
+    #[test]
+    fn the_migration_lock_key_mixes_differently_from_the_server_lock() {
+        for i in 0..1000 {
+            let name = format!("schema_{i:04}");
+            assert_ne!(
+                migration_lock_key(&name),
+                schema_lock_key(&name),
+                "the two derivations collide on {name}"
+            );
+            assert_ne!(
+                migration_lock_key(&name),
+                SCHEMA_LOCK,
+                "the migration lock lands on the shared turn on {name}"
+            );
+        }
+        for [a, b] in [
+            ["schema_000000", "schema_000001"],
+            ["schema_000532", "schema_001276"],
+            ["schema_043279", "schema_073399"],
+        ] {
+            assert_ne!(
+                migration_lock_key(a),
+                migration_lock_key(b),
+                "{a} and {b} share a migration lock"
+            );
+        }
     }
 
     /// The loss's own `ROLLBACK` runs on the recovered connection: the
