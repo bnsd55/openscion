@@ -7,38 +7,14 @@ updates:
     groups:
       cargo:
         patterns: ["*"]
-  # Each fuzz sub-workspace holds its own Cargo.lock, which the root
-  # entry never reads (it did: the gix advisory rode a fuzz lock after
-  # the root moved). The same schedule and grouping as "/"; a fuzz
-  # crate's dependency bump lands as its own grouped PR.
-  - package-ecosystem: cargo
-    directory: /crates/scion-core/fuzz
-    schedule:
-      interval: weekly
-    groups:
-      cargo:
-        patterns: ["*"]
-  - package-ecosystem: cargo
-    directory: /crates/scion-proto/fuzz
-    schedule:
-      interval: weekly
-    groups:
-      cargo:
-        patterns: ["*"]
-  - package-ecosystem: cargo
-    directory: /crates/scion-server/fuzz
-    schedule:
-      interval: weekly
-    groups:
-      cargo:
-        patterns: ["*"]
-  - package-ecosystem: cargo
-    directory: /crates/scion-tier/fuzz
-    schedule:
-      interval: weekly
-    groups:
-      cargo:
-        patterns: ["*"]
+  # The four fuzz sub-workspaces (crates/*/fuzz) have no entry here on
+  # purpose: Dependabot's updater resolves inside a copy that lacks the
+  # root workspace manifest, and a fuzz crate's path dependency inherits
+  # from that manifest, so an update that needs resolution dies with
+  # "failed to find a workspace root" (#1245). Their lockfiles are
+  # covered instead by the deny loop in ci.yml (nightly and on every
+  # dependency change: an advisory fails red) and by the manual upkeep
+  # step in docs/fuzzing.md ("Dependency upkeep").
   - package-ecosystem: github-actions
     directory: /
     schedule:
