@@ -7123,7 +7123,8 @@ mod tests {
     use super::{
         Client, Conn, Fence, Flow, Job, Kind, NoTls, Reply, SCHEMA_LOCK, Setup, SetupFailure,
         TxState, connect_on, connection_gone, delete_prefixes, merged_options, migration_lock_key,
-        reset_schema, run_job, run_with_retry, schema_lock_key,
+        park_refuse, park_register, park_release, reset_schema, run_job, run_with_retry,
+        schema_lock_key,
     };
     use crate::error::{Error, Storage};
     use crate::pg::{Pairing, Pg, pairing_decision};
@@ -7692,6 +7693,37 @@ mod tests {
         let mut raw = postgres::Client::connect(&base, NoTls).unwrap();
         raw.batch_execute(&format!("DROP SCHEMA IF EXISTS {fresh} CASCADE"))
             .unwrap();
+    }
+
+    /// The parked-connect bookkeeping holds its own rows: the register
+    /// stops at the cap, a release drops its own token's row, and a
+    /// release's token is the one it names. The refusal's text is the
+    /// lens: it names how many rows the cap holds.
+    #[test]
+    fn the_parked_connect_slots_release_and_bound_the_register() {
+        super::test_reset_parked_connects();
+        park_register(1);
+        park_register(2);
+        park_register(3);
+        // At the cap the register keeps no fourth row, and the refusal
+        // names two parked.
+        let err = park_refuse("db").unwrap_err().to_string();
+        assert!(err.contains("2 connects parked"), "{err}");
+
+        // A release gives its row back: the next connect starts.
+        park_release(1);
+        assert!(park_refuse("db").is_ok(), "the released slot starts a connect");
+
+        // A release names its own token: releasing 2 leaves 3's row.
+        // One more register fills the cap again, and the refusal names
+        // two parked - a release that kept the wrong row would leave a
+        // different count (or none) behind.
+        park_register(3);
+        park_release(2);
+        park_register(4);
+        let err = park_refuse("db").unwrap_err().to_string();
+        assert!(err.contains("2 connects parked"), "{err}");
+        super::test_reset_parked_connects();
     }
 
     /// The one id row the staging mark holds.
