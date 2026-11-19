@@ -234,7 +234,16 @@ impl Drop for Lazyfs {
         // child, not `child` (the script exits once it has launched it),
         // and the exact mount path keeps a parallel round's daemon safe.
         if let Some(pid) = self.daemon {
-            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).output();
+            let killed = Command::new("kill").arg("-9").arg(pid.to_string()).output();
+            // The teardown lands in the mount log, so the artifact
+            // carries the round's whole lifecycle, start to exit.
+            let _ = fs::write(
+                &self.mount_log,
+                format!(
+                    "[test] drop: killed the daemon pid {pid}: {:?}\n",
+                    killed.map(|o| o.status)
+                ),
+            );
         }
         let _ = Command::new("fusermount3")
             .arg("-u")
@@ -263,7 +272,7 @@ fn daemon_pid(mount: &Path) -> Option<u32> {
 /// and the fuse mounts. The panic of a failed start carries it, so the
 /// job's log names the failure without another artifact download.
 fn mount_diagnostics(mount: &Path, mount_log: &Path) -> String {
-    let mut out = String::from("mount diagnostics:\n");
+    let mut out = format!("mount diagnostics for {}:\n", mount.display());
     if let Ok(log) = fs::read_to_string(mount_log) {
         let tail: Vec<&str> = log.lines().rev().take(40).collect();
         out.push_str("-- mount log tail --\n");
@@ -330,6 +339,25 @@ fn pending(data: &std::path::Path) -> i64 {
             .join()
             .unwrap()
     })
+}
+
+/// The `LazyFS` daemon's own argument parser refuses a config path whose
+/// text contains "-o" anywhere (a case-insensitive strcasestr in
+/// lazyfs's main.cpp): the path then rides to FUSE as a stray argument,
+/// FUSE exits with `invalid argument`, and the mount never appears. The
+/// tempdir's random name triggers it when the character after its
+/// hyphen is an o - #1240's two failures were exactly that
+/// (`.tmp3856-orZ5q6...`, `.tmp3617-OvHGs...`). The suite keeps drawing
+/// tempdirs until one is safe, a handful of tries at a 2-in-62 miss.
+fn power_tempdir() -> tempfile::TempDir {
+    for _ in 0..32 {
+        let dir = scion_server::test_support::private_tempdir();
+        let safe = !dir.path().to_str().unwrap().to_lowercase().contains("-o");
+        if safe {
+            return dir;
+        }
+    }
+    panic!("32 private tempdirs in a row held a '-o' path; the draw is not random");
 }
 
 /// One cut of the power suite: the round's server, clients, the cut at
@@ -456,7 +484,7 @@ async fn every_reply_survives_a_power_cut() {
     // 0.1%.
     let rounds = usize::try_from(env("SCION_POWER_ROUNDS", 10)).unwrap();
     let mut pending_kills = 0usize;
-    let dir = scion_server::test_support::private_tempdir();
+    let dir = power_tempdir();
     let log = dir.path().join("server.log");
     let mut cut_lands = 0;
     let mut total = 0;
@@ -488,7 +516,7 @@ async fn an_acknowledged_write_s_audit_lines_survive_a_power_cut() {
         return;
     }
     let lazyfs = lazyfs_dir().unwrap();
-    let dir = scion_server::test_support::private_tempdir();
+    let dir = power_tempdir();
     let log = dir.path().join("server.log");
     let lazy = Lazyfs::start(dir.path(), &lazyfs, 0);
     let data = lazy.mount.join("data");
@@ -812,7 +840,7 @@ async fn racing_puts_of_one_blob_survive_a_cut() {
     let seed = seed();
     let mut rng = Rng::new(seed);
     let rounds = usize::try_from(env("SCION_RACE_ROUNDS", 8)).unwrap();
-    let dir = scion_server::test_support::private_tempdir();
+    let dir = power_tempdir();
     // The server's log goes where CI can upload it: next to the LazyFS
     // trace, when the run named that directory.
     let server_log = std::env::var_os("SCION_LAZYFS_TRACE_DIR").map_or_else(
@@ -973,7 +1001,7 @@ async fn checker_writes_outlive_the_lazyfs_exit() {
     let seed = seed();
     let mut rng = Rng::new(seed);
     let rounds = usize::try_from(env("SCION_CHECKER_ROUNDS", 4)).unwrap();
-    let dir = scion_server::test_support::private_tempdir();
+    let dir = power_tempdir();
     let log = dir.path().join("checker.log");
     for round in 200..200 + rounds {
         let mut lazy = Lazyfs::start(dir.path(), &lazyfs, round);
@@ -1066,7 +1094,7 @@ async fn import_process_races_the_server_on_the_same_blob() {
     let lazyfs = lazyfs_dir().unwrap();
     let seed = seed();
     let mut rng = Rng::new(seed);
-    let dir = scion_server::test_support::private_tempdir();
+    let dir = power_tempdir();
     let log = dir.path().join("import-race-server.log");
     let mut lazy = Lazyfs::start(dir.path(), &lazyfs, 300);
     let data = lazy.mount.join("data");
