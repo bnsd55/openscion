@@ -7626,10 +7626,7 @@ mod tests {
     /// The migration lock's key and the server lock's key mix their
     /// hashes differently: over a thousand names, no name gives the
     /// two derivations the same key, and none lands a migration lock
-    /// on the shared turn's own key. Distinct schemas also name
-    /// distinct migration locks - the pairs below are samples whose
-    /// hashes the weaker mixes fold onto one key, and two stores'
-    /// migrations would serialize on it.
+    /// on the shared turn's own key.
     #[test]
     fn the_migration_lock_key_mixes_differently_from_the_server_lock() {
         for i in 0..1000 {
@@ -7645,8 +7642,15 @@ mod tests {
                 "the migration lock lands on the shared turn on {name}"
             );
         }
+    }
+
+    /// Distinct schemas name distinct migration locks. These pairs are
+    /// samples whose hashes the weaker mixes fold onto one key: an or
+    /// or an and would give both names of a pair the same lock, and
+    /// two stores' migrations would serialize on it.
+    #[test]
+    fn distinct_schemas_name_distinct_migration_locks() {
         for [a, b] in [
-            ["schema_000000", "schema_000001"],
             ["schema_000532", "schema_001276"],
             ["schema_043279", "schema_073399"],
         ] {
@@ -7662,7 +7666,9 @@ mod tests {
     /// identity, and the reset drops it even though the mark itself is
     /// a table in the schema: the mark is the restore's own, not a
     /// foreign object. A reset that counted the mark as foreign would
-    /// refuse to clean up what a killed restore left behind.
+    /// refuse to clean up what a killed restore left behind. The first
+    /// reset makes the real mark; the second must drop the schema and
+    /// mint a fresh one - a new id is the proof the drop ran.
     #[test]
     fn a_staging_schema_resets_even_though_its_mark_is_a_table() {
         let base = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
@@ -7670,31 +7676,38 @@ mod tests {
         let mut raw = postgres::Client::connect(&base, NoTls).unwrap();
         raw.batch_execute(&format!("DROP SCHEMA IF EXISTS {fresh} CASCADE"))
             .unwrap();
-        raw.batch_execute(&format!(
-            "CREATE SCHEMA {fresh}; \
-             CREATE TABLE {fresh}.restore_staging (id text primary key, \
-             started timestamptz default now()); \
-             INSERT INTO {fresh}.restore_staging (id) VALUES ('leftover')"
-        ))
-        .unwrap();
+        raw.batch_execute(&format!("CREATE SCHEMA {fresh}"))
+            .unwrap();
         drop(raw);
-
         let sep = if base.contains('?') { '&' } else { '?' };
         let url = format!("{base}{sep}options=--search_path%3D{fresh}");
-        reset_schema(&url, None).unwrap();
 
-        // The reset leaves a fresh schema, staged for the next restore.
+        reset_schema(&url, None).unwrap();
+        let first = staging_mark_id(&base, fresh);
+
+        reset_schema(&url, None).unwrap();
+        let second = staging_mark_id(&base, fresh);
+
+        assert_ne!(first, second, "the second reset dropped the old mark");
         let mut raw = postgres::Client::connect(&base, NoTls).unwrap();
-        let staged: Option<String> = raw
+        raw.batch_execute(&format!("DROP SCHEMA IF EXISTS {fresh} CASCADE"))
+            .unwrap();
+    }
+
+    /// The one id row the staging mark holds.
+    fn staging_mark_id(base: &str, schema: &str) -> String {
+        let mut raw = postgres::Client::connect(base, NoTls).unwrap();
+        let mark: Option<String> = raw
             .query_opt(
                 "SELECT to_regclass(format('%I.restore_staging', $1::text))::text",
-                &[&fresh],
+                &[&schema],
             )
             .unwrap()
             .and_then(|row| row.get::<_, Option<String>>(0));
-        assert!(staged.is_some(), "the reset re-stages the schema");
-        raw.batch_execute(&format!("DROP SCHEMA IF EXISTS {fresh} CASCADE"))
-            .unwrap();
+        let mark = mark.expect("the schema carries the staging mark");
+        raw.query_one(&format!("SELECT id FROM {mark}"), &[])
+            .unwrap()
+            .get("id")
     }
 
     /// The loss's own `ROLLBACK` runs on the recovered connection: the
