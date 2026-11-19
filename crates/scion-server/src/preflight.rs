@@ -1409,28 +1409,26 @@ mod tests {
     /// mutant, which no live-server test could reach (#1257).
     #[test]
     fn the_version_gate_names_a_supported_major_and_refuses_a_foreign_one() {
-        let ok = |line: String| assert!(line.contains("is supported"), "{line}");
-        let refused = |line: String| {
-            assert!(
-                line.contains("supports PostgreSQL 16 to 18"),
-                "a foreign major takes the refusal: {line}"
-            )
-        };
-        for (num, want) in [(17_0011, &ok), (16_0004, &ok), (18_0000, &ok)] {
-            match version_answer(num) {
-                Answer::Ok(line) => want(line),
-                Answer::Fail(line) => refused(line),
-                Answer::Warn(line) => refused(line),
+        let ok = |a: Answer| match a {
+            Answer::Ok(line) => assert!(line.contains("is supported"), "{line}"),
+            Answer::Fail(line) | Answer::Warn(line) => {
+                panic!("a supported major names the release: {line}")
             }
+        };
+        let refused = |a: Answer| match a {
+            // An Ok for a foreign major is exactly the mutant's
+            // failure: the gate let the server's own major through.
+            Answer::Ok(line) => panic!("a foreign major takes the refusal, got: {line}"),
+            Answer::Fail(line) | Answer::Warn(line) => assert!(
+                line.contains("supports PostgreSQL 16 to 18"),
+                "the refusal names the supported range: {line}"
+            ),
+        };
+        for num in [17_0011, 16_0004, 18_0000] {
+            ok(version_answer(num));
         }
         for num in [9_0603, 15_0009, 19_0000, 0] {
-            // Either arm's line must carry the refusal's words: an Ok
-            // for a foreign major is exactly the mutant's failure.
-            match version_answer(num) {
-                Answer::Ok(line) => refused(line),
-                Answer::Fail(line) => refused(line),
-                Answer::Warn(line) => refused(line),
-            }
+            refused(version_answer(num));
         }
     }
 
