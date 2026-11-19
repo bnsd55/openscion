@@ -7785,9 +7785,9 @@ mod tests {
         assert!(source.contains("the engine refused"), "{source}");
     }
 
-    /// A connect error carries no SQLSTATE: the mapping answers busy -
-    /// which the client retries, not internal - or the client would
-    /// retry what a retry cannot fix.
+    /// A connect error carries no SQLSTATE: it maps to busy, which the
+    /// client retries. As internal, the client would give up on an
+    /// outage that a retry outlives.
     #[test]
     fn a_connect_error_without_a_sqlstate_is_busy() {
         use super::map_pg_error;
