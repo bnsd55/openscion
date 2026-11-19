@@ -7121,9 +7121,9 @@ impl Meta for Pg {
 #[cfg(test)]
 mod tests {
     use super::{
-        Client, Conn, Fence, Flow, Job, Kind, NoTls, Reply, Setup, SetupFailure, TxState,
-        connect_on, connection_gone, delete_prefixes, merged_options, migration_lock_key,
-        run_job, run_with_retry, schema_lock_key, SCHEMA_LOCK,
+        Client, Conn, Fence, Flow, Job, Kind, NoTls, Reply, SCHEMA_LOCK, Setup, SetupFailure,
+        TxState, connect_on, connection_gone, delete_prefixes, merged_options, migration_lock_key,
+        run_job, run_with_retry, schema_lock_key,
     };
     use crate::error::{Error, Storage};
     use crate::pg::{Pairing, Pg, pairing_decision};
