@@ -44,6 +44,7 @@ pub struct Report {
 
 /// One check's answer: the line preflight prints, and the level the
 /// exit code reads.
+#[derive(Debug, PartialEq, Eq)]
 enum Answer {
     Ok(String),
     Warn(String),
@@ -106,10 +107,6 @@ pub fn run(opts: &PreflightOptions) -> Report {
     finish(answers)
 }
 
-/// The database's checks: the build's version, the schema's state
-/// through `check_schema`, the store's pairing, and a live server on
-/// the lock. A database that does not answer stops here; the later
-/// checks still print.
 /// The version answer for a `server_version_num` reading. Pure, so
 /// the gate's boundary is testable without a server of a foreign
 /// major (#1257): the test cannot make a live PostgreSQL 17 report 9
@@ -129,6 +126,10 @@ fn version_answer(num: i32) -> Answer {
     }
 }
 
+/// The database's checks: the build's version, the schema's state
+/// through `check_schema`, the store's pairing, and a live server on
+/// the lock. A database that does not answer stops here; the later
+/// checks still print.
 fn database_checks(
     data: &Path,
     migrate: bool,
@@ -1424,10 +1425,16 @@ mod tests {
                 "the refusal names the supported range: {line}"
             ),
         };
-        for num in [17_0011, 16_0004, 18_0000] {
+        // Both ends of the range, both sides: 16 and 189999 pass, 15
+        // (159999 is 15's last reading) and 19 fail.
+        assert_eq!(
+            version_answer(17_0011),
+            Answer::Ok("PostgreSQL 17.11 is supported".to_string())
+        );
+        for num in [16_0000, 17_0011, 18_9999] {
             ok(version_answer(num));
         }
-        for num in [9_0603, 15_0009, 19_0000, 0] {
+        for num in [15_9999, 9_0603, 19_0000, 0] {
             refused(version_answer(num));
         }
     }
