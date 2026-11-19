@@ -1686,11 +1686,14 @@ mod silent_failures {
         // The record's dir spelled the way the command resolves it, so
         // the unmount's mount_dir lands on the same record.
         let dir = mount_dir(&base.path().join("view")).unwrap();
+        // The pid no system hands out (Linux pid_max is at most 2^22,
+        // macOS 99998), so even a mutated stop check can only signal a
+        // process that cannot exist.
         let known = MountRecord {
             dir: dir.clone(),
             overlay: overlay.clone(),
             rev: "main".to_owned(),
-            pid: 4245,
+            pid: i32::MAX as u32,
             writable: false,
         };
         save_session(&known).unwrap();

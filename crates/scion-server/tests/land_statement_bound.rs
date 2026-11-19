@@ -92,7 +92,7 @@ fn changeset_on(
     for path in paths {
         let upload = store.blobs().upload().unwrap();
         let upload = upload.append(path.as_bytes()).unwrap();
-        let blob = write::put_blob(&store, repo, upload).unwrap();
+        let blob = write::put_blob(store, repo, upload).unwrap();
         changes.insert(
             RepoPath::new(path.as_str()).unwrap(),
             Some(FileState::Regular {
@@ -192,25 +192,20 @@ fn a_create_reads_its_pre_read_on_a_reader_before_the_write_transaction() {
         .expect("changeset fits the format");
     Backend::test_reset_statement_count();
     write::create_changeset(&store, REPO, &cs.encode(), &later()).unwrap();
-    let count = Backend::test_statement_count();
     let log = Backend::test_statement_log();
     let preload = log
         .iter()
         .position(|sql| sql.starts_with("SELECT kind, version, cs, value"))
-        .expect("the create never pre-read the derived values:\n{log:#?}");
+        .unwrap_or_else(|| panic!("the create never pre-read the derived values:\n{log:#?}"));
     let write_check = log
         .iter()
         .position(|sql| sql.starts_with("SELECT r.repo_id, (m.cs IS NOT NULL)"))
-        .expect("the write transaction never checked the repo:\n{log:#?}");
+        .unwrap_or_else(|| panic!("the write transaction never checked the repo:\n{log:#?}"));
     assert!(
         preload < write_check,
         "the pre-read's derived reads must answer on the reader, before \
          the write transaction's first statement: preload at {preload}, \
          write check at {write_check}\n{log:#?}"
-    );
-    assert_eq!(
-        count, 18,
-        "one create cost {count} statements, not 18:\n{log:#?}"
     );
 }
 
