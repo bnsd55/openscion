@@ -304,7 +304,10 @@ jobs:
               cat "$list_out" >&2
               exit 2
             fi
-            diff_mutants=$(grep -c '^' "$list_out" || true)
+            # Count mutant-shaped lines (path:line:col: ...): cargo-mutants
+            # writes only mutants to stdout, but the count keys on the
+            # shape, not on stdout being silent (its notices go to stderr).
+            diff_mutants=$(grep -Ec '^[^ ]+\.rs:[0-9]+:' "$list_out" || true)
             if [ "$diff_mutants" = 0 ]; then
               echo "no mutants on the changed lines: the diff touches only comments, docs or code cargo-mutants does not mutate"
             else
@@ -324,11 +327,16 @@ jobs:
               export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="prlimit --as=$cap_bytes" ;;
           esac
           if [ "$diff_mutants" = 0 ]; then
+            # The same keys a real outcomes.json carries, with zero
+            # counts and an empty outcomes list: a reader's jq .caught
+            # sees a number, not a shape error.
             mkdir -p mutants-out/mutants.out
             : > mutants-out/mutants.out/missed.txt
             : > mutants-out/mutants.out/caught.txt
             : > mutants-out/mutants.out/timeout.txt
-            printf '[]\n' > mutants-out/mutants.out/outcomes.json
+            now=$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")
+            ver=$(cargo mutants --version | awk '{print $2}')
+            printf '{"total_mutants": 0, "missed": 0, "caught": 0, "timeout": 0, "unviable": 0, "success": 0, "start_time": "%s", "end_time": "%s", "cargo_mutants_version": "%s", "outcomes": []}\n' "$now" "$now" "$ver" > mutants-out/mutants.out/outcomes.json
           else
           # shellcheck disable=SC2086
           # An empty array under `set -u` reads as unbound on bash 3.2.
@@ -450,7 +458,10 @@ jobs:
               cat "$list_out" >&2
               exit 2
             fi
-            diff_mutants=$(grep -c '^' "$list_out" || true)
+            # Count mutant-shaped lines (path:line:col: ...): cargo-mutants
+            # writes only mutants to stdout, but the count keys on the
+            # shape, not on stdout being silent (its notices go to stderr).
+            diff_mutants=$(grep -Ec '^[^ ]+\.rs:[0-9]+:' "$list_out" || true)
             if [ "$diff_mutants" = 0 ]; then
               echo "no mutants on the changed lines: the diff touches only comments, docs or code cargo-mutants does not mutate"
             else
@@ -459,11 +470,16 @@ jobs:
             fi
           fi
           if [ "$diff_mutants" = 0 ]; then
+            # The same keys a real outcomes.json carries, with zero
+            # counts and an empty outcomes list: a reader's jq .caught
+            # sees a number, not a shape error.
             mkdir -p mutants-out/mutants.out
             : > mutants-out/mutants.out/missed.txt
             : > mutants-out/mutants.out/caught.txt
             : > mutants-out/mutants.out/timeout.txt
-            printf '[]\n' > mutants-out/mutants.out/outcomes.json
+            now=$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")
+            ver=$(cargo mutants --version | awk '{print $2}')
+            printf '{"total_mutants": 0, "missed": 0, "caught": 0, "timeout": 0, "unviable": 0, "success": 0, "start_time": "%s", "end_time": "%s", "cargo_mutants_version": "%s", "outcomes": []}\n' "$now" "$now" "$ver" > mutants-out/mutants.out/outcomes.json
           else
           # shellcheck disable=SC2086
           # An empty array under `set -u` reads as unbound on bash 3.2.
