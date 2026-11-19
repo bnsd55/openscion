@@ -2265,3 +2265,79 @@ fn the_diff_steps_memory_guard_reads_at_the_edge_and_refuses_below() {
     );
 }
 
+
+/// The rename search's read refuses a candidate whose bytes and the
+/// call's shares pass the budget: `size + held > cap`. A candidate that
+/// lands exactly on the budget READS under `>` and is refused under `>=`
+/// (and under `==`), which changes the rename: with the read the search
+/// pairs the added file with the similar deleted one and the reply's
+/// changesets carry the old path; with the refusal no source is found
+/// and they carry the new path. The test pins the equality from both
+/// sides. The candidate's size is fixed, so the cap is the arithmetic
+/// sum: the state share of the 401 counted lines, the tip's 801 text
+/// bytes, the one caller byte, the walk's node takes for this fixture -
+/// 366, a constant of the history row encoding, re-measured the same way
+/// if the encoding changes - and the candidate's 600 bytes.
+#[test]
+fn the_rename_search_reads_the_candidate_at_the_budget_edge() {
+    let (_data, store) = open_store();
+    // Root holds `old` (300 `a` lines) and a `decoy` (40 `z` lines); the
+    // rename deletes both and adds `new` (400 `a` lines and one `b`);
+    // the tip changes `new`'s 400th `a` to a `c`. `new` is 75% like
+    // `old` and nothing like the decoy, so the search pairs it with
+    // `old` - when the read of `old` is allowed.
+    let root_body: Vec<u8> = std::iter::repeat(b"a\n".to_vec()).take(300).flatten().collect();
+    let decoy: Vec<u8> = std::iter::repeat(b"z\n".to_vec()).take(40).flatten().collect();
+    let mut mid_body = std::iter::repeat(b"a\n".to_vec()).take(400).flatten().collect::<Vec<u8>>();
+    mid_body.push(b'b');
+    let mut tip_body = mid_body.clone();
+    tip_body[398 * 2] = b'c';
+    let old_blob = store.blobs().put(&root_body).unwrap();
+    let ids = chain(
+        &store,
+        vec![
+            vec![
+                ("old", Option::<FileState>::Some(regular(old_blob))),
+                ("decoy", Option::<FileState>::Some(regular(store.blobs().put(&decoy).unwrap()))),
+            ],
+            vec![
+                ("old", Option::<FileState>::None),
+                ("decoy", Option::<FileState>::None),
+                ("new", Option::<FileState>::Some(regular(store.blobs().put(&mid_body).unwrap()))),
+            ],
+            vec![("new", Option::<FileState>::Some(regular(store.blobs().put(&tip_body).unwrap())))],
+        ],
+    );
+    let state = 401 * BYTES_PER_LINE;
+    let text = tip_body.len();
+    let caller = 1;
+    const NODE_TAKE: usize = 366;
+    let edge = caller + state + text + NODE_TAKE + root_body.len();
+    let named_old = |cap: usize| {
+        match blame::blame(
+            &store,
+            REPO,
+            ids[2],
+            &path("new"),
+            &Resume::default(),
+            1,
+            &Bytes::new(cap),
+            None,
+        ) {
+            Ok(b) => b.changesets.iter().any(|(_, _, p)| *p == path("old")),
+            Err(_) => false, // the shares alone do not fit: refused
+        }
+    };
+    // At the edge the candidate's read passes the guard's `>`: the search
+    // pairs `new` with `old`, and the reply names the old path.
+    assert!(
+        named_old(edge),
+        "at size + held == cap exactly the candidate reads and the rename is found"
+    );
+    // One byte under the edge the read is refused, no source is found,
+    // and the reply names the new path.
+    assert!(
+        !named_old(edge - 1),
+        "one byte under the edge the candidate is refused and no rename is found"
+    );
+}
