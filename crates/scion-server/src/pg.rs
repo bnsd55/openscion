@@ -7123,7 +7123,7 @@ mod tests {
     use super::{
         Client, Conn, Fence, Flow, Job, Kind, NoTls, Reply, SCHEMA_LOCK, Setup, SetupFailure,
         TxState, connect_on, connection_gone, delete_prefixes, merged_options, migration_lock_key,
-        run_job, run_with_retry, schema_lock_key,
+        reset_schema, run_job, run_with_retry, schema_lock_key,
     };
     use crate::error::{Error, Storage};
     use crate::pg::{Pairing, Pg, pairing_decision};
@@ -7656,6 +7656,45 @@ mod tests {
                 "{a} and {b} share a migration lock"
             );
         }
+    }
+
+    /// A restore's leftover carries the staging mark and no store
+    /// identity, and the reset drops it even though the mark itself is
+    /// a table in the schema: the mark is the restore's own, not a
+    /// foreign object. A reset that counted the mark as foreign would
+    /// refuse to clean up what a killed restore left behind.
+    #[test]
+    fn a_staging_schema_resets_even_though_its_mark_is_a_table() {
+        let base = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let fresh = "staging_reset_marks_a_table";
+        let mut raw = postgres::Client::connect(&base, NoTls).unwrap();
+        raw.batch_execute(&format!("DROP SCHEMA IF EXISTS {fresh} CASCADE"))
+            .unwrap();
+        raw.batch_execute(&format!(
+            "CREATE SCHEMA {fresh}; \
+             CREATE TABLE {fresh}.restore_staging (id text primary key, \
+             started timestamptz default now()); \
+             INSERT INTO {fresh}.restore_staging (id) VALUES ('leftover')"
+        ))
+        .unwrap();
+        drop(raw);
+
+        let sep = if base.contains('?') { '&' } else { '?' };
+        let url = format!("{base}{sep}options=--search_path%3D{fresh}");
+        reset_schema(&url, None).unwrap();
+
+        // The reset leaves a fresh schema, staged for the next restore.
+        let mut raw = postgres::Client::connect(&base, NoTls).unwrap();
+        let staged: Option<String> = raw
+            .query_opt(
+                "SELECT to_regclass(format('%I.restore_staging', $1::text))::text",
+                &[&fresh],
+            )
+            .unwrap()
+            .and_then(|row| row.get::<_, Option<String>>(0));
+        assert!(staged.is_some(), "the reset re-stages the schema");
+        raw.batch_execute(&format!("DROP SCHEMA IF EXISTS {fresh} CASCADE"))
+            .unwrap();
     }
 
     /// The loss's own `ROLLBACK` runs on the recovered connection: the
