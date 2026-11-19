@@ -353,8 +353,6 @@ reads this block - it keeps no list of its own.
   file)
 - no branch: `crates/scion-proto/src/lib.rs` (`descriptor_set` returns a
   compiled-in byte slice)
-- tracked by #1060: `crates/scion-server/src/pg.rs` (the Postgres
-  backend's run is planned)
 
 ## The open list (the v1.0 blockers this audit leaves)
 
