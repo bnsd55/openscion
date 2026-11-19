@@ -2186,6 +2186,13 @@ fn a_call_that_holds_budget_never_waits_for_more() {
 /// encoding, re-measured the same way if the encoding changes.
 #[test]
 fn the_diff_steps_memory_guard_reads_at_the_edge_and_refuses_below() {
+    // The walk's path-history node takes for this fixture: two lookups
+    // on one path across the walk's two steps. They are a constant of
+    // the history row encoding, not of the guard: 106 bytes as measured
+    // for these rows (the smallest cap, over the arithmetic sum below,
+    // where the mid diff runs). If the encoding changes, the edge
+    // asserts below fail and the number is re-measured the same way.
+    const NODE_TAKE: usize = 106;
     let (_data, store) = open_store();
     // Root holds 500 `a` lines; mid drops 100 of them and adds one `b`
     // (401 lines); tip changes mid's 400th `a` to a `c` (401 lines). The
@@ -2219,17 +2226,10 @@ fn the_diff_steps_memory_guard_reads_at_the_edge_and_refuses_below() {
     let state = 401 * BYTES_PER_LINE;
     let text = tip_body.len();
     let older_take = root_body.len();
-    // The walk's path-history node takes for this fixture: two lookups
-    // on one path across the walk's two steps. They are a constant of
-    // the history row encoding, not of the guard: 106 bytes as measured
-    // for these rows (the smallest cap, over the arithmetic sum below,
-    // where the mid diff runs). If the encoding changes, the edge
-    // asserts below fail and the number is re-measured the same way.
-    let node_take = 106;
     // The caller's own share: one held byte, so the sum's first term is
     // exercised (a zero share hides a product fold of the sum).
     let caller = 1;
-    let edge = need + state + text + older_take + node_take + caller;
+    let edge = need + state + text + older_take + NODE_TAKE + caller;
     let diff_ran = |cap: usize| {
         match blame::blame(
             &store,
@@ -2279,10 +2279,15 @@ fn the_diff_steps_memory_guard_reads_at_the_edge_and_refuses_below() {
 /// sides. The candidate's size is fixed, so the cap is the arithmetic
 /// sum: the state share of the 401 counted lines, the tip's 801 text
 /// bytes, the one caller byte, the walk's node takes for this fixture -
-/// 366, a constant of the history row encoding, re-measured the same way
+/// 536, a constant of the history row encoding, re-measured the same way
 /// if the encoding changes - and the candidate's 600 bytes.
 #[test]
 fn the_rename_search_reads_the_candidate_at_the_budget_edge() {
+    // The walk's node takes for this fixture (three decoy lookups on the
+    // deleted paths plus the added one), a constant of the history row
+    // encoding, re-measured the same way if the encoding changes: 536
+    // bytes as measured.
+    const NODE_TAKE: usize = 536;
     let (_data, store) = open_store();
     // Root holds `old` (300 `a` lines) and three decoys (40 `z` lines
     // each); the rename deletes all four and adds `new` (400 `a` lines
@@ -2339,8 +2344,7 @@ fn the_rename_search_reads_the_candidate_at_the_budget_edge() {
     let state = 401 * BYTES_PER_LINE;
     let text = tip_body.len();
     let caller = 1;
-    let node_take = 536;
-    let edge = caller + state + text + node_take + root_body.len();
+    let edge = caller + state + text + NODE_TAKE + root_body.len();
     let named_old = |cap: usize| {
         match blame::blame(
             &store,
