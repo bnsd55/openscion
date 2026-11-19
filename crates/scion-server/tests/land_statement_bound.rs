@@ -92,7 +92,7 @@ fn changeset_on(
     for path in paths {
         let upload = store.blobs().upload().unwrap();
         let upload = upload.append(path.as_bytes()).unwrap();
-        let blob = write::put_blob(store, repo, upload).unwrap();
+        let blob = write::put_blob(&store, repo, upload).unwrap();
         changes.insert(
             RepoPath::new(path.as_str()).unwrap(),
             Some(FileState::Regular {
@@ -154,6 +154,65 @@ fn land_statement_count(paths: usize) -> u64 {
 /// The seam is process-wide, so the tests take turns: parallel windows
 /// would count each other's statements.
 static LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// One create costs a fixed number of statements, and its pre-read runs
+/// on a reader, before the write transaction: the build's reads then
+/// answer from the pre-read without round trips on the write connection
+/// (tree.rs 436-442, write.rs 177). With the pre-read stubbed, the
+/// preload statement disappears and the build's reads ride the write
+/// transaction, so the count grows and the preload's SELECT never
+/// appears.
+#[test]
+fn a_create_reads_its_pre_read_on_a_reader_before_the_write_transaction() {
+    let _log = LOG_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (_dir, store) = store_with_root(&[]);
+    let repo = store.read(|c| c.repo_id(REPO)).unwrap();
+    let base = store
+        .read(|c| {
+            Ok(c.get_ref(repo, "main")?
+                .expect("the root ref exists")
+                .target)
+        })
+        .unwrap();
+    store.blobs().put(b"payload\n").unwrap();
+    let upload = store.blobs().upload().unwrap();
+    let upload = upload.append(b"payload\n").unwrap();
+    let blob = write::put_blob(&store, repo, upload).unwrap();
+    let mut changes = BTreeMap::new();
+    changes.insert(
+        RepoPath::new("p000.txt").unwrap(),
+        Some(FileState::Regular {
+            content: blob,
+            executable: false,
+        }),
+    );
+    let cs = Changeset::new(vec![base], identity(), None, b"create\n".to_vec(), changes)
+        .expect("changeset fits the format");
+    Backend::test_reset_statement_count();
+    write::create_changeset(&store, REPO, &cs.encode(), &later()).unwrap();
+    let count = Backend::test_statement_count();
+    let log = Backend::test_statement_log();
+    let preload = log
+        .iter()
+        .position(|sql| sql.starts_with("SELECT kind, version, cs, value"))
+        .expect("the create never pre-read the derived values:\n{log:#?}");
+    let write_check = log
+        .iter()
+        .position(|sql| sql.starts_with("SELECT r.repo_id, (m.cs IS NOT NULL)"))
+        .expect("the write transaction never checked the repo:\n{log:#?}");
+    assert!(
+        preload < write_check,
+        "the pre-read's derived reads must answer on the reader, before \
+         the write transaction's first statement: preload at {preload}, \
+         write check at {write_check}\n{log:#?}"
+    );
+    assert_eq!(
+        count, 18,
+        "one create cost {count} statements, not 18:\n{log:#?}"
+    );
+}
 
 /// A land request for `key` against `target_ref`.
 fn record_request(cs: scion_core::ChangesetId, target_ref: &str, key: &str) -> LandRequest {
