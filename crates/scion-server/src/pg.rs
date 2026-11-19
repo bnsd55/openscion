@@ -7121,8 +7121,9 @@ impl Meta for Pg {
 #[cfg(test)]
 mod tests {
     use super::{
-        Client, Conn, Fence, Flow, Job, Kind, NoTls, Reply, Setup, SetupFailure, TxState,
-        connect_on, connection_gone, delete_prefixes, merged_options, run_job, run_with_retry,
+        Client, Conn, Fence, Flow, Job, Kind, NoTls, Reply, SCHEMA_LOCK, Setup, SetupFailure,
+        TxState, connect_on, connection_gone, delete_prefixes, merged_options, migration_lock_key,
+        reset_schema, run_job, run_with_retry, schema_lock_key,
     };
     use crate::error::{Error, Storage};
     use crate::pg::{Pairing, Pg, pairing_decision};
@@ -7620,6 +7621,93 @@ mod tests {
             TxState::Lost.after("SELECT 1", true),
             TxState::Lost
         ));
+    }
+
+    /// The migration lock's key and the server lock's key mix their
+    /// hashes differently: over a thousand names, no name gives the
+    /// two derivations the same key, and none lands a migration lock
+    /// on the shared turn's own key.
+    #[test]
+    fn the_migration_lock_key_mixes_differently_from_the_server_lock() {
+        for i in 0..1000 {
+            let name = format!("schema_{i:04}");
+            assert_ne!(
+                migration_lock_key(&name),
+                schema_lock_key(&name),
+                "the two derivations collide on {name}"
+            );
+            assert_ne!(
+                migration_lock_key(&name),
+                SCHEMA_LOCK,
+                "the migration lock lands on the shared turn on {name}"
+            );
+        }
+    }
+
+    /// Distinct schemas name distinct migration locks. These pairs are
+    /// samples whose hashes the weaker mixes fold onto one key: an or
+    /// or an and would give both names of a pair the same lock, and
+    /// two stores' migrations would serialize on it.
+    #[test]
+    fn distinct_schemas_name_distinct_migration_locks() {
+        for [a, b] in [
+            ["schema_000532", "schema_001276"],
+            ["schema_043279", "schema_073399"],
+        ] {
+            assert_ne!(
+                migration_lock_key(a),
+                migration_lock_key(b),
+                "{a} and {b} share a migration lock"
+            );
+        }
+    }
+
+    /// A restore's leftover carries the staging mark and no store
+    /// identity, and the reset drops it even though the mark itself is
+    /// a table in the schema: the mark is the restore's own, not a
+    /// foreign object. A reset that counted the mark as foreign would
+    /// refuse to clean up what a killed restore left behind. The first
+    /// reset makes the real mark; the second must drop the schema and
+    /// mint a fresh one - a new id is the proof the drop ran.
+    #[test]
+    fn a_staging_schema_resets_even_though_its_mark_is_a_table() {
+        let base = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let fresh = "staging_reset_marks_a_table";
+        let mut raw = postgres::Client::connect(&base, NoTls).unwrap();
+        raw.batch_execute(&format!("DROP SCHEMA IF EXISTS {fresh} CASCADE"))
+            .unwrap();
+        raw.batch_execute(&format!("CREATE SCHEMA {fresh}"))
+            .unwrap();
+        drop(raw);
+        let sep = if base.contains('?') { '&' } else { '?' };
+        let url = format!("{base}{sep}options=--search_path%3D{fresh}");
+
+        reset_schema(&url, None).unwrap();
+        let first = staging_mark_id(&base, fresh);
+
+        reset_schema(&url, None).unwrap();
+        let second = staging_mark_id(&base, fresh);
+
+        assert_ne!(first, second, "the second reset dropped the old mark");
+        let mut raw = postgres::Client::connect(&base, NoTls).unwrap();
+        raw.batch_execute(&format!("DROP SCHEMA IF EXISTS {fresh} CASCADE"))
+            .unwrap();
+    }
+
+    /// The one id row the staging mark holds.
+    fn staging_mark_id(base: &str, schema: &str) -> String {
+        let mut raw = postgres::Client::connect(base, NoTls).unwrap();
+        let mark: Option<String> = raw
+            .query_opt(
+                "SELECT to_regclass(format('%I.restore_staging', $1::text))::text",
+                &[&schema],
+            )
+            .unwrap()
+            .and_then(|row| row.get::<_, Option<String>>(0));
+        let mark = mark.expect("the schema carries the staging mark");
+        raw.query_one(&format!("SELECT id FROM {mark}"), &[])
+            .unwrap()
+            .get("id")
     }
 
     /// The loss's own `ROLLBACK` runs on the recovered connection: the
