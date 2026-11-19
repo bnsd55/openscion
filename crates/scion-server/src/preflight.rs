@@ -44,6 +44,7 @@ pub struct Report {
 
 /// One check's answer: the line preflight prints, and the level the
 /// exit code reads.
+#[derive(Debug, PartialEq, Eq)]
 enum Answer {
     Ok(String),
     Warn(String),
@@ -106,6 +107,25 @@ pub fn run(opts: &PreflightOptions) -> Report {
     finish(answers)
 }
 
+/// The version answer for a `server_version_num` reading. Pure, so
+/// the gate's boundary is testable without a server of a foreign
+/// major (#1257): the test cannot make a live PostgreSQL 17 report 9
+/// or 19, so the check it guards sat unreachable to every suite and
+/// the guard's mutant survived. Since PostgreSQL 10 the number is
+/// major * 10000 + minor: 17.11 reads 170011, so the minor is the
+/// whole rest, not the two digits the pre-10 layout gave it (#1072).
+fn version_answer(num: i32) -> Answer {
+    if (16..=18).contains(&(num / 10000)) {
+        let (major, minor) = (num / 10000, num % 10000);
+        Answer::Ok(format!("PostgreSQL {major}.{minor} is supported"))
+    } else {
+        Answer::Fail(format!(
+            "this build supports PostgreSQL 16 to 18; the database runs {}",
+            num / 10000
+        ))
+    }
+}
+
 /// The database's checks: the build's version, the schema's state
 /// through `check_schema`, the store's pairing, and a live server on
 /// the lock. A database that does not answer stops here; the later
@@ -120,17 +140,7 @@ fn database_checks(
         .query_one("SHOW server_version_num", &[])
         .map(|row| row.get::<_, String>(0).parse().unwrap_or(0))
     {
-        Ok(num) if (16..=18).contains(&(num / 10000)) => {
-            // Since PostgreSQL 10 the number is major * 10000 + minor:
-            // 17.11 reads 170011, so the minor is the whole rest, not
-            // the two digits the pre-10 layout gave it (#1072).
-            let (major, minor) = (num / 10000, num % 10000);
-            Answer::Ok(format!("PostgreSQL {major}.{minor} is supported"))
-        }
-        Ok(num) => Answer::Fail(format!(
-            "this build supports PostgreSQL 16 to 18; the database runs {}",
-            num / 10000
-        )),
+        Ok(num) => version_answer(num),
         Err(error) => Answer::Fail(format!("cannot read the server version: {error}")),
     };
     answers.push(("Postgres version", version));
@@ -1391,6 +1401,42 @@ mod tests {
             "the gone filesystem fails:\n{:#?}",
             report.lines
         );
+    }
+
+    /// The version gate's boundary, reachable now that the answer is
+    /// pure: a supported major names the release, a foreign major - a
+    /// pre-16 layout, a future 19, an unreadable reading - takes the
+    /// refusal with the server's own major. Kills the gate's guard
+    /// mutant, which no live-server test could reach (#1257).
+    #[test]
+    fn the_version_gate_names_a_supported_major_and_refuses_a_foreign_one() {
+        let ok = |a: Answer| match a {
+            Answer::Ok(line) => assert!(line.contains("is supported"), "{line}"),
+            Answer::Fail(line) | Answer::Warn(line) => {
+                panic!("a supported major names the release: {line}")
+            }
+        };
+        let refused = |a: Answer| match a {
+            // An Ok for a foreign major is exactly the mutant's
+            // failure: the gate let the server's own major through.
+            Answer::Ok(line) => panic!("a foreign major takes the refusal, got: {line}"),
+            Answer::Fail(line) | Answer::Warn(line) => assert!(
+                line.contains("supports PostgreSQL 16 to 18"),
+                "the refusal names the supported range: {line}"
+            ),
+        };
+        // Both ends of the range, both sides: 16 and 189999 pass, 15
+        // (159999 is 15's last reading) and 19 fail.
+        assert_eq!(
+            version_answer(17_0011),
+            Answer::Ok("PostgreSQL 17.11 is supported".to_string())
+        );
+        for num in [16_0000, 17_0011, 18_9999] {
+            ok(version_answer(num));
+        }
+        for num in [15_9999, 9_0603, 19_0000, 0] {
+            refused(version_answer(num));
+        }
     }
 
     /// The version line names the server's own major and minor: a
