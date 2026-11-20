@@ -2605,8 +2605,6 @@ mod tests {
         );
         let second = st.hold(60);
         assert!(st.over(), "past the limit the read side fails");
-        let second = st.hold(60);
-        assert!(st.over(), "past the limit the read side fails");
         drop(second);
         drop(first);
     }
