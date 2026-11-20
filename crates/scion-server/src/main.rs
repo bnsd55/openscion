@@ -1994,4 +1994,94 @@ mod gc_intent_tests {
             write_deferred_intent(&audit, true, true).await;
         }
     }
+
+    /// A gc whose run fails: the failed result line names the error's
+    /// class and never its message, and the process answers 2 - the
+    /// operator's cue that the run collected nothing and the runbook's
+    /// step is to look, not that the tool is broken. The probe runs in a
+    /// child of this same test binary, because the answer is the
+    /// process's exit status; the child names its directory through the
+    /// environment, so the parent can read the audit file it left.
+    #[cfg(test)]
+    mod gc_failure_tests {
+        use super::*;
+        use scion_server::test_support::meta::{Meta as _, MetaTx as _};
+
+        #[tokio::test]
+        async fn a_failed_gc_records_the_failed_line_and_exits_2() {
+            let dir = scion_server::test_support::private_tempdir();
+            let exe = std::env::current_exe().expect("the test binary is known");
+            let out = std::process::Command::new(exe)
+                .args(["gc_failure_probe", "--nocapture"])
+                .env("SCION_TEST_GC_FAILURE_PROBE", "1")
+                .env("SCION_TEST_GC_PROBE_DATA", dir.path())
+                .output()
+                .expect("the probe runs");
+            assert_eq!(
+                out.status.code(),
+                Some(2),
+                "a failed gc answers 2: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&out.stderr).contains("scion-server gc:"),
+                "the run's own stderr names the failure: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let log = std::fs::read_to_string(dir.path().join("audit.log")).unwrap();
+            let lines: Vec<serde_json::Value> = log
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("each audit line is one JSON object"))
+                .collect();
+            assert_eq!(lines.len(), 2, "one intent and one failed line: {lines:?}");
+            assert_eq!(lines[0]["event"], "admin");
+            assert_eq!(lines[0]["outcome"], "intent");
+            assert_eq!(lines[0]["what"], "gc");
+            assert_eq!(lines[0]["dry_run"], false);
+            assert_eq!(lines[1]["event"], "admin");
+            assert_eq!(lines[1]["outcome"], "failed");
+            assert_eq!(lines[1]["what"], "gc");
+            assert_eq!(
+                lines[1]["why"], "busy",
+                "the why is the error's class, never its message: {lines:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn gc_failure_probe() {
+            if std::env::var_os("SCION_TEST_GC_FAILURE_PROBE").is_none() {
+                // The suite's own run: nothing to probe.
+                return;
+            }
+            let dir = PathBuf::from(
+                std::env::var_os("SCION_TEST_GC_PROBE_DATA")
+                    .expect("the parent named the data directory"),
+            );
+            // The store the parent holds: one repo whose rows are all
+            // dead - no stored changeset puts them - so the real run's
+            // prune chunk is the write the backend refuses as busy.
+            let store = Backend::open_test(&dir.join("data")).unwrap();
+            let blob = store.blobs().put(b"a prunable file\n").unwrap();
+            let fake = scion_core::BlobId::from_bytes([7u8; 32]);
+            store
+                .write(|c| {
+                    let repo = c.create_repo("r")?;
+                    c.add_repo_blob(repo, blob)?;
+                    c.add_repo_blob(repo, fake)
+                })
+                .unwrap();
+            store.fail_next_commits(1);
+            // The arm under test: the run fails, the failed line lands,
+            // and the process exits 2 inside this call.
+            gc_command(
+                scion_server::Audit::open(&dir.join("audit.log")).unwrap(),
+                &store,
+                Duration::ZERO,
+                false,
+                None,
+            )
+            .await
+            .expect("the failed run's exit happens inside gc_command");
+        }
+    }
 }

@@ -1332,7 +1332,52 @@ async fn an_https_upstream_needs_a_ca() {
         CACHE_UPSTREAM_TIMEOUT,
         None,
     );
-    assert!(tier.is_err());
+    let Err(refused) = tier else {
+        panic!("an https upstream without a CA refuses the start");
+    };
+    let why = format!("{refused:#}");
+    assert!(why.contains("no CA is given"), "{why}");
+    assert!(why.contains("pass --tls-ca"), "{why}");
+}
+
+/// An upstream address that does not parse refuses the start: the tier
+/// dials lazily, so a typo'd address must fail at once, not on the first
+/// caller's miss (#1315).
+#[tokio::test]
+async fn an_upstream_address_that_does_not_parse_refuses_the_start() {
+    let store = MemoryStore::new(1 << 20);
+    let Err(refused) = Tier::new_relay(
+        store,
+        "ht tp://bad address",
+        TOKEN,
+        CACHE_UPSTREAM_TIMEOUT,
+        None,
+    ) else {
+        panic!("an upstream that does not parse refuses the start")
+    };
+    let why = format!("{refused:#}");
+    assert!(why.contains("bad upstream address"), "{why}");
+}
+
+/// An https upstream with a client TLS that trusts no CA refuses the
+/// start: a CA-less client TLS is the default shape (`ClientTls::load`
+/// with no flags), so an operator who set --upstream to https but forgot
+/// --tls-ca must be refused at once (#1315).
+#[tokio::test]
+async fn an_https_upstream_with_a_caless_client_tls_refuses_the_start() {
+    let store = MemoryStore::new(1 << 20);
+    let tls = ClientTls::load(None, None, None).expect("a CA-less client TLS loads");
+    let Err(refused) = Tier::new_relay(
+        store,
+        "https://127.0.0.1:1",
+        TOKEN,
+        CACHE_UPSTREAM_TIMEOUT,
+        Some(&tls),
+    ) else {
+        panic!("an https upstream with no CA to trust refuses the start")
+    };
+    let why = format!("{refused:#}");
+    assert!(why.contains("no CA is given"), "{why}");
 }
 
 /// A daemon checks no ticket and runs no walk: a miss forwards the ticket

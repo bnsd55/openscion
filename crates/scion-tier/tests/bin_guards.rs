@@ -589,6 +589,87 @@ async fn the_cache_writes_a_snapshot_of_each_repo() {
     drop(bin);
 }
 
+// --- R3b: the cache's own snapshot seeds a daemon, and the daemon
+// serves the snapshot's blob from its store.
+
+/// The chain an operator runs: a cache snapshots what its replies used,
+/// and a daemon started from that snapshot serves the object from its
+/// own store - its upstream is a dead port, so every served byte comes
+/// from the seed (#1315).
+#[tokio::test]
+async fn a_daemon_seeded_from_the_cache_s_own_snapshot_serves_the_blob() {
+    let fake = Fake::new(false);
+    let upstream = serve_fake(&fake).await;
+    let dir = private_dir();
+    let snaps = dir.path().join("snaps");
+    let log = dir.path().join("cache.log");
+    let bin = spawn_bin(
+        env!("CARGO_BIN_EXE_scion-cache"),
+        &[
+            "--listen",
+            "127.0.0.1:0",
+            "--upstream",
+            &format!("http://{upstream}"),
+            "--ticket-public-key",
+            &fake.public_key_hex(),
+            "--snapshot",
+            snaps.to_str().unwrap(),
+            "--snapshot-repo",
+            "r",
+            "--snapshot-every",
+            "1",
+        ],
+        &log,
+    );
+    let addr = serving_addr(&log);
+    let mut client = tcp_client(addr).await;
+    let mut stream = client
+        .get_objects(blob_request(&fake))
+        .await
+        .expect("the call is served")
+        .into_inner();
+    let part = stream
+        .message()
+        .await
+        .expect("the reply reads")
+        .expect("a part");
+    assert_eq!(part.id, fake.blob);
+
+    // One tick is enough: the reply's object is in the store.
+    let file = snaps.join("r.scnsnap");
+    let started = std::time::Instant::now();
+    while !file.exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the snapshot file never appeared"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    drop(bin);
+
+    // The daemon seeds from the cache's own file and serves: its upstream
+    // is a dead port, so a served byte can only come from the seed.
+    let _daemon = seeded_daemon(&dir, &file);
+    let socket = dir.path().join("data").join("daemon.sock");
+    let channel = Endpoint::from_shared(format!("unix://{}", socket.display()))
+        .unwrap()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(30))
+        .connect()
+        .await
+        .expect("the daemon's socket connects");
+    let mut daemon_client = ObjectsClient::new(channel);
+    let mut stream = daemon_client
+        .get_objects(blob_request(&fake))
+        .await
+        .expect("the seeded daemon serves the object")
+        .into_inner();
+    let mut served = Vec::new();
+    while let Some(part) = stream.message().await.expect("the reply reads") {
+        served.extend_from_slice(&part.data);
+    }
+    assert!(!served.is_empty(), "the seeded daemon served the object");
+
 // --- R2b: the cache's metrics listener serves /metrics on the address
 // the operator gave it.
 
