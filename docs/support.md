@@ -34,7 +34,7 @@ marked supported here.
 | scion-server | Linux | arm64 | ext4 | — | best effort | `test-arm64-server` (ci.yml) | The server suite runs on arm64 nightly and on release candidates, not per push; the cell is best effort until v0.8, and the Linux arm64 binaries return with the v0.8 support wave |
 | scion-server | Linux | arm64 | ext4 | 17 | best effort | `test-arm64-server` (ci.yml) | The arm64 server suite runs on Postgres 17 when the arm64 job runs; the cell is best effort because the job itself is not per push |
 | scion-server | Linux | x64 | xfs | — | best effort | `test-xfs` (ci.yml) | Every store the server suite opens lands on a real xfs loop device (TMPDIR); the job runs nightly and on release candidates, not per push |
-| scion-server | Linux | x64 | ext4 | 17 | best effort | `test-umask-002` (ci.yml) | The whole workspace suite under `umask 002`, on its own Postgres service: an operator's umask is not the suite's to choose. Runs on the nightly only |
+| scion-server | Linux | x64 | ext4 | 17 | best effort | `test-umask-002` (ci.yml) | The whole workspace suite under `umask 002`, on its own Postgres service: an operator's umask is not the suite's to choose. Runs on the nightly and on release candidates |
 | scion-server | Linux | x64 | ext4 | — | best effort | `test-restore-ceiling` (ci.yml) | The streamed restore's RSS ceiling (`archive_restore_stream`) runs release-shaped on main pushes, the nightly and dispatches — not on pull requests, where the fixture's disk cost buys nothing; the job measures the restore's own peak against the twin's baseline |
 | scion-server | macOS | arm64 | APFS | — | supported | `test-macos` (ci.yml) | Native `macos-15` runner, full workspace suite; the runner's disk is APFS |
 | scion-server | Windows | x64 | any | — | unsupported | — | No job builds or tests it; the lock files and paths assume POSIX. Unsupported until a native job exists |
@@ -194,8 +194,10 @@ Read of the table:
   100k and 1M only. A host that sizes RAM to its store keeps fsck warm
   and flat; a store larger than RAM makes fsck minutes per million
   blobs.
-- **gc --dry-run** grows a little faster than the count (7.8x for 5x)
-  but stays far under fsck; it stats every file and reads none.
+- **gc --dry-run** grows about linearly with the count (11.4x for 10x
+  from 100,000 to 1,000,000) and under it past that (4.2x for 5x to
+  5,000,000), and stays far under fsck; it stats every file and reads
+  none.
 
 One inode per blob is the second wall: 5M blobs spent 5M of the
 runner's 19.5M inodes. The inode budget and how to size it are in
