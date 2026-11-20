@@ -1062,7 +1062,8 @@ whatever entry it finds (the store's paths read "already holds a
 store"), so a stray file is met before the replay, not at the
 publication rename. The target's own `audit.log` is the one entry the
 check passes: the run's intent line is in it, and the file moves into
-the restored store. Any other entry refuses and is named. The replay goes through the store's own write path
+the restored store. Any other entry refuses and is named. The replay
+goes through the store's own write path
 so every object ID carries over, the refs go back with the versions the
 export read, and the pending lands are recorded again, so a retry with
 the same request key resumes. It exits 2 when it could not finish, and
@@ -1751,8 +1752,9 @@ Proof: crates/scion-server/tests/docs_alerts.rs::tier_miss_ratio_falls_when_the_
 `scion_blob_ceiling_share` passes 70%, 85% and 100% of the 1,000,000
 blobs docs/support.md supports per data directory, and stays past the
 line for 15 minutes. The share is the count the metadata names, divided
-by the ceiling; the gauge refreshes at most every 60 s; a slow count
-spaces the next refresh by its own cost.
+by the ceiling; the gauge refreshes from one bounded query, no more
+often than every 60 s; a slow count spaces the next refresh by its
+own cost.
 
 Read the share and its trend:
 
