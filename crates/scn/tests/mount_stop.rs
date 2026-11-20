@@ -97,8 +97,10 @@ fn a_terminated_mount_unmounts_and_answers_0() {
         "the printed command mounts the served export: {second}"
     );
 
-    // The mount serves until a signal: it holds here, and its record
-    // names the dir it serves and the overlay it must remove.
+    // The mount serves until a signal: it holds through a grace window
+    // - a mount that stopped on its own would be gone inside one - and
+    // its record names the dir it serves and the overlay it must remove.
+    std::thread::sleep(std::time::Duration::from_millis(500));
     assert!(
         child.try_wait().unwrap().is_none(),
         "the mount serves until a signal"
