@@ -146,8 +146,14 @@ A release is cut through one PR from a branch named
    (`.github/workflows/release.yml`) does this step: on the tag push it
    builds every artifact twice per cell, fails on one differing byte,
    attests each artifact and SBOM, verifies the attestations, and
-   opens the release immutable with the notes rebuilt from the
-   `CHANGELOG.md` section of the version at that commit. A person does
+   opens the release: it creates the release as a draft, uploads the
+   assets, checks the count, and flips it with `gh release edit
+   --draft=false` as the run's last act - the repository's
+   immutable-releases setting is what forbids adding assets after
+   that. The body is the notes file of the version at that commit
+   (`docs/release-notes/<version>.md`, read at the tagged commit)
+   plus one line pointing at the version's `CHANGELOG.md` section,
+   which the workflow proves exists and holds a row. A person does
    not run it; a person reads its run. What a person must turn on
    once, before the first tag (repository settings only the owner can
    change):
@@ -158,9 +164,8 @@ A release is cut through one PR from a branch named
      workflow would happily build. GitHub's older tag-protection rules
      are replaced by rulesets; this is the ruleset to create.
    - **Immutable releases** (Settings → General → Releases): the
-     workflow also passes `--immutable` to `gh release create`, so a
-     release is protected even before the repository-wide setting
-     exists.
+     workflow publishes by the draft-then-flip order above, and this
+     setting is what forbids adding assets after the flip.
    - **The registry the SBOMs name is not secret; nothing else to
      add.** The workflow needs no key: the tag's SSH signature is
      verified by GitHub at push time against the key on the owner's
