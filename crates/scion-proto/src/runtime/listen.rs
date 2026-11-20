@@ -2609,6 +2609,36 @@ mod tests {
         drop(first);
     }
 
+    /// The process-wide total is a memory bound: the hold that crosses it
+    /// is seen on that hold, not one hold later. A fresh process total,
+    /// one hold past it - the connection's own cap sits far away, so the
+    /// total alone decides - and the parked read's waker is gone when
+    /// `hold` answers, which is how a parked reply's close is seen
+    /// without a frame from the client.
+    #[test]
+    fn one_hold_past_the_stall_total_wakes_the_parked_read_at_once() {
+        let st = Stalled::new(
+            Some(SocketAddr::from(([127, 0, 0, 1], 9))),
+            1 << 20,
+            Arc::new(Metrics::default()),
+            Arc::new(TotalBytes::new(100)),
+        );
+        // The parked reply's waker sits in the read side, as a poll left
+        // it before the reply parked.
+        *st.0.waker.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(std::task::Waker::noop().clone());
+        // The first hold already crosses the total: 100 of its 100.
+        let _stall = st.hold(100);
+        assert!(
+            st.0.waker
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_none(),
+            "the hold that crosses the process total wakes the parked read at once"
+        );
+        assert!(st.over(), "the total reads 100 of its 100 limit");
+    }
+
     /// The write side of the same cap: a connection under the limit
     /// writes through, and over it the next write is refused at once,
     /// without a read in between. The h2 driver reaches the write side
