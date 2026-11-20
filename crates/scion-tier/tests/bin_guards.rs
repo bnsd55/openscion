@@ -589,6 +589,69 @@ async fn the_cache_writes_a_snapshot_of_each_repo() {
     drop(bin);
 }
 
+// --- R2b: the cache's metrics listener serves /metrics on the address
+// the operator gave it.
+
+/// `--metrics-listen 127.0.0.1:0` binds the port the OS chose, names it
+/// in the log, and serves the tier's metrics there: a scraper reads the
+/// body, so the test reads it the same way (#1320).
+#[tokio::test]
+async fn the_cache_serves_metrics_on_the_address_it_was_given() {
+    let fake = Fake::new(false);
+    let upstream = serve_fake(&fake).await;
+    let dir = private_dir();
+    let log = dir.path().join("cache.log");
+    let _bin = spawn_bin(
+        env!("CARGO_BIN_EXE_scion-cache"),
+        &[
+            "--listen",
+            "127.0.0.1:0",
+            "--upstream",
+            &format!("http://{upstream}"),
+            "--ticket-public-key",
+            &fake.public_key_hex(),
+            "--metrics-listen",
+            "127.0.0.1:0",
+        ],
+        &log,
+    );
+    let started = std::time::Instant::now();
+    let addr: SocketAddr = loop {
+        if let Some(addr) = fs::read_to_string(&log)
+            .ok()
+            .and_then(|text| {
+                text.lines()
+                    .find(|line| line.contains("serving metrics"))
+                    .and_then(|line| line.split("listen=").nth(1))
+                    .and_then(|rest| rest.split_whitespace().next().map(str::to_owned))
+            })
+            .and_then(|addr| addr.parse().ok())
+        {
+            break addr;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the serving-metrics line never came"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let mut stream = std::net::TcpStream::connect(addr).expect("the metrics port connects");
+    stream
+        .write_all(
+            format!("GET /metrics HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .unwrap();
+    let mut body = Vec::new();
+    std::io::Read::read_to_end(&mut stream, &mut body).unwrap();
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("scion_connections_refused_total 0"),
+        "the tier's metrics render: {}",
+        &text[..text.len().min(400)]
+    );
+}
+
 // --- R2: the operator's limits ride to the running serve, the way
 // tests/serve_limits.rs pins the server's.
 
