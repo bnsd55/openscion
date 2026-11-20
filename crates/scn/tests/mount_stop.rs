@@ -70,7 +70,7 @@ struct Serving {
     stdout: std::io::Lines<BufReader<std::process::ChildStdout>>,
     dir: PathBuf,
     overlay: PathBuf,
-    pid: u32,
+    pid: u64,
     table: PathBuf,
 }
 
@@ -124,8 +124,12 @@ fn serving(tiers: &common::Tiers, home: &std::path::Path) -> Serving {
     assert_eq!(record.as_array().map(Vec::len), Some(1), "{record:?}");
     let dir: PathBuf = record[0]["dir"].as_str().expect("the served dir").into();
     let overlay: PathBuf = record[0]["overlay"].as_str().expect("the overlay").into();
-    let pid = record[0]["pid"].as_u64().expect("the serving pid") as u32;
-    assert_eq!(pid, child.id(), "the record names the server");
+    let pid = record[0]["pid"].as_u64().expect("the serving pid");
+    assert_eq!(
+        Some(pid),
+        Some(u64::from(child.id())),
+        "the record names the server"
+    );
     Serving {
         child,
         warnings,
@@ -150,7 +154,7 @@ fn stop(pid: u32) {
 fn a_terminated_mount_unmounts_and_answers_0() {
     let data = common::private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
-    let base = start(&store);
+    start(&store);
     let tiers = common::Tiers::start(data, store);
     let home = common::private_tempdir();
     let mut serving = serving(&tiers, home.path());
@@ -162,7 +166,7 @@ fn a_terminated_mount_unmounts_and_answers_0() {
     );
     assert!(serving.overlay.is_dir(), "the overlay exists while serving");
 
-    stop(serving.pid);
+    stop(u32::try_from(serving.pid).expect("the pid is a process id"));
     let status = serving.child.wait().expect("the mount ends");
     let stderr = serving.warnings.join().unwrap_or_default();
     assert_eq!(
@@ -203,7 +207,7 @@ fn a_terminated_mount_unmounts_and_answers_0() {
 fn a_stop_that_cannot_clean_names_its_warnings() {
     let data = common::private_tempdir();
     let store = Backend::open_test(data.path()).unwrap();
-    let base = start(&store);
+    start(&store);
     let tiers = common::Tiers::start(data, store);
     let home = common::private_tempdir();
     let mut serving = serving(&tiers, home.path());
@@ -214,7 +218,7 @@ fn a_stop_that_cannot_clean_names_its_warnings() {
     std::fs::set_permissions(&serving.overlay, std::fs::Permissions::from_mode(0o500))
         .expect("the overlay's mode changes");
 
-    stop(serving.pid);
+    stop(u32::try_from(serving.pid).expect("the pid is a process id"));
     let status = serving.child.wait().expect("the mount ends");
     let stderr = serving.warnings.join().unwrap_or_default();
     // The failed cleanup does not fail the stop: the runbook's step is
