@@ -492,8 +492,9 @@ SCION_POSTGRES_URL='postgres://user@dbhost/scion?sslmode=require' \
 - The one-server rule and the write queue are Postgres advisory locks,
   visible as `pg_locks` rows of kind `advisory`: the one-server lock is
   a key of the schema `current_schema()` names, the migration lock is a
-  fixed key of the database, and every
-  write transaction also takes the schema's collector key
+  key of that schema too (the database's fixed key only when the URL
+  names no schema, and every migration also takes a shared turn on it),
+  and every write transaction takes the schema's collector key
   (`pg_advisory_xact_lock(hashtext(current_schema() || ':gc'))`),
   which orders it against the collector's sweeps and gives up on that
   key alone after 60 s. An `advisory` row in `pg_locks` is one of
