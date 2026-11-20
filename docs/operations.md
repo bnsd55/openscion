@@ -1053,7 +1053,10 @@ scion-server verify --archive /backups/scion-archive-2026-11-05
 `--out` that exists. `verify` exits 0 when it saw no damage, 1 when it
 did, 2 when it could not run. `restore` takes `--archive` and the same
 `--data` and Postgres flags as every store command; its target must be
-an empty directory, the replay goes through the store's own write path
+an empty directory - the restore checks this at its start and names
+whatever entry it finds (the store's paths read "already holds a
+store"), so a stray file is met before the replay, not at the
+publication rename. The replay goes through the store's own write path
 so every object ID carries over, the refs go back with the versions the
 export read, and the pending lands are recorded again, so a retry with
 the same request key resumes. It exits 2 when it could not finish, and
@@ -1086,7 +1089,7 @@ forward only when you ask: the `migrate` command, or a serve started
 with `--migrate`. One migration per released version, each in one
 transaction (v0.1.0 shipped migrations 1–5: table creations and a parent
 numbering; migration 6 adds a land's reject reason. None rewrites data,
-so none takes long). Three rules:
+so none takes long). Four rules:
 
 - A database with a **newer** schema than the binary refuses to open,
   with the build's own numbers — for a build one version behind a
@@ -1094,10 +1097,11 @@ so none takes long). Three rules:
   `database schema version 7 is newer than this build (6)`.
   Run the old binary until you can upgrade, or restore a backup.
 - A database **behind** the build refuses every open but the two that
-  are asked to move it: `serve`, `import`, `gc`, `fsck` and `derive`
-  answer "the database is at schema version N, this build ships M; run
-  `scion-server migrate` first, or pass --migrate to serve", and nothing
-  changes. Only `migrate` and `serve --migrate` move the schema. A
+  are asked to move it: `serve`, `import`, `gc`, `fsck`, `derive`,
+  `export`, `create-repo` and `create-ref` answer "the database is at
+  schema version N, this build ships M; run `scion-server migrate`
+  first, or pass --migrate to serve", and nothing changes. Only
+  `migrate` and `serve --migrate` move the schema. A
   fresh, empty database is not behind: `serve` and `import` still
   create it, so a first boot needs no migrate step.
 - The move takes the schema's advisory lock: one process migrates at a
@@ -1146,7 +1150,9 @@ re-date such a commit in the git history and import again.
 
 So an upgrade is four steps: check, back up, migrate, serve. The check
 runs first, and it reads the state and writes nothing, so it is safe
-beside the live old server. With the new binary installed beside the
+beside the live old server. The backup runs with the old binary too
+(the pre-migrate database is behind the new build, and the new build
+refuses every store command until the migrate runs). With the new binary installed beside the
 old one (below), run it against the running store:
 
 ```sh
