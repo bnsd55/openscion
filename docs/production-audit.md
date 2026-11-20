@@ -150,7 +150,7 @@ changes. Verdicts:
 | `scion-server/src/pg.rs::schema_lock_key` (`.expect("8 of 32 bytes")`) | the hash of the schema name | SAFE — `blake3` always yields 32 bytes |
 | `scion-server/src/pg.rs::spawn_client` (`.join().unwrap()`) | the connect thread | SAFE — the closure is a plain connect that returns `Result`; its error is the open's error; the thread exists to keep the blocking connect off the tokio worker |
 | `scion-server/src/pg.rs::run_one_migration, ::migrate_under_lock` (`.expect("a schema version fits ...")`) | the migration table's length | SAFE — the table is a literal the build carries; the count fits `usize` and `u32` |
-| `scion-server/src/pg.rs::first_parent_page` (`.unwrap()`) | the page's rows | SAFE — the guard above checks the page length against the limit, so the rows are non-empty |
+| `scion-server/src/pg.rs::first_parent_page` (`.unwrap()`) | the page's rows | SAFE — the `rows.is_empty()` guard above answers `NotFound`, so the rows are non-empty at the `.unwrap()` |
 | `scion-server/src/pg.rs` worker spawn (the OS: thread-spawn `EAGAIN` under a thread limit) | the OS | REACHABLE — fixed in the panic-fix PR: the open answers the error ("the OS refused the postgres worker thread: {error}") instead of crashing |
 | `scion-server/src/preflight.rs::store_pairing` (`unreachable!("a fresh database names no store")`) | a pairing of the wrong shape | SAFE — the pairing's Fresh arm is answered above; the unreachable holds the rest |
 | `scion-server/src/read.rs::path_page` (`.expect("the batch answered every id")`) | the page's bodies | SAFE — the batch fetched every id of the page |
@@ -192,7 +192,6 @@ leaves behind, and whether the next holder checks it.
 | `derived.rs` `in_flight: Mutex<usize>` (the `Derived` field) | the walk-permit count | a stale permit count | SAFE — `Permit`'s Drop runs on unwind and decrements |
 | `derived.rs` `flight.walks` per-flight counter + `woken` | the walk-end signal for waiters | a counter that never advances | covered by the `flights` fix above: with `retire` on every owner exit the waiters wake and take over a fresh walk |
 | `service.rs`/`listen.rs` semaphores and slot maps | connection/stream accounting | a leaked slot | SAFE — every holder holds it across `.await`-free counter ops; the panic points sit outside the critical sections, and the slot Drop runs on unwind |
-| `memory.rs` `free: Mutex<usize>` + `woke: Condvar` (the reply-memory budget) | the pool's free-byte count | a mid-update free count | SAFE — nothing inside the lock can panic (a compare and a checked subtract), so the lock cannot poison; the budget is not store state, so the into_inner policy does not apply — it fails loud like the stall slot (`5a`'s memory.rs row) |
 
 The fix PR (#568) carries: the flight-leak fix — one drop guard over
 both leak paths — with two tests (a panicking derive; a permit timeout
