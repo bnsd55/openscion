@@ -105,8 +105,10 @@ Prove the one-machine server under real load.
   [benchmarks](benchmarks.md): open. The 12-hour fault soak (Run B)
   ran and passed; its numbers are in
   [benchmarks](benchmarks.md#fault-soak-run-b). The 72-hour soak (Run
-  A) runs on an owner machine since 2026-10-21, and its report comes
-  on [#399](https://github.com/bnsd55/openscion/issues/399); the run
+  A) was stopped from outside at 66 h 40 min, before its own end
+  checks ran, and is recorded as a partial run; no rerun has run, and
+  the record is on the closed
+  [#399](https://github.com/bnsd55/openscion/issues/399); the run
   counts only for the commit it was launched from — it is not evidence
   for a later tag. A
   120-minute
@@ -184,7 +186,12 @@ Freeze the surfaces users need, not the implementation.
   (an older tag is named in a warning, not built). Rollback restores the
   pre-upgrade backup.
 - A full repository exports to a versioned logical archive. CI verifies
-  and restores the archive.
+  and restores the archive: done - `scion-server export` writes the
+  scion-archive format, version 1 (crates/scion-server/src/archive.rs),
+  `verify` checks an archive against docs/archive-format.md without the
+  store's code, `restore` replays it, and CI runs the archive tests
+  (archive_golden.rs pins the bytes and asserts verify's damage list is
+  empty; archive.rs and archive_attacks.rs run in the workspace suite).
 - Postgres 17 is promoted to production when all of it holds:
   the contract test ([#560](https://github.com/bnsd55/openscion/issues/560))
   passes on Postgres 17, the real Postgres fault rows pass, backup and
@@ -220,33 +227,57 @@ Make one server routine to run.
   ([#454](https://github.com/bnsd55/openscion/pull/454)'s
   `a_newer_schema_refuses_the_open_and_a_restore_serves`).
 - Readiness, liveness and graceful drain have end-to-end tests.
-  Readiness goes false before the server drains in-flight calls.
+  Readiness goes false before the server drains in-flight calls: done -
+  the health suite runs the real server binary; the named services
+  flip to `NOT_SERVING` before the drain, a named watch stays
+  `SERVING` through it, and the drain holds until the in-flight calls
+  end (crates/scion-server/tests/health.rs).
 - Prometheus alert rules and the log fields they use are versioned and
-  checked.
+  checked: done - CI checks and tests the rules with promtool
+  (deploy/prometheus/openscion-alerts.yml, ci.yml), and
+  crates/scion-server/tests/docs_alerts.rs runs the first step of each
+  alert runbook of operations.md section 6 against a served server.
 - An audit log records authentication, writes, ref changes and
-  administrative changes without tokens or file contents.
+  administrative changes without tokens or file contents: done -
+  crates/scion-server/tests/audit.rs and its golden (audit_v1.golden)
+  record writes, lands and ref changes as intent-and-result pairs, and
+  the tests assert a refused token and its digest never appear.
 - The operating metrics publish the supported capacity envelope, tail
   latency, memory, disk growth and recovery time on a named workload
-  and machine.
+  and machine: done - the capacity envelope job names its machine and
+  runs scripts/capacity.sh (bench.yml), and operations.md section 7
+  publishes the columns.
 - The documentation says that one active server has no automatic
-  failover.
+  failover: done - operations.md states it ("One server, and no
+  automatic failover").
 
 ## v0.8.0 - releases and project continuity
 
 Make releases repeatable without one person's machine or account.
 
 - A component, OS, architecture, filesystem and Postgres support matrix
-  names one native CI job for every supported cell.
-- CI builds every release artifact from the protected tag.
+  names one native CI job for every supported cell: done -
+  docs/support.md's matrix, and the release smoke's matrix over
+  ubuntu-24.04 and macos-15 with the Postgres-version matrix in
+  ci.yml.
+- CI builds every release artifact from the protected tag: done -
+  release.yml builds every artifact from a pushed `v*` tag.
 - The release smoke passes natively on every supported cell under umask
-  002 and 022.
-- The unsigned release payload rebuilds byte for byte.
+  002 and 022: done - the smoke's matrix runs natively on
+  ubuntu-24.04 and macos-15.
+- The unsigned release payload rebuilds byte for byte: done -
+  release.yml builds every artifact twice per cell and fails on any
+  byte difference (docs/verify.md records it).
 - Each artifact has a checksum, an SPDX or CycloneDX SBOM and
   verifiable provenance. From this release, the binaries and SBOMs get
-  GitHub artifact attestations, as [docs/slsa.md](slsa.md) records.
+  GitHub artifact attestations, as [docs/slsa.md](slsa.md) records:
+  done - release.yml attests the binaries and their CycloneDX SBOMs.
 - Required tests have no hidden retry. The scheduled full suite passes
-  30 consecutive runs, with no open flaky-test issue.
-- Protected branches need all required checks.
+  30 consecutive runs, with no open flaky-test issue: open - the
+  recent scheduled ci.yml runs include failures and cancellations, so
+  the streak is not met.
+- Protected branches need all required checks: done - main's branch
+  protection requires the checks and enforces them for admins.
 
 ## v0.9.0 - release candidate
 
@@ -286,14 +317,17 @@ Cut the tested release. Add no new surface.
 
 ## Out until v1.0.0 passes
 
-Work the gates above do not earn yet. Issues stay open; none starts
-before v1.0.0 passes.
+Work the gates above do not earn yet. The two named issues are closed
+as not planned; the list is what stays out of v1, not a queue of open
+issues.
 
 - [A horizontally scalable backend](https://github.com/bnsd55/openscion/issues/47):
-  more than one server process sharing data, per region and per node.
-  v1.0 promises one active server and no automatic failover.
+  closed as not planned. More than one server process sharing data, per
+  region and per node. v1.0 promises one active server and no automatic
+  failover.
 - [History and writes for a principal with folder read
-  rules](https://github.com/bnsd55/openscion/issues/183).
+  rules](https://github.com/bnsd55/openscion/issues/183): closed as not
+  planned.
 - Blame as derived data.
 - The writable `scn` mount: v1's mount is read-only, and the overlay
   write and `commit --from-mount` are a build feature, off in release
