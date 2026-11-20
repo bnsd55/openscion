@@ -30,10 +30,10 @@ document landed on.
 
 | Finding | Evidence | Status |
 | --- | --- | --- |
-| The Postgres store identity lives in two durable places: the `store_uuid` row in the database and the `backend` marker file in the data directory. A crash between the two writes, or a lost marker, refuses the open loudly ("this database names the store ..., but the data directory carries no marker of it") | `crates/scion-server/src/backend.rs:108,143`, `crates/scion-server/src/pg.rs:870` | fixed by design — the refusal is loud and never silent, and the runbook's re-pairing (write the marker back with the UUID the error names) is proven by `crates/scion-server/tests/backend_refusals.rs::a_lost_marker_written_back_as_the_runbook_says_reopens_the_store`; the runbook line is `operations.md` "Re-pairing a lost marker" |
-| On Postgres, a server restarted right after a crash can refuse with "another server holds this store" until Postgres ends the dead session's advisory lock | `crates/scion-server/src/pg.rs:1745`, `docs/operations.md` "A start after an unclean kill" | fixed by design — the runbook says the supervisor's `Restart=on-failure` is the whole recovery on the same host (the lock dies at once with the dead process's sockets), and on a lost host no bounded wait inside `serve` helps (Postgres learns of the death only through TCP keepalives, hours by default), so `serve` fails fast and the supervisor retries; `operations.md` quotes the refusal's exact text and names `pg_terminate_backend` / `tcp_keepalives_idle` for the lost host |
-| Migrations run one transaction each under a lock with a 5 s clock; an open that waits longer answers busy; a newer database is refused | `docs/operations.md` "The open" (the 5 s clock and the busy answer), `crates/scion-server/src/db.rs` | bounded — ceiling: 1 transaction per migration, the lock wait capped at 5 s; `operations.md` "The open migrates the database's schema ... under a database lock with the same 5 s clock" |
-| Rename durability: the blob file fsyncs before the rename and the directory after it; the power-loss suite proves sync-before-reply | `crates/scion-server/src/store.rs:931,1004`, `crates/scion-server/tests/power.rs` | fixed on Linux (the native cell); the macOS gap (no tool can cut power or drop a barrier there) is outside the production profile — `support.md`'s platform matrix runs the power-loss and dm-log-writes cells on Linux only |
+| The Postgres store identity lives in two durable places: the `store_uuid` row in the database and the `backend` marker file in the data directory. A crash between the two writes, or a lost marker, refuses the open loudly ("this database names the store ..., but the data directory carries no marker of it") | `backend.rs::Backend::open` (the marker check and its read), `pg.rs` (the quoted refusal text in the open) | fixed by design — the refusal is loud and never silent, and the runbook's re-pairing (write the marker back with the UUID the error names) is proven by `crates/scion-server/tests/backend_refusals.rs::a_lost_marker_written_back_as_the_runbook_says_reopens_the_store`; the runbook line is `operations.md` "Re-pairing a lost marker" |
+| On Postgres, a server restarted right after a crash can refuse with "another server holds this store" until Postgres ends the dead session's advisory lock | `pg.rs` (the quoted "another server holds this store" refusal), `docs/operations.md` "A start after an unclean kill" | fixed by design — the runbook says the supervisor's `Restart=on-failure` is the whole recovery on the same host (the lock dies at once with the dead process's sockets), and on a lost host no bounded wait inside `serve` helps (Postgres learns of the death only through TCP keepalives, hours by default), so `serve` fails fast and the supervisor retries; `operations.md` quotes the refusal's exact text and names `pg_terminate_backend` / `tcp_keepalives_idle` for the lost host |
+| Migrations run one transaction each under a lock with a 5 s clock; an open that waits longer answers busy; a newer database is refused | `docs/operations.md` "The open" (the 5 s clock and the busy answer), `pg.rs::migrate_under_lock` (the migrations, each in its own transaction) | bounded — ceiling: 1 transaction per migration, the lock wait capped at 5 s; `operations.md` "The open migrates the database's schema ... under a database lock with the same 5 s clock" |
+| Rename durability: the blob file fsyncs before the rename and the directory after it; the power-loss suite proves sync-before-reply | `store.rs::Blobs::write` (the fsync-before-rename order), `crates/scion-server/tests/power.rs` | fixed on Linux (the native cell); the macOS gap (no tool can cut power or drop a barrier there) is outside the production profile — `support.md`'s platform matrix runs the power-loss and dm-log-writes cells on Linux only |
 | Archive restore holds a whole repository's changesets in RAM while reading the archive | `crates/scion-server/src/archive.rs` (the streaming replay), `crates/scion-server/tests/archive_restore_stream.rs::a_big_restore_stays_under_its_rss_ceiling` | fixed (#575) — the replay streams the frames from a `BufReader`, one record at a time, and commits per byte budget (`DEFAULT_TX_BYTES`, 64 MiB); the RSS ceiling test proves a big archive's restore stays under its measured bound |
 | The import writes changesets, parents, repo rows, derived rows, history nodes and the git import in separate transactions; the order and the batching are proven by the statement-count suites | `crates/scion-server/tests/changeset_batch.rs`, `tests/derived_batch.rs`, `tests/history_batch.rs` | fixed (#545, #548, #551) |
 
@@ -41,58 +41,61 @@ document landed on.
 
 | Finding | Evidence | Status |
 | --- | --- | --- |
-| Protocol reads are length-capped before `read_to_end` | `crates/scion-proto/src/runtime/auth/mod.rs:352`, cap `MAX_CHECKED_FILE = 1 MiB` at `:278` | bounded — ceiling: 1 MiB per checked read, `cap + 1` then refused; `docs/protocol-v1.md` states the message size limits |
-| One unary reply can aggregate a whole directory or changeset past the per-object memory budget (`whole_share` charged by encoded size, the aggregate uncapped) | `crates/scion-server/src/service.rs:485` (`whole_share_of`), `:1825` (the changeset's length-only query), `:1986` (`tree_size`) | fixed (#586): the share is taken from a length-only query before the object is built, an object over `MAX_OBJECT_BYTES` is refused before any byte is read, and the share is held for the whole reply (`stream_whole_holding`); the guard is `tests/reply_budget_h2.rs` (`a_client_that_resets_its_unread_replies_frees_the_budget`, which asserts the budget binds at `bodies.len() < 40` and the served reply is whole) |
-| Slow clients can pin large unary replies outside the memory accounting | `crates/scion-server/src/reply.rs:36` (`REPLY_MEMORY_BUDGET = 128 << 20`), `crates/scion-proto/src/runtime/metrics.rs:896` (`CountingBody`) | fixed (#586): the reply-memory layer counts every in-flight reply's bytes and refuses new unary replies past the 128 MiB budget; a client that resets its unread replies frees the budget (the guard is the same `tests/reply_budget_h2.rs` test) |
+| Protocol reads are length-capped before `read_to_end` | `auth/mod.rs::read_secret_file`, cap `MAX_CHECKED_FILE = 1 MiB` (the const, same file) | bounded — ceiling: 1 MiB per checked read, `cap + 1` then refused; `docs/protocol-v1.md` states the message size limits |
+| One unary reply can aggregate a whole directory or changeset past the per-object memory budget (`whole_share` charged by encoded size, the aggregate uncapped) | `service.rs::whole_share_of`, `::get_changeset` (the length-only query), the `tree_size` read in the tree reply | fixed (#586): the share is taken from a length-only query before the object is built, an object over `MAX_OBJECT_BYTES` is refused before any byte is read, and the share is held for the whole reply (`stream_whole_holding`); the guard is `tests/reply_budget_h2.rs` (`a_client_that_resets_its_unread_replies_frees_the_budget`, which asserts the budget binds at `bodies.len() < 40` and the served reply is whole) |
+| Slow clients can pin large unary replies outside the memory accounting | `reply.rs`, const `REPLY_MEMORY_BUDGET = 128 << 20`; `metrics.rs::CountingBody` | fixed (#586): the reply-memory layer counts every in-flight reply's bytes and refuses new unary replies past the 128 MiB budget; a client that resets its unread replies frees the budget (the guard is the same `tests/reply_budget_h2.rs` test) |
 | `gc` prune reads and deletes in batches of 1,000 rows | `crates/scion-server/src/gc.rs` (`prune_rows`) | fixed (#529 batched the reads and the deletes; the guard is `tests/gc_prune_batch.rs`) |
 | `scn commit` reads a regular file whole into RAM: the size limit is "whatever fits" | `crates/scn/src/cmd/commit.rs` | fixed (#582 streams from the file in 1 MiB chunks; the ceiling is the RSS guard, `crates/scn/tests/commit_stream.rs`, 24 MiB file under a 32 MiB ceiling) |
-| `scn` JSON output silently replaces non-UTF-8 bytes | `crates/scn/src/client.rs:328` (`lossy`), `:336` (`put_json_bytes`) | fixed (#576): the lossy text stays, and every non-UTF-8 name or message carries the exact bytes in a sibling `<field>_b64` (standard base64) so scripts can round-trip them; the guard is `crates/scn/tests/json_raw_bytes.rs` (`assert_b64` and the seed suites) |
-| Import batches are time-based per transaction and count-based for blobs | `crates/scion-server/src/import.rs:52` (`TX_BUDGET = 1 s`), `store.rs` (`BlobBatch`) | bounded — ceiling: 1 s of work or one commit per import transaction; `docs/benchmarks.md` records the measured commit size and rate the batches were tuned at |
+| `scn` JSON output silently replaces non-UTF-8 bytes | `client.rs::lossy`, `::put_json_bytes` | fixed (#576): the lossy text stays, and every non-UTF-8 name or message carries the exact bytes in a sibling `<field>_b64` (standard base64) so scripts can round-trip them; the guard is `crates/scn/tests/json_raw_bytes.rs` (`assert_b64` and the seed suites) |
+| Import batches are time-based per transaction and count-based for blobs | `import.rs`, const `TX_BUDGET = 1 s`; `store.rs` (`BlobBatch`) | bounded — ceiling: 1 s of work or one commit per import transaction; `docs/benchmarks.md` records the measured commit size and rate the batches were tuned at |
 
 ## 4. Database loops
 
 | Finding | Evidence | Status |
 | --- | --- | --- |
-| The Postgres writer pings the database with an autocommit `SELECT 1` while holding the writer mutex | `crates/scion-server/src/pg.rs:905` | bounded — ceiling: 1 statement per writer-idle probe (not per call); the probe's role is stated in `operations.md`'s connection-cap paragraph (the server holds 9 connections). Untested: the probe is a timer with no seam (the 60 s interval is a literal in the spawned thread), so no test pins its cadence |
-| No production site pays a statement per repository item over the wire: Postgres chunks every multi-row write (1,000 rows per `unnest` insert) or answers one `ANY($1)` statement per list, and every paged read is a keyset page with a matching `ORDER BY` | `pg.rs:1330,2401,2573,2634,2979,3313,3599,3710-3910`; `fsck.rs:240,300`; `land.rs:1170`; `import.rs:236` | fixed by design (chunked; no REPO-SIZED site) |
+| The Postgres writer pings the database with an autocommit `SELECT 1` while holding the writer mutex | `pg.rs` (the `pg-probe` thread) | bounded — ceiling: 1 statement per writer-idle probe (not per call); the probe's role is stated in `operations.md`'s connection-cap paragraph (the server holds 9 connections). Untested: the probe is a timer with no seam (the 60 s interval is a literal in the spawned thread), so no test pins its cadence |
+| No production site pays a statement per repository item over the wire: Postgres chunks every multi-row write (1,000 rows per `unnest` insert) or answers one `ANY($1)` statement per list, and every paged read is a keyset page with a matching `ORDER BY` | the sweep table below; `fsck.rs` (the check page loops); `land.rs` (the path-index walk); `import.rs` (the import batches) | fixed by design (chunked; no REPO-SIZED site) |
 
 ### The sweep, per site
 
 | Site | The loop grows with | Statements per iteration | Verdict |
 | --- | --- | --- | --- |
-| `db.rs:228` `insert_changeset`: per-parent generation read, then the per-parent `changeset_parents` inserts | the parents of one changeset | 2 statements per parent, local | BATCHED — a client commit has exactly one parent (`write.rs:278` refuses otherwise); only git import carries merges, and it runs ≤ 1,000 commits per transaction (`import.rs:44,236`), all local |
-| `db.rs:278` `repo_missing_blobs`: per-blob existence read | the blob list of one upload request | 1 local SELECT per blob | BATCHED — local (the comment at `db.rs:276` names it); Postgres answers one `ANY($1)` statement per 1,000 (`pg.rs:2573`) |
-| `db.rs:875` `get_trees`: per-id body read | the ids of one request | 1 local SELECT per id | BATCHED — local; Postgres chunks at `meta::DERIVED_BATCH` (`pg.rs:3313`) |
-| `db.rs:1193` `put_git_imports`: per-pair insert | the pairs of one import batch | 1 local INSERT per pair | BATCHED — local; Postgres inserts one `unnest` per batch (`pg.rs:3599`) |
-| `db.rs:1346` `delete_repo_blobs`: per-blob delete | the blobs gc removes | 1 local DELETE per blob | BATCHED — local; Postgres answers one `ANY($2)` statement (`pg.rs:3809`) |
-| `db.rs:1384` `changeset_bodies_after`/`tree_bodies_after`, `derived_rows_after`; `pg.rs:3710-3910` the same readers | the whole table | 1 statement per ≤ 1,000-row keyset page | BATCHED — keyset pagination, each page ordered by its key |
-| `db.rs:1536` `lands_with_missing_changesets` | two fixed columns | 2 statements | BOUNDED (2) |
-| `fsck.rs:240,300` the check page loops | every changeset and tree | 1 statement per page | BATCHED |
-| `land.rs:1041,1170` the path index walks (`first_parent_page`) | the repo's history length | 1 statement per 1,000-change page | BATCHED — the page is one recursive CTE with `ORDER BY walk.depth` |
-| `pg.rs:1330,2401` the change flushes (`flush_history_rows`, `flush_changeset_rows`) | the transaction's pending rows | 1 `unnest` insert per 1,000 rows | BATCHED |
-| `pg.rs:2283` the per-changeset parent-generation read | the parents the transaction did not insert | 1 statement with `= ANY($2)` | BATCHED |
-| `pg.rs:2634,2979` `first_parent_page`/`get_derived_chain` recursive CTEs | the history the walk covers | 1 statement per page | BATCHED |
+| `meta.rs::insert_changeset` / `pg.rs::insert_changeset`: per-parent generation read, then the per-parent `changeset_parents` inserts | the parents of one changeset | 2 statements per parent, local | BATCHED — a client commit has exactly one parent (`write.rs` refuses otherwise, the quoted "a changeset needs exactly one parent"); only git import carries merges, and it runs ≤ `BATCH` (1,000) commits per transaction (`import.rs`, const `BATCH`), all local |
+| `meta.rs::repo_missing_blobs` / `pg.rs::repo_missing_blobs`: per-blob existence read | the blob list of one upload request | 1 local SELECT per blob | BATCHED — local (the comment at the trait method names it); Postgres answers one `ANY($1)` statement per 1,000 |
+| `meta.rs::get_trees` / `pg.rs::get_trees`: per-id body read | the ids of one request | 1 local SELECT per id | BATCHED — local; Postgres chunks at `meta::DERIVED_BATCH` |
+| `meta.rs::put_git_imports` / `pg.rs::put_git_imports`: per-pair insert | the pairs of one import batch | 1 local INSERT per pair | BATCHED — local; Postgres inserts one `unnest` per batch |
+| `meta.rs::delete_repo_blobs` / `pg.rs::delete_repo_blobs`: per-blob delete | the blobs gc removes | 1 local DELETE per blob | BATCHED — local; Postgres answers one `ANY($2)` statement |
+| `meta.rs::changeset_bodies_after/::tree_bodies_after/::derived_rows_after` and the same readers in `pg.rs` | the whole table | 1 statement per ≤ 1,000-row keyset page | BATCHED — keyset pagination, each page ordered by its key |
+| `meta.rs::lands_with_missing_changesets` / `pg.rs::lands_with_missing_changesets` | two fixed columns | 2 statements | BOUNDED (2) |
+| `fsck.rs` the check page loops | every changeset and tree | 1 statement per page | BATCHED |
+| `land.rs` the path index walks (one `pg.rs::first_parent_page` CTE per page) | the repo's history length | 1 statement per 1,000-change page | BATCHED — the page is one recursive CTE with `ORDER BY walk.depth` |
+| `pg.rs::flush_history_rows`, `::flush_changeset_rows` | the transaction's pending rows | 1 `unnest` insert per 1,000 rows | BATCHED |
+| `pg.rs` the per-changeset parent-generation read | the parents the transaction did not insert | 1 statement with `= ANY($2)` | BATCHED |
+| `pg.rs::first_parent_page`/`::get_derived_chain` recursive CTEs | the history the walk covers | 1 statement per page | BATCHED |
 
 ### Queries a caller's order depends on
 
 Every paged read and every recursive CTE carries the `ORDER BY` its
-keyset or walk needs (`db.rs:354,649,1362,1415,1432,1553`;
-`pg.rs:2646,2994,3710,3734,3742,3757,3768,3800,3844,3861,3874,3890,3951`).
-Three queries lack `ORDER BY`, and no caller depends on their order —
-each caller answers per row and the reply is a set:
+keyset or walk needs — the paged readers of `meta.rs` and their `pg.rs` drivers
+(`::first_parent_page`, `::get_derived_chain`, the bodies-after
+readers) each carry theirs. Three queries lack `ORDER BY`, and no
+caller depends on their order — each caller answers per row and the
+reply is a set:
 
-- `dangling_refs` (`pg.rs:3912`, `db.rs:1510`) — fsck reports each row.
-- `stale_lands` (`pg.rs:3462`) — the janitor rejects each land by id.
-- `lands_with_missing_changesets` (`db.rs:1518`, `pg.rs:3929`) — fsck
-  reports each row.
+- `dangling_refs` (`meta.rs::dangling_refs` / `pg.rs::dangling_refs`) —
+  fsck reports each row.
+- `stale_lands` (`pg.rs::stale_lands`) — the janitor rejects each land
+  by id.
+- `lands_with_missing_changesets` (`meta.rs::lands_with_missing_changesets`
+  / `pg.rs::lands_with_missing_changesets`) — fsck reports each row.
 
 ### Postgres isolation, per transaction
 
 | Transaction | Level | Read-then-write paths at that level | Lost update? |
 | --- | --- | --- | --- |
-| Writes (`pg.rs:1355`, plain `BEGIN`) | READ COMMITTED (Postgres's default) — one in-process writer mutex, and every write transaction of the schema holds the schema's one advisory key until it commits, so two writers serialize even across processes | `cas_ref` keeps its version predicate inside the UPDATE; `record_land`'s count-then-insert runs under the advisory key (`pg.rs:3407`); `settle` re-reads the ref and writes only under the version it read (`land.rs:810`); `put_derived`'s agree-check reads and writes in one writer-serialized transaction | No — `two_lands_that_record_together_respect_the_pending_cap` (`pg.rs:4735`) proves the count, `a_conflict_recorded_while_an_import_moved_the_ref_is_not_final` (`land.rs:1982`, run on both backends) proves the verdict's CAS window |
-| Reads (`pg.rs:1389`) | REPEATABLE READ, READ ONLY — one snapshot per read, with `SET LOCAL` statement and idle timeouts | none (read-only) | No |
-| A server refuses a data directory whose marker names another backend at the open | `crates/scion-server/src/backend.rs:128,183` | fixed by design (refusal, not fallback) |
+| Writes (`pg.rs::write`, plain `BEGIN`) | READ COMMITTED (Postgres's default) — one in-process writer mutex, and every write transaction of the schema holds the schema's one advisory key until it commits, so two writers serialize even across processes | `cas_ref` keeps its version predicate inside the UPDATE; `record_land`'s count-then-insert runs under the advisory key (`pg.rs::record_land`); `land.rs::settle` re-reads the ref and writes only under the version it read; `put_derived`'s agree-check reads and writes in one writer-serialized transaction | No — `pg.rs::two_lands_that_record_together_respect_the_pending_cap` (the in-file test tail) proves the count, `land.rs::a_conflict_recorded_while_an_import_moved_the_ref_is_not_final` (run on both backends) proves the verdict's CAS window |
+| Reads (`pg.rs::read`) | REPEATABLE READ, READ ONLY — one snapshot per read, with `SET LOCAL` statement and idle timeouts | none (read-only) | No |
+| A server refuses a data directory whose marker names another backend at the open | `backend.rs::Backend::open` (the marker-names-another-backend refusal) | fixed by design (refusal, not fallback) |
 
 ## 5. Failure paths
 
@@ -101,7 +104,9 @@ each caller answers per row and the reply is a set:
 Every `unwrap`, `expect`, `panic!`, `unreachable!` and `todo!` in
 non-test code of `scion-server`, `scn`, `scion-proto` and
 `scion-tier` (test-tail modules, `tests/` and the fuzz targets
-excluded). Verdicts:
+excluded). Each row anchors by file and function, or by the quoted
+panic text; the sweep that produced it is re-run whenever a row
+changes. Verdicts:
 
 - **SAFE** — an invariant the code proves on the line before (named).
 - **REACHABLE** — a client request, a file on disk, the database, or
@@ -110,42 +115,69 @@ excluded). Verdicts:
 
 | Site | What reaches it | Verdict |
 | --- | --- | --- |
-| `scion-proto/src/ticket.rs:150,194,195,229` (`try_into().unwrap()`) | a ticket from the wire | SAFE — each `try_into` follows a `take(n)` that returns exactly `n` bytes or errors, so the conversion is uninhabitable |
-| `scion-proto/src/ticket.rs:365` (`unreachable!`) | the parse loop's exit | SAFE — the loop returns at every entry (the comment names it) |
-| `scion-proto/src/ticket.rs:388` (`trees.get(&id).unwrap()`) | a tree id just written to the same table | SAFE — the id is inserted two lines above |
-| `scion-proto/src/runtime/listen.rs:69,73,168` (`NonZero::new().unwrap()`) | process start | SAFE — the constants are literal non-zero values |
-| `scion-proto/src/runtime/listen.rs:559,633` (semaphore `.expect("never closed")`) | accept-loop teardown | SAFE — the semaphore is never closed while the listener lives; closing happens only in Drop |
-| `scion-proto/src/runtime/reply.rs:176` (stall-slot lock `.expect("not poisoned")`) | a panicked stall holder | SAFE — it fails loud (a panic, not a silent continue): the poisoned slot cannot be repaired, and the process dies naming it |
-| `scion-server/src/access.rs:295,308` (`unreachable!`) | the prefix-match loop | SAFE — the loop breaks on the first match, so the `_` arm is dead (the comment names the invariant) |
-| `scion-server/src/archive.rs:651` (`to.parent().expect`) | a crafted archive manifest | SAFE — `to` is built from a `BlobId` (`archive/blobs/xx/yy`), never a bare name; the parent is always present |
-| `scion-server/src/blame.rs:819` (`PathElem::new().expect`) | a repo path from the database | SAFE — `RepoPath::new` validated every part on the way in (no empty part, no `.`/`..`, no nul), and re-splitting a valid path yields exactly those parts |
-| `scion-server/src/blame.rs:881` (`line_u32`) | a blamed file with 2^32 lines | SAFE — `MAX_OBJECT_BYTES` is 100 MiB (`store.rs:84`), so a stored file has far fewer than 2^32 one-byte lines |
-| `scion-server/src/blame.rs:967` (16 of 32 hash bytes) | the hasher's output | SAFE — `blake3` always yields 32 bytes |
-| `scion-server/src/blame.rs:1033,1111,1112` (cursor/table `u32::try_from`) | a cursor field or window table | SAFE — the fields are built from one path (≤ `MAX_PATH_BYTES`) and one window over a store far below 2^32 changesets |
-| `scion-server/src/graph.rs:576` (`.expect("a queued changeset has a mark")`) | the walk's own queue | SAFE — the mark is inserted when the changeset is queued, two lines above |
-| `scion-server/src/main.rs:794,858,975,1064,1392,1402` (clap-conflict `unreachable!`/`expect`) | the command line | SAFE — clap refuses the conflicting flags before these arms run |
-| `scion-server/src/main.rs:1274` (`.expect("exactly one source is given")`) | the access-file flags | SAFE — clap's `conflicts_with` allows exactly one source |
-| `scion-server/src/pg.rs:325` (`.expect("a taken reader has a client")`) | the reader pool's taken flag | SAFE — `take` sets the client before returning the guard, and the guard's Drop clears it |
-| `scion-server/src/pg.rs:599` (`.expect("a raw job carries its closure")`) | the job queue | SAFE — the sender sets `raw` exactly for `Kind::Raw` jobs, checked one line above |
-| `scion-server/src/pg.rs:621` (`.expect("spawn the postgres worker")`) | the OS: thread-spawn `EAGAIN` under a thread limit | REACHABLE — fixed in the panic-fix PR (the open answers the error instead of crashing) |
-| `scion-server/src/pg.rs:645,658,666` (`unreachable!`) | a reply of the wrong shape | SAFE — each worker branch answers exactly the reply kind its job kind asked for |
-| `scion-server/src/pg.rs:905` (`writer.lock().unwrap()`) | a poisoned writer lock | SAFE — see 5b: a panic mid-probe leaves nothing behind |
-| `scion-server/src/service.rs:1295` (`walk.next.unwrap()`) | the log walk's state | SAFE — the `walk.next.is_none()` case returns 13 lines above |
-| `scion-server/src/service.rs:1841` (`.expect("asserted to fit in u32")`) | a reply size | SAFE — the `assert!` above bounds it |
-| `scion-server/src/tickets.rs:44` (`.expect("system randomness")`) | the OS entropy source | SAFE — `getrandom::fill` cannot fail on the supported platforms (Linux, macOS; `support.md`'s platform matrix); the doc comment states it |
-| `scion-server/src/tickets.rs:103` (`.expect("a key is 32 bytes")`) | the 32-byte secret minted above | SAFE — `getrandom::fill(&mut [0u8; 32])` fills exactly 32 |
-| `scion-server/src/views.rs:262` (`Tree::new(kept).expect`) | kept entries of a stored tree | SAFE — a subset of an already-valid tree re-validates (every name passed `PathElem` on the way in) |
+| `scion-proto/src/ticket.rs::parse, ::ticket_of, ::take_name` (`try_into().unwrap()`, four sites) | a ticket from the wire | SAFE — each `try_into` follows a `take(n)` that returns exactly `n` bytes or errors, so the conversion is uninhabitable |
+| `scion-proto/src/ticket.rs::reach` (`unreachable!("the loop returns at every entry")`) | the parse loop's exit | SAFE — the loop returns at every entry (the comment names it) |
+| `scion-proto/src/ticket.rs::tree` (`trees.get(&id).unwrap()`) | a tree id just written to the same table | SAFE — the id is inserted two lines above |
+| `scion-proto/src/runtime/listen.rs` constants (`DEFAULT_CONNECTIONS`, `DEFAULT_STREAMS`, `DEFAULT_STALLED_BYTES`, `Limits::default`'s `stalled_total`) (`NonZero::new().unwrap()`) | process start | SAFE — the constants are literal non-zero values |
+| `scion-proto/src/runtime/metrics.rs::shutdown_signal` (`.expect("SIGTERM handler")`) | process start | SAFE — tokio's signal registration cannot fail on the supported platforms; the serve runtime always carries the signal driver |
+| `scion-proto/src/runtime/metrics.rs::serve` (2x `.expect("static response")`) | the metrics HTTP export | SAFE — building an HTTP response from static bytes cannot fail |
+| `scion-proto/src/runtime/reply.rs::park` (`.expect("the stall slot lock is not poisoned")`) | a panicked stall holder | SAFE — it fails loud (a panic, not a silent continue): the poisoned slot cannot be repaired, and the process dies naming it |
+| `scion-proto/src/runtime/reply.rs::Window::next` (let-else `.unwrap()` + `unreachable!("the front was done")`) | the reply window's queue | SAFE — the match guards `Entry::Done` before the pop, so the else arm is dead |
+| `scion-server/src/access.rs::parse` (2x `unreachable!("matched at most one prefix")`) | the prefix-match loop | SAFE — the loop breaks on the first match, so the `_` arm is dead (the comment names the invariant) |
+| `scion-server/src/archive.rs::copy_blobs` (`to.parent().expect("a blob file has a folder")`) | a crafted archive manifest | SAFE — `to` is built from a `BlobId` (`archive/blobs/xx/yy`), never a bare name; the parent is always present |
+| `scion-server/src/blame.rs::lookup_cached` (`PathElem::new().expect("a RepoPath part is a valid name")`) | a repo path from the database | SAFE — `RepoPath::new` validated every part on the way in (no empty part, no `.`/`..`, no nul), and re-splitting a valid path yields exactly those parts |
+| `scion-server/src/blame.rs::line_u32` (`.expect("a blamed file has fewer than 2^32 lines")`) | a blamed file with 2^32 lines | SAFE — `MAX_OBJECT_BYTES` is 100 MiB, so a stored file has far fewer than 2^32 one-byte lines |
+| `scion-server/src/blame.rs::cursor_digest` (`.expect("16 bytes of a 32-byte hash")`) | the hasher's output | SAFE — `blake3` always yields 32 bytes |
+| `scion-server/src/blame.rs::put_bytes, ::encode_cursor` (cursor/table `u32::try_from`, 3 sites) | a cursor field or window table | SAFE — the fields are built from one path (≤ `MAX_PATH_BYTES`) and one window over a store far below 2^32 changesets |
+| `scion-server/src/graph.rs::Paint::next` (`.expect("a queued changeset has a mark")`) | the walk's own queue | SAFE — the mark is inserted when the changeset is queued, two lines above |
+| `scion-server/src/history.rs::entries, ::stamp, ::store, ::lookup, ::put_level, ::index_node, ::level_root, ::encode_node, ::encode_index` (14 sites: leaf-or-chunked and not-empty invariants, path splits, `u16::try_from` of a name) | the history walk's own state | SAFE — each names a construction invariant: a level is leaf or chunked, an index held is not empty, every name passed the path rules (≤ 4,096 bytes), a split of a non-empty path has a first part, and the loaded rows answered the lookup |
+| `scion-server/src/import.rs::changeset` (`.expect("changeset fits the format")`) | a crafted git object | SAFE — the import's header caps (`MAX_STRUCTURE_BYTES`, 100 MiB) hold every field far below the u32::MAX the format's checked constructors refuse at |
+| `scion-server/src/land.rs::Lands::evict` (`.expect("an index was picked")`) | the eviction list | SAFE — `idle` only holds indexes that were picked; `take` answers the one the loop chose |
+| `scion-server/src/land.rs::plan` (`.expect("one parent fits the format")`) | the rebase | SAFE — `with_parents` of one `ChangesetId` cannot touch a field cap |
+| `scion-server/src/main.rs::main` (the preflight join `.expect("the preflight thread does not panic")`) | the preflight check | SAFE — the check's own panic sites are inventoried SAFE above; a crash fails loud at start, before serving |
+| `scion-server/src/main.rs::main` (2x `unreachable!("handled before the store opens")`) | the store commands | SAFE — the listed commands were matched and handled before this match runs |
+| `scion-server/src/main.rs::main` (`.expect("a serve command validated its flags")`) | the serve flags | SAFE — the serve arm validated its flags before the store opened |
+| `scion-server/src/main.rs::server_tls` (`unreachable!("clap requires --tls-cert and --tls-key together")`) | the command line | SAFE — clap refuses the conflicting flags before this arm runs |
+| `scion-server/src/main.rs::load_access` (`.expect("exactly one source is given")`) | the access-file flags | SAFE — clap's `conflicts_with` allows exactly one source |
+| `scion-server/src/main.rs::hash_token` (`unreachable!("hash_token handles only the hash-token command")`) | the command line | SAFE — the function only runs for `HashToken` |
+| `scion-server/src/memory.rs::Bytes::take, ::try_take, ::Held::keep, ::Drop` (6x `.expect("the budget lock is not poisoned")`) | a panicked budget holder | SAFE — nothing inside the lock can panic (a compare and a checked subtract); the budget is not store state, so 5b's into_inner policy does not apply; it fails loud like the stall slot |
+| `scion-server/src/objects.rs::prove` (`.expect("a walk names a tree id")`) | the ticket walk | SAFE — the walk only hands back the 32 bytes it got from a tree |
+| `scion-server/src/pg.rs::client` (`.expect("a taken reader has a client")`) | the reader pool's taken flag | SAFE — `take` sets the client before returning the guard, and the guard's Drop clears it |
+| `scion-server/src/pg.rs::run_job` (`.expect("a raw job carries its closure")`) | the job queue | SAFE — the sender sets `raw` exactly for `Kind::Raw` jobs, checked one line above |
+| `scion-server/src/pg.rs::raw, ::query, ::execute, ::batch` (4x `unreachable!`) and ::run_statement (`unreachable!("a raw job ran in its own branch")`) | a reply of the wrong shape | SAFE — each worker branch answers exactly the reply kind its job kind asked for |
+| `scion-server/src/pg.rs::store_identity` (2x `unreachable!`) | a pairing of the wrong shape | SAFE — Fresh, Agree and AdoptCut are each answered by the caller's match; these arms hold the rest |
+| `scion-server/src/pg.rs::uuid_new, ::reset_schema` (`.expect("system randomness")`) | the OS entropy source | SAFE — `getrandom::fill` cannot fail on the supported platforms (Linux, macOS); the same verdict as `tickets.rs::generate` |
+| `scion-server/src/pg.rs::schema_lock_key` (`.expect("8 of 32 bytes")`) | the hash of the schema name | SAFE — `blake3` always yields 32 bytes |
+| `scion-server/src/pg.rs::spawn_client` (`.join().unwrap()`) | the connect thread | SAFE — the closure is a plain connect that returns `Result`; its error is the open's error; the thread exists to keep the blocking connect off the tokio worker |
+| `scion-server/src/pg.rs::run_one_migration, ::migrate_under_lock` (`.expect("a schema version fits ...")`) | the migration table's length | SAFE — the table is a literal the build carries; the count fits `usize` and `u32` |
+| `scion-server/src/pg.rs::first_parent_page` (`.unwrap()`) | the page's rows | SAFE — the guard above checks the page length against the limit, so the rows are non-empty |
+| `scion-server/src/pg.rs` worker spawn (the OS: thread-spawn `EAGAIN` under a thread limit) | the OS | REACHABLE — fixed in the panic-fix PR: the open answers the error ("the OS refused the postgres worker thread: {error}") instead of crashing |
+| `scion-server/src/preflight.rs::store_pairing` (`unreachable!("a fresh database names no store")`) | a pairing of the wrong shape | SAFE — the pairing's Fresh arm is answered above; the unreachable holds the rest |
+| `scion-server/src/read.rs::path_page` (`.expect("the batch answered every id")`) | the page's bodies | SAFE — the batch fetched every id of the page |
+| `scion-server/src/service.rs::spawn_free_space_poll` (`.expect("the sample was just set")`) | the poll's own state | SAFE — the sample was set two lines above |
+| `scion-server/src/service.rs::log_parts` (`walk.next.unwrap()`) | the log walk's state | SAFE — the `walk.next.is_none()` case returns above |
+| `scion-server/src/service.rs::whole_share_of` (`.expect("the cap asserts u32 fit")`) | a reply size | SAFE — the `assert!` above bounds it by `MAX_OBJECT_BYTES`, far under `u32::MAX` |
+| `scion-server/src/tickets.rs::generate` (`.expect("system randomness")`) | the OS entropy source | SAFE — `getrandom::fill` cannot fail on the supported platforms (Linux, macOS; `support.md`'s platform matrix); the doc comment states it |
+| `scion-server/src/tickets.rs::to_hex` (`.expect("a key is 32 bytes")`) | the 32-byte secret minted above | SAFE — `getrandom::fill(&mut [0u8; 32])` fills exactly 32 |
+| `scion-server/src/tree.rs::parts, ::prefix, ::entries, ::delete, ::store` (5 sites) | the tree build's own paths | SAFE — a part of a validated path re-validates, a prefix re-validates, the loaded arm is guaranteed by the load above, and the built entries passed the path rules |
+| `scion-server/src/views.rs::walk` (4 sites: 2x fetched entries, the stack pop, `Tree::new(kept)`) | the derive walk's own stack | SAFE — the entries were fetched above, the frame was pushed before, and a subset of an already-valid tree re-validates |
 | `scion-server/src/pg.rs`, `test_support/*`, the fuzz targets | — | outside the audit (test-only builds; `test-hooks` is off in release) |
-| `scn/src/cmd/bench.rs:114,125`, `cmd/blame.rs:64`, `cmd/commit.rs:130,138` (`IdentityTime::new`/`Changeset::new` `.expect`) | argv and git config | SAFE — the fields come from `-m` argv (bounded by `ARG_MAX`) and git's config parser, both far below the format's `u32::MAX` field limit |
-| `scn/src/cmd/mount.rs:589,590` (signal `.expect`) | the OS signal masks | SAFE — `signal()` on an already-listened signal fails only on a broken runtime; the platforms guarantee it |
-| `scn/src/main.rs:208,216`, `scion-tier/src/bin/*:120,128,157,165,197` (clap-conflict `unreachable!`/`expect`) | the command line | SAFE — clap refuses the conflicting flags first |
-| `scn/src/vfs.rs:351,607,658,779,1167,1229,1278` (path/kind `expect`/`unreachable`) | the mount's own node table | SAFE — the guards above each call check the same field; a file node always carries its overlay path (the `Node` invariant the mount maintains) |
-| `scn/src/vfs.rs:713` (double `.unwrap()`) | an NFS setattr on a forged file id | SAFE — `get(&id)` returns None before it (answered `NFS3ERR_STALE`), and the kind check above returns for dirs, so the remaining node is a file with a path |
-| `scn/src/vfs.rs:720` (`file_mode().try_into().unwrap()`) | the mode constant | SAFE — 0o644 fits both Linux `u32` and macOS `u16`; the `useless_conversion` allow names it |
-| `scn/src/vfs.rs:811` (`.get(&id).unwrap()`) | a lookup one line after the same get | SAFE — the match above already answered the `None` case |
-| `scn/src/vfs.rs:1320,1384,1392` (`take(4).try_into().expect`) | a truncated index file | SAFE — `take(n)` returns exactly `n` bytes or an error; four bytes always fit `u32` |
-| `scn/src/vfs.rs:1510` (`.expect("cannot read /dev/urandom")`) | the OS entropy source | SAFE — `/dev/urandom` always opens on the supported platforms; the mount fails at startup, before it serves |
+| `scn/src/cmd/blame.rs::blame_call` (`.expect("identity fits the format")`) | argv and git config | SAFE — the fields come from `-m` argv (bounded by `ARG_MAX`) and git's config parser, both far below the format's `u32::MAX` field limit |
+| `scion-tier/src/bin/scion-cache.rs::main` (`unreachable!("clap requires --tls-cert and --tls-key together")`) | the command line | SAFE — clap refuses the conflicting flags first |
+| `scn/src/vfs.rs::parent, ::list_dir, ::merged_listing, ::setattr, ::read, ::write, ::attr_of, ::materialize, ::file_bytes` (path/kind `expect`/`unreachable`) | the mount's own node table | SAFE — the guards above each call check the same field; a file node always carries its overlay path (the `Node` invariant the mount maintains) |
+| `scn/src/vfs.rs::setattr` (double `.unwrap()`) | an NFS setattr on a forged file id | SAFE — `get(&id)` returns None before it (answered `NFS3ERR_STALE`), and the kind check above returns for dirs, so the remaining node is a file with a path |
+| `scn/src/vfs.rs::setattr` (`file_mode().try_into().unwrap()`) | the mode constant | SAFE — 0o644 fits both Linux `u32` and macOS `u16`; the `useless_conversion` allow names it |
+| `scn/src/vfs.rs::write` (`.get(&id).unwrap()`) | a lookup one line after the same get | SAFE — the match above already answered the `None` case |
+| `scn/src/vfs.rs::write_deletes` (`.expect("a path fits")`) | the overlay's deletes note (the feature build) | SAFE — a `RepoPath` is at most 4,096 bytes, far under `u32::MAX` |
+| `scn/src/vfs.rs::read_deletes` (`take(4).try_into().expect("four bytes")`) | a truncated deletes note | SAFE — `take(n)` returns exactly `n` bytes or an error; four bytes always fit `u32` |
+| `scn/src/vfs.rs` entropy (the `/dev/urandom` read, refused with its cause) | the OS entropy source | SAFE — `/dev/urandom` always opens on the supported platforms; the mount fails at startup, before it serves |
+| `scn/src/client.rs::put_blob_file` (`.expect("the chunk size fits usize")`) | the stream put's chunk math | SAFE — the `min`'s upper bound is `CHUNK_BYTES`, a small constant |
 | `scion-core`, `scion-proto` ticket decode, and every `take`-then-`try_into` in the codecs | the wire | SAFE — the same `take` contract |
+
+The inventory's sweep excludes the test-gated sites: the `test-hooks`
+seams (floor.rs's override, the tier store's `crash` and `walk_probe`,
+the scn client's pause and test client, `test_support/*`), the
+`#[cfg(test)]` tails, `tests/`, and the fuzz targets.
 
 ### 5b. The lock-poison inventory
 
@@ -156,10 +188,11 @@ leaves behind, and whether the next holder checks it.
 
 | Lock | Guards | A panicking holder leaves | Verdict |
 | --- | --- | --- | --- |
-| `derived.rs:178` `flights: Mutex<HashMap<FlightKey, Arc<Flight>>>` | which repo/kind walks are live | a live flight whose walk never retires: every later joiner waits for a walk counter that never moves — a caller with no deadline waits forever. Two exit paths leaked it: the panic unwind past `retire`, and the permit wait's early `?` on the owner's deadline | UNSAFE — fixed in the panic-fix PR: one drop guard (`RetireOnDrop`), created the moment the join makes the caller an owner, retires the flight on every exit; the panic still propagates. Tests: a panicking derive (the next caller owns a fresh walk) and a permit timeout (red before: the next caller hung to its DeadlineExceeded; green: it finishes the chain) |
-| `derived.rs:180` `in_flight: Mutex<usize>` | the walk-permit count | a stale permit count | SAFE — `Permit`'s Drop runs on unwind and decrements |
+| `derived.rs` `flights: Mutex<HashMap<FlightKey, Arc<Flight>>>` (the `Derived` field) | which repo/kind walks are live | a live flight whose walk never retires: every later joiner waits for a walk counter that never moves — a caller with no deadline waits forever. Two exit paths leaked it: the panic unwind past `retire`, and the permit wait's early `?` on the owner's deadline | UNSAFE — fixed in the panic-fix PR: one drop guard (`RetireOnDrop`), created the moment the join makes the caller an owner, retires the flight on every exit; the panic still propagates. Tests: a panicking derive (the next caller owns a fresh walk) and a permit timeout (red before: the next caller hung to its DeadlineExceeded; green: it finishes the chain) |
+| `derived.rs` `in_flight: Mutex<usize>` (the `Derived` field) | the walk-permit count | a stale permit count | SAFE — `Permit`'s Drop runs on unwind and decrements |
 | `derived.rs` `flight.walks` per-flight counter + `woken` | the walk-end signal for waiters | a counter that never advances | covered by the `flights` fix above: with `retire` on every owner exit the waiters wake and take over a fresh walk |
 | `service.rs`/`listen.rs` semaphores and slot maps | connection/stream accounting | a leaked slot | SAFE — every holder holds it across `.await`-free counter ops; the panic points sit outside the critical sections, and the slot Drop runs on unwind |
+| `memory.rs` `free: Mutex<usize>` + `woke: Condvar` (the reply-memory budget) | the pool's free-byte count | a mid-update free count | SAFE — nothing inside the lock can panic (a compare and a checked subtract), so the lock cannot poison; the budget is not store state, so the into_inner policy does not apply — it fails loud like the stall slot (`5a`'s memory.rs row) |
 
 The fix PR (#568) carries: the flight-leak fix — one drop guard over
 both leak paths — with two tests (a panicking derive; a permit timeout
@@ -168,7 +201,7 @@ worker-spawn fix with the error path (EAGAIN cannot be forced
 in-process; stated in the PR).
 
 | `todo!`/`unimplemented!` in production code: none | grep across the five crates | fixed (none exist) |
-| Warn-and-continue: the import records and counts per-commit failures against the ledger; the two `eprintln!` skip lines are inside test-only helpers | `crates/scion-server/src/pg.rs:4459`, `gc.rs:591,1154` (both test helpers) | fixed by design (no production warn-and-continue on a correctness boundary) |
+| Warn-and-continue: the import records and counts per-commit failures against the ledger; the two `eprintln!` skip lines are inside test-only helpers | `pg.rs` and `gc.rs` (both in the files' `#[cfg(test)]` tails) | fixed by design (no production warn-and-continue on a correctness boundary) |
 
 ## 6. Defaults
 
