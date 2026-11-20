@@ -31,7 +31,8 @@ change the dataset.
 
 - Linux or macOS, and network access to GitHub.
 - Rust 1.89 or newer and `protoc`, as for the build.
-- Git 2.28 or newer, with `git daemon`.
+- Git 2.35 or newer, with `git daemon` (the sparse checkout runs `git
+  sparse-checkout set --no-cone`, which git 2.35 added).
 - `/usr/bin/time` (on Debian and Ubuntu: `apt install time`).
 - `curl` and `pkill` (on Debian and Ubuntu: `apt install curl procps`):
   the scripts check for both and stop without them.
@@ -100,9 +101,9 @@ So git writes nothing before the sparse rules are set. Cone mode would also
 write the files of every directory above `tokio/src`, and `scn checkout`
 does not, so the jobs use no cone.
 
-The article names these git mitigations: sparse checkouts and promisor
-remotes (partial clone), and git mirrors. It also names shallow clones,
-which this benchmark does not run.
+Git's own mitigations are sparse checkouts, promisor remotes (partial
+clone) and mirrors; shallow clones are another, which this benchmark
+does not run.
 
 - Git serves the repository with `git daemon` on loopback (`git://`), so
   git and scion both fetch from a server over TCP.
