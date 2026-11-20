@@ -515,9 +515,6 @@ pub fn restore_with_budget(
     restore_impl(archive, data, postgres_url, postgres_ca, tx_bytes, open)
 }
 
-/// The whole restore — preflight, verify, the staging choreography, the
-/// rename — with the opener a parameter. Private: the public [`restore`]
-/// and the test hook are its only callers.
 /// The empty-directory rule's whole-directory arm (operations.md §3,
 /// #1274): a missing target counts as empty - the publication rename
 /// creates it, and every restore into a not-yet-existing path rides on
@@ -550,6 +547,9 @@ fn empty_target_check(data: &Path) -> Result<()> {
     }
 }
 
+/// The whole restore — preflight, verify, the staging choreography, the
+/// rename — with the opener a parameter. Private: the public [`restore`]
+/// and the test hook are its only callers.
 fn restore_impl(
     archive: &Path,
     data: &Path,
