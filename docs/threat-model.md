@@ -338,7 +338,8 @@ that breaks one is caught.
 Each of these is a claim this document makes without a test behind it.
 They become issues as the project moves past alpha.
 
-- The token compare is constant time: the code is (`auth.rs`,
+- The token compare is constant time: the code is
+  (`crates/scion-proto/src/runtime/auth/mod.rs`,
   `constant_time_eq`), but no test observes it, and a timing test would
   be flaky by nature. The digest form of the access file is the main
   defence, and that is the load-time format. The check's whole work
