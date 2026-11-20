@@ -669,6 +669,7 @@ async fn a_daemon_seeded_from_the_cache_s_own_snapshot_serves_the_blob() {
         served.extend_from_slice(&part.data);
     }
     assert!(!served.is_empty(), "the seeded daemon served the object");
+}
 
 // --- R2b: the cache's metrics listener serves /metrics on the address
 // the operator gave it.
