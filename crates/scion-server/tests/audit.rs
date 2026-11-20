@@ -600,6 +600,62 @@ async fn a_write_whose_intent_fails_is_refused() {
     let _ = stop.send(());
 }
 
+/// A write the disk refuses records its failed line. The intent lands
+/// before the write, the store then refuses the blob file (the
+/// write-gate hook answers ENOSPC), and the pair's result names the
+/// disk's answer. The reply is the store's out-of-space answer; the
+/// audit line is the evidence a supervisor reads (#1311).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_the_disk_refuses_records_a_failed_line() {
+    use scion_proto::v1::PutBlobRequest;
+    use tokio_stream::once;
+
+    let dir = scion_server::test_support::private_tempdir();
+    let store = store(dir.path());
+    let audit_path = dir.path().join("audit.log");
+    let audit = Audit::open(&audit_path).unwrap();
+    let (stop, url) = serve_with_audit(&store, dir.path(), write_access(), audit).await;
+    let mut ci = writer(&url, "t-disk").await;
+
+    // The next blob file's write is the one the disk refuses. The
+    // spool's writes are not gated, so the upload streams whole and
+    // the failure lands after the intent line, in the store's put.
+    store.blobs().fail_writes_after(0);
+    let status = bound(30, "put_blob (the refused write)", async {
+        ci.put_blob(once(PutBlobRequest {
+            repo: REPO.into(),
+            data: b"never lands\n".to_vec(),
+        }))
+        .await
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(status.code(), Code::ResourceExhausted, "{status:?}");
+
+    // The write died before the file: the store holds no blob of it.
+    let id = BlobId::of(b"never lands\n");
+    assert!(
+        store.blobs().get(id).is_err(),
+        "the refused write stored nothing"
+    );
+
+    stop.send(()).unwrap();
+    wait_for_lines(&audit_path, 2).await;
+
+    let lines = read_lines(&audit_path);
+    let writes = pairs(&lines, "write");
+    assert_eq!(writes.len(), 1, "one upload pair: {lines:?}");
+    assert_eq!(writes[0].0["rpc"], "PutBlob", "the pair is the upload's");
+    assert_eq!(
+        writes[0].1["outcome"], "failed",
+        "the result names the refusal: {lines:?}"
+    );
+    assert_eq!(
+        writes[0].1["why"], "resource_exhausted",
+        "the result names the disk's answer: {lines:?}"
+    );
+}
+
 /// The intent and result of every `event` in `lines`, joined by their
 /// request ID, the intent first.
 fn pairs<'a>(

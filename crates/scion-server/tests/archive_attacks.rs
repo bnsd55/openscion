@@ -233,6 +233,49 @@ fn a_changeset_stream_claiming_a_huge_length_is_torn_not_allocated() {
     }
 }
 
+fn assert_torn(verified: &Result<Vec<String>, scion_server::Error>) {
+    match verified {
+        // The reader refused the stream outright.
+        Err(scion_server::Error::Corrupt(why)) => {
+            assert!(why.contains("ends inside a record"), "{why}");
+        }
+        Ok(damages) => assert!(
+            damages.iter().any(|d| d.contains("ends inside a record")),
+            "a cut record must be called torn, not decoded: {damages:?}"
+        ),
+        other => panic!("expected a torn-stream answer, got {other:?}"),
+    }
+}
+
+/// The attack: the stream file is cut inside a record - the shape a
+/// crash mid-append leaves. The first cut lands inside the 44-byte
+/// prefix, the second mid-body with the length field honest. Either
+/// way the reader must answer "ends inside a record", never a decode
+/// of the cut tail, and never a silent end of the stream.
+#[test]
+fn a_changeset_stream_cut_inside_a_record_is_torn_not_decoded() {
+    // Inside the prefix: fewer than 44 bytes are left.
+    {
+        let (_keep, out, _main, _second) = sound_archive();
+        let stream = section(&out, REPO).join("changesets.bin");
+        let mut bytes = std::fs::read(&stream).unwrap();
+        assert!(bytes.len() > 44, "the sound archive holds one record");
+        bytes.truncate(20);
+        std::fs::write(&stream, &bytes).unwrap();
+        assert_torn(&archive::verify(&out));
+    }
+    // Mid-body: the prefix reads whole and the length tells the truth,
+    // so only the file's end proves the record is torn.
+    {
+        let (_keep, out, _main, _second) = sound_archive();
+        let stream = section(&out, REPO).join("changesets.bin");
+        let mut bytes = std::fs::read(&stream).unwrap();
+        bytes.truncate(44 + (bytes.len() - 44) / 2);
+        std::fs::write(&stream, &bytes).unwrap();
+        assert_torn(&archive::verify(&out));
+    }
+}
+
 /// The attack: the same changeset recorded twice in one repo's stream.
 /// The ID is the hash of the body, so both records re-hash true, and
 /// nothing in `verify` says a stream must hold a changeset once. The
