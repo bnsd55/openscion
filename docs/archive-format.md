@@ -49,7 +49,7 @@ Pretty-printed JSON, UTF-8, with these keys:
 | `snapshot_at`   | string | RFC 3339 UTC stamp, to the second, of the metadata read     |
 | `snapshot_note` | string | what one snapshot means, for a human reader                 |
 | `counts`        | object | `repos`, `changesets`, `refs`, `pending_lands`, `blobs` — all numbers, totals over the archive |
-| `repos`         | array  | one object per repo: `name` plus the same five counts for it |
+| `repos`         | array  | one object per repo, its keys: `name`; `changesets`, `refs`, `pending_lands` (the counts above, per repo); `members` (the repo's blob count - the archive-level `blobs`); `provenance` (the imported git commits) |
 
 The manifest is written LAST. An archive without a manifest is not an
 archive, and a reader refuses it. Every repo named in `manifest.json`
