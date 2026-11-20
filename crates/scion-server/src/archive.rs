@@ -534,6 +534,23 @@ fn restore_impl(
             )));
         }
     }
+    // The empty-directory rule is the whole directory, not only the
+    // store's three paths: any other entry fails the restore HERE, at
+    // its start - not at the publication rename, after the whole
+    // replay. The one entry the restore itself puts there is the
+    // audit log, whose intent line rode in before this fn (main's
+    // restore command opens the audit first and the publication
+    // rename keeps it); the staging carries it below.
+    for entry in std::fs::read_dir(data)?.flatten() {
+        if entry.file_name() == "audit.log" {
+            continue;
+        }
+        return Err(Error::FailedPrecondition(format!(
+            "{} already holds {}; a restore goes into an empty directory",
+            data.display(),
+            entry.path().display()
+        )));
+    }
     // The staging directory sits beside the target, on the same
     // filesystem, so the final publication is one rename: either the
     // target is the restored store or it is what it was.
