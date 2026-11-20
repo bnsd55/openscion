@@ -518,6 +518,38 @@ pub fn restore_with_budget(
 /// The whole restore — preflight, verify, the staging choreography, the
 /// rename — with the opener a parameter. Private: the public [`restore`]
 /// and the test hook are its only callers.
+/// The empty-directory rule's whole-directory arm (operations.md §3,
+/// #1274): a missing target counts as empty - the publication rename
+/// creates it, and every restore into a not-yet-existing path rides on
+/// that; every other `read_dir` error stops the restore, because a
+/// target that is a file or is unreadable is not proven empty, and a
+/// late failure at the rename is what this rule exists to stop. The
+/// one tolerated entry is "audit.log" - the restore command's own
+/// intent line lands there before the call, and the staging carries it
+/// through the publication rename.
+fn empty_target_check(data: &Path) -> Result<()> {
+    match std::fs::read_dir(data) {
+        Ok(entries) => {
+            for entry in entries {
+                // A read error is not "empty" either, for the same
+                // reason.
+                let entry = entry?;
+                if entry.file_name() == "audit.log" {
+                    continue;
+                }
+                return Err(Error::FailedPrecondition(format!(
+                    "{} already holds {}; a restore goes into an empty directory",
+                    data.display(),
+                    entry.path().display()
+                )));
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn restore_impl(
     archive: &Path,
     data: &Path,
@@ -534,37 +566,7 @@ fn restore_impl(
             )));
         }
     }
-    // The empty-directory rule is the whole directory, not only the
-    // store's three paths: any other entry fails the restore HERE, at
-    // its start - not at the publication rename, after the whole
-    // replay. The one entry the restore itself puts there is the
-    // audit log, whose intent line rode in before this fn (main's
-    // restore command opens the audit first and the publication
-    // rename keeps it); the staging carries it below.
-    // A missing target counts as empty: the publication rename creates
-    // it, and every restore into a not-yet-existing path rides on that.
-    // Every other read_dir error stops the restore: a target that is a
-    // file or is unreadable is not proven empty, and a late failure at
-    // the rename is what the empty-directory rule exists to stop.
-    match std::fs::read_dir(data) {
-        Ok(entries) => {
-            for entry in entries {
-                // A read error is not "empty" either, for the same
-                // reason.
-                let entry = entry?;
-                if entry.file_name() == "audit.log" {
-                    continue;
-                }
-                return Err(Error::FailedPrecondition(format!(
-                    "{} already holds {}; a restore goes into an empty directory",
-                    data.display(),
-                    entry.path().display()
-                )));
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
-    }
+    empty_target_check(data)?;
     // The staging directory sits beside the target, on the same
     // filesystem, so the final publication is one rename: either the
     // target is the restored store or it is what it was.

@@ -411,8 +411,8 @@ fn a_restore_of_a_target_holding_one_stray_file_is_refused_at_once() {
 
 
 /// The empty-directory rule's other arm: a target path that is a
-/// regular file (or anything read_dir cannot list) is refused at the
-/// restore's start - read_dir's ENOTDIR is not "empty" - so the replay
+/// regular file (or anything `read_dir` cannot list) is refused at the
+/// restore's start - `read_dir`'s ENOTDIR is not "empty" - so the replay
 /// never runs to a rename that cannot land (#1274).
 #[test]
 fn a_restore_of_a_target_that_is_a_file_is_refused_at_once() {
