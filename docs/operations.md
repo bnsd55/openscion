@@ -166,9 +166,12 @@ mode 0700 and owned by the user the server runs as: the server refuses one
 that group or others can write, one they can read, or that sits under a
 directory another user can change; the error names the directory, and
 `chmod 700 <dir>` fixes it. Without `--ticket-key` no object is readable, so a real server
-adds a ticket key (section 2):
+adds a ticket key (section 2). The seed's directories must be root's or
+yours, and not group- or others-writable (the sticky bit excuses only an
+others-writable directory), so make the keys directory first:
 
 ```sh
+install -d -m 0700 /srv/scion-keys
 ./scion-server --data /srv/scion ticket-key --out /srv/scion-keys/ticket.key \
   | tee /srv/scion-keys/ticket.pub   # prints the public key
 chmod 600 /srv/scion-keys/ticket.key

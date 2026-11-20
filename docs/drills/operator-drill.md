@@ -45,9 +45,11 @@ Source: §1 "One server", §2 "Ticket keys", §6 "Health".
    Done when: the log says the server listens on `127.0.0.1:7878`.
 
 3. Stop it (Ctrl-C). Mint a ticket key — without one no object is
-   readable:
+   readable. The seed's directories must be root's or yours, and not
+   group- or others-writable (§2), so make the keys directory first:
 
    ```sh
+   install -d -m 0700 /srv/scion-keys
    ./scion-server ticket-key --out /srv/scion-keys/ticket.key
    chmod 600 /srv/scion-keys/ticket.key
    ```
@@ -110,7 +112,9 @@ Source: §3 "Backup and restore".
 
 Source: §3 "Backup and restore".
 
-1. Put the metadata, and `objects/`, into a fresh directory.
+1. Put the metadata, the `backend` marker, and `objects/`, into a
+   fresh directory (§3's restore list names all three; the marker is
+   the one T3 step 1 copied).
 
 2. `fsck` on it.
 
