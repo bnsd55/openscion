@@ -409,6 +409,35 @@ fn a_restore_of_a_target_holding_one_stray_file_is_refused_at_once() {
     );
 }
 
+
+/// The empty-directory rule's other arm: a target path that is a
+/// regular file (or anything read_dir cannot list) is refused at the
+/// restore's start - read_dir's ENOTDIR is not "empty" - so the replay
+/// never runs to a rename that cannot land (#1274).
+#[test]
+fn a_restore_of_a_target_that_is_a_file_is_refused_at_once() {
+    let data = scion_server::test_support::private_tempdir();
+    let (store, _main) = source(data.path());
+    let out = scion_server::test_support::private_tempdir()
+        .path()
+        .join("archive");
+    archive::export(&store, data.path(), Some(REPO), false, &out).unwrap();
+    let holder = scion_server::test_support::private_tempdir();
+    let target = holder.path().join("restored");
+    std::fs::write(&target, b"the operator's notes\n").unwrap();
+    match archive::restore(&out, &target, &url_of(holder.path()), None) {
+        Err(scion_server::Error::Io(e)) => {
+            assert_eq!(e.kind(), std::io::ErrorKind::NotADirectory, "{e}");
+        }
+        other => panic!("expected the read_dir error, got {other:?}"),
+    }
+    // Nothing ran: no staging directory beside the target.
+    let staging = holder
+        .path()
+        .join(format!("{}.restoring", target.file_name().unwrap().to_string_lossy()));
+    assert!(!staging.exists(), "a staging directory was created: {staging:?}");
+}
+
 #[test]
 fn an_export_refuses_an_out_that_exists_and_a_repo_that_is_not_stored() {
     let data = scion_server::test_support::private_tempdir();

@@ -543,20 +543,27 @@ fn restore_impl(
     // rename keeps it); the staging carries it below.
     // A missing target counts as empty: the publication rename creates
     // it, and every restore into a not-yet-existing path rides on that.
-    if let Ok(entries) = std::fs::read_dir(data) {
-        for entry in entries {
-            // A read error is not "empty": an unreadable target is not
-            // proven empty, so the read error stops the restore.
-            let entry = entry?;
-            if entry.file_name() == "audit.log" {
-                continue;
+    // Every other read_dir error stops the restore: a target that is a
+    // file or is unreadable is not proven empty, and a late failure at
+    // the rename is what the empty-directory rule exists to stop.
+    match std::fs::read_dir(data) {
+        Ok(entries) => {
+            for entry in entries {
+                // A read error is not "empty" either, for the same
+                // reason.
+                let entry = entry?;
+                if entry.file_name() == "audit.log" {
+                    continue;
+                }
+                return Err(Error::FailedPrecondition(format!(
+                    "{} already holds {}; a restore goes into an empty directory",
+                    data.display(),
+                    entry.path().display()
+                )));
             }
-            return Err(Error::FailedPrecondition(format!(
-                "{} already holds {}; a restore goes into an empty directory",
-                data.display(),
-                entry.path().display()
-            )));
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
     }
     // The staging directory sits beside the target, on the same
     // filesystem, so the final publication is one rename: either the
