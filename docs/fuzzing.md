@@ -34,6 +34,7 @@ longer budget and keeps its corpus between runs (`.github/workflows/fuzz.yml`).
 | the access file (`scion-server/src/access.rs`, `Access::parse`) | `scion-server/fuzz: access` |
 | the archive files (`scion-server/src/archive.rs`, `verify`/`restore`: the manifest and its names, `changesets.bin`, `refs.json`, `lands.json`, `members.txt`, `provenance.json`, the blob files) | `scion-server/fuzz: archive-verify` |
 | each archive section reader fed raw bytes (`scion-server/src/archive.rs`, `read_changesets`, `read_refs`, `read_lands`, `read_members`, `read_provenance`) | `scion-server/fuzz: archive-read` |
+| the backend marker file (`scion-server/src/backend.rs`, `Backend::open` reads it before anything else; an operator or a bad disk wrote the bytes) | `scion-server/fuzz: backend-marker` |
 | the tier snapshot seed file (`scion-tier/src/snapshot.rs`, `seed`; an operator drops the file beside a cold store) | `scion-tier/fuzz: snapshot-seed` |
 
 ### No target

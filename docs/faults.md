@@ -32,7 +32,8 @@ Notes:
 
 - The out-of-space rows inject the fault through the test hooks
   (`fail_writes_after`, a capped metadata file), beside the real tmpfs
-  rows. #262 adds the faults a disk fails with that are not "no space".
+  rows. #262 (closed) added the faults a disk fails with that are not
+  "no space" - the `EIO`/`EROFS` row above.
 - The Postgres runs of the NFS, power, dm-log-writes and tmpfs rows
   split each fault in two: the data directory holds the marker and the
   blob files, so the fault cuts those, and the metadata lives in
