@@ -27,7 +27,7 @@ flowchart LR
     subgraph serve["scion-server serve"]
         svc["service.rs, objects.rs + auth.rs"] --> ops["write.rs, land.rs, read.rs, blame.rs"]
         ops --> tree["tree.rs: apply, root trees<br/>graph.rs: commit graph<br/>history.rs: path history<br/>derived.rs: derived data"]
-        ops --> db["db.rs, store.rs"]
+        ops --> db["pg.rs, store.rs"]
         tree --> db
         db --> pg[("metadata: Postgres")]
         ops --> blobs[("objects/blob: zstd files")]
@@ -61,11 +61,11 @@ How one request flows through the server:
 
    Each TCP connection has Nagle's algorithm off, so a small reply does not
    wait for the client's ACK. The tiers share this code
-   (`scion-proto/src/listen.rs`) and its defaults. Size `--max-connections`
+   (`crates/scion-proto/src/runtime/listen.rs`) and its defaults. Size `--max-connections`
    for the clients that keep a connection: on a cache, at least the daemons
    behind it plus room for others; on the server, at least the caches plus
    the direct clients.
-2. The bearer-token check (`scion-proto/src/auth.rs`) tags the request with
+2. The bearer-token check (`crates/scion-proto/src/runtime/auth/mod.rs`) tags the request with
    a `Caller`.
 3. `service.rs` (the `Scion` service) or `objects.rs` (the `Objects` service)
    checks names, IDs and paths, then runs `write.rs`, `land.rs`, `read.rs`
@@ -1157,13 +1157,13 @@ starting at the root tree, and never says what it already has.
   here.
 - Each object goes out in parts of at most 1 MiB of encoded data. The first
   part gives the kind, ID, encoding, encoded size and size, so a receiver
-  reserves its memory before the rest arrives (`scion-proto/src/object.rs`).
+  reserves its memory before the rest arrives (`crates/scion-proto/src/runtime/object.rs`).
 - Memory: before an object is read, the bytes it sends come from the store
   (a tree's stored length, a blob file's length, or the size in its zstd
   frame header), and the object takes its share of a server-wide budget of
   400 MiB: those bytes, plus the decoder (3 MiB) while a blob is unpacked
   for a `RAW` client, in chunks of 1 MiB. The reply loop and the budget
-  live in `scion-proto/src/reply.rs`, so the tiers follow the same rules.
+  live in `crates/scion-proto/src/runtime/reply.rs`, so the tiers follow the same rules.
   The reply keeps the object and its share until it has handed the last
   part to the channel. Each part is a buffer of its own: a chunk read from
   the file or the decoder, or a copy of 1 MiB out of a tree's bytes. So the
@@ -1206,7 +1206,7 @@ uses only `Objects`:
 1. Resolve REV, then `GetRootTree`.
 2. Fetch one tree level per `GetObjects` batch. Each tree must hash to the
    ID that was asked for. Every object is collected from its parts and
-   unpacked within its announced size first (`scion-proto/src/object.rs`). Keep only the entries inside the sparse
+   unpacked within its announced size first (`crates/scion-proto/src/runtime/object.rs`). Keep only the entries inside the sparse
    directories (each selects itself and everything below it) and the
    directories above them. A sparse path that is not in the tree is an error.
 3. Check every kept name (below). Submodules are skipped with a note.
@@ -1283,7 +1283,7 @@ Both binaries are thin wrappers around one type, `Tier`. It serves the
   accepts `ZSTD`, and unpacks it for one that does not.
 - **The server's limits.** A tier refuses what the server refuses (1 to
   1,000 objects per call, the repo name rules; the checks are shared code
-  in `scion-proto/src/check.rs`). Its replies run the same loop
+  in `crates/scion-proto/src/runtime/check.rs`). Its replies run the same loop
   (`reply.rs`): a reply holds at least one object, and sends the next only
   while it has sent less than 64 MiB. Each object takes its share of a
   400 MiB budget before its bytes are read or copied, and each part frees
@@ -1477,7 +1477,7 @@ must be owned by root or by their user, and must not be writable by group
 or others unless it has the sticky bit (as `/tmp` has). Else another user
 could swap the path after the check. The directory that holds the path is
 resolved first, and its resolved directories are checked
-(`scion-proto/src/auth.rs`, `check_ancestors`). Then `scn` connects to,
+(`crates/scion-proto/src/runtime/auth/mod.rs`, `check_ancestors`). Then `scn` connects to,
 and the daemon uses, the resolved path, so a symlink on the way is not
 followed again. A tier serves only `Objects`, so of the `scn` commands only
 `checkout` works through it; the others need the server.
@@ -1629,7 +1629,7 @@ The owner of every row is the project owner.
 | `scripts/common.sh` (the loop's process group) | No process group for function loops — bash only grants one to an exec'd program; the upgrade path is a dispatch subcommand the script re-invokes for the loop. | bounded | A loop job has no group of its own; the script's traps still stop it. | A CI timeout leaves a loop job running. | A dispatch subcommand the script re-invokes for the loop. | the owned-process tests (scripts/test-owned-run.sh) | the project owner |
 | `scripts/common.sh` (the staggered starts) | Stagger the starts because git daemon's backlog is 5 and cannot be set; the ceiling is a lazy-fetch burst during checkout. | bounded | Backlog 5; the stagger absorbs a lazy-fetch burst during checkout. | A checkout shows connection refusals in the rig. | A real git server (http-backend) in the rig. | the checkout benchmark's runs | the project owner |
 | `scripts/capacity.sh` (the copied readers) | The readers and the sampling are the soak's shape, copied here rather than lifted, because soak.sh and soak-fault.sh are two working scripts whose knobs this does not want to share. | bounded | Two copies of the same reader loop; #461 rewrites the harness and lifts the shared part. | The two copies drift. | Lift the shared loop into one place when #461 lands. | the capacity harness's self-checks (#461) | the project owner |
-| `scripts/version-matrix.sh` (the pins) | The pins stand in for release tags; the first release tag replaces them, because a release tag is an ancestor of HEAD and the pins sit on main. | bounded | Two pinned commits stand for tags; no tag exists yet. | The first release tag lands. | The tags replace the pins. | the version-matrix job's pairs | the project owner |
+| `scripts/version-matrix.sh` (the stand-in ladder) | Until a release tag is an ancestor of HEAD, the matrix's N-1 is the newest stand-in commit (one, the last main before the SQLite removal); `prev_ref` prefers a dispatch's input, then the newest release tag behind HEAD, then the stand-in. v0.1.0 is tagged and behind HEAD, so the tag resolution is what runs. | bounded | One stand-in commit in the ladder; the tag branch is live. | A release tag resolves behind HEAD, as v0.1.0 does. | Drop the stand-in when it can no longer be the answer. | the version-matrix job's pairs | the project owner |
 | `scripts/soak-fault.sh` (the copied loaders) | The loaders are copied from soak.sh, not factored out, because the two scripts' knobs differ and the soak's 72-hour run pins its report format. | bounded | Two copies of the loader; the soak's report format must not change. | The copies drift. | Lift the loader once the soak's pinned run ends. | the fault soak's runs | the project owner |
 | `.github/workflows/release.yml` (the dry-run's tag read and publication flip) | The dry run skips the tag-object read and the signature check it carries — no CI run holds a signed release tag, so the verdicts are tested with canned objects instead — and skips the final `--draft=false` flip. | bounded | The dry run proves the build, compare, attest, and the publish path against a scratch-named draft it creates, uploads, counts and deletes; the signature verdicts are tested with canned tag objects. | The first real tag exercises the read path and the flip. | The release dry run on the tag itself, when one exists. | the release-verify-tag tests (scripts/test-release-verify-tag.sh); the dry run's release job | the project owner |
 | `.github/workflows/ci.yml` (the test job cap) | The 50-minute cap fits the whole-workspace Postgres suite, whose cost is now the slow tail of whole-model oracles: the graph, path-log and log-page tests walk a seeded model of thousands of changesets, and the crash suite kills a server and lands again (run 41366890167's logs); the log pages no longer read one changeset per entry (#758). | bounded | The measured times on main (22-37 min, Oct 2026; the runs that hold the batched reads measure 22-36); the job's timeout is the bound. | The slowest model oracles get a cheaper full walk (the ten 60-second tests: the graph and path-log oracles, the log-page full walks, the crash kill-and-land loops). | Bring the cap back toward 30. | the test job's own runs | the project owner |
