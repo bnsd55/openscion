@@ -186,7 +186,12 @@ Freeze the surfaces users need, not the implementation.
   (an older tag is named in a warning, not built). Rollback restores the
   pre-upgrade backup.
 - A full repository exports to a versioned logical archive. CI verifies
-  and restores the archive.
+  and restores the archive: done - `scion-server export` writes the
+  scion-archive format, version 1 (crates/scion-server/src/archive.rs),
+  `verify` checks an archive against docs/archive-format.md without the
+  store's code, `restore` replays it, and CI runs the archive tests
+  (archive_golden.rs pins the bytes and asserts verify's damage list is
+  empty; archive.rs and archive_attacks.rs run in the workspace suite).
 - Postgres 17 is promoted to production when all of it holds:
   the contract test ([#560](https://github.com/bnsd55/openscion/issues/560))
   passes on Postgres 17, the real Postgres fault rows pass, backup and
