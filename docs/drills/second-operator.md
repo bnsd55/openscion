@@ -44,9 +44,12 @@ only on Linux is marked **(Linux)**.
 
 ### T2 - A ticket key, so objects read (§2 "Ticket keys")
 
-1. Mint the key and make the file private:
+1. Mint the key and make the file private. The seed's directories must
+   be root's or yours, and not group- or others-writable (§2), so make
+   the keys directory first:
 
    ```sh
+   install -d -m 0700 /srv/scion-keys
    ./scion-server ticket-key --out /srv/scion-keys/ticket.key   # prints the public key
    chmod 600 /srv/scion-keys/ticket.key
    ```
@@ -105,22 +108,16 @@ only on Linux is marked **(Linux)**.
 
    Notes: ___
 
-2. Copy the backend marker (a Postgres deployment writes one):
-
-   ```sh
-   cp /srv/scion/backend /backups/scion-$(date +%F)/backend
-   ```
-
-   Notes: ___
-
-3. `fsck` on the copy is read-only and may run beside a live server.
+2. `fsck` on the copy is read-only and may run beside a live server.
+   (The marker rode along in step 1's third command: it is part of the
+   metadata, and travels with it.)
 
    Done when: `fsck` on the backup directory exits 0 and prints no
    problem lines.
 
    Notes: ___
 
-4. Write down the recovery point the runbook promises for this backup
+3. Write down the recovery point the runbook promises for this backup
    (§3 "The durability point"), in your own words, before you look at
    T5.
 
