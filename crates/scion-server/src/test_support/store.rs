@@ -165,6 +165,7 @@ impl DurabilityLog {
     }
 
     /// The steps recorded so far, in order, for the order test.
+    #[cfg(test)]
     pub(super) fn steps(&self) -> Vec<DurabilityStep> {
         self.steps
             .lock()

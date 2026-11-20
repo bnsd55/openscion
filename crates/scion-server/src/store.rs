@@ -309,7 +309,7 @@ impl Blobs {
 
     /// The durability steps this `Blobs` recorded, in order: what the
     /// order test asserts against.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(test)]
     pub(crate) fn durability_steps(&self) -> Vec<DurabilityStep> {
         self.log.steps()
     }
@@ -1589,7 +1589,7 @@ mod tests {
         let steps_of = |log: &[DurabilityStep], step: &DurabilityStep| {
             log.iter()
                 .position(|s| s == step)
-                .unwrap_or_else(|| panic!("no {step:?} in {:?}", log))
+                .unwrap_or_else(|| panic!("no {step:?} in {log:?}"))
         };
         // The write path: temp write, file fsync, rename, dir fsync, and
         // the full flush of `sync`, all before the batch answers.
