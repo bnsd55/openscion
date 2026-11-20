@@ -508,9 +508,8 @@ fn a_mid_replay_failure_leaves_the_target_empty() {
 /// `SCION_TEST_POSTGRES_URL` names the job's own scratch instance.
 #[test]
 fn a_pg_replay_that_dies_halfway_leaves_the_database_empty() {
-    let Ok(base) = std::env::var("SCION_TEST_POSTGRES_URL") else {
-        return;
-    };
+    let base = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL must name the test database");
     // The restore's database names one store, so the attack gets its
     // own: created and dropped here, never the tests' shared one. The
     // name is this test's own, not only this process's: the tests run
@@ -623,9 +622,8 @@ fn assert_pg_database_empty(check: &mut postgres::Client) {
 /// `SCION_TEST_POSTGRES_URL` names the job's own scratch instance.
 #[test]
 fn a_stale_lock_cannot_hang_the_failed_restore_and_the_next_one_lands() {
-    let Ok(base) = std::env::var("SCION_TEST_POSTGRES_URL") else {
-        return;
-    };
+    let base = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL must name the test database");
     init_log();
     let name = format!("scion_restore_attack_stale_{}", std::process::id());
     let mut maker = postgres::Client::connect(&base, postgres::NoTls).unwrap();
@@ -720,9 +718,8 @@ fn a_stale_lock_cannot_hang_the_failed_restore_and_the_next_one_lands() {
 /// scratch instance.
 #[test]
 fn a_restore_at_a_stopped_stores_url_refuses_and_leaves_it_whole() {
-    let Ok(base) = std::env::var("SCION_TEST_POSTGRES_URL") else {
-        return;
-    };
+    let base = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL must name the test database");
     let name = format!("scion_restore_attack_stopped_{}", std::process::id());
     let mut maker = postgres::Client::connect(&base, postgres::NoTls).unwrap();
     maker
@@ -795,9 +792,8 @@ fn a_restore_at_a_stopped_stores_url_refuses_and_leaves_it_whole() {
 /// `SCION_TEST_POSTGRES_URL` names the job's own scratch instance.
 #[test]
 fn a_stopped_store_in_a_search_path_schema_is_refused_whole() {
-    let Ok(base) = std::env::var("SCION_TEST_POSTGRES_URL") else {
-        return;
-    };
+    let base = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL must name the test database");
     let name = format!("scion_restore_attack_schema_{}", std::process::id());
     let mut maker = postgres::Client::connect(&base, postgres::NoTls).unwrap();
     maker
@@ -878,9 +874,8 @@ fn a_stopped_store_in_a_search_path_schema_is_refused_whole() {
 /// never the fold. Red on 1d5b54b7: the guards read the fold.
 #[test]
 fn a_mixed_case_schema_is_read_and_dropped_as_itself() {
-    let Ok(base) = std::env::var("SCION_TEST_POSTGRES_URL") else {
-        return;
-    };
+    let base = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL must name the test database");
     let name = format!("scion_restore_attack_case_{}", std::process::id());
     let mut maker = postgres::Client::connect(&base, postgres::NoTls).unwrap();
     maker
@@ -963,9 +958,8 @@ fn a_mixed_case_schema_is_read_and_dropped_as_itself() {
 /// `SCION_TEST_POSTGRES_URL` names the job's own scratch instance.
 #[test]
 fn a_restored_store_does_not_carry_the_mark_and_a_later_restore_refuses() {
-    let Ok(base) = std::env::var("SCION_TEST_POSTGRES_URL") else {
-        return;
-    };
+    let base = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL must name the test database");
     let name = format!("scion_restore_attack_published_{}", std::process::id());
     let mut maker = postgres::Client::connect(&base, postgres::NoTls).unwrap();
     maker
@@ -1035,9 +1029,8 @@ fn a_restored_store_does_not_carry_the_mark_and_a_later_restore_refuses() {
 /// before the schema; this case pins that the new check holds.
 #[test]
 fn a_pg_restore_that_dies_at_the_open_leaves_the_database_empty() {
-    let Ok(base) = std::env::var("SCION_TEST_POSTGRES_URL") else {
-        return;
-    };
+    let base = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL must name the test database");
     // The restore's database names one store, so the attack gets its
     // own: created and dropped here, never the tests' shared one. The
     // name is this test's own, not only this process's: the tests run
@@ -1154,9 +1147,8 @@ fn the_url_of_data_survives_a_sweep_while_its_directory_is_held() {
 /// `SCION_TEST_POSTGRES_URL` names the job's own scratch instance.
 #[test]
 fn a_kill_between_repos_resets_cleanly_on_the_next_restore() {
-    let Ok(base) = std::env::var("SCION_TEST_POSTGRES_URL") else {
-        return;
-    };
+    let base = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL must name the test database");
     // The child half: the restore that dies after the first repo's
     // publication. The parent re-runs this binary with the seam armed.
     if std::env::var("SCION_TEST_RESTORE_EXIT_AFTER").is_ok() {
@@ -1246,9 +1238,8 @@ fn a_kill_between_repos_resets_cleanly_on_the_next_restore() {
 /// `SCION_TEST_POSTGRES_URL` names the job's own scratch instance.
 #[test]
 fn a_zero_repo_archive_leaves_no_staging_mark() {
-    let Ok(base) = std::env::var("SCION_TEST_POSTGRES_URL") else {
-        return;
-    };
+    let base = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL must name the test database");
     // The store that makes the archive lives in one scratch database;
     // the restore lands in a second, so the target starts fresh.
     let a = format!("scion_restore_attack_empty_a_{}", std::process::id());
@@ -1343,9 +1334,8 @@ fn a_zero_repo_archive_leaves_no_staging_mark() {
 /// scratch instance.
 #[test]
 fn a_failed_restore_resets_a_quoted_schema_as_itself() {
-    let Ok(base) = std::env::var("SCION_TEST_POSTGRES_URL") else {
-        return;
-    };
+    let base = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL must name the test database");
     // The store's schema holds a double quote and a space; `b c` is
     // the name the raw interpolation's quote-continuation would reach.
     let name = format!("scion_restore_attack_quotey_{}", std::process::id());
@@ -1501,9 +1491,8 @@ fn a_provenance_row_naming_a_foreign_changeset_is_named_and_refused() {
 /// does not name.
 #[test]
 fn a_restore_at_a_foreign_tables_schema_refuses_without_the_stopped_advice() {
-    let Ok(base) = std::env::var("SCION_TEST_POSTGRES_URL") else {
-        return;
-    };
+    let base = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL must name the test database");
     let name = format!("scion_restore_foreign_{}", std::process::id());
     let mut maker = postgres::Client::connect(&base, postgres::NoTls).unwrap();
     maker

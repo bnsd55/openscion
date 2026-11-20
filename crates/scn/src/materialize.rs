@@ -1709,6 +1709,7 @@ mod tests {
     fn a_directory_of_another_user_is_refused() {
         // `/` belongs to root, and is not empty.
         if rustix::process::geteuid().is_root() {
+            eprintln!("skipping: running as root, the mode cannot refuse root");
             return;
         }
         let root = Path::new("/");

@@ -220,6 +220,7 @@ fn a_stop_that_cannot_clean_names_its_warnings() {
         .expect("the probe's mode changes");
     if std::fs::remove_dir_all(&probe).is_ok() {
         // Running as root: the overlay's mode cannot stop the removal.
+        eprintln!("skipping: running as root, the mode cannot refuse root");
         return;
     }
 
