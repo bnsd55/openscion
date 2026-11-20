@@ -819,8 +819,9 @@ the bytes of the chunks that both files have, over the size of the larger
 file. A symlink or a gitlink is a rename only with the same content.
 
 **Rename bounds.** The rename pass walks the whole diff below `path`, and
-holds its entries in memory: at most 1,000,000 entries, about 150 MB per
-call. Past it, the call finds no renames. As in git, the inexact search
+holds its entries in memory: the bound is a byte bound of 64 MiB, at 160
+bytes an entry, so about 419,430 entries per call. Past it, the call finds
+no renames. As in git, the inexact search
 (steps 2 and 3) runs only when the added files left times the deleted files
 left are at most 1,000,000. Steps 2 and 3 share a budget per call: about
 4M, where each chunk of a file read and each row of a chunk table indexed
@@ -1116,8 +1117,9 @@ version, a server stops serving its package; its clients then get
 - Client changesets with no parent, several parents or a committer. Only git
   import makes them.
 - Text merge. Conflicts are path-level.
-- Diff renames past the entry bound of the rename pass (1,000,000
-  entries), or past the inexact search's pair limit or budget
+- Diff renames past the entry bound of the rename pass (a 64 MiB byte
+  bound at 160 bytes an entry, about 419,430 entries), or past the
+  inexact search's pair limit or budget
   ([#107](https://github.com/bnsd55/openscion/issues/107)).
 - `Blame` without per-call bounds
   ([#61](https://github.com/bnsd55/openscion/issues/61)), and `Log` that
