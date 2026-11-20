@@ -19,8 +19,8 @@ that round-trips the bytes.
 ## Global flags and environment variables
 
 Every command takes the connection flags (`--server`, `--objects`,
-`--tls-ca`, `--repo`, `--json`) before or after the subcommand. The two
-token flags sit before the subcommand only (they are flags of `scn`
+`--tls-ca`, `--repo`, `--json`) before or after the subcommand. The token flag
+(`--token-file`) sits before the subcommand only (it is a flag of `scn`
 itself): `scn --token-file FILE cat main:src/lib.rs` parses;
 `scn cat --token-file FILE ...` does not. The server's own global flags
 (`--data`, `--postgres-url-file`, `--postgres-ca`)
@@ -47,7 +47,8 @@ and `scion-server fsck --data D` are the same call.
   ref name or a changeset ID.
 - `scn ls REV[:DIR]` — list a directory: `scn ls main:src`, or `scn ls
   main` for the root. Each line shows the mode, the kind (`file`,
-  `dir`, `symlink`), and the size that the tree carries; `--json` adds
+  `dir`, `symlink`, `gitlink` - mode `160000`, no size, a submodule
+  pointer), and the size that the tree carries; `--json` adds
   `size` to the entries that carry one.
 - `scn log [REV]` (default `main`) — first-parent history, newest first,
   `-n/--limit` how many changesets to show (default 10). `--path PATH`
