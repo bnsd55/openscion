@@ -209,4 +209,4 @@ and the first cost to bite is fsck on a store larger than RAM. The
 remedy if a real workload needs more is the one the file-per-blob
 layout has always pointed at - packing small blobs into fewer files -
 tracked with the profile that names the cold-walk cost in
-[#824](https://github.com/bnsd55/openscion/issues/828).
+[#828](https://github.com/bnsd55/openscion/issues/828).
