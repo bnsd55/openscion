@@ -1599,10 +1599,14 @@ mod tests {
             let tmp_write = steps_of(batch1, &S::TmpWrite(*id));
             let file_fsync = steps_of(batch1, &S::FileFsync(*id));
             let rename = steps_of(batch1, &S::Rename(*id));
-            let dir_fsync = batch1
-                .iter()
-                .position(|s| matches!(s, S::DirFsync(path) if *path == dir))
-                .unwrap_or_else(|| panic!("no dir fsync of {} before the answer", dir.display()));
+            let dir_fsync = rename
+                + 1
+                + batch1[rename + 1..]
+                    .iter()
+                    .position(|s| matches!(s, S::DirFsync(path) if *path == dir))
+                    .unwrap_or_else(|| {
+                        panic!("no dir fsync of {} before the answer", dir.display())
+                    });
             assert!(
                 tmp_write < file_fsync
                     && file_fsync < rename
