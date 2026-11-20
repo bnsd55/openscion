@@ -113,7 +113,7 @@ public claim the owner makes.
 | build_standard_variables | N/A | Pure Rust; no native build |
 | build_preserve_debug | met | cargo keeps debuginfo |
 | build_non_recursive | met | One cargo workspace |
-| build_repeatable | met | Lockfile, pinned toolchain, fixed codegen |
+| build_repeatable | met | Lockfile, fixed codegen; the two builds of one release agree byte for byte |
 | installation_common | met | cargo install; the Docker image |
 | installation_standard_variables | N/A | cargo install --root is the way |
 | installation_development_quick | met | CONTRIBUTING.md's setup |
