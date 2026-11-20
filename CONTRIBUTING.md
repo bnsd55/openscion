@@ -105,7 +105,11 @@ branch does.
 - **The format is frozen.** `docs/format-v1.md` defines the bytes that object
   IDs hash. A change there changes every ID and needs a new format version and
   a discussion first.
-- `unsafe` code is not allowed (`unsafe_code = "forbid"`).
+- `unsafe` code is not allowed: the workspace denies it (`unsafe_code =
+  "deny"` in Cargo.toml) and most crate roots forbid it. The one
+  exception is the auth FFI module in scion-proto
+  (runtime/auth/ffi.rs), and a test fails if unsafe code appears
+  anywhere else.
 
 ## Commit messages
 
