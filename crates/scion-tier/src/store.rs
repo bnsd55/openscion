@@ -2897,7 +2897,9 @@ mod tests {
             let err = DiskStore::open(Path::new("/"), 1 << 20).err().unwrap();
             assert!(err.to_string().contains("owned by another user"), "{err}");
         } else {
-            eprintln!("skipping the other-owner case: running as root, the mode cannot refuse root");
+            eprintln!(
+                "skipping the other-owner case: running as root, the mode cannot refuse root"
+            );
         }
 
         // A private directory under one that others can write.
