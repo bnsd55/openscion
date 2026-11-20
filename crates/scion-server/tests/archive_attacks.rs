@@ -1562,12 +1562,26 @@ fn a_restore_that_cannot_take_the_target_s_place_carries_the_audit_back() {
     let target = empty.path().join("restored");
     std::fs::create_dir_all(&target).unwrap();
     std::fs::write(target.join("audit.log"), b"the run's intent line\n").unwrap();
-    // A file that is no store's: the preflight passes, and the rename
-    // that publishes cannot replace a directory that is not empty.
-    std::fs::write(target.join("the operator's notes.txt"), b"keep\n").unwrap();
-
-    let error = archive::restore(&out, &target, &url_of(empty.path()), None)
-        .expect_err("the rename into a non-empty target must fail");
+    // A file that is no store's, written mid-replay: the restore's
+    // start check (the whole directory must be empty, #1274) has
+    // passed, and the rename that publishes cannot replace a directory
+    // that is not empty. The open seam is where the replay's store
+    // opens, before any rename - the file lands mid-replay, exactly
+    // the way an outside writer would beat the restore to its target.
+    let notes = target.join("the operator's notes.txt");
+    let restored = archive::restore_with(
+        &out,
+        &target,
+        &url_of(empty.path()),
+        None,
+        move |path, url, ca| {
+            std::fs::write(&notes, b"keep\n").unwrap();
+            scion_server::Backend::open(path, url, ca)
+        },
+    );
+    let error = restored
+        .map(|_| ())
+        .expect_err("the rename into a mid-replay non-empty target must fail");
     let why = format!("{error:#}");
     assert!(
         why.contains("could not take"),

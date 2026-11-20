@@ -365,6 +365,86 @@ fn a_restore_refuses_a_data_directory_that_already_holds_a_store() {
     }
 }
 
+/// The empty-directory rule is the whole directory, not only the
+/// store's three paths: a target holding one stray file is refused at
+/// the restore's START - before any replay - with the entry named, so
+/// an operator does not meet the refusal at the publication rename,
+/// after the whole replay (operations.md §3, #1274). Nothing runs: no
+/// staging directory beside the target, no schema rows behind the URL.
+#[test]
+fn a_restore_of_a_target_holding_one_stray_file_is_refused_at_once() {
+    let data = scion_server::test_support::private_tempdir();
+    let (store, _main) = source(data.path());
+    let out = scion_server::test_support::private_tempdir()
+        .path()
+        .join("archive");
+    archive::export(&store, data.path(), Some(REPO), false, &out).unwrap();
+    // The stray file: a target the operator picked by mistake.
+    let target = scion_server::test_support::private_tempdir();
+    std::fs::write(target.path().join("lost+found"), b"").unwrap();
+    match archive::restore(&out, target.path(), &url_of(target.path()), None) {
+        Err(scion_server::Error::FailedPrecondition(why)) => {
+            assert!(why.contains("already holds"), "{why}");
+            assert!(why.contains("lost+found"), "{why}");
+        }
+        other => panic!("expected FailedPrecondition, got {other:?}"),
+    }
+    // Nothing ran: no staging directory beside the target.
+    let staging = target.path().with_file_name(format!(
+        "{}.restoring",
+        target.path().file_name().unwrap().to_string_lossy()
+    ));
+    assert!(
+        !staging.exists(),
+        "a staging directory was created: {staging:?}"
+    );
+    // And no schema rows behind the URL: the store's schema holds no
+    // store table.
+    let mut client = postgres::Client::connect(&url_of(target.path()), postgres::NoTls).unwrap();
+    let rows = client
+        .query(
+            "SELECT to_regclass(format('%I.store', current_schema()))::text",
+            &[],
+        )
+        .unwrap();
+    assert!(
+        rows[0].get::<_, Option<String>>(0).is_none(),
+        "the replay wrote schema rows behind the refusal"
+    );
+}
+
+/// The empty-directory rule's other arm: a target path that is a
+/// regular file (or anything `read_dir` cannot list) is refused at the
+/// restore's start - `read_dir`'s ENOTDIR is not "empty" - so the replay
+/// never runs to a rename that cannot land (#1274).
+#[test]
+fn a_restore_of_a_target_that_is_a_file_is_refused_at_once() {
+    let data = scion_server::test_support::private_tempdir();
+    let (store, _main) = source(data.path());
+    let out = scion_server::test_support::private_tempdir()
+        .path()
+        .join("archive");
+    archive::export(&store, data.path(), Some(REPO), false, &out).unwrap();
+    let holder = scion_server::test_support::private_tempdir();
+    let target = holder.path().join("restored");
+    std::fs::write(&target, b"the operator's notes\n").unwrap();
+    match archive::restore(&out, &target, &url_of(holder.path()), None) {
+        Err(scion_server::Error::Io(e)) => {
+            assert_eq!(e.kind(), std::io::ErrorKind::NotADirectory, "{e}");
+        }
+        other => panic!("expected the read_dir error, got {other:?}"),
+    }
+    // Nothing ran: no staging directory beside the target.
+    let staging = holder.path().join(format!(
+        "{}.restoring",
+        target.file_name().unwrap().to_string_lossy()
+    ));
+    assert!(
+        !staging.exists(),
+        "a staging directory was created: {staging:?}"
+    );
+}
+
 #[test]
 fn an_export_refuses_an_out_that_exists_and_a_repo_that_is_not_stored() {
     let data = scion_server::test_support::private_tempdir();
