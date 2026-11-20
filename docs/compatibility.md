@@ -74,12 +74,12 @@ protocol v1 with a non-Rust client; the migrations tests prove the
 schema migrates; the demo and the release smoke run a server and
 `scn` from one tree.
 
-Cross-version is the version matrix's check, and it runs daily
-([.github/workflows/version-matrix.yml](../.github/workflows/
-version-matrix.yml), on the schedule and on a dispatch that names the
-N-1 ref): it builds the tagged N-1 binaries and HEAD's binaries and
-runs the pairs of the table as
-[scripts/version-matrix.sh](../scripts/version-matrix.sh) names them -
+Cross-version is the version matrix's check, and it runs daily on
+[.github/workflows/version-matrix.yml](../.github/workflows/version-matrix.yml)
+(the schedule, and a dispatch that names the N-1 ref): it builds the
+tagged N-1 binaries and HEAD's binaries and runs the pairs of the
+table as [scripts/version-matrix.sh](../scripts/version-matrix.sh)
+names them -
 `scn` ↔ server both directions, a tier ↔ server both directions,
 `scn` ↔ daemon over `unix://`, the store one direction, the ticket
 window both directions, the snapshot window both directions, and the
