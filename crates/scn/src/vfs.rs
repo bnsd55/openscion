@@ -3056,6 +3056,30 @@ mod tests {
         assert_eq!(blobs.1, 2, "the cache counts bytes it does not hold");
     }
 
+    /// A read whose copy of the blob holds another length than its tree
+    /// entry fails `NFS3ERR_IO`: the tree said one size, the copy holds
+    /// another, and reading on would serve lies (#1311). The copy reaches the read through the blob cache, whose
+    /// bytes a fetch left there whole - the wire's own size and hash
+    /// checks cannot be crossed, so the mismatch a reader can meet is
+    /// one the entry's size did not survive.
+    #[tokio::test]
+    async fn a_blob_whose_length_differs_from_its_tree_entry_fails_the_read() {
+        let test = start(&[("a", b"x\n", Some(false))]).await;
+        let id = find(&test.vfs, "a").await.unwrap();
+        let blob = BlobId::of(b"x\n");
+        test.vfs
+            .blobs
+            .lock()
+            .await
+            .0
+            .insert(blob, std::sync::Arc::new(b"a longer copy\n".to_vec()));
+        let first = test.vfs.read(id, 0, 1000).await;
+        assert!(
+            matches!(first, Err(nfsstat3::NFS3ERR_IO)),
+            "first: {first:?}"
+        );
+    }
+
     /// A mount that lives past the life of its first ticket keeps reading:
     /// the refusal mints a fresh ticket over the mounted changeset, once,
     /// and the read is asked again with it. The next read mints no more.
