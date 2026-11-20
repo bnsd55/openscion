@@ -3930,8 +3930,9 @@ fn make_tls(ca: &Path) -> Result<MakeRustlsConnect> {
         .map_err(|e| Error::InvalidArgument(format!("cannot read the database CA: {e}")))?;
     let mut roots = RootCertStore::empty();
     for certificate in CertificateDer::pem_slice_iter(&ca_bytes) {
-        let certificate = certificate
-            .map_err(|e| Error::InvalidArgument(format!("the database CA is not PEM: {e}")))?;
+        let certificate = certificate.map_err(|e| {
+            Error::InvalidArgument(format!("the database CA {} is not PEM: {e}", ca.display()))
+        })?;
         roots
             .add(certificate)
             .map_err(|_| Error::InvalidArgument("the database CA is not a root".to_owned()))?;
@@ -7447,6 +7448,41 @@ mod tests {
         assert!(
             text.contains("scion_pg_collector_key_wait_seconds_count 1\n"),
             "{text}"
+        );
+    }
+
+    /// An open whose `--postgres-ca` file is not PEM is refused, naming
+    /// the CA file: the connector is built before any connect, so a
+    /// typo'd CA is a refusal at the open, not a TLS failure against a
+    /// live database (#1311).
+    #[test]
+    fn a_postgres_ca_that_is_not_pem_refuses_the_open() {
+        let dir = crate::test_support::private_tempdir();
+        let ca = dir.path().join("ca.pem");
+        // A file that carries a PEM block whose body is not base64: the
+        // PEM iterator refuses it when the connector is built.
+        std::fs::write(
+            &ca,
+            "-----BEGIN CERTIFICATE-----\nnot base64!\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        // Nothing is dialed: the refusal comes from the connector's
+        // build, before the connect's thread spawns.
+        let Err(error) = super::connect_on(
+            "postgres://postgres:scion@localhost:5432/scion",
+            Some(&ca),
+            "",
+        ) else {
+            panic!("a CA that is not PEM refuses the connect")
+        };
+        assert!(
+            matches!(&error, crate::error::Error::InvalidArgument(_)),
+            "{error:#}"
+        );
+        let why = format!("{error:#}");
+        assert!(
+            why.contains("the database CA") && why.contains("ca.pem"),
+            "{why}"
         );
     }
 
