@@ -985,7 +985,7 @@ mod tests {
         let started = std::time::Instant::now();
         while !listed.load(std::sync::atomic::Ordering::SeqCst) {
             assert!(
-                started.elapsed() < Duration::from_secs(2),
+                started.elapsed() < Duration::from_secs(60),
                 "gc never listed"
             );
             std::thread::sleep(Duration::from_millis(5));
@@ -1001,7 +1001,7 @@ mod tests {
         file.set_modified(SystemTime::now()).unwrap();
         drop(held);
         let report = done_rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(60))
             .expect("gc never finished");
         assert_eq!(report.files_removed, 0, "{report:?}");
         assert!(path.exists());

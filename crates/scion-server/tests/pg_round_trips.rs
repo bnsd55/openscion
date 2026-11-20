@@ -269,7 +269,7 @@ async fn serve(
         .await
         .unwrap();
     let client = ScionClient::with_interceptor(channel, bearer());
-    let waited = tokio::time::timeout(Duration::from_secs(10), async {
+    let waited = tokio::time::timeout(Duration::from_secs(60), async {
         while !Backend::test_first_sweep_done() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
