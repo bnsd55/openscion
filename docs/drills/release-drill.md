@@ -110,10 +110,13 @@ private key"). One file per run, in this shape.
 1. #302 is closed by choice: the group-writable rule stays fail-closed
    and the refusal names the chmod, so the umask-002 run proves the
    refusal, not an exception. The CI suite under umask 002
-   (`test-umask-002` in `.github/workflows/ci.yml`) runs on every PR,
-   the release PR included; its green result is part of the release.
+   (`test-umask-002` in `.github/workflows/ci.yml`) runs on the
+   schedule and on manual dispatch only - not on PRs - so dispatch
+   `ci.yml` on the release commit (the release-candidate run) and read
+   that job there; the nightly runs it too.
 
-   Done when: the job is green on the release commit.
+   Done when: `test-umask-002` is green in the dispatched run on the
+   release commit.
 
    Notes: ___
 
