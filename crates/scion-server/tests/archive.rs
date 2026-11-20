@@ -390,10 +390,14 @@ fn a_restore_of_a_target_holding_one_stray_file_is_refused_at_once() {
         other => panic!("expected FailedPrecondition, got {other:?}"),
     }
     // Nothing ran: no staging directory beside the target.
-    let staging = target
-        .path()
-        .with_file_name(format!("{}.restoring", target.path().file_name().unwrap().to_string_lossy()));
-    assert!(!staging.exists(), "a staging directory was created: {staging:?}");
+    let staging = target.path().with_file_name(format!(
+        "{}.restoring",
+        target.path().file_name().unwrap().to_string_lossy()
+    ));
+    assert!(
+        !staging.exists(),
+        "a staging directory was created: {staging:?}"
+    );
     // And no schema rows behind the URL: the store's schema holds no
     // store table.
     let mut client = postgres::Client::connect(&url_of(target.path()), postgres::NoTls).unwrap();
@@ -408,7 +412,6 @@ fn a_restore_of_a_target_holding_one_stray_file_is_refused_at_once() {
         "the replay wrote schema rows behind the refusal"
     );
 }
-
 
 /// The empty-directory rule's other arm: a target path that is a
 /// regular file (or anything `read_dir` cannot list) is refused at the
@@ -432,10 +435,14 @@ fn a_restore_of_a_target_that_is_a_file_is_refused_at_once() {
         other => panic!("expected the read_dir error, got {other:?}"),
     }
     // Nothing ran: no staging directory beside the target.
-    let staging = holder
-        .path()
-        .join(format!("{}.restoring", target.file_name().unwrap().to_string_lossy()));
-    assert!(!staging.exists(), "a staging directory was created: {staging:?}");
+    let staging = holder.path().join(format!(
+        "{}.restoring",
+        target.file_name().unwrap().to_string_lossy()
+    ));
+    assert!(
+        !staging.exists(),
+        "a staging directory was created: {staging:?}"
+    );
 }
 
 #[test]
