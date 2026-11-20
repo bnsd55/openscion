@@ -2289,6 +2289,7 @@ mod tests {
 
         // Root may rename out of a read-only directory.
         if rustix::process::geteuid().as_raw() == 0 {
+            eprintln!("skipping: running as root, the mode cannot refuse root");
             return;
         }
         let dir = crate::private_tempdir();
@@ -2633,6 +2634,7 @@ mod tests {
 
         // Root may write a read-only file.
         if rustix::process::geteuid().as_raw() == 0 {
+            eprintln!("skipping: running as root, the mode cannot refuse root");
             return;
         }
         let dir = crate::private_tempdir();
@@ -2894,6 +2896,10 @@ mod tests {
         if rustix::process::geteuid().as_raw() != 0 {
             let err = DiskStore::open(Path::new("/"), 1 << 20).err().unwrap();
             assert!(err.to_string().contains("owned by another user"), "{err}");
+        } else {
+            eprintln!(
+                "skipping the other-owner case: running as root, the mode cannot refuse root"
+            );
         }
 
         // A private directory under one that others can write.
@@ -3073,6 +3079,7 @@ mod tests {
     fn an_unreadable_old_index_refuses_the_start() {
         use std::os::unix::fs::PermissionsExt as _;
         if rustix::process::geteuid().as_raw() == 0 {
+            eprintln!("skipping: running as root, the mode cannot refuse root");
             return;
         }
         let dir = crate::private_tempdir();
@@ -3210,6 +3217,7 @@ mod tests {
     fn an_unreadable_object_file_is_an_error_not_a_miss() {
         use std::os::unix::fs::PermissionsExt as _;
         if rustix::process::geteuid().as_raw() == 0 {
+            eprintln!("skipping: running as root, the mode cannot refuse root");
             return;
         }
         let dir = crate::private_tempdir();
@@ -3236,6 +3244,7 @@ mod tests {
     fn a_fan_dir_of_kinds_that_cannot_be_read_refuses_the_scan() {
         use std::os::unix::fs::PermissionsExt as _;
         if rustix::process::geteuid().as_raw() == 0 {
+            eprintln!("skipping: running as root, the mode cannot refuse root");
             return;
         }
         let dir = crate::private_tempdir();
@@ -3261,6 +3270,7 @@ mod tests {
     fn a_file_that_cannot_leave_refuses_the_scan() {
         use std::os::unix::fs::PermissionsExt as _;
         if rustix::process::geteuid().as_raw() == 0 {
+            eprintln!("skipping: running as root, the mode cannot refuse root");
             return;
         }
         let dir = crate::private_tempdir();
