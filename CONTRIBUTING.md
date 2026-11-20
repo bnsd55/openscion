@@ -77,7 +77,8 @@ A pull request does not edit `CHANGELOG.md`. It adds a fragment,
 - `<slug>` is the pull request's number when you know it, else a short
   kebab name (`rename-budget`).
 - The file is plain text: no leading `- `, and no indent on any line.
-  Wrap it at 76 columns, so the merged row fits in 79. Write it so it
+  The convention is to wrap it at 76 columns. Nothing checks the
+  width, and rows past 79 exist. Write it so it
   stands on its own: what changed, for whom, and the pull request's
   number in parentheses.
 
