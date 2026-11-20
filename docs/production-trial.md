@@ -54,8 +54,16 @@ pass; write it as a hard bound, not a wish.>
 
 ## The daily table
 
-One row per day, filled by the second operator from the same source
-each day (the server's metrics export, at a fixed hour).
+One row per day, filled by the second operator at a fixed hour from
+three named sources: the server's metrics export for every column
+except two, and the operating system for those two at the same hour —
+the server's resident set (`ps -o rss= -p <server pid>` prints KiB;
+divide by 1024 for the MiB column), and the store's size as the two
+figures scripts/capacity.sh's growth columns measure, the data
+directory's `du -sk` and the metadata database's bytes
+(`psql "$(cat <postgres-url file>)" -X -A -t -c "SELECT
+pg_database_size(current_database())"`, the same URL file the server
+reads). Record both store figures; growth reads across the two.
 
 | Day | Date | Lands | Reads | Land p99 ms | Read p99 ms | Server RSS MiB | Store size | Errors |
 |---|---|---|---|---|---|---|---|---|
