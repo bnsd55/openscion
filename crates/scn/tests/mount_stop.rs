@@ -215,13 +215,20 @@ fn a_stop_that_cannot_clean_names_its_warnings() {
     // A root user can remove a 0500 directory: the failure this test
     // drives cannot exist for it, so the test skips rather than break.
     let probe = home.path().join("root-probe");
-    std::fs::create_dir_all(&probe).unwrap();
+    std::fs::create_dir_all(probe.join("child")).unwrap();
     std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o500))
         .expect("the probe's mode changes");
     if std::fs::remove_dir_all(&probe).is_ok() {
         // Running as root: the overlay's mode cannot stop the removal.
         return;
     }
+    // The probe dir goes back to a deletable mode, so the test's home
+    // can go away; the removal of an empty 0500 directory succeeds for
+    // any user (rmdir needs only the parent's write), which is why the
+    // probe holds a child: unlinking it needs the write the mode took
+    // away.
+    std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o700))
+        .expect("the probe's mode goes back");
 
     // The overlay becomes undeletable: the mount's stop cannot remove
     // it, and must say so instead of ending quietly.
