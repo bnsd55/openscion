@@ -541,15 +541,22 @@ fn restore_impl(
     // audit log, whose intent line rode in before this fn (main's
     // restore command opens the audit first and the publication
     // rename keeps it); the staging carries it below.
-    for entry in std::fs::read_dir(data)?.flatten() {
-        if entry.file_name() == "audit.log" {
-            continue;
+    // A missing target counts as empty: the publication rename creates
+    // it, and every restore into a not-yet-existing path rides on that.
+    if let Ok(entries) = std::fs::read_dir(data) {
+        for entry in entries {
+            // A read error is not "empty": an unreadable target is not
+            // proven empty, so the read error stops the restore.
+            let entry = entry?;
+            if entry.file_name() == "audit.log" {
+                continue;
+            }
+            return Err(Error::FailedPrecondition(format!(
+                "{} already holds {}; a restore goes into an empty directory",
+                data.display(),
+                entry.path().display()
+            )));
         }
-        return Err(Error::FailedPrecondition(format!(
-            "{} already holds {}; a restore goes into an empty directory",
-            data.display(),
-            entry.path().display()
-        )));
     }
     // The staging directory sits beside the target, on the same
     // filesystem, so the final publication is one rename: either the
