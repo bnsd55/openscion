@@ -2609,6 +2609,58 @@ mod tests {
         drop(first);
     }
 
+    /// The write side of the same cap: a connection under the limit
+    /// writes through, and over it the next write is refused at once,
+    /// without a read in between. The h2 driver reaches the write side
+    /// when the crossing lands mid-flush - the frames it had buffered
+    /// are on their way out, and the next `poll_write` must not add to a
+    /// connection the cap has condemned. The refusal names the count,
+    /// the way the read side's does.
+    #[tokio::test]
+    async fn the_write_side_refuses_a_connection_over_the_stall_cap() {
+        let limit = 100;
+        let (mut peer, server) = tokio::io::duplex(64 << 10);
+        let mut conn = pin!(Connection {
+            io: server,
+            _place: Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap(),
+            preface: None,
+            stalled: Stalled::new(
+                Some(SocketAddr::from(([127, 0, 0, 1], 9))),
+                limit,
+                Arc::new(Metrics::default()),
+                Arc::new(TotalBytes::new(1 << 20)),
+            ),
+            born: std::time::Instant::now(),
+            first_poll: false,
+        });
+        let mut cx = Context::from_waker(Waker::noop());
+
+        // Under the limit, the write goes to the wire.
+        match conn.as_mut().poll_write(&mut cx, b"frame") {
+            Poll::Ready(Ok(n)) => assert_eq!(n, 5, "the whole frame is taken"),
+            other => panic!("under the limit the write goes through: {other:?}"),
+        }
+        let mut seen = [0_u8; 5];
+        peer.read_exact(&mut seen).await.unwrap();
+        assert_eq!(&seen, b"frame", "the bytes reached the peer");
+
+        // The hold crosses the limit: the same poll_write the h2 driver
+        // calls for its next frame is the one that must refuse.
+        let held = conn.stalled.hold(limit);
+        assert!(conn.stalled.over(), "the hold crossed the limit");
+        match conn.as_mut().poll_write(&mut cx, b"more") {
+            Poll::Ready(Err(error)) => {
+                assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted, "{error}");
+                assert!(
+                    error.to_string().contains("over the 100 limit"),
+                    "the refusal names the count: {error}"
+                );
+            }
+            other => panic!("over the limit the write side refuses: {other:?}"),
+        }
+        drop(held);
+    }
+
     /// The serve's last line writes what is left, without the interval
     /// check: the counts the binaries exit with are in the log, not
     /// dropped.
