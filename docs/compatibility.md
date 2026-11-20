@@ -70,14 +70,25 @@ version it needs, and every other command keeps working.
 
 Today the promises rest on the contracts and their tests: the golden
 tests pin the object bytes and IDs; the conformance job exercises
-protocol v1 with a non-Rust client; the schema drift test proves both
-backends migrate; the demo and the release smoke run a server and
+protocol v1 with a non-Rust client; the migrations tests prove the
+schema migrates; the demo and the release smoke run a server and
 `scn` from one tree.
 
-What is not yet proven is cross-version: every CI job builds one tree.
-The version matrix (#239, v0.2.0, part 1) starts once v0.1.0 is
-tagged: it builds the tagged N-1 binaries and runs the pairs of the
-table — a client of N against a server of N-1 and the reverse, a tier
-of N behind a server of N-1, a checkout of a store N-1 wrote, and the
-nightly soak across the pair. Until then the pairs are a policy, not a
-tested fact; the matrix turns each row into a check.
+Cross-version is the version matrix's check, and it runs daily
+([.github/workflows/version-matrix.yml](../.github/workflows/
+version-matrix.yml), on the schedule and on a dispatch that names the
+N-1 ref): it builds the tagged N-1 binaries and HEAD's binaries and
+runs the pairs of the table as
+[scripts/version-matrix.sh](../scripts/version-matrix.sh) names them -
+`scn` ↔ server both directions, a tier ↔ server both directions,
+`scn` ↔ daemon over `unix://`, the store one direction, the ticket
+window both directions, the snapshot window both directions, and the
+transcript corpus's N-1 legs. The tier↔tier chain is not a pair of its
+own: the policy's chain rule follows from every hop, and each hop is
+the tier pair. `scn` ↔ repositories needs no built binaries - the
+golden object tests pin the bytes and IDs. A minor that adds a call
+must leave the client able to handle `UNIMPLEMENTED` from an N-1
+server; the matrix cannot force that from two arbitrary commits (which
+call is new is not known until the pair exists), so a release that
+adds a call proves the fallback in its own PR, and the conformance job
+covers the status codes.
