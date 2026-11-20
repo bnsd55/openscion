@@ -73,7 +73,7 @@ public claim the owner makes.
 | delivery_unsigned | met | No hashes over http |
 | vulnerabilities_fixed_60_days | met | RUSTSEC fixes landed on arrival |
 | vulnerabilities_critical_fixed | met | None open |
-| no_leaked_credentials | met | The leak-pattern push gate |
+| no_leaked_credentials | met | GitHub secret scanning with push protection, both enabled on the repository |
 | static_analysis | met | CodeQL and clippy |
 | static_analysis_common_vulnerabilities | met | CodeQL's security queries |
 | static_analysis_fixed | met | No open exploitable finding |
@@ -98,7 +98,7 @@ public claim the owner makes.
 | documentation_roadmap | met | docs/ROADMAP.md |
 | documentation_architecture | met | docs/architecture.md |
 | documentation_security | met | SECURITY.md, docs/threat-model.md |
-| documentation_quick_start | met | README.md Try it; smoke runs it |
+| documentation_quick_start | met | README.md Quick start; smoke runs it |
 | documentation_current | met | docs_ops and docs_links pin the docs |
 | documentation_achievements | Ben | The README badge is the owner's call |
 | accessibility_best_practices | met | README.md states the text scope |
