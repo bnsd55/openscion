@@ -386,6 +386,14 @@ jobs:
           # reported as 1) before the report ever starts.
           pd="$(find "$(rustc --print sysroot)" -type f -name llvm-profdata -print -quit)"
           lcv="$(find "$(rustc --print sysroot)" -type f -name llvm-cov -print -quit)"
+          # A process writes its profile at a normal exit (atexit). A
+          # spawned binary its test ends with kill() - SIGKILL, as
+          # bin_guards.rs's Bin::drop and serve_limits.rs's Guarded::drop
+          # end theirs - writes nothing, whatever LLVM_PROFILE_FILE says.
+          # The lines only a spawned server, cache or daemon ran therefore
+          # read as uncovered (the metrics listeners, the snapshot tick
+          # loop): a known limit of this measure, not missing tests
+          # (#1326).
           "$pd" merge -sparse target/coverage/*.profraw \
             -o target/coverage/merged.profdata
           # Every unit is a coverage object, passed as a repeated
