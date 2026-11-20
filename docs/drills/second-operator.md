@@ -243,8 +243,9 @@ only on Linux is marked **(Linux)**.
    ```
 
    Done when: you can name the client the close notice points at, and
-   say which of the runbook's two causes it was (one client, once; or
-   the same peer again and again).
+   say which of the runbook's three causes it was: one client, once;
+   the same peer again and again; or many clients, bytes near the cap
+   on several connections, the process's 1 GiB stall total in play.
 
    Notes: ___
 
