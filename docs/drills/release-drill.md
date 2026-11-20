@@ -53,8 +53,13 @@ private key"). One file per run, in this shape.
 
 ### R4 - The release PR: changelog, date, version (RELEASING.md "The release PR" 1-3)
 
-1. `scripts/merge-changelog.sh v0.1.0` (or the release's section);
-   review the result and commit it on the `release/<version>` branch.
+1. `scripts/release-refresh.sh v0.1.0` (or the release's version): it
+   folds the `changes/` fragments into the version's section, demands
+   the release-notes file (`docs/release-notes/<version>.md`), refuses
+   one that still carries a `CAPACITY-NUMBERS-PENDING` slot, and
+   reminds about the release date while the section still says
+   unreleased. Review the result and commit it on the
+   `release/<version>` branch.
 
 2. Rename the version's `## [v0.1.0] - unreleased` to the release day,
    with a fresh empty `## [Unreleased]` above it.
@@ -76,8 +81,11 @@ private key"). One file per run, in this shape.
 
 ### R5 - Notes from the tagged commit, and the smoke (RELEASING.md "The release PR" 5-8)
 
-1. The GitHub release notes come from the version's `CHANGELOG.md`
-   section read at the tagged commit, never a local working tree:
+1. The release body is the version's notes file
+   (`docs/release-notes/<version>.md`) read at the tagged commit,
+   never a local working tree or an edited copy, plus one line
+   pointing at the version's `CHANGELOG.md` section. The section
+   alone - the full change list the notes point at - comes out of:
 
    ```sh
    git show v0.1.0:CHANGELOG.md | awk \
@@ -99,9 +107,13 @@ private key"). One file per run, in this shape.
 
 ### R6 - The umask-002 run (RELEASING.md "The release PR" 7)
 
-1. Once #302's CI job exists, it runs on the release commit and its
-   green result is part of the release. Until it exists, this step
-   cannot run: write down what that block means for the release.
+1. #302 is closed by choice: the group-writable rule stays fail-closed
+   and the refusal names the chmod, so the umask-002 run proves the
+   refusal, not an exception. The CI suite under umask 002
+   (`test-umask-002` in `.github/workflows/ci.yml`) runs on every PR,
+   the release PR included; its green result is part of the release.
+
+   Done when: the job is green on the release commit.
 
    Notes: ___
 
@@ -152,9 +164,14 @@ private key"). One file per run, in this shape.
 
 1. The release workflow builds every artifact twice per cell, fails on
    one differing byte, attests each artifact and SBOM, verifies the
-   attestations, and opens the release immutable with the notes
-   rebuilt from the version's `CHANGELOG.md` section. A person does
-   not run it; a person reads its run.
+   attestations, and opens the release: it creates the release as a
+   draft, uploads the `-a` assets, checks the count, and flips it with
+   `gh release edit --draft=false` as the run's last act (the
+   repository's immutable-releases setting is what forbids more assets
+   afterwards). The body is the version's notes file read at the
+   commit, plus one line pointing at the version's `CHANGELOG.md`
+   section, which the workflow proves exists and holds a row. A person
+   does not run it; a person reads its run.
 
    Done when: you have read the run's diff job (`NO DIFFERENCE`) and
    the `verify` job's attestation output, and the release page shows
@@ -173,9 +190,6 @@ A second maintainer cannot tag a release.
    owner, so tag rights live in one account.
 3. **The immutable-releases setting** (R8): a repository setting only
    the owner can change.
-4. **The umask-002 run** (R6): the CI job does not exist yet (#302) -
-   not an owner gap, a missing-automation gap that today blocks the
-   step for anyone.
 
 Everything else - the dry run, the drills, the gates, the release PR,
 the notes, the smoke, the provenance, and reading the release run - a
