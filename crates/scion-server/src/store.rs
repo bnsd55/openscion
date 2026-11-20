@@ -1648,7 +1648,11 @@ mod tests {
                 "the batch's answer must close its steps: {batch2:?}"
             );
         }
-        assert_eq!(*steps.last().unwrap(), S::Answer, "the log ends at the answer");
+        assert_eq!(
+            *steps.last().unwrap(),
+            S::Answer,
+            "the log ends at the answer"
+        );
     }
 
     #[test]
