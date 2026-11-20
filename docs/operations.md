@@ -165,8 +165,6 @@ the chmod that fixes it. The data directory holds every blob and every row, so k
 mode 0700 and owned by the user the server runs as: the server refuses one
 that group or others can write, one they can read, or that sits under a
 directory another user can change; the error names the directory, and
-`chmod 700 <dir>` fixes it. that group or others can write, one they can read, or that sits under a
-directory another user can change; the error names the directory, and
 `chmod 700 <dir>` fixes it. Without `--ticket-key` no object is readable, so a real server
 adds a ticket key (section 2). The seed's directories must be root's or
 yours, and not group- or others-writable (the sticky bit excuses only an
