@@ -163,6 +163,14 @@ impl DurabilityLog {
             .expect("the durability log's lock")
             .push(step);
     }
+
+    /// The steps recorded so far, in order, for the order test.
+    pub(super) fn steps(&self) -> Vec<DurabilityStep> {
+        self.steps
+            .lock()
+            .expect("the durability log's lock")
+            .clone()
+    }
 }
 
 /// The rename of a temp file onto the blob's name, with its step recorded

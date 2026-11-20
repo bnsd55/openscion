@@ -307,6 +307,13 @@ impl Blobs {
         })
     }
 
+    /// The durability steps this `Blobs` recorded, in order: what the
+    /// order test asserts against.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) fn durability_steps(&self) -> Vec<DurabilityStep> {
+        self.log.steps()
+    }
+
     /// Gives the blob folder the server's metrics registry, once: every
     /// full flush then records how long it took.
     pub(crate) fn set_metrics(&self, metrics: std::sync::Arc<crate::metrics::Metrics>) {
@@ -1547,6 +1554,101 @@ mod tests {
             batch.put(content).unwrap();
             let _ = id;
         });
+    }
+
+    #[test]
+    fn a_batch_answers_after_its_durability_steps() {
+        use DurabilityStep as S;
+
+        let dir = crate::test_support::private_tempdir();
+        let blobs = Blobs::open(dir.path()).unwrap();
+        let raws: Vec<&[u8]> = vec![b"one", b"two", b"three"];
+        let ids: Vec<BlobId> = {
+            let mut batch = blobs.batch();
+            let ids: Vec<BlobId> = raws.iter().map(|raw| batch.put(raw).unwrap()).collect();
+            batch.sync().unwrap();
+            ids
+        };
+        // The keep path: the same bytes again. Nothing is written, and
+        // the stored file is fsynced with its directory before the
+        // answer.
+        let kept: Vec<BlobId> = {
+            let mut batch = blobs.batch();
+            let ids: Vec<BlobId> = raws.iter().map(|raw| batch.put(raw).unwrap()).collect();
+            batch.sync().unwrap();
+            ids
+        };
+        let steps = blobs.durability_steps();
+        let answers: Vec<usize> = steps
+            .iter()
+            .enumerate()
+            .filter_map(|(i, step)| (*step == S::Answer).then_some(i))
+            .collect();
+        assert_eq!(answers.len(), 2, "two batches answered: {steps:?}");
+
+        let steps_of = |log: &[DurabilityStep], step: &DurabilityStep| {
+            log.iter()
+                .position(|s| s == step)
+                .unwrap_or_else(|| panic!("no {step:?} in {:?}", log))
+        };
+        // The write path: temp write, file fsync, rename, dir fsync, and
+        // the full flush of `sync`, all before the batch answers.
+        let batch1 = &steps[..answers[0]];
+        for id in &ids {
+            let (dir, _) = blobs.location(*id);
+            let tmp_write = steps_of(batch1, &S::TmpWrite(*id));
+            let file_fsync = steps_of(batch1, &S::FileFsync(*id));
+            let rename = steps_of(batch1, &S::Rename(*id));
+            let dir_fsync = batch1
+                .iter()
+                .position(|s| matches!(s, S::DirFsync(path) if *path == dir))
+                .unwrap_or_else(|| panic!("no dir fsync of {} before the answer", dir.display()));
+            assert!(
+                tmp_write < file_fsync
+                    && file_fsync < rename
+                    && rename < dir_fsync
+                    && dir_fsync < answers[0],
+                "the durability steps of {id} are out of order: \
+                 tmp write {tmp_write}, file fsync {file_fsync}, rename {rename}, \
+                 dir fsync {dir_fsync}, answer {}",
+                answers[0]
+            );
+            if let Some(full_flush) = batch1.iter().position(|s| *s == S::FullFlush) {
+                assert!(
+                    dir_fsync < full_flush && full_flush < answers[0],
+                    "the full flush must follow the dir fsync and precede the answer: \
+                     dir fsync {dir_fsync}, full flush {full_flush}, answer {}",
+                    answers[0]
+                );
+            }
+        }
+        // The keep path: no temp write of a kept blob in the second
+        // batch, but a stored-file fsync and a dir fsync before the
+        // answer.
+        let batch2 = &steps[answers[0] + 1..=answers[1]];
+        for id in &kept {
+            assert!(
+                batch2.iter().all(|s| *s != S::TmpWrite(*id)),
+                "a kept blob was written again"
+            );
+            assert!(
+                batch2.contains(&S::StoredFileFsync(*id)),
+                "no stored-file fsync before the answer"
+            );
+            let (dir, _) = blobs.location(*id);
+            assert!(
+                batch2
+                    .iter()
+                    .any(|s| matches!(s, S::DirFsync(path) if *path == dir)),
+                "no dir fsync of {} before the answer",
+                dir.display()
+            );
+            assert!(
+                batch2.last().is_some_and(|s| *s == S::Answer),
+                "the batch's answer must close its steps: {batch2:?}"
+            );
+        }
+        assert_eq!(*steps.last().unwrap(), S::Answer, "the log ends at the answer");
     }
 
     #[test]
