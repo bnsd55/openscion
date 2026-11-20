@@ -148,13 +148,14 @@ jobs:
   # The Postgres arm of the fault soak: the same mixed load, kills and
   # checks, on a Postgres-backed store, with the database itself
   # restarted beside every server kill (SCION_FAULT_PG, soak-fault.sh's
-  # pg_restart). Dispatch only: where a long-run Postgres lives is
-  # still open (the 72-hour hosting decision), so the nightly never runs this arm; a dispatch
-  # proves it on demand. The image is pinned tag@sha256 the way the
-  # digest-pin wave (#595) pins the service containers.
+  # pg_restart). It rides the nightly with the other two jobs (#1317),
+  # against its own ephemeral service container: the 72-hour hosting
+  # decision concerns a persistent Postgres for the 72-hour soak, which
+  # this job does not run. A dispatch proves it on demand. The image is
+  # pinned tag@sha256 the way the digest-pin wave (#595) pins the
+  # service containers.
   soak-fault-postgres:
     name: soak-fault-postgres
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     # The same shape as the SQLite fault soak: 150 min covers 120 min
     # of load, and the build, the checks and the teardown share the
