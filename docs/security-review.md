@@ -81,22 +81,15 @@ reviewer probes.
 ## 4. Ten minutes, locally
 
 Build and start one server with one repo, on loopback, with a token:
+the README's [quick start](../README.md#quick-start) is that setup,
+and CI's release smoke runs it end to end on the release binaries
+(`.github/workflows/ci.yml`, the release-smoke job), so it runs as
+written. Run the quick start; then attack what it started.
 
-```sh
-git clone https://github.com/bnsd55/openscion && cd openscion
-cargo build --release
-export SCION_TOKEN=dev SCION_SERVER=http://127.0.0.1:7878
-git clone --depth 1 https://github.com/tokio-rs/tokio /tmp/tokio
-./target/release/scion-server --data /tmp/scion import /tmp/tokio
-./target/release/scion-server --data /tmp/scion ticket-key --out /tmp/scion/ticket.key > /tmp/scion/ticket.pub
-./target/release/scion-server --data /tmp/scion serve --ticket-key /tmp/scion/ticket.key &
-```
-
-Attack it: `scn` is the client (`./target/release/scn ls main:src` and
-the rest of the README's [quick start](../README.md#quick-start) steps run as
-written); the gRPC surface is behind `SCION_TOKEN=dev` on port 7878;
-the data directory `/tmp/scion` is a marker plus blobs (the metadata
-lives in Postgres). The file-mode
+Attack it: `scn` is the client (`scn ls main:src` and the rest of the
+quick start's read steps); the gRPC surface is behind `SCION_TOKEN=dev`
+on port 7878; the data directory `/tmp/scion` is a marker plus blobs
+(the metadata lives in Postgres). The file-mode
 rules refuse a directory other accounts can write — make one and watch
 the open refuse it. The archive round trip is the fastest path to the
 archive attacks: `scion-server --data /tmp/scion export --all --out
