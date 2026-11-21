@@ -17,7 +17,7 @@
 # writes.
 #
 # Faults: kill -9 the server under load. Nightly (120 min): every 20
-# minutes, six kills; the 10-minute dispatch: at a quarter, a half and
+# minutes, five kills; the 10-minute dispatch: at a quarter, a half and
 # three quarters of the run, three kills. The third restart takes the
 # whole chain down - cache and daemon too - the rest the server alone,
 # so most restarts prove the clients resume against a restarted
@@ -72,7 +72,8 @@ SOAK_FD_GROWTH=${SOAK_FD_GROWTH:-100}
 SOAK_P99_FACTOR=${SOAK_P99_FACTOR:-2}
 SOAK_WARM_SECONDS=${SOAK_WARM_SECONDS:-1800}
 # The kill schedule, in seconds from the start. Nightly (120 min):
-# every 20 minutes, six kills, the last 2 minutes before the end.
+# every 20 minutes up to 2 minutes before the end: five kills, at 20,
+# 40, 60, 80 and 100 minutes.
 # Shorter runs kill at a quarter, a half and three quarters of the run.
 KILL_AT=()
 if [ "$RUN_MINUTES" -ge 60 ]; then
@@ -86,9 +87,9 @@ else
   q=$((RUN_MINUTES * 60 / 4))
   KILL_AT+=("$q" "$((q * 2))" "$((q * 3))")
 fi
-# The pg backend and its restart. Off by default; the nightly keeps it
-# off until the 72-hour hosting decision says where Postgres
-# lives. SCION_FAULT_PG_CMD is the restart command itself, for example
+# The pg backend and its restart. Off by default; soak.yml's
+# soak-fault-postgres job turns it on, nightly and on dispatch
+# (#1317). SCION_FAULT_PG_CMD is the restart command itself, for example
 # `docker restart soak-pg`.
 # The Postgres URL reaches every scion-server this script raises
 # (serve, import, gc, fsck) through the env, which decides the backend;
@@ -649,8 +650,8 @@ row "kills planned -> done" "$planned_kills -> $done_kills"
 # what ran either way.
 served=$(served_backend "$WORK/server")
 row "backend (data dir)" "$served"
-# The Postgres restarts this run made (0 on the SQLite backend; the
-# fault-soak-postgres job's summary shows the fault really ran).
+# The Postgres restarts this run made (the soak-fault-postgres job's
+# summary shows the fault really ran).
 [ "${SCION_FAULT_PG:-0}" = "1" ] && row "postgres restarts" "$PG_RESTARTS"
 # A run shorter than the warm-up floor checks no per-segment RSS bound
 # and says so here: the floors the bounds need cannot exist, and the

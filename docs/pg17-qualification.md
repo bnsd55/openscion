@@ -55,7 +55,7 @@ The Postgres 17 evidence rides on one job family:
 | Requirement | What it says | Evidence today | Verdict |
 | --- | --- | --- | --- |
 | (a) the contract test on Postgres 17 | The end-to-end contract flow (import, serve, land, read, export) answers the same on Postgres 17 | `crates/scion-server/tests/contract.rs` drives a real server over the job's Postgres service (the spawned commands get `SCION_POSTGRES_URL` from `common::postgres_url`) and runs inside `test (postgres 17.11)`'s whole-suite step on every ready, non-docs-only push and PR, `main`, nightly and dispatch. The contract goldens of #571 (`crates/scion-server/tests/archive_golden.rs`, `audit_golden.rs`, the proto wire goldens) ride the same suite | EVIDENCE |
-| (b) the real Postgres fault rows | The fault matrix's Postgres rows are proven by tests that run on Postgres and can fail | See section 2 | EVIDENCE with two WEAK rows (the soak-fault arm, nightly from #1317; the drills) |
+| (b) the real Postgres fault rows | The fault matrix's Postgres rows are proven by tests that run on Postgres and can fail | See section 2 | EVIDENCE with one WEAK row (the drills) |
 | (c) backup and restore on Postgres 17 | A Postgres-backed store backs up and restores whole | `crates/scion-server/tests/backup.rs` `a_backup_taken_while_serving_restores_whole` — a live server, a backup taken mid-write (the metadata snapshot is the runbook's `pg_dump --no-owner` of the live database; the job hands the service container to the steps through `SCION_TEST_PG_CONTAINER`), the restore into a fresh store, then the equality check. Runs in `test (postgres 17.11)` per push. The operations runbook is `docs/operations.md` section 3 (`pg_dump` the database, restore the data directory, reopen) | EVIDENCE for the test; the runbook has never been walked on a real Postgres 17 install — that is requirement (d)'s trial, not a CI gap |
 | (d) the release-candidate trial on Postgres 17 | One RC serves real work for 30 days per `docs/production-trial.md`, with the trial file named before day 1 | `docs/production-trial.md` is the template only; `docs/release-notes/` holds no trial file; v0.6 has no RC yet. The two store drills have Postgres steps (operator-drill T3's `pg_dump` backup; second-operator's marker step and restart drill), but only a person runs them; the release and vulnerability drills have no store step. The RC trial runs the drills on the Postgres 17 install and records the outputs | MISSING — by schedule, not by neglect: the trial runs when the RC is cut. The follow-up is in section 4 |
 
@@ -87,7 +87,7 @@ the database's own WAL, and each fault row cuts the half it names.
 | EIO / EROFS failing disk | `storage.rs` rows on Postgres in the whole-suite step; the metadata half rides the database's WAL | EVIDENCE |
 | Whole server on a real full disk (tmpfs) | `disk_full.rs` on Postgres in the tmpfs step (blob path and inodes) | EVIDENCE |
 | SIGTERM drain under load | `health.rs` runs on Postgres in the whole-suite step | EVIDENCE |
-| Soak-fault: kill -9 the server under load, on Postgres | The `soak-fault-postgres` job (`.github/workflows/soak.yml`) arms the Postgres arm of `scripts/soak-fault.sh` (`pg_restart`): a Postgres 17 service container pinned tag@sha256, `SCION_TEST_POSTGRES_URL`, `SCION_FAULT_PG=1`, and `SCION_FAULT_PG_CMD` restarting the container between kills. The summary names the backend, the kills and the Postgres restarts, and the run fails unless every kill restarted Postgres. The nightly runs the job from #1317 on, with the same 120-minute budget as the SQLite fault soak, against its own ephemeral container | WEAK — until the first green nightly proves it, only a dispatch has run it. Green: [40017979410](https://github.com/bnsd55/openscion/actions/runs/40017979410) (postgres -> postgres, 3 kills, 3 restarts); red: [40071077720](https://github.com/bnsd55/openscion/actions/runs/40071077720) (the restart command replaced by a stop: "Postgres never came back"). The row flips to EVIDENCE on the first green nightly |
+| Soak-fault: kill -9 the server under load, on Postgres | The `soak-fault-postgres` job (`.github/workflows/soak.yml`) arms the Postgres arm of `scripts/soak-fault.sh` (`pg_restart`): a Postgres 17 service container pinned tag@sha256, `SCION_TEST_POSTGRES_URL`, `SCION_FAULT_PG=1`, and `SCION_FAULT_PG_CMD` restarting the container between kills. The summary names the backend, the kills and the Postgres restarts, and the run fails unless every kill restarted Postgres. The nightly runs the job from #1317 on, with the same 120-minute budget as the `soak-fault` job, against its own ephemeral container | EVIDENCE — the first nightly is green: [44717482221](https://github.com/bnsd55/openscion/actions/runs/44717482221) (backend postgres, 120 minutes, 5 kills, 5 Postgres restarts). The dispatch proofs before it: green [40017979410](https://github.com/bnsd55/openscion/actions/runs/40017979410) (postgres -> postgres, 3 kills, 3 restarts); red [40071077720](https://github.com/bnsd55/openscion/actions/runs/40071077720) (the restart command replaced by a stop: "Postgres never came back") |
 | The lock-restart refusal row (a server restarting right after a crash refuses until Postgres reaps the dead session's lock) | Open in `docs/production-audit.md` section 2; the runbook must say the supervisor retries the open with backoff | open row of the audit, not a CI gap — feeds the trial's runbook walk |
 | Operator / release / vulnerability drills | WEAK - the two store drills have Postgres steps (`pg_dump --no-owner` in operator-drill T3; second-operator's marker step and its Postgres restart drill T9), but only a person runs them; the trial (d) is where they run on Postgres 17. The release and vulnerability drills have no store step — they never touch the metadata backend, and the trial's record says so | WEAK as drills — the trial (d) runs them on the Postgres 17 install. Follow-up 4 |
 
@@ -95,8 +95,8 @@ the database's own WAL, and each fault row cuts the half it names.
 
 | Gap | Smallest closer | Cost |
 | --- | --- | --- |
-| faults.md staleness (its evidence names moved: `crash_pg.rs`, the tmpfs step's home, and one ci.yml line number) | faults.md's rows now name `crash_pg.rs` and the `test-postgres` tmpfs step; the one stale ci.yml line reference in the 53100 row is fixed in the same sweep as this list | Doc-only; minutes; no new CI |
-| ~~The soak-fault Postgres arm never runs~~ | Closed by #585: the dispatch-only `soak-fault-postgres` job sets the three variables and pins the image; the script fails a run whose kills did not restart Postgres | Done; ~10 minutes per dispatch run |
+| ~~faults.md staleness (its evidence names moved: `crash_pg.rs`, the tmpfs step's home, and one ci.yml line number)~~ | Closed: faults.md's rows name `crash_pg.rs` and the `test-postgres` tmpfs step, and no row cites a ci.yml line number | Done |
+| ~~The soak-fault Postgres arm never runs~~ | Closed by #585 and #1317: the `soak-fault-postgres` job sets the three variables and pins the image, and runs nightly and on dispatch; the script fails a run whose kills did not restart Postgres | Done; 120 minutes nightly, ~10 minutes per dispatch run |
 | ~~The racing-puts power row skips on Postgres~~ | Closed by the park seam's move to files under the data directory (`store.rs`'s `WritePark::from_env`): the row runs in the `power-loss` job's Postgres-backed flow, and faults.md's row says so | Done; the row is EVIDENCE above |
 | The drills run only when a person runs them | The trial (below) runs the store drills against the Postgres 17 RC install and records the outputs in the trial file; the release and vulnerability drills name no backend, and the trial's record says so | Part of (d); no CI change |
 | The RC trial on Postgres 17 (d) | Cut the RC, name `docs/release-notes/production-trial-<version>-pg17.md` before day 1 per the template, run 30 days with the drill walk-throughs | 30 days wall clock plus one host; not CI-automatable; starts when v0.6's RC is cut |
@@ -105,12 +105,11 @@ the database's own WAL, and each fault row cuts the half it names.
 
 1. ~~**faults.md row repair**~~ (done): the SIGKILL rows name
    `crash_pg.rs`, and the 53100 row names the `test-postgres` tmpfs
-   step. The one stale anchor left in faults.md, its ci.yml line
-   number for the tmpfs step, is fixed in the same sweep as this
-   list.
-2. ~~**Arm the Postgres soak-fault arm**~~ (closed by #585): the
-   dispatch-only `soak-fault-postgres` job sets the three variables;
-   the summary row and the restarts check prove the fault fired.
+   step, and no row cites a ci.yml line number.
+2. ~~**Arm the Postgres soak-fault arm**~~ (closed by #585 and
+   #1317): the `soak-fault-postgres` job sets the three variables
+   and runs nightly and on dispatch; the summary row and the
+   restarts check prove the fault fired.
 3. ~~**The racing-puts power row on Postgres**~~ (closed): the park
    seam is a file seam under the data directory now, so the row runs
    in the power job's Postgres-backed flow; see section 2's EVIDENCE
