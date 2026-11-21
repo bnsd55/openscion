@@ -157,7 +157,7 @@ jobs:
   soak-fault-postgres:
     name: soak-fault-postgres
     runs-on: ubuntu-24.04
-    # The same shape as the SQLite fault soak: 150 min covers 120 min
+    # The same shape as the soak-fault job: 150 min covers 120 min
     # of load, and the build, the checks and the teardown share the
     # rest. A dispatch defaults to 10 minutes of load.
     timeout-minutes: 165
@@ -189,7 +189,7 @@ jobs:
           SOAK_RSS_PCT: "150"
           SOAK_FD_GROWTH: "100"
           SOAK_P99_FACTOR: "2"
-          # The same baseline window as the SQLite fault soak (#365),
+          # The same baseline window as the soak-fault job (#365),
           # applied per restart segment.
           SOAK_WARM_SECONDS: "1800"
           # The fault: the restart command restarts this job's own
@@ -205,7 +205,7 @@ jobs:
           PGHOST: "127.0.0.1"
           PGPORT: "5432"
         run: |
-          # The same cap as the SQLite fault soak: 150 min covers 120
+          # The same cap as the soak-fault job: 150 min covers 120
           # min of load.
           timeout 9000 scripts/soak-fault.sh
       - name: upload the samples and the logs
