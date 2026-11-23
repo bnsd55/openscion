@@ -180,6 +180,11 @@ Source: §2 "Ticket keys" (the four steps are quoted there in order).
    no OLD-PUBLIC; restart with the new key alone and skip step 3's
    `--ticket-key-old`.
 
+   Skipping the old key has a cost an operator must weigh first: every
+   live ticket the old key signed is refused at once — up to 15
+   minutes' worth — and the clients and caches that hold one must mint
+   again.
+
 2. Give the tiers BOTH public keys, new first, before the server moves:
    `--ticket-public-key <NEW_HEX> --ticket-public-key <OLD_HEX>`.
    Restart the caches.
