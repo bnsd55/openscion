@@ -1012,10 +1012,36 @@ fn a_kill_during_a_land_leaves_no_session_or_lock_behind() {
     );
 
     // The land runs while the kill lands: the same shape the old-or-new
-    // test kills.
+    // test kills. The kill waits for the land's pending row first - the
+    // row is the land in flight - so the kill lands on a live land
+    // whenever the land has not already finished. A land that finished
+    // before its row showed is a passed positive control: the
+    // nothing-left-behind sweep still runs, and the same assertions
+    // hold.
     let url = server.url.clone();
     let handle = std::thread::spawn(move || land(&url, cut.as_bytes(), "cut"));
-    std::thread::sleep(Duration::from_millis(400));
+    let started = Instant::now();
+    // The land's first row is its accept: pending means the land's job
+    // is mid-flight, landed means it beat the poll. Either way the
+    // kill lands on a server that met the land, and the same
+    // assertions hold.
+    let mut state = String::from("absent");
+    while started.elapsed() < Duration::from_secs(10) {
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT state FROM {schema}.lands WHERE request_key = 'cut'"
+                ),
+                &[],
+            )
+            .expect("the lands read answers");
+        if let Some(row) = rows.first() {
+            state = row.get::<_, String>(0);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    println!("probe: the land's row at the kill: {state}");
     server.kill_and_wait();
     let _ = handle.join();
 
