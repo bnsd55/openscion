@@ -21,6 +21,8 @@ forms=(
   'local -A seen'
   'lower=${x,,}'
   'upper=${x^^}'
+  'one=${x,}'
+  'one_up=${x^}'
   'cmd1 |& cmd2'
   'cmd &>> log'
   'coproc tail -f log'

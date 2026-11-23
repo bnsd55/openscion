@@ -68,7 +68,9 @@ find scripts -maxdepth 1 -name '*.sh' ! -name capacity.sh -print0 |
 # 3.2, so a bash 4 form must fail this job in seconds, not a macOS test
 # job 20 minutes in (#1388). check-bash3.sh names the forms and their
 # reason; it sits out of its own scan, because it names them, and so
-# does its test, whose fixtures are the forms themselves.
-find scripts -maxdepth 1 -name '*.sh' ! -name capacity.sh \
+# does its test, whose fixtures are the forms themselves. capacity.sh
+# is scanned: it has no bash 4 form, and the gate is not the shellcheck
+# gate's exclusion list.
+find scripts -maxdepth 1 -name '*.sh' \
   ! -name check-bash3.sh ! -name test-check-bash3.sh -print0 |
   xargs -0 scripts/check-bash3.sh

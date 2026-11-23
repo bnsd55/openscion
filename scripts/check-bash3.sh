@@ -25,13 +25,16 @@ die() { printf '%s %s\n' "check-bash3:" "$*" >&2; exit 1; }
 # The forms. Whole-word bounds on the command words keep a name that
 # contains one of them out; the case-change operators need only the
 # "${name" prefix, so a ${x:-a,b} default stays legal.
-pattern='(^|[^A-Za-z0-9_])(mapfile|readarray|coproc)([^A-Za-z0-9_]|$)|(^|[^A-Za-z0-9_])(declare|local)[[:space:]]+-(A|n)([^A-Za-z0-9_]|$)|\$\{[A-Za-z_][A-Za-z0-9_]*(\^\^|,,)|\|\&|&>>'
+pattern='(^|[^A-Za-z0-9_])(mapfile|readarray|coproc)([^A-Za-z0-9_]|$)|(^|[^A-Za-z0-9_])(declare|local)[[:space:]]+-(A|n)([^A-Za-z0-9_]|$)|\$\{[A-Za-z_][A-Za-z0-9_]*(\^\^?|,,?)|\|\&|&>>'
 
 hits=0
 for f in "$@"; do
-  # -H names the file even when one file is given: the message must
-  # carry the file and the line.
-  if grep -nHE "$pattern" -- "$f"; then
+  # A whole-line comment is prose, not code: a form may be named there
+  # on purpose (merge-changelog.sh explains the portable case change it
+  # uses instead). An occurrence after a command still matches.
+  if lines=$(grep -nHE "$pattern" -- "$f" | \
+    grep -vE '^[^:]+:[0-9]+:[[:space:]]*#'); then
+    printf '%s\n' "$lines"
     hits=1
   fi
 done
