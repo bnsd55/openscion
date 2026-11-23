@@ -29,14 +29,16 @@ const TOKENS: [&str; 6] = [
 ];
 
 /// A site the sweep found: file (`scion-server/src/main.rs`), 1-based
-/// line, the enclosing function ("" for free-const sites), and the
-/// token that matched.
+/// line, the enclosing function ("" for free-const sites), the token
+/// that matched, and the message the site's own string literal carries
+/// (`""` for `unwrap` and for macros; `expect` always names one).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 struct Site {
     file: String,
     line: usize,
     fn_name: String,
     token: String,
+    message: String,
 }
 
 /// Blanks comments and the contents of string and char literals, line
@@ -136,6 +138,50 @@ fn blank_noise(src: &str) -> String {
             i += 1;
             continue;
         }
+        if c == 'r' && (nxt == '"' || (nxt == '#' && chars[i..].contains(&'"'))) {
+            // A raw string: `r"..."`, `r#"..."#`, `r##"..."##`, ... It
+            // closes only at the quote followed by the same number of
+            // hashes, so an inner quote or an inner `"#` cannot close it.
+            let mut hashes = 0usize;
+            let mut scan = i + 1;
+            while scan < n && chars[scan] == '#' {
+                hashes += 1;
+                scan += 1;
+            }
+            if scan < n && chars[scan] == '"' {
+                // Walk to the closing quote-plus-hashes; keep the newlines.
+                let mut at = scan + 1;
+                while at < n {
+                    if chars[at] == '"' {
+                        let mut close = at + 1;
+                        while close < n && chars[close] == '#' {
+                            close += 1;
+                        }
+                        if close - at - 1 == hashes {
+                            break;
+                        }
+                        at = close;
+                    } else {
+                        at += 1;
+                    }
+                }
+                // Blank the whole literal, quotes and hashes included,
+                // except its newlines.
+                for blanked in i..=at.min(n - 1) {
+                    if chars[blanked] != '\n' {
+                        out[blanked] = ' ';
+                    }
+                }
+                i = at + 1;
+                continue;
+            }
+            // Not a raw string opening: an identifier that happens to be
+            // `r` (a lifetime-name clash is impossible in code position);
+            // fall through as a plain character.
+            out[i] = 'r';
+            i += 1;
+            continue;
+        }
         if c == '\'' {
             // A char literal is at most an escape or one character wide.
             let lit = chars[i..].len() >= 3
@@ -153,6 +199,40 @@ fn blank_noise(src: &str) -> String {
     out.into_iter().collect()
 }
 
+/// Whether one `cfg(...)` predicate (from its opening paren to its
+/// matching close) gates an item out of non-test builds: a positive
+/// `test` word or the exact feature `test-hooks`, with no `not(...)`
+/// around either. `cfg(not(test))` stays in; a feature named
+/// `latest-thing` is not `test-hooks`, whatever it contains.
+fn predicate_gates_tests(part: &str) -> bool {
+    let Some(open) = part.find('(') else {
+        return false;
+    };
+    // The predicate's own span: to the paren that balances the opener.
+    let mut depth = 0usize;
+    let mut end = part.len();
+    for (offset, c) in part[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = open + offset + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let predicate = &part[open..end];
+    let not_wrapped = predicate.contains("not(");
+    let test_word = predicate
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|word| word == "test");
+    let test_hooks = predicate.contains("feature = \"test-hooks\"");
+    (test_word || test_hooks) && !not_wrapped
+}
+
 /// Marks the 0-based line indexes of items gated out of non-test
 /// builds: any `cfg(...)` attribute whose predicate mentions `test`
 /// (as `cfg(test)` or `cfg(any(test, feature = "test-hooks"))`). The
@@ -165,13 +245,19 @@ fn mark_test_gated(noisy: &str) -> BTreeSet<usize> {
     let mut at = 0;
     while at < line_count {
         let trimmed = lines[at].trim_start();
-        // A `cfg(not(test))`/`cfg(not(any(test, ...)))` item is the
-        // production twin: it stays in the sweep. Only a positive
-        // `test` in the attribute's own predicate marks the item out;
-        // matching the word `test` anywhere would blank the `not(test)`
-        // twin and sweep a production fn as test code.
-        let is_cfg =
-            trimmed.starts_with("#[cfg(") && !trimmed.contains("not(") && trimmed.contains("test");
+        // An attribute list may share one line (`#[allow(dead_code)]
+        // #[cfg(test)]`), so the cfg can sit anywhere in the line's
+        // attribute run - but each `cfg(...)` predicate decides alone. A
+        // `cfg(not(test))`/`cfg(not(any(test, ...)))` item is the
+        // production twin: it stays in the sweep. The predicate matches
+        // the word `test` exactly or the feature `test-hooks` exactly, so
+        // a future feature named `latest-thing` cannot gate a production
+        // item out by sharing a substring.
+        let is_cfg = trimmed.contains("#[cfg(")
+            && trimmed
+                .split("#[")
+                .filter(|part| part.starts_with("cfg("))
+                .any(predicate_gates_tests);
         if is_cfg {
             // The attribute may span lines; find its closing bracket.
             let mut attr_end = at;
@@ -279,6 +365,7 @@ fn sweep() -> Vec<Site> {
                 continue;
             }
             let src = fs::read_to_string(&path).unwrap();
+            let src_lines: Vec<&str> = src.lines().collect();
             let noisy = blank_noise(&src);
             let gated = mark_test_gated(&noisy);
             for (idx, line) in noisy.lines().enumerate() {
@@ -287,11 +374,13 @@ fn sweep() -> Vec<Site> {
                 }
                 for token in TOKENS {
                     if line.contains(token) {
+                        let message = site_message(src_lines[idx], token);
                         sites.push(Site {
                             file: rel.clone(),
                             line: idx + 1,
                             fn_name: enclosing_fn(&noisy, idx),
                             token: token.to_owned(),
+                            message,
                         });
                     }
                 }
@@ -379,6 +468,40 @@ fn backticked(cell: &str) -> Vec<String> {
         .collect()
 }
 
+/// The message of a panic site, read from the original source line:
+/// the string literal inside the call, for `expect` and for the macros
+/// (`panic!("...")` and so on). `unwrap` carries no message; the answer
+/// is `""`, and no row can match it by message.
+fn site_message(line: &str, token: &str) -> String {
+    let Some(at) = line.find(token) else {
+        return String::new();
+    };
+    let rest = &line[at + token.len()..];
+    let rest = rest.trim_start();
+    // `.expect(` / `panic!(` / ... is followed by the message's opening
+    // quote; anything else (a `?`, a `.`, a `,`) means no message here.
+    let Some(quote_at) = rest.find('"') else {
+        return String::new();
+    };
+    let after_quote = &rest[quote_at + 1..];
+    let mut message = String::new();
+    let mut chars = after_quote.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                // An escaped char rides as-is: `\"` does not close.
+                if let Some(escaped) = chars.next() {
+                    message.push('\\');
+                    message.push(escaped);
+                }
+            }
+            '"' => return message,
+            _ => message.push(c),
+        }
+    }
+    message
+}
+
 /// A row names a site when its file cell names the site's file (a full
 /// path, or the file's basename uniquely across the four crates) AND
 /// the site's function or quoted token text appears in the row.
@@ -426,10 +549,12 @@ fn row_names_site(
                     .is_some_and(|tail| tail == site.fn_name)
         })
         || {
-            // The quoted panic text: the row may quote the token with its
-            // message (`unreachable!("...")`) or name the shape
-            // (`.expect("...")`); either appears as `token` plus backtick.
-            row_text.contains(&site.token)
+            // The quoted panic text: the row claims the site only when it
+            // quotes the site's OWN message (`unreachable!("the loop
+            // returns at every entry")`). A row that quotes one site's
+            // message must not claim every site of the same token shape in
+            // its file - the message pins which site the row speaks of.
+            !site.message.is_empty() && row_text.contains(&format!("\"{}\"", site.message))
         }
 }
 
@@ -484,6 +609,58 @@ fn every_5a_row_names_a_live_site() {
          live site on purpose reads FIXED or NOT A PANIC):\n{}",
         stale.join("\n")
     );
+}
+
+#[test]
+fn blank_noise_holds_raw_strings_and_shared_line_attributes() {
+    // A raw string whose contents would otherwise move the fn walker
+    // (a `}`) and add a false site (an `.unwrap()`): F2's fixture.
+    let raw = concat!(
+        "fn outer() -> usize {\n",
+        "    let text = r#\"a } brace and .unwrap() inside\"#;\n",
+        "    text.len()\n",
+        "}\n"
+    );
+    let noisy = blank_noise(raw);
+    let sites: Vec<&str> = TOKENS
+        .iter()
+        .filter(|token| noisy.contains(**token))
+        .copied()
+        .collect();
+    assert!(
+        sites.is_empty(),
+        "a raw string's contents must read as string, not code: {sites:?}"
+    );
+    // The fn walker sees one fn with one brace pair, no phantom close.
+    assert_eq!(enclosing_fn(&noisy, 2), "outer");
+    // A hash-quoted raw string with an inner plain quote: F2's second
+    // shape. It closes only at quote-plus-hash, so the inner quote stays
+    // inside the literal.
+    let hashed = concat!(
+        "fn middle() {\n",
+        "    let text = r#\"an inner \" quote and .expect(\u{22}x\u{22}) stay\"#;\n",
+        "}\n"
+    );
+    let noisy = blank_noise(hashed);
+    assert!(
+        !noisy.contains(".expect("),
+        "a raw string's inner quote must not end the literal early"
+    );
+    assert_eq!(enclosing_fn(&noisy, 2), "middle");
+    // Two attributes on one line: F3's fixture. The cfg marks the item
+    // out even though the line starts with another attribute.
+    let shared = "#[allow(dead_code)] #[cfg(test)]\nfn hidden() {}\n";
+    let marked = mark_test_gated(shared);
+    // The attribute line and the fn line (the item closes on it); a
+    // token search on either must be skipped.
+    assert_eq!(marked.len(), 2, "the shared-line cfg marks its item out");
+    // A feature whose name merely contains "test" gates nothing out: the
+    // predicate must name `test` or `test-hooks` exactly.
+    let near = "#[cfg(feature = \"latest-thing\")]\nfn real() {}\n";
+    assert!(mark_test_gated(near).is_empty());
+    // `not(test)` stays in.
+    let twin = "#[cfg(not(test))]\nfn real() {}\n";
+    assert!(mark_test_gated(twin).is_empty());
 }
 
 #[test]
