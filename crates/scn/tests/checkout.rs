@@ -599,8 +599,18 @@ fn a_stopped_checkout_reports_the_signal_and_writes_nothing() {
     .spawn()
     .unwrap();
     // The checkout is parked in its fetch, waiting for the reply that
-    // never comes; the signal reaches it there.
-    std::thread::sleep(std::time::Duration::from_millis(1500));
+    // never comes; the signal reaches it there. The wait reads the
+    // checkout's progress: the liar sent `a`, so the parked fetch has
+    // written it to a temp dir - the same marker the fetch-order test
+    // reads.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !temp_dirs(&dest).iter().any(|temp| temp.join("a").exists()) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the checkout never wrote a"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     // `kill` by name: `--` keeps a pid that starts with a digit a pid.
     std::process::Command::new("kill")
         .args(["-INT", "--", &child.id().to_string()])
