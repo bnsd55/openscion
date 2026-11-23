@@ -454,13 +454,9 @@ async fn late_land(
     // deadline-exceeded for certain.
     let started = std::time::Instant::now();
     let ts = loop {
-        let line = read_lines(audit_path)
-            .into_iter()
-            .find(|line| {
-                line["event"] == "land"
-                    && line["outcome"] == "intent"
-                    && line["request_id"] == "t-late"
-            });
+        let line = read_lines(audit_path).into_iter().find(|line| {
+            line["event"] == "land" && line["outcome"] == "intent" && line["request_id"] == "t-late"
+        });
         if let Some(line) = line {
             break line["ts"].as_str().expect("the line carries ts").to_owned();
         }
