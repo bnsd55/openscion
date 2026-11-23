@@ -709,7 +709,6 @@ fn an_open_waits_while_an_older_builds_migration_holds_the_bare_key() {
     }
     assert_eq!(holding.len(), 1, "the older build's turn is real");
     let dir = private_tempdir();
-    let started = std::time::Instant::now();
     let opened = std::thread::spawn(move || Backend::open_test(dir.path()));
     // The hold itself proves the open's wait: the open cannot pass the
     // bare key while it is held, so the release only drops once the

@@ -40,8 +40,9 @@ fn wait_key_held(key: i64) {
     loop {
         // Postgres splits a bigint advisory key across pg_locks' classid
         // (the high half) and objid (the low half); both columns are oid.
-        let classid = ((key >> 32) & 0xFFFF_FFFF) as u32;
-        let objid = (key & 0xFFFF_FFFF) as u32;
+        // The masked halves are the u32 bit patterns Postgres holds.
+        let classid = u32::try_from((key >> 32) & 0xFFFF_FFFF).unwrap();
+        let objid = u32::try_from(key & 0xFFFF_FFFF).unwrap();
         let granted = client
             .query_one(
                 "SELECT count(*) FROM pg_locks \

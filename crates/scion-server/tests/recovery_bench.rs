@@ -117,38 +117,7 @@ async fn a_restart_after_a_kill_recovers_in_a_stated_time() {
     // release, not a sleep's guess at one: every connection of the
     // store's schema names the schema as its application_name, so the
     // wait polls pg_stat_activity until none is left.
-    let schema = Backend::test_schema(&data);
-    // The connect is one blocking call at setup: it runs on a thread of
-    // its own, the way `common::postgres_url` does it, so the runtime's
-    // worker never blocks on it.
-    tokio::task::spawn_blocking(move || {
-        let mut client = postgres::Client::connect(
-            &std::env::var("SCION_TEST_POSTGRES_URL").unwrap(),
-            postgres::NoTls,
-        )
-        .unwrap();
-        let started = std::time::Instant::now();
-        loop {
-            let left = client
-                .query_one(
-                    "SELECT count(*) FROM pg_stat_activity \
-                     WHERE application_name = $1 AND pid <> pg_backend_pid()",
-                    &[&schema],
-                )
-                .unwrap()
-                .get::<_, i64>(0);
-            if left == 0 {
-                break;
-            }
-            assert!(
-                started.elapsed() < std::time::Duration::from_secs(10),
-                "the test's own store never released: {left} sessions left"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-    })
-    .await
-    .unwrap();
+    wait_store_released(Backend::test_schema(&data)).await;
 
     // The port is the test's own: a rerun on a development machine must
     // not talk to a server a panicking earlier run left behind. On the
@@ -248,6 +217,42 @@ impl Drop for ServerGuard {
 /// Polls the health service until readiness answers SERVING. The
 /// service takes no token; a poll before the port opens errors, and the
 /// loop reads that as not yet.
+/// Waits until no session of the store's schema is left in
+/// `pg_stat_activity`: every connection names its schema as its
+/// `application_name`, so an empty listing is the store's release. The
+/// connect is one blocking call at setup, so it runs on a thread of
+/// its own, the way `common::postgres_url` does it.
+async fn wait_store_released(schema: String) {
+    tokio::task::spawn_blocking(move || {
+        let mut client = postgres::Client::connect(
+            &std::env::var("SCION_TEST_POSTGRES_URL").unwrap(),
+            postgres::NoTls,
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        loop {
+            let left = client
+                .query_one(
+                    "SELECT count(*) FROM pg_stat_activity \
+                     WHERE application_name = $1 AND pid <> pg_backend_pid()",
+                    &[&schema],
+                )
+                .unwrap()
+                .get::<_, i64>(0);
+            if left == 0 {
+                break;
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "the test's own store never released: {left} sessions left"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    })
+    .await
+    .unwrap();
+}
+
 async fn wait_for_serving(work: &std::path::Path) {
     let endpoint = Endpoint::from_shared(format!("http://127.0.0.1:{PORT}"))
         .unwrap()
