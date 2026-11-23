@@ -495,6 +495,59 @@ for w in $WRITERS; do
   done
 done
 
+# scan_damage WORK: the cells whose bench failed its exactly-once check
+# or whose checkouts read back damaged data, one line per cell, nonzero
+# when there is any. Lost or damaged data is a correctness failure and
+# fails the run (#1362); overload errors stay data - the errors column,
+# the timeouts column. The rule is by message, never by exit code: both
+# kinds exit 2 (main.rs's ERROR_EXIT), and a bench that died on an
+# overloaded RPC fails exactly like one whose exactly-once check
+# failed. Only these texts name damage:
+# - bench's verify (crates/scn/src/cmd/bench.rs:184, :201, :206):
+#   "appears twice on main", "lands reported the same result",
+#   "reported lands differ from main:" - never a bare bench failure;
+# - checkout's own checks (crates/scn/src/cmd/checkout.rs, client.rs):
+#   "server sent a bad object for", "server sent tree ", "server sent
+#   blob ", "server sent a bad tree for", "server sent a bad ID",
+#   "server sent an object that was not asked for", "server sent none
+#   of the requested objects", "bytes, the tree says", and the
+#   truncated reply "the reply ended in the middle of an object";
+# - the server's own data-loss status: "code: 'DataLoss'" (the message
+#   is error.rs's "damaged data").
+# Overload reads as "code: 'Unavailable'", "code: 'ResourceExhausted'"
+# and the harness's "timeout after 60s" - recorded, not fatal. The
+# ticket refusal ("cannot mint a fresh ticket: the server sent no
+# ticket") names no marker and stays out. test-capacity-counters.sh
+# pins every marker against the Rust source, so a reword fails CI
+# instead of silently turning the guard off.
+scan_damage() {
+  local work=$1 f cell hit hits=0
+  for f in "$work"/bench-*.log; do
+    [ -e "$f" ] || continue
+    cell=${f##*/}; cell=${cell#bench-}; cell=${cell%.log}; cell=${cell%-rep*}
+    hit=$(grep -h -m1 -e "appears twice on main" \
+      -e "lands reported the same result" \
+      -e "reported lands differ from main:" "$f" || true)
+    [ -n "$hit" ] || continue
+    printf 'cell %s: bench exactly-once failed: %s\n' "$cell" "$hit"
+    hits=1
+  done
+  for f in "$work"/reads-*.log; do
+    [ -e "$f" ] || continue
+    cell=${f##*/}; cell=${cell#reads-}; cell=${cell%.log}
+    hit=$(grep -h -m1 -e "server sent a bad object for" -e "server sent tree " \
+      -e "server sent blob " -e "server sent a bad tree for" -e "server sent a bad ID" \
+      -e "server sent an object that was not asked for" \
+      -e "server sent none of the requested objects" -e "bytes, the tree says" \
+      -e "the reply ended in the middle of an object" -e "code: 'DataLoss'" \
+      "$f" || true)
+    [ -n "$hit" ] || continue
+    printf 'cell %s: damaged data: %s\n' "$cell" "$hit"
+    hits=1
+  done
+  [ "$hits" -eq 0 ]
+}
+
 # The artifacts go where the workflow finds them.
 mkdir -p "${RUNNER_TEMP:-/tmp}/capacity-artifacts"
 
@@ -535,4 +588,14 @@ echo
 row "commit" "$HEAD_HEX"
 [ -n "$RUN_URL" ] && row "run" "$RUN_URL"
 row "runner" "$CAPACITY_MACHINE"
+# The grid is recorded and the table is printed; now the exit. Lost or
+# damaged data fails the run and names the cells (#1362); overload
+# errors stay data. The table above stands either way: the artifacts
+# and the row are the measurement, the exit is the verdict.
+if ! damage=$(scan_damage "$WORK"); then
+  echo "FAIL: the run lost or damaged data:" >&2
+  printf '%s\n' "$damage" >&2
+  stop_scion 2> /dev/null || true
+  exit 1
+fi
 stop_scion 2> /dev/null || true
