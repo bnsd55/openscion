@@ -783,12 +783,17 @@ async fn concurrent_lands_ref_lines_tell_one_true_history() {
         })
     };
     // Hold the store's write connection, so no land's job can record
-    // itself, let alone move the ref, until every call has read the
-    // ref: the calls' first tasks need only the readers, and the
-    // intents in the audit file say they are past them. Then let go:
-    // the ref lock serializes the jobs' moves, and each move's
+    // itself, let alone move the ref, while the block runs. Then let
+    // go: the ref lock serializes the jobs' moves, and each move's
     // `previous` (or, on the racing code, the call's own early read)
-    // must be the head the move actually replaced.
+    // must be the head the move actually replaced. On the current code
+    // a land's first task is the pending row - a write - so under the
+    // block every job sits at record_land and reads the ref later,
+    // inside the lock. The sleep below is the point: a regressed land
+    // that reads the ref early, outside the lock, would read it during
+    // the block, within microseconds of its intent, and the sleep
+    // gives it the time to do so before the go - the broken chain the
+    // ref lines below must catch.
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
     let blocker = std::thread::spawn({
@@ -807,13 +812,14 @@ async fn concurrent_lands_ref_lines_tell_one_true_history() {
     for i in 0..8 {
         join(i);
     }
-    // The eight intents say every call is past its intent; their
-    // first tasks read the ref within microseconds of it.
+    // The eight intents say every call is past its intent, and the
+    // sleep gives a regressed early-read land its moment: the bug this
+    // test guards against reads the ref during the block, within
+    // microseconds of its intent. The sleep is the point (OTHER, not
+    // SYNC): on the current code nothing reads the ref during the
+    // block, and the go releases the recorded lands to their reads
+    // inside the lock.
     wait_for_lines(&audit_path, 8).await;
-    // The sleep waits for the eight calls' first reads of the ref - a
-    // state no line or row records, so only time stands in for it.
-    // SHORTCUT: no observable marks a land's plan read; #1372's hook
-    // PR replaces this sleep with a poll of that marker.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     go_tx.send(()).unwrap();
     blocker.join().unwrap();
