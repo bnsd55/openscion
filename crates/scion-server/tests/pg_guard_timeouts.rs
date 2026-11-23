@@ -30,6 +30,38 @@ fn connect() -> Client {
     Client::connect(&url, NoTls).expect("the test database is up")
 }
 
+/// Waits until the holder's advisory lock shows granted in `pg_locks`, so
+/// the waiter's timeout window starts on a key that is really taken. The
+/// deadline is above the holder's own hold, and the poll never changes
+/// what the test asserts.
+fn wait_key_held(key: i64) {
+    let mut client = connect();
+    let started = Instant::now();
+    loop {
+        // Postgres splits a bigint advisory key across pg_locks' classid
+        // (the high half) and objid (the low half); both columns are oid.
+        let classid = ((key >> 32) & 0xFFFF_FFFF) as u32;
+        let objid = (key & 0xFFFF_FFFF) as u32;
+        let granted = client
+            .query_one(
+                "SELECT count(*) FROM pg_locks \
+                 WHERE locktype = 'advisory' AND granted \
+                 AND classid = $1 AND objid = $2",
+                &[&classid, &objid],
+            )
+            .expect("the lock read works")
+            .get::<_, i64>(0);
+        if granted >= 1 {
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the holder never took the key within 10 s"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// A held key on its own open transaction: the holder stays in scope
 /// for about 1.2 s, so a waiter under a 1 s timeout fails fast and a
 /// waiter under a longer one eventually gets the key. The holder is a
@@ -64,7 +96,7 @@ fn wait_for_key(client: &mut Client, key: i64, timeout: &str) -> Result<Duration
 #[test]
 fn the_key_wait_runs_under_the_timeout_set_before_it() {
     hold_key_for(KEY_GUARD, 3);
-    std::thread::sleep(Duration::from_millis(500));
+    wait_key_held(KEY_GUARD);
     let mut waiter = connect();
     // 1 s is shorter than the holder's 3 s: only if the 1 s timeout
     // governs the wait does it fail.
@@ -88,7 +120,7 @@ fn the_key_wait_runs_under_the_transactions_60s_guard() {
     // under 5 s, and the wait would fail at 5 s - this proof fails
     // then. And a dropped 60 s statement fails it at the session's 1 s.
     hold_key_for(KEY_FOLD, 7);
-    std::thread::sleep(Duration::from_millis(500));
+    wait_key_held(KEY_FOLD);
     let mut waiter = connect();
     waiter
         .batch_execute("SET lock_timeout = '1s'")
