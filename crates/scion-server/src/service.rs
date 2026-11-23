@@ -4463,42 +4463,69 @@ mod tests {
         )
     }
 
-    /// A wait for a shared limit whose rest is taken answers at the busy
-    /// bound: `resource_exhausted`, a retryable "busy ... retry later"
-    /// message, and the limit's `scion_busy_timeouts_total` counted
-    /// (#1391). On main the wait has no bound, so the blame call hangs
-    /// past this test's own completion assert: red there.
-    #[tokio::test]
-    async fn a_wait_over_a_taken_limit_answers_busy_at_the_bound() {
+    /// A store with repo `r`, ref `main` and one changeset that holds
+    /// the one-byte file `a`, for the busy-bound tests (#1391).
+    fn a_store_with_a_file() -> (tempfile::TempDir, Backend, ChangesetId) {
         let dir = crate::test_support::private_tempdir();
         let store = Backend::open_test(dir.path()).unwrap();
         let blob = store.blobs().put(b"x").unwrap();
-        let put = |parents, path: &str| {
-            Changeset::new(
-                parents,
-                IdentityTime::new(b"t".to_vec(), b"t@x".to_vec(), 0, 0)
-                    .expect("identity fits the format"),
-                None,
-                path.as_bytes().to_vec(),
-                [(
-                    RepoPath::new(path.as_bytes().to_vec()).unwrap(),
-                    Some(FileState::Regular {
-                        content: blob,
-                        executable: false,
-                    }),
-                )]
-                .into(),
-            )
-            .expect("changeset fits the format")
-        };
+        let cs = Changeset::new(
+            vec![],
+            IdentityTime::new(b"t".to_vec(), b"t@x".to_vec(), 0, 0)
+                .expect("identity fits the format"),
+            None,
+            b"a".to_vec(),
+            [(
+                RepoPath::new("a").unwrap(),
+                Some(FileState::Regular {
+                    content: blob,
+                    executable: false,
+                }),
+            )]
+            .into(),
+        )
+        .expect("changeset fits the format");
         let cs = store
             .write(|c| {
                 let repo = c.create_repo("r")?;
-                let root = c.insert_changeset(repo, &put(vec![], "a"))?;
+                let root = c.insert_changeset(repo, &cs)?;
                 assert!(c.cas_ref(repo, "main", None, root)?);
                 Ok(root)
             })
             .unwrap();
+        (dir, store, cs)
+    }
+
+    /// Asserts the call's wait for a taken limit answers at the busy
+    /// bound: `resource_exhausted`, the limit's retryable "busy ...
+    /// retry later" message, and its `scion_busy_timeouts_total` counted
+    /// once (#1391). Bounded at 5 s so a server without the wrap fails
+    /// the test instead of hanging it.
+    async fn busy_at_the_bound<T>(
+        metrics: &Metrics,
+        limit: BusyLimit,
+        message: &str,
+        call: impl std::future::Future<Output = Result<Response<T>, Status>>,
+    ) {
+        let reply = tokio::time::timeout(Duration::from_secs(5), call).await;
+        match reply {
+            Ok(Ok(_reply)) => panic!("the taken limit answered with a reply, not busy"),
+            Ok(Err(status)) => {
+                assert_eq!(status.code(), tonic::Code::ResourceExhausted, "{status}");
+                assert!(status.message().contains(message), "{status}");
+                assert_eq!(metrics.busy_timeouts(limit), 1);
+            }
+            Err(elapsed) => panic!("the wait did not end within the test's own bound: {elapsed}"),
+        }
+    }
+
+    /// A wait for a shared limit whose rest is taken answers at the busy
+    /// bound (#1391). On main the wait has no bound, so the blame call
+    /// hangs past this test's own completion assert: red there. The
+    /// other four sites' wraps have their own tests below.
+    #[tokio::test]
+    async fn a_wait_over_a_taken_limit_answers_busy_at_the_bound() {
+        let (_dir, store, cs) = a_store_with_a_file();
         let metrics = Arc::new(Metrics::default());
         let mut service = counting_service(&store, &metrics);
         service.busy = Duration::from_millis(100);
@@ -4513,33 +4540,139 @@ mod tests {
             cursor: Vec::new(),
         });
         let started = std::time::Instant::now();
-        // Bounded so a server without the bound fails this test instead
-        // of hanging it: red on main (#1391).
-        let reply = tokio::time::timeout(Duration::from_secs(5), service.blame(request)).await;
-        let status = match reply {
-            Ok(Ok(_reply)) => panic!("the taken limit answered with a reply, not busy"),
-            Ok(Err(status)) => status,
-            Err(elapsed) => panic!("the wait did not end within the test's own bound: {elapsed}"),
-        };
+        busy_at_the_bound(
+            &metrics,
+            BusyLimit::Blame,
+            "busy: no blame slot free; retry later",
+            service.blame(request),
+        )
+        .await;
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "the wait ended at the bound, not at a hang: {:?}",
             started.elapsed()
         );
-        assert_eq!(status.code(), tonic::Code::ResourceExhausted, "{status}");
-        assert!(
-            status
-                .message()
-                .contains("busy: no blame slot free; retry later"),
-            "{status}"
-        );
-        assert_eq!(metrics.busy_timeouts(BusyLimit::Blame), 1);
         // The export carries the limit's own series.
         let text = metrics.render();
         assert!(
             text.contains("scion_busy_timeouts_total{limit=\"blame\"} 1"),
             "{text}"
         );
+        drop(held);
+    }
+
+    /// Diff's slot wrap is pinned: with every diff slot held, the call
+    /// answers at the bound. Fails if the wrap at the diff site goes.
+    #[tokio::test]
+    async fn a_diff_waits_for_a_slot_at_the_busy_bound() {
+        let (_dir, store, cs) = a_store_with_a_file();
+        let metrics = Arc::new(Metrics::default());
+        let mut service = counting_service(&store, &metrics);
+        service.busy = Duration::from_millis(100);
+        let held: Vec<_> = (0..MAX_DIFFS)
+            .map(|_| Arc::clone(&service.diffs).try_acquire_owned().unwrap())
+            .collect();
+        let request = as_default(DiffRequest {
+            repo: "r".into(),
+            old_changeset_id: cs.as_bytes().to_vec(),
+            new_changeset_id: cs.as_bytes().to_vec(),
+            path: Vec::new(),
+            after: Vec::new(),
+        });
+        busy_at_the_bound(
+            &metrics,
+            BusyLimit::Diff,
+            "busy: no diff slot free; retry later",
+            service.diff(request),
+        )
+        .await;
+        drop(held);
+    }
+
+    /// The graph-query wrap is pinned over `MergeBase`: with every
+    /// graph-query slot held, the call answers at the bound. Fails if
+    /// the wrap in `run_graph_query` goes.
+    #[tokio::test]
+    async fn a_graph_query_waits_for_a_slot_at_the_busy_bound() {
+        let (_dir, store, cs) = a_store_with_a_file();
+        let metrics = Arc::new(Metrics::default());
+        let mut service = counting_service(&store, &metrics);
+        service.busy = Duration::from_millis(100);
+        let held: Vec<_> = (0..MAX_GRAPH_QUERIES)
+            .map(|_| {
+                Arc::clone(&service.graph_queries)
+                    .try_acquire_owned()
+                    .unwrap()
+            })
+            .collect();
+        let request = as_default(MergeBaseRequest {
+            repo: "r".into(),
+            a_changeset_id: cs.as_bytes().to_vec(),
+            b_changeset_id: cs.as_bytes().to_vec(),
+        });
+        busy_at_the_bound(
+            &metrics,
+            BusyLimit::GraphQuery,
+            "busy: no graph query slot free; retry later",
+            service.merge_base(request),
+        )
+        .await;
+        drop(held);
+    }
+
+    /// `ReadFile`'s share wrap is pinned: with the read budget's whole
+    /// rest held, the call answers at the bound before its first part.
+    /// Fails if the wrap at the `read_file` share site goes.
+    #[tokio::test]
+    async fn a_read_file_waits_for_its_share_at_the_busy_bound() {
+        let (_dir, store, cs) = a_store_with_a_file();
+        let metrics = Arc::new(Metrics::default());
+        let mut service = counting_service(&store, &metrics);
+        service.busy = Duration::from_millis(100);
+        let reads = Arc::clone(&service.reads);
+        let held = reads
+            .try_acquire_many(u32::try_from(reads.available_permits()).expect("permits fit u32"))
+            .unwrap();
+        let request = as_default(ReadFileRequest {
+            repo: "r".into(),
+            changeset_id: cs.as_bytes().to_vec(),
+            path: b"a".to_vec(),
+        });
+        busy_at_the_bound(
+            &metrics,
+            BusyLimit::ReadBudget,
+            "busy: no read budget free; retry later",
+            service.read_file(request),
+        )
+        .await;
+        drop(held);
+    }
+
+    /// `GetChangeset`'s share wrap is pinned over `whole_share_of`: with
+    /// the read budget's whole rest held, the call answers at the bound
+    /// before its first part. Fails if the wrap at the whole-share site
+    /// goes.
+    #[tokio::test]
+    async fn a_get_changeset_waits_for_its_share_at_the_busy_bound() {
+        let (_dir, store, cs) = a_store_with_a_file();
+        let metrics = Arc::new(Metrics::default());
+        let mut service = counting_service(&store, &metrics);
+        service.busy = Duration::from_millis(100);
+        let reads = Arc::clone(&service.reads);
+        let held = reads
+            .try_acquire_many(u32::try_from(reads.available_permits()).expect("permits fit u32"))
+            .unwrap();
+        let request = as_default(GetChangesetRequest {
+            repo: "r".into(),
+            changeset_id: cs.as_bytes().to_vec(),
+        });
+        busy_at_the_bound(
+            &metrics,
+            BusyLimit::ReadBudget,
+            "busy: no read budget free; retry later",
+            service.get_changeset(request),
+        )
+        .await;
         drop(held);
     }
 

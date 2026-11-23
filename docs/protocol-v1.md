@@ -179,16 +179,18 @@ at most 4 `Blame` calls run at once, at most 4 `MergeBase`, `IsAncestor`
 and `Log` calls with a path together, and at most 4 `Diff` calls run at
 once. A `ReadFile` call waits for its share of a memory budget
 (section 6.7). Time in a queue counts toward the timeout.
-Every wait for one of these shared limits ends within 30 s (the busy
-bound): a wait that finds no room within it fails at once with a
-retryable `RESOURCE_EXHAUSTED`, whose message says `busy: no <limit>
-free; retry later`, and the server counts it in the limit's series of
-`scion_busy_timeouts_total` (section 8). This covers the 256 jobs, the
-`PutBlob` uploads, the `Blame`, `MergeBase`, `IsAncestor`, `Log` and
-`Diff` slots, the `ReadFile` budget, and the derive walks a cold read
-makes (section 7.2). One wait keeps its own shape: a `GetObjects` call
-that gets no memory for its first object within 30 s, or before the
-caller's `grpc-timeout`, fails with `RESOURCE_EXHAUSTED` (section 7.3).
+A wait for one of the blame, diff, graph-query, read-budget or
+derive-walk limits ends within 30 s (the busy bound): a wait that finds
+no room within it fails at once with a retryable `RESOURCE_EXHAUSTED`,
+whose message says `busy: no <limit> free; retry later`, and the server
+counts it in the limit's series of `scion_busy_timeouts_total`
+(section 8). This covers the `Blame`, `MergeBase`, `IsAncestor`, `Log`
+and `Diff` slots, the `ReadFile` budget, and the derive walks a cold
+read makes (section 7.2). The 256 jobs and the `PutBlob` uploads keep
+the call's own deadline. One wait keeps its own shape: a `GetObjects`
+call that gets no memory for its first object within 30 s, or before
+the caller's `grpc-timeout`, fails with `RESOURCE_EXHAUSTED`
+(section 7.3).
 
 ## 3. Common rules
 
