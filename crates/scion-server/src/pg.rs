@@ -633,7 +633,7 @@ fn need<T>(v: Option<T>, land_id: i64, repo: RepoId) -> Result<T> {
 /// lock on its session, and a session lock lives until the session
 /// ends: the worker's teardown can lag the return, and the replay's
 /// open tries the same key at its own connect - the macOS CI failure of
-/// the admin_audit restore ("another server holds this store", run
+/// the `admin_audit` restore ("another server holds this store", run
 /// 45167878584). The release is the reset's job, not the teardown's:
 /// the guard unlocks on every return, success or refusal, so a retried
 /// restore never meets its own dead session.
@@ -3331,7 +3331,7 @@ fn reset_schema_on(client: &mut PgClient) -> Result<()> {
     // restore, run 45167878584). The release is this call's job, not the
     // teardown's: the guard unlocks on every return, success or refusal,
     // so a retried restore never meets its own dead session.
-    let mut client = ReleaseServerLock::on(client);
+    let client = ReleaseServerLock::on(client);
     // The one-server lock of the schema the connection lands in: the
     // setup asks the database `current_schema()` and locks that. A
     // refusal here is another server's hold, and the drop must not run.
