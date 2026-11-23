@@ -910,28 +910,6 @@ fn refs_needed<'a>(lines: &'a [serde_json::Value], id: &str) -> &'a serde_json::
         .unwrap_or_else(|| panic!("no ref line for {id}"))
 }
 
-/// Waits until the cut call's answer is in the file: the aborted
-/// call's handler future drops at an await point, and its answer is
-/// either the cancelled line the drop writes or the job's own ending.
-/// Either ending means the cut call is dead and the job owes the
-/// evidence.
-async fn wait_cut_answered(path: &std::path::Path) {
-    let started = std::time::Instant::now();
-    loop {
-        let answered = read_lines(path).iter().any(|line| {
-            line["request_id"] == "t-cut" && line["outcome"] != "intent" && line["event"] == "land"
-        });
-        if answered {
-            return;
-        }
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(10),
-            "the cut call stayed unsettled for 10 s"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
-}
-
 /// Waits until the file holds `n` lines: the stop's flush runs on its
 /// own task, so the lines land a moment after the stop.
 async fn wait_for_lines(path: &std::path::Path, n: usize) {
@@ -1019,7 +997,16 @@ async fn a_land_whose_call_is_cut_still_writes_its_result_and_ref_lines() {
     });
     wait_for_lines(&audit_path, intent_lines + 1).await;
     call.abort();
-    wait_cut_answered(&audit_path).await;
+    // The abort is in when the client's task has ended: the handle
+    // returns cancelled, the call's channel is closed, and the
+    // server-side handler's future drops off the reset. Which of the
+    // two endings writes the answer - the drop's cancelled line or the
+    // job's own ending - is a race the design owns, and the checks
+    // after the unblock read the file until it holds the evidence.
+    assert!(
+        call.await.is_err(),
+        "the aborted call's task did not end cancelled"
+    );
 
     // Let the land commit. The job, not the dead call, now owes the
     // audit its result and its ref line.
