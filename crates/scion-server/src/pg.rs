@@ -680,8 +680,8 @@ impl Drop for ReleaseServerLock<'_> {
 /// only closes the channel: the session - and any lock it holds - ends
 /// at the worker's pace, a beat after the drop, not at it. A caller
 /// that takes the same lock again right after a drop must release it
-/// first (reset_schema_on's guard) or wait for the holder's text
-/// (reopen_test, reset_own_staging).
+/// first (`reset_schema_on`'s guard) or wait for the holder's text
+/// (`reopen_test`, `reset_own_staging`).
 struct PgClient {
     jobs: std::sync::mpsc::Sender<Job>,
 }
@@ -7878,7 +7878,7 @@ mod tests {
 
     /// S2, the replay's failure path: the replay's store client was
     /// dropped a statement ago, and its session's one-server lock ends
-    /// at the worker's pace. reset_own_staging waits the holder out and
+    /// at the worker's pace. `reset_own_staging` waits the holder out and
     /// then cleans: the test holds the lock, releases it from another
     /// thread after about 100 ms, and the cleanup succeeds. With the
     /// holder never released, it gives up past the bound with the
