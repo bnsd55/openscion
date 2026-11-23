@@ -199,7 +199,8 @@ sample_cell() {
   # fields), never a death. The parent's set -euo pipefail stays off
   # in here; a probe that fails leaves the row's field empty.
   set +euo pipefail
-  local w=$1 r=$2 out="$WORK/samples-w$w-r$r.csv"
+  local w=$1 r=$2
+  local out="$WORK/samples-w$w-r$r.csv"
   SAMPLER_CELL=$w-$r
   local clk
   clk=$(getconf CLK_TCK)
@@ -462,7 +463,7 @@ for w in $WRITERS; do
       land_p99="-"
       push_p99="-"
     fi
-    lands_per_sec=$(cell_throughput "$WORK"/bench-w$w-r$r-rep*.json)
+    lands_per_sec=$(cell_throughput "$WORK"/bench-w"$w"-r"$r"-rep*.json)
     p50=$(pct "$WORK/read-times.csv" 0.50)
     p99=$(pct "$WORK/read-times.csv" 0.99)
     [ -n "$p50" ] || p50="-"

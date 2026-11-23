@@ -57,9 +57,8 @@ else
   note "using the pinned shellcheck $SHELLCHECK_VERSION"
 fi
 
-# Every scripts/*.sh but capacity.sh, which two open pull requests touch
-# (#1363, #1365): it carries SC2318 and SC2086 findings those PRs'
-# changes resolve, and it joins this check when they merge.
+# Every scripts/*.sh: capacity.sh joins here now that #1363 and #1365
+# merged, its SC2318 and SC2086 findings fixed by #1369's step.
 cd "$(dirname "$0")/.."
-find scripts -maxdepth 1 -name '*.sh' ! -name capacity.sh -print0 |
+find scripts -maxdepth 1 -name '*.sh' -print0 |
   xargs -0 "$SHELLCHECK" -x
