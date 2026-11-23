@@ -112,6 +112,11 @@ changes. Verdicts:
 - **REACHABLE** — a client request, a file on disk, the database, or
   the OS can reach it; each one is fixed in the panic-fix PR with a
   red/green test.
+- **FIXED** — a site that was REACHABLE and is answered now; the row
+  stays as the record.
+- **NOT A PANIC** — a row that records no panic site (an exclusion, a
+  catch-all statement, or a refusal); the guard test's reverse check
+  skips it.
 
 | Site | What reaches it | Verdict |
 | --- | --- | --- |
