@@ -199,6 +199,13 @@ jobs:
         run: scripts/lint-workflows.sh
       - name: the actionlint download fails as a download (#897)
         run: scripts/test-lint-workflows.sh
+      # The shellcheck gate for scripts (#1369), not just the workflows'
+      # run blocks (actionlint covers those). The binary is pinned by
+      # version and sha256 (lint-scripts.sh). capacity.sh sits out until
+      # #1363 and #1365 merge: it carries SC2318 and SC2086 findings that
+      # those PRs' diff resolves; it joins the check right after.
+      - name: shellcheck over scripts
+        run: scripts/lint-scripts.sh
       - name: the capacity reader counters count the log's own shapes
         run: scripts/test-capacity-counters.sh
       - name: a script that dies leaves no owned process

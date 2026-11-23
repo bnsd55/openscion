@@ -699,6 +699,7 @@ pair_4() {
   if SCION_POSTGRES_URL="$URL" "$BIN/scion-server" --data "$dir/server" fsck >"$dir/fsck.log" 2>&1; then
     die "pair '$PAIR' ($SIDE): the N server opened the N-1 store without being asked to migrate"
   fi
+  # shellcheck disable=SC2016 # the backticks are the server message's literal text
   grep -q 'run `scion-server migrate` first' "$dir/fsck.log" ||
     die "pair '$PAIR' ($SIDE): the refusal does not name the migrate"
   SCION_POSTGRES_URL="$URL" "$BIN/scion-server" --data "$dir/server" migrate >"$dir/migrate.log" 2>&1 ||

@@ -208,6 +208,7 @@ start() {
   # the program. The group holds the program alone; time stays in this
   # shell's group, which is why stop waits on the job: it is what
   # makes time's report land in the log before stop returns.
+  # shellcheck disable=SC2016 # a perl -e body: the $-signs are perl's, not the shell's
   OWNED_INFO="$WORK/.owned.$name" OWNED_CMD="$*" \
     /usr/bin/time -p perl -e '
       use POSIX qw(setpgid);
@@ -538,6 +539,7 @@ batch() {
   # form folds ("0.100" reads as 0.1 s) and the pace breaks.
   [ "$jobs" -le 99 ] || die "batch: $jobs jobs breaks the two-decimal stagger cap (99)"
   local rc=0
+  # shellcheck disable=SC2016 # a sh -c body: $2/$3/$4 are its own positionals, {} is xargs's
   seq 1 "$jobs" | /usr/bin/time -p xargs -P "$jobs" -I{} sh -c \
     'sleep "$(printf "0.%02d" $(( ($3 - 1) % $4 )))"; eval "$2"' \
     sh "$WORK/$name/{}" "$cmd" {} "$jobs" \

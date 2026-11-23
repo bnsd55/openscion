@@ -9,6 +9,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 fail=0
+# shellcheck disable=SC2044 # the find paths are this repo's own, space-free; a while-read pipe would lose fail in sh
 for lock in $(find . -name Cargo.lock -not -path './target/*'); do
   case "$lock" in
     ./Cargo.lock) ;;
