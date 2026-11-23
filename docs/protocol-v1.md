@@ -168,7 +168,9 @@ sweep never moves a ref.
 
 **Timeouts.** The server ends a call with `CANCELLED` when its reply has not
 started after 600 s, or earlier if the client's `grpc-timeout` is shorter.
-For `PutBlob` this covers the whole upload. For a streamed reply (`ReadFile`,
+For `PutBlob` this covers the whole upload, and the upload has its own
+pace limit: it ends with `DEADLINE_EXCEEDED` when the client sends no
+message for 120 s. For a streamed reply (`ReadFile`,
 `GetObjects`) it covers only the start. A `ReadFile` reply has its own limits
 (section 6.7). A call that ends this way may still finish its work on the
 server (section 6.3).
@@ -237,7 +239,7 @@ contract. A client MUST NOT depend on its text.
 | `ABORTED` | `Land` only: other writers kept moving the ref. The land stays `PENDING`. | Yes, with the same request key (a key is remembered for at least 7 days, section 6.3) |
 | `OUT_OF_RANGE` | A message is larger than its limit. | After the cause is fixed |
 | `CANCELLED` | The server's 600 s limit or the client's `grpc-timeout` ran out. A client library can report its own deadline as `DEADLINE_EXCEEDED`. | Yes. A `Land` retry uses the same request key, remembered for at least 7 days (section 6.3). |
-| `DEADLINE_EXCEEDED` | `ReadFile`: the client took no message for 120 s. `GetObjects`: the client took no part for 120 s in the middle of an object (section 7.3). `Land`: the land ran past 600 s from the start of the call. The land stays `PENDING`. `MergeBase`, `IsAncestor`, `Log` with a path: the call ran past its deadline, 600 s from its start or the caller's `grpc-timeout`. From a tier: the caller's deadline ran out while the tier waited for its first object (section 8). | Yes. A `Land` retry uses the same request key, remembered for at least 7 days (section 6.3). |
+| `DEADLINE_EXCEEDED` | `ReadFile`: the client took no message for 120 s. `GetObjects`: the client took no part for 120 s in the middle of an object (section 7.3). `PutBlob`: the client sent no message for 120 s - the first one or a later chunk - and the upload ended. `Land`: the land ran past 600 s from the start of the call. The land stays `PENDING`. `MergeBase`, `IsAncestor`, `Log` with a path: the call ran past its deadline, 600 s from its start or the caller's `grpc-timeout`. From a tier: the caller's deadline ran out while the tier waited for its first object (section 8). | Yes, from the start. A `Land` retry uses the same request key, remembered for at least 7 days (section 6.3). |
 | `UNAVAILABLE` | The server cannot be reached or is shutting down, or its database stayed busy for 5 s (another process, such as an import, held its write lock). A tier also replies `UNAVAILABLE` when its upstream does not answer in time, or when it finds no room to fetch an object from upstream within 30 s (section 8). | Yes |
 | `RESOURCE_EXHAUSTED` | A server limit stopped the call, and the message names it: a per-principal quota (section 2); a memory budget that the call's share does not fit, or did not get in time, such as `GetObjects` with no memory for the first object within 30 s or before the caller's deadline (section 7.3) and `Blame` (section 6.10); a graph query (`MergeBase`, `IsAncestor`) whose walk passed its million-visit bound (section 6.11); the server's budget of unary replies its clients have not read; a reply over its size cap; or a server out of disk space. | Yes, after a wait, except a graph query at its visit bound: its retry visits the same changesets and fails the same way. A call whose share is more than the whole budget, or whose reply is over its cap, fails the same way again. |
 | `DATA_LOSS` | Stored data is damaged: a tier's upstream sent bytes that are not the object asked for (section 8), or the server's stored copy failed its own check. The message is `damaged data`; the detail stays in the server log. | MAY |
@@ -318,7 +320,12 @@ file's content.
   1 MiB. An empty file is one message with empty `data`.
 - The server checks the repo when the first message arrives, before it reads
   the rest. The caller needs a write rule for the repo: an upload names no
-  path, so any write rule covers it.
+  path, so any write rule covers it. A principal that reads whole repos and
+  may write none is refused before the first message.
+- An upload that sends no message for 120 s - the first one or a later
+  chunk - ends with `DEADLINE_EXCEEDED` and frees its upload slot. The
+  server's own work between messages (the spool appends) does not count
+  against the limit.
 - The reply's `blob_id` is the `BlobId` of all the bytes together
   ([`format-v1.md`](format-v1.md)).
 - The blob then belongs to the repo: a changeset of the repo may name it
