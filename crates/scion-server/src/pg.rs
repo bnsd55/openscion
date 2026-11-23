@@ -629,6 +629,53 @@ fn need<T>(v: Option<T>, land_id: i64, repo: RepoId) -> Result<T> {
 /// `postgres` client runs its own tokio runtime, which must not start
 /// inside the server's, so a statement is sent to the worker and the
 /// caller blocks for its reply. The client itself never crosses threads.
+/// The reset's exclusive client holds the schema's one-server advisory
+/// lock on its session, and a session lock lives until the session
+/// ends: the worker's teardown can lag the return, and the replay's
+/// open tries the same key at its own connect - the macOS CI failure of
+/// the admin_audit restore ("another server holds this store", run
+/// 45167878584). The release is the reset's job, not the teardown's:
+/// the guard unlocks on every return, success or refusal, so a retried
+/// restore never meets its own dead session.
+///
+/// `pg_advisory_unlock_all`, not the schema's key: the one-server lock
+/// is the only session lock this client holds, the release needs no key
+/// re-derivation if the setup re-took the lock after a reconnect, and a
+/// schema read that failed still unlocks. The connection ends at the
+/// client's drop either way; releasing here only moves it earlier, to
+/// the statement's return.
+struct ReleaseServerLock<'a> {
+    client: &'a mut PgClient,
+}
+
+impl<'a> ReleaseServerLock<'a> {
+    fn on(client: &'a mut PgClient) -> Self {
+        Self { client }
+    }
+}
+
+impl std::ops::Deref for ReleaseServerLock<'_> {
+    type Target = PgClient;
+
+    fn deref(&self) -> &PgClient {
+        self.client
+    }
+}
+
+impl std::ops::DerefMut for ReleaseServerLock<'_> {
+    fn deref_mut(&mut self) -> &mut PgClient {
+        self.client
+    }
+}
+
+impl Drop for ReleaseServerLock<'_> {
+    fn drop(&mut self) {
+        let _ = self
+            .client
+            .query_opt("SELECT pg_advisory_unlock_all()", &[]);
+    }
+}
+
 struct PgClient {
     jobs: std::sync::mpsc::Sender<Job>,
 }
@@ -3260,7 +3307,8 @@ const RESET_STATEMENT_TIMEOUT: &str = "120s";
 /// committed batches (a kill runs no failure path) or a replay that
 /// failed midway must not survive into the next run. Refuses when
 /// another process holds the schema's one-server lock: a live store is
-/// never dropped.
+/// never dropped. The one-server lock this call's own client took is
+/// released before the return - see [`ReleaseServerLock`].
 ///
 /// # Errors
 ///
@@ -3268,10 +3316,26 @@ const RESET_STATEMENT_TIMEOUT: &str = "120s";
 /// schema.
 pub(crate) fn reset_schema(url: &str, ca: Option<&Path>) -> Result<()> {
     let options = base_options();
+    let mut client = connect_exclusive(url, ca, &options, None, Arc::new(Fence::new()))?;
+    reset_schema_on(&mut client)
+}
+
+/// The body of [`reset_schema`], on a client the caller keeps: the test
+/// holds the reset's own client past the return, so it can prove the
+/// schema lock is already released while the session still lives.
+fn reset_schema_on(client: &mut PgClient) -> Result<()> {
+    // The one-server lock this client holds must not outlive the reset:
+    // the replay's open tries the same key at its own connect, and a
+    // session lock lives until the session ends - the worker's teardown
+    // can lag the return (the macOS CI failure of the admin_audit
+    // restore, run 45167878584). The release is this call's job, not the
+    // teardown's: the guard unlocks on every return, success or refusal,
+    // so a retried restore never meets its own dead session.
+    let mut client = ReleaseServerLock::on(client);
     // The one-server lock of the schema the connection lands in: the
     // setup asks the database `current_schema()` and locks that. A
     // refusal here is another server's hold, and the drop must not run.
-    let client = connect_exclusive(url, ca, &options, None, Arc::new(Fence::new()))?;
+    // (The lock's release is the [`ReleaseServerLock`] guard.)
     // The target schema, resolved ONCE and quoted: the guards, the lock
     // and the drop must all act on the same name. A URL whose
     // search_path names another schema resolves current_schema() to
@@ -7135,8 +7199,9 @@ impl Meta for Pg {
 mod tests {
     use super::{
         Client, Conn, Fence, Flow, Job, Kind, NoTls, Reply, SCHEMA_LOCK, Setup, SetupFailure,
-        TxState, connect_on, connection_gone, delete_prefixes, merged_options, migration_lock_key,
-        reset_schema, run_job, run_with_retry, schema_lock_key,
+        TxState, connect_exclusive, connect_on, connection_gone, delete_prefixes, merged_options,
+        migration_lock_key, reset_schema, reset_schema_on, run_job, run_with_retry,
+        schema_lock_key, server_lock_raw,
     };
     use crate::error::{Error, Storage};
     use crate::pg::{Pairing, Pg, pairing_decision};
@@ -7737,6 +7802,49 @@ mod tests {
         let second = staging_mark_id(&base, fresh);
 
         assert_ne!(first, second, "the second reset dropped the old mark");
+        let mut raw = postgres::Client::connect(&base, NoTls).unwrap();
+        raw.batch_execute(&format!("DROP SCHEMA IF EXISTS {fresh} CASCADE"))
+            .unwrap();
+    }
+
+    /// The race the macOS CI hit: the reset's session lock must be
+    /// released by the reset itself, not by the worker's teardown. The
+    /// test holds the reset's own client alive past the call - the worst
+    /// teardown, never - and then takes the same key from a fresh
+    /// connection, the take an open's setup runs. With the release, the
+    /// take succeeds every time; without it, the live session still
+    /// holds the key and the take fails every time.
+    #[test]
+    fn the_reset_releases_the_schema_lock_while_its_client_still_lives() {
+        let base = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let fresh = "reset_lock_gone_on_return";
+        let mut raw = postgres::Client::connect(&base, NoTls).unwrap();
+        raw.batch_execute(&format!("DROP SCHEMA IF EXISTS {fresh} CASCADE"))
+            .unwrap();
+        raw.batch_execute(&format!("CREATE SCHEMA {fresh}"))
+            .unwrap();
+        drop(raw);
+        let sep = if base.contains('?') { '&' } else { '?' };
+        let url = format!("{base}{sep}options=--search_path%3D{fresh}");
+
+        let mut client = connect_exclusive(&url, None, "", None, Arc::new(Fence::new())).unwrap();
+        reset_schema_on(&mut client).unwrap();
+        // The reset's session still lives. A fresh connection takes the
+        // key an open's setup would try: success says the reset released
+        // the lock; a failure says the key is still held by a session
+        // that did no work since - the release never ran.
+        let mut probe = connect_on(&url, None, "").unwrap();
+        let schema: String = probe
+            .query_opt("SELECT current_schema()::text", &[])
+            .unwrap()
+            .unwrap()
+            .get(0);
+        assert!(
+            server_lock_raw(&mut probe, schema_lock_key(&schema)),
+            "the reset's one-server lock outlived the reset while its own client still lives: the release never ran"
+        );
+        drop(probe);
+        drop(client);
         let mut raw = postgres::Client::connect(&base, NoTls).unwrap();
         raw.batch_execute(&format!("DROP SCHEMA IF EXISTS {fresh} CASCADE"))
             .unwrap();
