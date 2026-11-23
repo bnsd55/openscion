@@ -63,7 +63,7 @@ v0.1 is one `scion-server serve` process on one machine.
 
 | Part | Today (`main`) | Why it does not scale out |
 |---|---|---|
-| Metadata | One Postgres database, one schema per store (`store.rs`, fn `Backend::open`; `Pg` in `pg.rs`). | It lives on one database server, and the store's blob files are on that machine's disk. One writer at a time per schema (`Pg::open_exclusive`). So other machines cannot share it as one store. |
+| Metadata | One Postgres database, one schema per store (`backend.rs`, fn `Backend::open`; `Pg` in `pg.rs`). | The metadata lives on one database server. The blob files are on the Scion server's own disk, and the one-server lock (`pg.rs`, fn `open_exclusive`) lets only one server open a store. So other machines cannot share it as one store. |
 | Write path | One write connection behind a mutex (`pg.rs`, fn `lock_writer`), and 8 read-only connections (`store.rs`, `READERS = 8`). | Every write of every repo waits for one lock. Throughput is that of one connection. |
 | Durability | `synchronous_commit = on`: a commit is durable when its statement returns (`pg.rs`), so a read need not wait. `GroupFlush` (`store.rs`, fn `run`) shares one full flush of the blob files. | The blob flush's counters (`started`, `finished` in `FlushState`) are in process memory. A commit by another process is not counted. |
 | Land lock | One mutex per (repo, ref) in `Lands::refs` (`land.rs`). | A second process does not see it. |
@@ -398,7 +398,7 @@ twice.
 
 - Each land is three network commits instead of two local transactions, and
   one ref takes about 50 lands per second (**estimate**, the proposal
-  column above; one server measures 28.9 to 32.0 today with no readers, per
+  column above; one server measures 28.0 to 32.0 today with no readers, per
   the capacity table above).
 - Each changeset also writes its history nodes, about one per path part of
   each changed path. For 5 changed paths 6 levels deep that is up to 30 tree
