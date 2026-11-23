@@ -661,3 +661,43 @@ count_reader_failures() {
   [ -f "$1" ] || { echo 0; return; }
   grep -c "checkout failed rc=" "$1" || true
 }
+
+# The damage texts (#1362): a line carrying any of them reports lost or
+# damaged data, and no expected-failure pattern may swallow it. One
+# list, shared by the classifiers of soak.sh and soak-fault.sh and by
+# capacity.sh's damage scan (#1376, #1365). scripts/test-capacity-counters.sh
+# pins each text against the Rust source it comes from, so a reword
+# fails CI instead of turning the guard off.
+damage_texts() {
+  cat <<'EOF'
+appears twice on main
+lands reported the same result
+reported lands differ from main:
+server sent a bad object for
+server sent tree 
+server sent blob 
+server sent a bad tree for
+server sent an object that was not asked for
+server sent none of the requested objects
+bytes, the tree says
+the reply ended in the middle of an object
+server sent a bad ID
+code: 'DataLoss'
+EOF
+}
+
+# is_damage LINE: the line reports lost or damaged data. Every
+# classifier tries this before its accepted patterns, so a damage line
+# fails the run however broad the expected-failure list is (#1376).
+is_damage() {
+  printf '%s\n' "$1" | grep -qF -f <(damage_texts)
+}
+
+# damage_in FILE: the file's first damage line, empty when it has none.
+# For the logs no classifier reads (#1376): an import or gc that died on
+# damaged data leaves its evidence in import-soak.log or gc.log, while
+# the classified file holds only the accepted marker line.
+damage_in() {
+  [ -f "$1" ] || return 0
+  grep -h -m1 -f <(damage_texts) "$1" 2> /dev/null || true
+}
