@@ -699,5 +699,5 @@ is_damage() {
 # the classified file holds only the accepted marker line.
 damage_in() {
   [ -f "$1" ] || return 0
-  grep -h -m1 -f <(damage_texts) "$1" 2> /dev/null || true
+  grep -h -m1 -F -f <(damage_texts) "$1" 2> /dev/null || true
 }
