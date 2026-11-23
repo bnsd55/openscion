@@ -21,9 +21,10 @@
 #
 # The edge is not enforced here: the run measures, the table's caption
 # states the limits, and the reader applies them to the CSV. What the
-# script does stop on is a failed check: bench verified main, every
-# checkout read back whole, and every client error is one the load
-# explains (the soak's classes).
+# run does with a failed check: it records a failed bench, a short
+# checkout or a client error in the cell's row and goes to the next
+# cell. Today a failed exactly-once check or a damaged checkout is
+# recorded in the row and does not fail the run (#1362).
 #
 # Set CAPACITY_MACHINE to the runner's public name and spec; the table's
 # caption carries it. Set RUN_URL to the workflow run's URL for the
@@ -60,23 +61,8 @@ LANDS=${LANDS:-1000}
 # Each rep: the writers land for the bench's own duration, and the
 # readers check out beside them for READ_SECONDS.
 READ_SECONDS=${READ_SECONDS:-90}
-CELL_WARM_SECONDS=${CELL_WARM_SECONDS:-60}
 CAPACITY_MACHINE=${CAPACITY_MACHINE:-unknown runner}
 RUN_URL=${RUN_URL:-}
-
-# classifies LOG: the soak's accepted failures. A cell whose clients
-# failed with anything else is past the edge; the run stops there.
-classifies() {
-  local log=$1 line
-  while IFS= read -r line; do
-    case $line in
-      *"exit 130"* | *"exit 137"* | *"exit 143"*) ;;
-      *unavailable* | *busy* | *aborted* | *expired* | *"permission denied"*) ;;
-      *) return 1 ;;
-    esac
-  done < "$log"
-  return 0
-}
 
 need
 # jq parses bench's JSON report; only this script needs it, so its
@@ -110,7 +96,11 @@ pct() {
 cpu_ms() {
   local pid=$1 clk=$2 ticks
   [ -n "$pid" ] || return 0
-  ticks=$(awk '{ sub(/^[^)]*\) /, ""); print $11 + $12 }' "/proc/$pid/stat" 2> /dev/null) || return 0
+  # proc(5): everything after the last ") " is state onward, and there
+  # utime and stime are the 12th and 13th fields (pid and (comm) are
+  # fields 1 and 2). A comm may hold a space and a ")" of its own, so
+  # the strip must reach the last ") ", not the first.
+  ticks=$(awk '{ sub(/^.*\) /, ""); print $12 + $13 }' "/proc/$pid/stat" 2> /dev/null) || return 0
   [ -n "$ticks" ] || return 0
   awk -v t="$ticks" -v clk="$clk" 'BEGIN { printf "%d", t * 1000 / clk }'
 }
