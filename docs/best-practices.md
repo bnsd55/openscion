@@ -16,7 +16,7 @@ public claim the owner makes.
 | criterion | status | evidence, gap, or justification |
 |---|---|---|
 | description_good | met | README.md: what this is, and why |
-| interact | met | README.md: issues, contributing, the demo |
+| interact | met | README.md: issues, contributing |
 | contribution | met | CONTRIBUTING.md: issues first, PRs |
 | contribution_requirements | met | CONTRIBUTING.md: code standards |
 | floss_license | met | MIT OR Apache-2.0, both files |
@@ -46,7 +46,7 @@ public claim the owner makes.
 | vulnerability_report_private | met | GitHub's private advisory form |
 | vulnerability_report_response | met | SECURITY.md: seven days |
 | build | met | cargo build; CI builds it |
-| build_common_tools | met | cargo and rustc only |
+| build_common_tools | met | cargo, rustc and protoc |
 | build_floss_tools | met | The toolchain is FLOSS |
 | test | met | cargo test --workspace |
 | test_invocation | met | The standard cargo test |
@@ -123,7 +123,7 @@ public claim the owner makes.
 | interfaces_current | met | clippy flags deprecations |
 | automated_integration_testing | met | ci.yml, per-job reports |
 | regression_tests_added50 | Ben | The policy is set; the share is a fact |
-| test_statement_coverage80 | met | The coverage gate: 85.7 percent lines |
+| test_statement_coverage80 | met | The coverage gate: it fails a build under 80 percent lines |
 | test_policy_mandated | met | CONTRIBUTING.md: tested, or said why not |
 | tests_documented_added | met | CONTRIBUTING.md, the same rule |
 | warnings_strict | met | -D warnings, both platforms |
@@ -135,7 +135,7 @@ public claim the owner makes.
 | crypto_tls12 | met | rustls's minimum |
 | crypto_certificate_verification | met | The TLS suite proves the refusal |
 | crypto_verification_private | met | Verified before any private call |
-| signed_releases | Ben | Tags SSH-signed; attestations are v0.8.0 |
+| signed_releases | Ben | Tags SSH-signed; the artifact attestations are done (release.yml attests the binaries and their SBOMs, docs/slsa.md); the release channels wait on the owner |
 | version_tags_signed | met | git tag -v, docs/RELEASING.md |
 | input_validation | met | IDs verified; tickets signed; allowlists |
 | hardening | met | Deny by default; mode-checked directories |
@@ -150,7 +150,9 @@ public claim the owner makes.
 2. `dco`: a DCO section in CONTRIBUTING.md and a sign-off check (a doc
    change plus a small CI check).
 3. `signed_releases`: the owner decides the release channels; the artifact
-   attestations are already the v0.8.0 roadmap line (Ben).
+   attestations are done - release.yml attests the binaries and their
+   CycloneDX SBOMs, as [docs/slsa.md](slsa.md) records (Ben, for the
+   channels).
 4. `access_continuity` and `bus_factor`: a second person with access, or a
    documented recovery path (Ben).
 5. `report_responses`, `enhancement_responses`, `regression_tests_added50`:
