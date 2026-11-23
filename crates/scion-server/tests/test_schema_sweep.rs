@@ -22,6 +22,36 @@ fn connect() -> postgres::Client {
     postgres::Client::connect(&url, postgres::NoTls).unwrap()
 }
 
+/// Waits until a bigint advisory key's row shows up in `pg_locks`, so the
+/// next step runs against a lock that is really taken (or really
+/// blocking, for `granted = false`). The deadline is above every holder
+/// in this file, and the poll never changes what a test asserts.
+fn wait_advisory(key: i64, granted: bool) {
+    let (hi, lo) = (key >> 32, key & 0xFFFF_FFFF);
+    let mut client = connect();
+    let started = std::time::Instant::now();
+    loop {
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT 1 FROM pg_locks WHERE locktype = 'advisory' \
+                     AND classid = {hi} AND objid = {lo} \
+                     AND granted = {granted}"
+                ),
+                &[],
+            )
+            .unwrap();
+        if !rows.is_empty() {
+            return;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the advisory row never showed up within 10 s"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 /// One client whose session holds the sweep tests' advisory lock for
 /// the caller's whole body. The sweep is global - it reads every
 /// registry row in the database - so a test that shapes the registry
@@ -131,7 +161,9 @@ fn an_open_whose_cleanup_lock_is_held_over_the_writer_s_clock_succeeds() {
             .execute("SELECT pg_advisory_unlock($1)", &[&CLEAN_LOCK])
             .unwrap();
     });
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    // The open starts only once the cleanup lock is really held: the
+    // wait reads the granted row from pg_locks, not a sleep's guess.
+    wait_advisory(CLEAN_LOCK, true);
     let dir = private_tempdir();
     let started = std::time::Instant::now();
     let store = Backend::open_test(dir.path());
@@ -575,7 +607,9 @@ fn an_open_waits_for_its_own_schemas_migration_lock_and_not_for_another_s() {
             .execute("SELECT pg_advisory_unlock($1)", &[&held])
             .unwrap();
     });
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    // The open starts only once the schema's migration lock is really
+    // held: the wait reads the granted row from pg_locks.
+    wait_advisory(held, true);
     let started = std::time::Instant::now();
     let Err(err) = Backend::open_test(dir.path()) else {
         panic!("the open succeeded while its schema's migration lock was held");
@@ -674,22 +708,42 @@ fn an_open_waits_while_an_older_builds_migration_holds_the_bare_key() {
         }
     }
     assert_eq!(holding.len(), 1, "the older build's turn is real");
+    assert_eq!(holding.len(), 1, "the older build's turn is real");
     let dir = private_tempdir();
-    let started = std::time::Instant::now();
+    // The open's own session names its schema, so the wait below can
+    // tell this test's open from any other open of the database.
+    let schema = Backend::test_schema(dir.path());
     let opened = std::thread::spawn(move || Backend::open_test(dir.path()));
-    std::thread::sleep(std::time::Duration::from_millis(1_000));
+    // The release only drops once the open is really blocking on the
+    // bare key: the open's own waiting row in pg_locks, scoped by its
+    // application_name so a concurrent test's open cannot stand in for
+    // it. Then the hold-then-release brackets a real wait.
+    let waiting = format!(
+        "SELECT 1 FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+         WHERE l.locktype = 'advisory'
+         AND l.classid = {held_hi} AND l.objid = {held_lo}
+         AND NOT l.granted
+         AND a.application_name = '{schema}'"
+    );
+    let poll = std::time::Instant::now();
+    loop {
+        let rows = connect().query(&waiting, &[]).unwrap();
+        if !rows.is_empty() {
+            break;
+        }
+        assert!(
+            poll.elapsed() < std::time::Duration::from_secs(10),
+            "the open never started waiting on the bare key"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     drop(release);
     let opened = opened.join().unwrap();
     holder.join().unwrap();
-    let took = started.elapsed();
     assert!(
         opened.is_ok(),
         "the open answers after the older build's migration: {:?}",
         opened.err()
-    );
-    assert!(
-        took >= std::time::Duration::from_millis(1_000),
-        "the open waited inside the hold to its release: {took:?}"
     );
 }
 

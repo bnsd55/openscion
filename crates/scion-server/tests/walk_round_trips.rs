@@ -427,9 +427,23 @@ fn eight_walks_leave_a_reader_for_a_plain_read() {
             })
         })
         .collect();
-    // The walks are up. A plain read must win a reader while all eight
+    // The walks are up: the lanes' steps take readers, so the take
+    // counter moves. A plain read must win a reader while all eight
     // lanes walk - it waits out at most a step, never its whole wait.
-    std::thread::sleep(Duration::from_millis(100));
+    let started = std::time::Instant::now();
+    let mut last = store.test_reader_takes();
+    loop {
+        let now = store.test_reader_takes();
+        if now > last {
+            break;
+        }
+        last = now;
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the walks never took a reader within 10 s"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
     store.read(|c| c.repo_id(REPO)).unwrap();
     for walk in walks {
         walk.join().unwrap();

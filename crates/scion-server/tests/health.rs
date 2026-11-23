@@ -391,6 +391,14 @@ async fn a_drain_finishes_its_in_flight_calls_and_the_store_keeps_the_promise() 
     // The watches go, so they hold nothing: the drain may end.
     drop(named);
     drop(watcher);
+    // The sleep waits for the dropped watch streams' server-side
+    // teardown, so the park lift below exercises the answered path.
+    // SHORTCUT: no observable marks that settle - the health service
+    // sits outside the metrics layer (service.rs wraps only scion and
+    // objects), so scion_calls_in_flight never counts the watch
+    // streams. The ceiling: on a slow runner 200 ms can be short, and
+    // the test would flake. The upgrade: a teardown signal on the
+    // health service, if S4 ever flakes.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // The park lifts: the upload finishes, and the drain answers it.
@@ -481,7 +489,9 @@ async fn after_the_restart(
 async fn the_drain_bound_cuts_the_calls_past_it() {
     let data = scion_server::test_support::private_tempdir();
     let log_dir = data.path().join("log");
+    let hooks = data.path().join("hooks");
     fs::create_dir(&log_dir).unwrap();
+    fs::create_dir(&hooks).unwrap();
     let log = log_dir.join("server.log");
     common::create_repo(data.path());
     let mut server = spawn_with(&["--drain-timeout-secs", "1"], data.path(), &log);
@@ -489,9 +499,22 @@ async fn the_drain_bound_cuts_the_calls_past_it() {
     let url = wait_url(&log).await;
     let (mut scion, _objects) = common::connect(&url).await.unwrap();
 
-    // An upload whose write never lands: no park file is ever lifted.
+    // An upload whose write never lands: a park file holds the write,
+    // and no lift ever comes. The wait reads the parked marker, so the
+    // signal lands on an upload that is in flight for sure.
+    let uploaded = BlobId::of(b"never answered");
+    let park = hooks.join(format!("park-{uploaded}"));
+    let parked = hooks.join(format!("parked-{uploaded}"));
+    fs::write(&park, b"").unwrap();
     let put = stalled_upload(&mut scion, b"never answered");
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let started = std::time::Instant::now();
+    while !parked.exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the upload never reached its park"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 
     // The stop: readiness flips on the open named watch.
     terminate(&server.child);

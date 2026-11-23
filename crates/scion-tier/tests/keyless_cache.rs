@@ -24,8 +24,19 @@ fn a_cache_without_a_public_key_does_not_start() {
         .stderr(log_file.try_clone().unwrap())
         .spawn()
         .expect("the binary runs");
-    std::thread::sleep(std::time::Duration::from_secs(2));
-    let alive = child.try_wait().expect("the wait works").is_none();
+    // The wait reads the exit, not 2 s of hope: a cache that refuses at
+    // start exits at once, and the deadline only bounds a slow spawn.
+    // A cache still alive at the deadline is the failure the test
+    // names, with the log it wrote.
+    let started = std::time::Instant::now();
+    let mut alive = true;
+    while started.elapsed() < std::time::Duration::from_secs(10) {
+        if child.try_wait().expect("the wait works").is_some() {
+            alive = false;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     if alive {
         child.kill().unwrap();
         child.wait().unwrap();
@@ -40,6 +51,7 @@ fn a_cache_without_a_public_key_does_not_start() {
              not: {err}"
         );
     }
+    child.wait().unwrap();
     let mut err = String::new();
     drop(log_file);
     std::fs::File::open(&log)

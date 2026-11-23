@@ -412,7 +412,12 @@ fn move_main_past_the_index(
 /// deadline-exceeded (or, once the call's own timeout has cut it, the
 /// call has gone), so the job writes the failed line. Certain on both
 /// backends: the job cannot reach the walk before the unblock.
-async fn late_land(store: &Backend, url: &str, late_id: scion_core::ChangesetId) {
+async fn late_land(
+    store: &Backend,
+    url: &str,
+    late_id: scion_core::ChangesetId,
+    audit_path: &std::path::Path,
+) {
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
     let blocker = std::thread::spawn({
@@ -440,7 +445,35 @@ async fn late_land(store: &Backend, url: &str, late_id: scion_core::ChangesetId)
     let late = tokio::task::spawn(async move {
         let _ = late_call.land(late).await;
     });
-    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    // Two real gates, not a 600 ms guess: the land's intent line is in
+    // the file (the job is running), and the call's own 500 ms deadline
+    // has expired - the intent line's ts marks the job's start, so the
+    // wait runs to that ts plus the deadline, with a slack for the
+    // gap between the call's begin and its intent. Only then does the
+    // unblock come, so the job's first deadline check answers
+    // deadline-exceeded for certain.
+    let started = std::time::Instant::now();
+    let ts = loop {
+        let line = read_lines(audit_path).into_iter().find(|line| {
+            line["event"] == "land" && line["outcome"] == "intent" && line["request_id"] == "t-late"
+        });
+        if let Some(line) = line {
+            break line["ts"].as_str().expect("the line carries ts").to_owned();
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the late land's intent never reached the file"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    };
+    let intent_at = ts
+        .parse::<jiff::Timestamp>()
+        .expect("the intent line's ts parses");
+    let expiry = intent_at + jiff::SignedDuration::from_millis(550);
+    let left = (expiry - jiff::Timestamp::now()).as_secs_f64();
+    if left > 0.0 {
+        tokio::time::sleep(std::time::Duration::from_secs_f64(left)).await;
+    }
     go_tx.send(()).unwrap();
     blocker.join().unwrap();
     let _ = late.await;
@@ -624,7 +657,7 @@ async fn exercise() -> (tempfile::TempDir, std::path::PathBuf) {
     .await
     .expect("the create is allowed");
     move_main_past_the_index(&store, id, blob);
-    late_land(&store, &url, late_id).await;
+    late_land(&store, &url, late_id, &audit_path).await;
 
     // The stop flushes the meter's counts before the server ends.
     stop.send(()).unwrap();
