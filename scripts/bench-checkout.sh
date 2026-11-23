@@ -114,6 +114,7 @@ for rep in $(seq 1 "$REPS"); do
   git_run "git clone" "$rep" "git-full-$rep" ""
   git_run "git clone --filter=blob:none" "$rep" "git-partial-$rep" "--filter=blob:none"
   scion_run warm "$rep"
+  # shellcheck disable=SC2016 # MIRROR is exported; batch's sh evals the flags late
   git_run "git clone --reference mirror" "$rep" "git-mirror-$rep" '--reference $MIRROR'
 done
 

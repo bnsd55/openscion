@@ -5,6 +5,8 @@
 # does, and the parent checks what it left behind.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=common.sh
 . "$here/common.sh"
 
 fail() {
