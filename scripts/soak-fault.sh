@@ -104,7 +104,9 @@ fi
 # expects. soak.sh's list, plus the transport lines a kill makes: a
 # client whose stream the kill tore is reporting the fault, and a
 # client that cannot reach a live server is caught by the latency
-# probe, which is a hard check, not a classified one.
+# probe, which is a hard check, not a classified one. One line is
+# gated on the pg arm: the Postgres client's own connect text only
+# happens inside a restart window, and only the pg arm restarts.
 classifies() {
   local log=$1 line
   while IFS= read -r line; do
@@ -112,6 +114,14 @@ classifies() {
       *"exit 130"* | *"exit 137"* | *"exit 143"*) ;;
       *unavailable* | *busy* | *aborted* | *expired* | *"permission denied"*) ;;
       *"error trying to connect"* | *"transport error"* | *"Connection refused"*) ;;
+      # The postgres crate's connect text (its own wording, pinned by
+      # pg.rs's test at the Storage::busy mapping): an import whose
+      # connect lands inside a pg-arm restart window is refused for the
+      # length of the restart (#1374, run 45160834460). With the arm
+      # off no restart happens, so a refused Postgres connect is a
+      # real failure.
+      *"error connecting to server"*)
+        [ "${SCION_FAULT_PG:-0}" = "1" ] || return 1 ;;
       *"connection closed"* | *"connection reset"*) ;;
       # The daemon's socket file, gone for the length of the full-chain
       # restart.
