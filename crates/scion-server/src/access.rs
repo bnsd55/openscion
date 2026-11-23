@@ -474,6 +474,45 @@ impl Access {
         }
     }
 
+    /// Refuses a principal that reads whole repos and may write none of
+    /// them, before an upload takes its permit. The refusal must change no
+    /// answer a naming call could have had: a principal with a write right
+    /// somewhere goes on to the per-repo checks; one with no rule for any
+    /// repo keeps the uniform "no repo" refusals; one with folder rules
+    /// keeps the folder rules' own `UNIMPLEMENTED` for uploads. Only a
+    /// whole-repo reader that may write nothing is refused here: every
+    /// repo it can name answers `PermissionDenied` anyway, and its idle
+    /// streams would hold upload slots for the whole call timeout.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::PermissionDenied`] if it reads whole repos and may not
+    /// write in any of them.
+    pub fn check_writer_anywhere(&self, caller: &Caller) -> Result<()> {
+        if self.everything.as_ref() == Some(&caller.0) {
+            return Ok(());
+        }
+        let mut reads_whole = false;
+        for ((principal, _), grant) in &self.grants {
+            if principal != &caller.0 {
+                continue;
+            }
+            if grant.may_write_some() || !grant.read_all {
+                return Ok(());
+            }
+            reads_whole = true;
+        }
+        if !reads_whole {
+            return Ok(());
+        }
+        // One line for the refusal, as the repo-bound checks log theirs.
+        tracing::warn!(principal = %caller.0, "may not write any repo");
+        Err(Error::PermissionDenied(format!(
+            "principal {:?} may not write in any repo",
+            caller.0
+        )))
+    }
+
     /// Fails unless `caller` may change some path of `repo`: the check of an
     /// upload, which names no path.
     ///

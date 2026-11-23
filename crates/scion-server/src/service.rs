@@ -90,6 +90,18 @@ pub(crate) const READ_BUDGET_BYTES: usize = 256 << 20;
 /// The parts that it leaves in its channel and in HTTP/2 stay outside the
 /// budget (`scion_proto::runtime::listen`).
 const READ_STALL_TIMEOUT: Duration = Duration::from_secs(120);
+/// An upload ends when its client sends no message for this long: the first
+/// message or any later chunk. The upload frees its permit when it ends, so
+/// streams that sit idle cannot hold the 16 upload slots for the whole call
+/// timeout (600 s) instead. A principal that reads whole repos and may
+/// write none is refused before it takes a permit at all (see `put_blob`).
+/// The residual: a principal the server cannot refuse before its first
+/// message - one with a write rule somewhere, no rule for any repo, or
+/// folder read rules - may still hold a permit for up to this long per
+/// stream and open the stream again; `--max-principal-requests` is the
+/// limit for that. The same bound that a stalled reply lives under
+/// (`READ_STALL_TIMEOUT`).
+const UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How often the stale-land sweep runs after the first one.
 const SWEEP_PERIOD: Duration = Duration::from_secs(60 * 60);
@@ -1657,6 +1669,136 @@ async fn send_parts<T: Send + 'static>(
     }
 }
 
+/// Reads the messages of one upload and puts the blob. `idle` bounds
+/// every wait for a message: the first one and each later chunk. A
+/// client that sends nothing for `idle` loses the call and frees its
+/// permit; the spool appends run outside the bound, so a busy server
+/// queues no one out of their own upload.
+async fn put_upload(
+    service: &ScionService,
+    caller: Caller,
+    request_id: String,
+    stream: &mut Streaming<PutBlobRequest>,
+    idle: Duration,
+) -> Result<Response<PutBlobResponse>, Status> {
+    let first = next_upload_message(stream, idle)
+        .await?
+        .ok_or_else(|| Status::invalid_argument("empty upload"))?;
+    check_name("repo", &first.repo)?;
+    // An upload names no path, so a caller that may change some path of
+    // the repo may upload. A partial reader uploads nothing in v0.1 of
+    // the folder rules ([#121]).
+    if service.access.partial(&caller, &first.repo) {
+        return Err(Status::unimplemented(
+            "not available to a principal with folder read rules",
+        ));
+    }
+    service.access.check_writer(&caller, &first.repo)?;
+    let repo_name = first.repo.clone();
+    let principal = caller.0.clone();
+    let audit = service.audit.clone();
+    let mut bytes_total = first.data.len();
+    // The first message's bytes, and the budget that the later messages
+    // of this upload take from. Held until the reply, on every path.
+    let mut quota = service
+        .quotas
+        .upload(&caller, first.data.len())
+        .map_err(Status::from)?;
+    // Check the repo before reading any more data. Each message goes to
+
+    // the spool file before the next one is read, so an upload holds one
+    // message in memory, not the whole blob.
+    let (repo, mut upload) = service
+        .worker
+        .run(move |store| {
+            let repo = store.read(|c| c.repo_id(&first.repo))?;
+            Ok((repo, store.blobs().upload()?.append(&first.data)?))
+        })
+        .await?;
+    while let Some(chunk) = next_upload_message(stream, idle).await? {
+        if !chunk.repo.is_empty() {
+            return Err(Status::invalid_argument(
+                "only the first PutBlob message names the repo",
+            ));
+        }
+        bytes_total += chunk.data.len();
+        quota.add(chunk.data.len()).map_err(Status::from)?;
+        upload = service
+            .worker
+            .run(move |_| upload.append(&chunk.data))
+            .await?;
+    }
+    let bytes = bytes_total;
+    service
+        .audit_intent(
+            &request_id,
+            caller.0.as_str(),
+            "write",
+            serde_json::json!({ "rpc": "PutBlob", "repo": repo_name, "bytes": bytes }),
+        )
+        .await?;
+    let written = service
+        .worker
+        .run(move |store| {
+            let written = write::put_blob(&store, repo, upload).map_err(Status::from);
+            // The job that changed the state writes the state
+            // change's own line, after the commit and outside the
+            // write transaction: the evidence does not depend on the
+            // call that asked for the write living on.
+            let mut fields =
+                serde_json::json!({ "rpc": "PutBlob", "repo": repo_name, "bytes": bytes });
+            match &written {
+                Ok(_) => ScionService::audit_result_blocking(
+                    &audit,
+                    &crate::audit::Event::new(
+                        "write",
+                        "ok",
+                        json_fields(&request_id, &principal, &fields),
+                    ),
+                ),
+                Err(status) => {
+                    fields["why"] = serde_json::json!(code_label(status.code()));
+                    ScionService::audit_result_blocking(
+                        &audit,
+                        &crate::audit::Event::new(
+                            "write",
+                            "failed",
+                            json_fields(&request_id, &principal, &fields),
+                        ),
+                    );
+                }
+            }
+            Ok(written)
+        })
+        .await;
+    let id = written??;
+    Ok(count_committed_reply(Response::new(PutBlobResponse {
+        blob_id: id.as_bytes().to_vec(),
+    })))
+}
+
+/// Reads the next message of an upload, with the client's own pace as the
+/// only wait: a client that sends no message for `idle` loses the call
+/// with `DEADLINE_EXCEEDED`, naming the bound. `None` when the stream
+/// ended: the client said all it had. The bytes of a message in flight are
+/// not the bound's business: the timeout wraps only the wait, not the
+/// spool appends that the server runs between messages.
+async fn next_upload_message<S, E>(
+    stream: &mut S,
+    idle: Duration,
+) -> Result<Option<PutBlobRequest>, Status>
+where
+    S: tokio_stream::Stream<Item = Result<PutBlobRequest, E>> + Unpin,
+    E: Into<Status>,
+{
+    match tokio::time::timeout(idle, stream.next()).await {
+        Ok(message) => message.transpose().map_err(Into::into),
+        Err(_) => Err(Status::deadline_exceeded(format!(
+            "no PutBlob message for {idle:?}; the upload ended"
+        ))),
+    }
+}
+
 /// Sends a blob to `tx` in parts of up to `CHUNK_BYTES`, as the client takes
 /// them.
 async fn send_file(
@@ -1691,106 +1833,23 @@ impl Scion for ScionService {
         &self,
         request: Request<Streaming<PutBlobRequest>>,
     ) -> Result<Response<PutBlobResponse>, Status> {
+        let caller = caller(&request)?;
+        // The write check that needs no repo: a principal that may not
+        // write in any repo can never pass `check_writer` below, so it is
+        // refused here, before the permit. It never holds a permit while
+        // the server waits for its first message. The repo is in that
+        // first message, so the per-repo check keeps its place after it:
+        // the memory floor counts one message per permit (`floor.rs`),
+        // and the permit still covers exactly those reads.
+        self.access.check_writer_anywhere(&caller)?;
         let _upload = Arc::clone(&self.uploads)
             .acquire_owned()
             .await
             .map_err(|_| Status::unavailable("server is shutting down"))?;
-        let caller = caller(&request)?;
         let request_id = request_id_of(&request);
         let _call = self.quotas.enter(&caller).map_err(Status::from)?;
         let mut stream = request.into_inner();
-        let first = stream
-            .next()
-            .await
-            .ok_or_else(|| Status::invalid_argument("empty upload"))??;
-        check_name("repo", &first.repo)?;
-        // An upload names no path, so a caller that may change some path of
-        // the repo may upload. A partial reader uploads nothing in v0.1 of
-        // the folder rules ([#121]).
-        if self.access.partial(&caller, &first.repo) {
-            return Err(Status::unimplemented(
-                "not available to a principal with folder read rules",
-            ));
-        }
-        self.access.check_writer(&caller, &first.repo)?;
-        let repo_name = first.repo.clone();
-        let principal = caller.0.clone();
-        let audit = self.audit.clone();
-        let mut bytes_total = first.data.len();
-        // The first message's bytes, and the budget that the later messages
-        // of this upload take from. Held until the reply, on every path.
-        let mut quota = self
-            .quotas
-            .upload(&caller, first.data.len())
-            .map_err(Status::from)?;
-        // Check the repo before reading any more data. Each message goes to
-
-        // the spool file before the next one is read, so an upload holds one
-        // message in memory, not the whole blob.
-        let (repo, mut upload) = self
-            .worker
-            .run(move |store| {
-                let repo = store.read(|c| c.repo_id(&first.repo))?;
-                Ok((repo, store.blobs().upload()?.append(&first.data)?))
-            })
-            .await?;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            if !chunk.repo.is_empty() {
-                return Err(Status::invalid_argument(
-                    "only the first PutBlob message names the repo",
-                ));
-            }
-            bytes_total += chunk.data.len();
-            quota.add(chunk.data.len()).map_err(Status::from)?;
-            upload = self.worker.run(move |_| upload.append(&chunk.data)).await?;
-        }
-        let bytes = bytes_total;
-        self.audit_intent(
-            &request_id,
-            caller.0.as_str(),
-            "write",
-            serde_json::json!({ "rpc": "PutBlob", "repo": repo_name, "bytes": bytes }),
-        )
-        .await?;
-        let written = self
-            .worker
-            .run(move |store| {
-                let written = write::put_blob(&store, repo, upload).map_err(Status::from);
-                // The job that changed the state writes the state
-                // change's own line, after the commit and outside the
-                // write transaction: the evidence does not depend on the
-                // call that asked for the write living on.
-                let mut fields =
-                    serde_json::json!({ "rpc": "PutBlob", "repo": repo_name, "bytes": bytes });
-                match &written {
-                    Ok(_) => Self::audit_result_blocking(
-                        &audit,
-                        &crate::audit::Event::new(
-                            "write",
-                            "ok",
-                            json_fields(&request_id, &principal, &fields),
-                        ),
-                    ),
-                    Err(status) => {
-                        fields["why"] = serde_json::json!(code_label(status.code()));
-                        Self::audit_result_blocking(
-                            &audit,
-                            &crate::audit::Event::new(
-                                "write",
-                                "failed",
-                                json_fields(&request_id, &principal, &fields),
-                            ),
-                        );
-                    }
-                }
-                Ok(written)
-            })
-            .await;
-        let id = written??;
-        Ok(count_committed_reply(Response::new(PutBlobResponse {
-            blob_id: id.as_bytes().to_vec(),
-        })))
+        put_upload(self, caller, request_id, &mut stream, UPLOAD_IDLE_TIMEOUT).await
     }
 
     async fn create_changeset(
@@ -5126,5 +5185,56 @@ mod tests {
             .unwrap_err();
         assert_eq!(status.code(), tonic::Code::Internal);
         assert_eq!(status.message(), "internal error");
+    }
+
+    /// An upload that sends no message for its idle bound loses the call
+    /// with `DEADLINE_EXCEEDED` that names the bound, and a client that
+    /// keeps its own pace is not touched. The bound is a parameter (the
+    /// `UPLOAD_IDLE_TIMEOUT` the handler passes), so this test drives the
+    /// read with a short one, the way `read_file` passes
+    /// `READ_STALL_TIMEOUT` to its sender.
+    #[tokio::test]
+    async fn an_idle_upload_loses_the_call_after_its_own_idle_wait() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<PutBlobRequest, Status>>(1);
+        let mut stream = ReceiverStream::new(rx);
+        // Nobody sends: the client holds its connection open and says
+        // nothing. The server's own 120 s bound would end this at 2 min;
+        // the short bound the test passes ends it in 2 s.
+        let idle = Duration::from_secs(2);
+        let start = Instant::now();
+        let status = next_upload_message(&mut stream, idle)
+            .await
+            .expect_err("an idle upload ends");
+        assert_eq!(status.code(), Code::DeadlineExceeded, "{status:?}");
+        assert!(
+            status.message().contains("no PutBlob message"),
+            "{status:?}"
+        );
+        assert!(start.elapsed() < Duration::from_secs(5), "the bound fires");
+        // A client that sends within the bound is read: the reply side's
+        // symmetry, from the other end. A second sender stays held, so
+        // the stream does not end when the send is done.
+        let held = tx.clone();
+        tokio::spawn(async move {
+            tx.send(Ok(PutBlobRequest {
+                repo: "main".into(),
+                data: b"x".to_vec(),
+            }))
+            .await
+            .ok();
+        });
+        let first = next_upload_message(&mut stream, idle)
+            .await
+            .expect("a paced upload reads")
+            .expect("the first message arrives");
+        assert_eq!(first.repo, "main");
+        // And one that falls silent after its first message is cut by the
+        // same bound on the later wait: the held sender keeps the stream
+        // open, so the wait, not the stream's end, is what fires.
+        let _held = held;
+        let status = next_upload_message(&mut stream, idle)
+            .await
+            .expect_err("a stalled upload ends");
+        assert_eq!(status.code(), Code::DeadlineExceeded, "{status:?}");
     }
 }
