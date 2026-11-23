@@ -71,7 +71,15 @@ How one request flows through the server:
    checks names, IDs and paths, then runs `write.rs`, `land.rs`, `read.rs`
    or `blame.rs` on a blocking thread (the database and the blob folder are
    synchronous). Both services share one bound: at most 256 run at once,
-   and at most 4 of them are `Blame` calls. A
+   and at most 4 of them are `Blame` calls. At most 16 uploads read at
+   once, and an upload that sends no message for 120 s ends with
+   `DEADLINE_EXCEEDED` and frees its slot. A principal that reads whole
+   repos and may write none is refused before it takes an upload slot.
+   The residual: a principal the server cannot refuse before its first
+   message - one with a write rule somewhere, no rule for any repo, or
+   folder read rules - may still hold a slot for up to 120 s per stream
+   and open the stream again; `--max-principal-requests` is the limit
+   for that. A
    request times out after 600 s; for a streamed reply that covers only its
    start. A `GetObjects` or `ReadFile` reply ends when its client takes no
    part for 120 s.
