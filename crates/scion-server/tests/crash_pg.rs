@@ -1029,9 +1029,7 @@ fn a_kill_during_a_land_leaves_no_session_or_lock_behind() {
     while started.elapsed() < Duration::from_secs(10) {
         let rows = client
             .query(
-                &format!(
-                    "SELECT state FROM {schema}.lands WHERE request_key = 'cut'"
-                ),
+                &format!("SELECT state FROM {schema}.lands WHERE request_key = 'cut'"),
                 &[],
             )
             .expect("the lands read answers");
