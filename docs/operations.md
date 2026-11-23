@@ -1860,7 +1860,10 @@ sampler of [run 42425935481](https://github.com/bnsd55/openscion/actions/runs/42
 shows the daemon holding about one CPU core whenever readers run, the
 disk's write time rising with the reader count, and Postgres spending
 about 52 CPU seconds per cell with no readers and 69-84 with them,
-while the Postgres wait-event counts do not grow.
+while the Postgres wait-event counts do not grow. The daemon's one core
+counts user time only - the sampler's CPU columns read utime and missed
+stime - so read it as a floor until a capacity run with the fix
+measures again.
 
 At 50 and 200 writers the queue is in changeset creation, not in the
 land, so the land p99 is small next to the push p99: a writer's whole

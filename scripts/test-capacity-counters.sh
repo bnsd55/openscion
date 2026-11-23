@@ -56,4 +56,19 @@ got=$(cell_throughput "$jsons"/rep1.json "$jsons/absent.json")
 got=$(cell_throughput "$jsons/absent.json")
 [ "$got" = "-" ] || { echo "throughput (no reports): wanted '-', got $got" >&2; exit 1; }
 
+# cpu_ms reads utime + stime from /proc/PID/stat. proc(5): everything
+# after the last ") " is state onward, and there utime and stime are the
+# 12th and 13th fields. The check pulls the awk program out of
+# capacity.sh itself, so it fails if the line drifts back. The fixture
+# makes both old bugs visible: the comm holds a space and a ")", so a
+# strip at any earlier ")" (or none) keeps the pid in the fields, and
+# cmajflt (7), utime (40) and stime (5) all differ, so the old
+# $11 + $12 line cannot pass by accident (it printed 0 here, or 47 with
+# the strip fixed but the fields not).
+prog=$(sed -n "s/^.*awk '\(.*\)' \"\\/proc\\/\$pid\\/stat\".*\$/\1/p" "$here/capacity.sh")
+[ -n "$prog" ] || { echo "cpu_ms: no awk program found in capacity.sh" >&2; exit 1; }
+printf '1234 (a )b c) R 0 0 0 0 0 0 0 0 0 7 40 5 0 0\n' > "$work/stat"
+got=$(awk "$prog" "$work/stat")
+[ "$got" -eq 45 ] || { echo "cpu_ms: wanted utime+stime = 45, got $got" >&2; exit 1; }
+
 echo "counter test: ok"

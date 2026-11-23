@@ -60,7 +60,6 @@ LANDS=${LANDS:-1000}
 # Each rep: the writers land for the bench's own duration, and the
 # readers check out beside them for READ_SECONDS.
 READ_SECONDS=${READ_SECONDS:-90}
-CELL_WARM_SECONDS=${CELL_WARM_SECONDS:-60}
 CAPACITY_MACHINE=${CAPACITY_MACHINE:-unknown runner}
 RUN_URL=${RUN_URL:-}
 
@@ -110,7 +109,11 @@ pct() {
 cpu_ms() {
   local pid=$1 clk=$2 ticks
   [ -n "$pid" ] || return 0
-  ticks=$(awk '{ sub(/^[^)]*\) /, ""); print $11 + $12 }' "/proc/$pid/stat" 2> /dev/null) || return 0
+  # proc(5): everything after the last ") " is state onward, and there
+  # utime and stime are the 12th and 13th fields (pid and (comm) are
+  # fields 1 and 2). A comm may hold a space and a ")" of its own, so
+  # the strip must reach the last ") ", not the first.
+  ticks=$(awk '{ sub(/^.*\) /, ""); print $12 + $13 }' "/proc/$pid/stat" 2> /dev/null) || return 0
   [ -n "$ticks" ] || return 0
   awk -v t="$ticks" -v clk="$clk" 'BEGIN { printf "%d", t * 1000 / clk }'
 }
