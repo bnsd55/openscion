@@ -49,9 +49,12 @@ jobs:
   # The tier gate. It reads the pull request's own file list from the
   # API: no checkout, no fetch, no third-party action. A PR that touches
   # only docs/**, *.md or changes/** cannot change behavior, so
-  # docs_only=true and only the docs tests run for it. The risk flags
-  # add jobs: pg adds test (postgres), macos adds test (macOS),
-  # workflows adds the release smoke. A draft PR skips every job, this
+  # docs_only=true and only the rustdoc and docs-tests jobs run for it.
+  # The risk flags add jobs: macos adds test (macOS), workflows adds
+  # the release smoke, deps adds supply-chain, mount adds the writable
+  # tests and the NFS mount, power adds the power-loss job. The
+  # Postgres jobs need no flag: every ready, non-docs-only pull request
+  # runs them. A draft PR skips every job, this
   # one included. Main, the nightly schedule and a dispatch run every
   # job as before.
   tier:
@@ -71,8 +74,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # The path rules live here, once; the table is in the pull
-          # request body.
+          # The path rules live here, once: there is no other copy of
+          # them in the repo to keep in step.
           files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/${{ github.event.pull_request.number }}/files" --jq '.[].filename')
           docs_only=true
           macos=false
@@ -250,11 +253,12 @@ jobs:
     name: docs tests
     needs: tier
     # The docs tests (links, the changes fragments, flags, operations,
-    # alerts, capacity, the CLI help) are integration tests of the docs
-    # pages. The test job skips a docs-only pull request, so without
-    # this job a broken link or a stale doc would land and fail main's
-    # first run instead. The same if as the docs job: for a docs-only
-    # PR the two of them are the only jobs that run. The test targets
+    # alerts, the audit table, capacity, the CLI help) are integration
+    # tests of the docs pages. The test job skips a docs-only pull
+    # request, so without this job a broken link or a stale doc would
+    # land and fail main's first run instead. The same if as the docs
+    # job: for a docs-only PR the two of them are the only jobs that
+    # run. The test targets
     # come from the docs_*.rs files themselves, so a new docs test
     # file runs without a hand list to forget; the counts refuse a
     # glob that matched nothing, so a moved directory cannot turn the
@@ -549,9 +553,10 @@ jobs:
     if: >-
       ${{ !cancelled() && (github.event_name != 'pull_request' && (needs.tier.result == 'success' || needs.tier.result == 'skipped')) }}
     runs-on: ubuntu-24.04
-    # The whole workspace on one Postgres: the fast tier already
-    # proved the suites, this proves the majors. A cold cache adds the
-    # build, the way the fast tier's cap does.
+    # One restore test on one Postgres: the fixture build and the
+    # store seeding are the cost, and a cold cache adds the build. The
+    # whole-workspace suites run in the test job; the Postgres majors
+    # run in the matrix job below.
     timeout-minutes: 40
     services:
       # The suite's Postgres tests read this database: the backend they
@@ -625,8 +630,9 @@ jobs:
     name: test (postgres ${{ matrix.version }})
     needs: tier
     # Fast tier: every event, but on a pull request only a ready,
-    # non-docs-only one - every suite is Postgres now, so the push that
-    # runs the suite runs the Postgres majors too.
+    # non-docs-only one - every suite is Postgres now. A push runs the
+    # 17 cell only; the 16 and 18 cells run nightly and on a release
+    # candidate's dispatch, as the matrix below says.
     if: >-
       ${{ !cancelled() && (github.event_name != 'pull_request' || (needs.tier.result == 'success' && !github.event.pull_request.draft && needs.tier.outputs.docs_only != 'true')) }}
     runs-on: ubuntu-24.04
@@ -735,7 +741,8 @@ jobs:
           df -h /
         env:
           # The Postgres majors prove version parity, not more cases;
-          # the main job on 17 already runs 2000.
+          # the main test job runs 64 on a pull request and 128 on
+          # main, and the nightly's proof jobs carry the full 2000.
           PROPTEST_CASES: "64"
           SCION_TEST_REQUIRE_SETFACL: "1"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
@@ -1491,7 +1498,8 @@ jobs:
       - run: TMPDIR=/mnt/xfs cargo test -p open-scion-server
         env:
           # The xfs job proves filesystem parity, not more cases; the
-          # main job on the runner disk already runs 2000.
+          # main test job runs 64 on a pull request and 128 on main,
+          # and the nightly's proof jobs carry the full 2000.
           PROPTEST_CASES: "64"
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
           # The backup test dumps the live metadata with the job's own
@@ -1509,8 +1517,9 @@ jobs:
     needs: tier
     # The slow tier: main, the nightly and a dispatch only - plus a
     # pull request whose change can break it (the suite's harness in
-    # tests/common, or the suite itself), the way pg runs the Postgres
-    # tests for the pull request that touches them.
+    # tests/common, or the suite itself), the way the mount flag runs
+    # the writable tests and the NFS mount for the pull request that
+    # touches the mount's code.
     if: >-
       ${{ !cancelled() && (github.event_name != 'pull_request' || (needs.tier.result == 'success' && !github.event.pull_request.draft && needs.tier.outputs.power == 'true')) }}
     runs-on: ubuntu-24.04
@@ -1752,6 +1761,10 @@ jobs:
         run: sh docker/demo.sh
 
   fuzz:
+    # The name's 60 s is history: 13 targets x -max_total_time=20 at
+    # -P4 is 4 waves, about 80 s of fuzzing. The name stays until a
+    # step change moves it: a job name can be a required status check,
+    # and support_matrix.rs reads job names.
     name: fuzz smoke (60 s)
     # The slow tier: main, the nightly and a dispatch only.
     if: github.event_name != 'pull_request'
