@@ -993,7 +993,30 @@ async fn a_land_whose_call_is_cut_still_writes_its_result_and_ref_lines() {
     });
     wait_for_lines(&audit_path, intent_lines + 1).await;
     call.abort();
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // The abort lands when the cut call's handler future has dropped at
+    // an await point: its answer either wrote the cancelled line (the
+    // drop won the race) or the job claimed the call and the line waits
+    // for the job's own ending. The wait polls the file for the
+    // cancelled line and stops at the first sign of the job's answer
+    // instead - either ending means the cut call is dead and the job
+    // owes the evidence.
+    let cut_is_dead = async {
+        loop {
+            let lines = read_lines(&audit_path);
+            let answered = lines.iter().any(|line| {
+                line["request_id"] == "t-cut"
+                    && line["outcome"] != "intent"
+                    && line["event"] == "land"
+            });
+            if answered {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), cut_is_dead)
+        .await
+        .expect_err("the cut call stayed unsettled for 10 s");
 
     // Let the land commit. The job, not the dead call, now owes the
     // audit its result and its ref line.
