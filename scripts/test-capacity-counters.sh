@@ -156,5 +156,3 @@ printf '%s\n' "$out" | grep -q "cell w2-r5" || {
 }
 
 echo "counter test: ok"
-
-echo "counter test: ok"
