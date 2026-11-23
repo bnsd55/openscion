@@ -1906,16 +1906,18 @@ async fn a_daemons_stderr_stays_quiet_and_colorless_across_gets() {
     wait_serving(&socket).await;
     let mut client = connect(&format!("unix://{}", socket.display()), Some(TOKEN)).await;
 
-    // One read, then measure what the daemon has logged.
+    // One read, then measure what the daemon has logged. The reply is
+    // the marker: a per-call line rides the call's own handling, so
+    // every read's line but the last is on disk before the next call
+    // even starts - the measure after the last reply reads 18 of 19
+    // would-be lines, far past the bound the assert sets.
     get(&mut client, &fake, &[&object]).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
     let after_one = std::fs::read(&log).unwrap().len();
 
     // Nineteen more reads: a line per call would add about 19 lines.
     for _ in 0..19 {
         get(&mut client, &fake, &[&object]).await.unwrap();
     }
-    tokio::time::sleep(Duration::from_millis(200)).await;
     let bytes = std::fs::read(&log).unwrap();
     assert!(
         !bytes.contains(&0x1b),
