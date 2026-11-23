@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Shared by demo.sh and bench-checkout.sh. Source it; do not run it.
+# Shared by the other scripts in this directory. Source it; do not run it.
 #
 # Everything goes into one private temp directory, $WORK. Every process runs
 # under `/usr/bin/time -p`, so its wall and CPU time are at the end of its log
@@ -81,8 +81,9 @@ kib_per_1k() {
 
 # served_backend DATA_DIR: what the store the server ran on really is,
 # read from the data directory, asserted Postgres. The server's metadata
-# store is Postgres: a directory with no backend marker ran SQLite, and
-# a marker with any other first line is damage, not SQLite, and reads
+# store is Postgres, and the marker is written when the store opens: a
+# directory with no marker never ran Postgres-backed, and a marker with
+# any other first line is damage, and reads
 # as unknown:<line> - either way the caller fails on it rather than
 # passing a store off as what the run asked for (#561 review F3).
 served_backend() {
