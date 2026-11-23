@@ -206,6 +206,8 @@ jobs:
       # those PRs' diff resolves; it joins the check right after.
       - name: shellcheck over scripts
         run: scripts/lint-scripts.sh
+      - name: the scripts' bash 3.2 gate refuses the bash 4 forms
+        run: scripts/test-check-bash3.sh
       - name: the capacity reader counters count the log's own shapes
         run: scripts/test-capacity-counters.sh
       - name: the soak-fault classifier classifies the pg restart's refusals

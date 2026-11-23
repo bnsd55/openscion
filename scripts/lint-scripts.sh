@@ -63,3 +63,12 @@ fi
 cd "$(dirname "$0")/.."
 find scripts -maxdepth 1 -name '*.sh' ! -name capacity.sh -print0 |
   xargs -0 "$SHELLCHECK" -x
+
+# The bash 3.2 gate (#1395): macOS runs the scripts under /bin/bash
+# 3.2, so a bash 4 form must fail this job in seconds, not a macOS test
+# job 20 minutes in (#1388). check-bash3.sh names the forms and their
+# reason; it sits out of its own scan, because it names them, and so
+# does its test, whose fixtures are the forms themselves.
+find scripts -maxdepth 1 -name '*.sh' ! -name capacity.sh \
+  ! -name check-bash3.sh ! -name test-check-bash3.sh -print0 |
+  xargs -0 scripts/check-bash3.sh
