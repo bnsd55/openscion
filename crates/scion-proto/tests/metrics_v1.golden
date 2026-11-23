@@ -318,6 +318,13 @@ scion_derive_walks_in_flight
 # HELP scion_derive_walks_waiting Derive walks waiting for a permit.
 # TYPE scion_derive_walks_waiting gauge
 scion_derive_walks_waiting
+# HELP scion_busy_timeouts_total Waits for a shared limit that found no room within the limit's busy bound (30 s) and answered with a retryable busy status; by limit, never by principal. A count that climbs says the limit is too small for the clients, or a client holds its share without reading.
+# TYPE scion_busy_timeouts_total counter
+scion_busy_timeouts_total{limit="blame"}
+scion_busy_timeouts_total{limit="diff"}
+scion_busy_timeouts_total{limit="graph_query"}
+scion_busy_timeouts_total{limit="read_budget"}
+scion_busy_timeouts_total{limit="derive_walk"}
 # HELP scion_pg_pool_wait_seconds Time a call waited for a Postgres reader, in seconds.
 # TYPE scion_pg_pool_wait_seconds histogram
 scion_pg_pool_wait_seconds_bucket{le="0.001"}

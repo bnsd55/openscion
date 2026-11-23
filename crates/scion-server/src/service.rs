@@ -16,6 +16,8 @@ use std::time::Duration;
 use prost::Message as _;
 use scion_core::{BlobId, Changeset, ChangesetId, FileState, RepoPath};
 use scion_proto::runtime::listen::{self, Limits};
+use scion_proto::runtime::metrics::BusyLimit;
+use scion_proto::runtime::reply::BUSY_TIMEOUT;
 use scion_proto::runtime::tls::ServerTls;
 use scion_proto::v1::scion_server::{Scion, ScionServer};
 use scion_proto::v1::{
@@ -80,6 +82,45 @@ const _: () = assert!(MAX_GRAPH_QUERIES < crate::store::READERS);
 /// for about a second to find renames (`read::MAX_RENAME_CHUNKS`), so diffs
 /// never take more than this many of the `MAX_BLOCKING` permits either.
 pub(crate) const MAX_DIFFS: usize = 4;
+/// Takes a permit of `sem`, or refuses with a retryable busy status
+/// after `busy`: every wait for a shared limit ends within the bound, so
+/// one caller's hold cannot park another past it (#1391). The wait holds
+/// only the call's request slot. A wait that runs past the bound counts
+/// the limit's `scion_busy_timeouts_total` series.
+async fn take_slot(
+    sem: &Arc<Semaphore>,
+    busy: Duration,
+    metrics: &Metrics,
+    limit: BusyLimit,
+    what: &str,
+) -> Result<OwnedSemaphorePermit, Status> {
+    let Ok(acquired) = tokio::time::timeout(busy, Arc::clone(sem).acquire_owned()).await else {
+        metrics.busy_timeout(limit);
+        return Err(Status::resource_exhausted(format!(
+            "busy: no {what} free; retry later"
+        )));
+    };
+    acquired.map_err(|_| Status::unavailable("server is shutting down"))
+}
+
+/// Takes `units` of `sem`, or refuses with a retryable busy status after
+/// `busy`, as [`take_slot`] does for one permit (#1391).
+async fn take_units(
+    sem: &Arc<Semaphore>,
+    units: u32,
+    busy: Duration,
+    metrics: &Metrics,
+) -> Result<OwnedSemaphorePermit, Status> {
+    let Ok(acquired) = tokio::time::timeout(busy, Arc::clone(sem).acquire_many_owned(units)).await
+    else {
+        metrics.busy_timeout(BusyLimit::ReadBudget);
+        return Err(Status::resource_exhausted(
+            "busy: no read budget free; retry later".to_owned(),
+        ));
+    };
+    acquired.map_err(|_| Status::unavailable("server is shutting down"))
+}
+
 /// Longest a request may take before the server gives up on it.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 /// Most bytes that all `ReadFile` replies together hold: the parts read and
@@ -432,6 +473,9 @@ pub async fn serve(
     // backends the blob full flushes, the derive-walk gauges and the
     // collector-key wait.
     store.set_metrics(Arc::clone(&metrics));
+    // The walks' busy bound: the default a serve keeps; the tests set a
+    // short one on their own service (#1391).
+    store.derive_flights().set_busy(BUSY_TIMEOUT);
     let fence = store.fence_flag();
     let worker = Worker::new(store);
     let lands = Arc::new(Lands::new(pending_lands, Some(Arc::clone(&metrics))));
@@ -646,6 +690,11 @@ pub struct ScionService {
     /// The audit log: state changes record an intent line before they
     /// run and a result line after.
     audit: crate::audit::Audit,
+    /// The bound every wait for a shared limit ends within: a wait past
+    /// it answers with a retryable busy status and counts
+    /// `scion_busy_timeouts_total` for its limit. `reply::BUSY_TIMEOUT`
+    /// (30 s) in a serve; the tests set it short.
+    busy: Duration,
 }
 
 /// One state per land call's answer: the intent is recorded, and
@@ -721,10 +770,13 @@ impl ScionService {
                 "the object is {size} bytes, over the {MAX_OBJECT_BYTES}-byte reply cap"
             )));
         }
-        Arc::clone(&self.reads)
-            .acquire_many_owned(u32::try_from(size).expect("the cap asserts u32 fit"))
-            .await
-            .map_err(|_| Status::unavailable("server is shutting down"))
+        take_units(
+            &self.reads,
+            u32::try_from(size).expect("the cap asserts u32 fit"),
+            self.busy,
+            &self.metrics,
+        )
+        .await
     }
 
     /// Sends `data` in parts, holding `share` for the whole reply.
@@ -772,6 +824,7 @@ impl ScionService {
             graph_queries: Arc::new(Semaphore::new(MAX_GRAPH_QUERIES)),
             diffs: Arc::new(Semaphore::new(MAX_DIFFS)),
             reads: Arc::new(Semaphore::new(READ_BUDGET_BYTES)),
+            busy: scion_proto::runtime::reply::BUSY_TIMEOUT,
         }
     }
 
@@ -936,7 +989,15 @@ impl ScionService {
         T: Send + 'static,
         F: FnOnce(&Backend, &Deadline) -> Result<T> + Send + 'static,
     {
-        run_graph_query(&self.worker, &self.graph_queries, deadline, query).await
+        run_graph_query(
+            &self.worker,
+            &self.graph_queries,
+            deadline,
+            self.busy,
+            &self.metrics,
+            query,
+        )
+        .await
     }
 }
 
@@ -1312,6 +1373,8 @@ async fn run_graph_query<T, F>(
     worker: &Worker,
     permits: &Arc<Semaphore>,
     deadline: Deadline,
+    busy: Duration,
+    metrics: &Metrics,
     query: F,
 ) -> Result<T, Status>
 where
@@ -1322,10 +1385,15 @@ where
     // that cancels, drops this call but not a job that is running. The
     // guard ends the deadline when this call ends or is dropped.
     let _call = deadline.guard();
-    let slot = Arc::clone(permits)
-        .acquire_owned()
-        .await
-        .map_err(|_| Status::unavailable("server is shutting down"))?;
+    // The wait is bounded, as every shared-limit wait is (#1391).
+    let slot = take_slot(
+        permits,
+        busy,
+        metrics,
+        BusyLimit::GraphQuery,
+        "graph query slot",
+    )
+    .await?;
     worker
         .run(move |store| {
             let _slot = slot;
@@ -1347,6 +1415,9 @@ struct LogWalk {
     left: usize,
     path: Option<RepoPath>,
     deadline: Deadline,
+    /// The busy bound the walk's own graph-query wait ends within.
+    busy: Duration,
+    metrics: Arc<Metrics>,
     stalled: Option<scion_proto::runtime::listen::Stalled>,
 }
 
@@ -1525,22 +1596,41 @@ async fn blame_parts(mut send: BlameSend, tx: mpsc::Sender<Part<BlameResponse>>)
     }
 }
 
+/// One page fetch of the log: the walk's shape that stays fixed from
+/// page to page.
+struct LogPageRequest {
+    repo: String,
+    path: Option<RepoPath>,
+    from: ChangesetId,
+    limit: usize,
+}
+
 /// Fetches one page of the log: a graph query when `path` is set, because
 /// it may derive the path history of a long history first, a plain read
 /// otherwise.
 async fn log_page(
     worker: &Worker,
     graph_queries: &Arc<Semaphore>,
-    repo: String,
-    path: Option<RepoPath>,
     deadline: Deadline,
-    from: ChangesetId,
-    limit: usize,
+    busy: Duration,
+    metrics: &Metrics,
+    req: LogPageRequest,
 ) -> Result<read::LogPage, Status> {
+    let LogPageRequest {
+        repo,
+        path,
+        from,
+        limit,
+    } = req;
     if let Some(path) = path {
-        run_graph_query(worker, graph_queries, deadline, move |store, deadline| {
-            read::log_page(store, &repo, from, Some(&path), limit, deadline)
-        })
+        run_graph_query(
+            worker,
+            graph_queries,
+            deadline,
+            busy,
+            metrics,
+            move |store, deadline| read::log_page(store, &repo, from, Some(&path), limit, deadline),
+        )
         .await
     } else {
         worker
@@ -1592,11 +1682,15 @@ async fn log_parts(mut walk: LogWalk, page: read::LogPage, tx: mpsc::Sender<Part
         page = match log_page(
             &walk.worker,
             &walk.graph_queries,
-            walk.repo.clone(),
-            walk.path.clone(),
             walk.deadline.clone(),
-            from,
-            limit,
+            walk.busy,
+            &walk.metrics,
+            LogPageRequest {
+                repo: walk.repo.clone(),
+                path: walk.path.clone(),
+                from,
+                limit,
+            },
         )
         .await
         {
@@ -2161,11 +2255,9 @@ impl Scion for ScionService {
             })
             .await?;
         // Taken before any content is read, so a call that waits holds none.
+        // The wait is bounded, as every shared-limit wait is (#1391).
         let share = u32::try_from(read_share(size)).expect("asserted to fit in u32");
-        let share = Arc::clone(&self.reads)
-            .acquire_many_owned(share)
-            .await
-            .map_err(|_| Status::unavailable("server is shutting down"))?;
+        let share = take_units(&self.reads, share, self.busy, &self.metrics).await?;
         // The request slot lives until the reply ends, not until this
         // handler returns: the reply's work goes on in the producer.
         let (tx, rx) = mpsc::channel(2);
@@ -2281,11 +2373,15 @@ impl Scion for ScionService {
         let page = log_page(
             &self.worker,
             &self.graph_queries,
-            req.repo.clone(),
-            path.clone(),
             deadline.clone(),
-            id,
-            limit,
+            self.busy,
+            &self.metrics,
+            LogPageRequest {
+                repo: req.repo.clone(),
+                path: path.clone(),
+                from: id,
+                limit,
+            },
         )
         .await?;
         // The first page goes out as the first parts; the rest follow,
@@ -2301,6 +2397,8 @@ impl Scion for ScionService {
             left: limit,
             path,
             deadline,
+            busy: self.busy,
+            metrics: Arc::clone(&self.metrics),
             stalled,
         };
         let (tx, rx) = mpsc::channel(2);
@@ -2320,11 +2418,16 @@ impl Scion for ScionService {
         let id = parse_id(&req.changeset_id, "changeset_id")?;
         let path = parse_path(req.path.clone())?;
         // Taken before the worker permit, and held until the job ends, also
-        // when the client leaves first.
-        let slot = Arc::clone(&self.blames)
-            .acquire_owned()
-            .await
-            .map_err(|_| Status::unavailable("server is shutting down"))?;
+        // when the client leaves first. The wait is bounded: a caller that
+        // holds every slot cannot park this one past the busy bound (#1391).
+        let slot = take_slot(
+            &self.blames,
+            self.busy,
+            &self.metrics,
+            BusyLimit::Blame,
+            "blame slot",
+        )
+        .await?;
         let memory = self.blame_memory.clone();
         let until = Some(deadline.at());
         let repo = req.repo.clone();
@@ -2451,11 +2554,16 @@ impl Scion for ScionService {
         let new = parse_id(&req.new_changeset_id, "new_changeset_id")?;
         let path = parse_optional_path(req.path)?;
         let after = parse_optional_path(req.after)?;
-        // Held until the job ends, as for `Blame`.
-        let slot = Arc::clone(&self.diffs)
-            .acquire_owned()
-            .await
-            .map_err(|_| Status::unavailable("server is shutting down"))?;
+        // Held until the job ends, as for `Blame`. The wait is bounded as
+        // every shared-limit wait is (#1391).
+        let slot = take_slot(
+            &self.diffs,
+            self.busy,
+            &self.metrics,
+            BusyLimit::Diff,
+            "diff slot",
+        )
+        .await?;
         let page = self
             .worker
             .run(move |store| {
@@ -4355,6 +4463,86 @@ mod tests {
         )
     }
 
+    /// A wait for a shared limit whose rest is taken answers at the busy
+    /// bound: `resource_exhausted`, a retryable "busy ... retry later"
+    /// message, and the limit's `scion_busy_timeouts_total` counted
+    /// (#1391). On main the wait has no bound, so the blame call hangs
+    /// past this test's own completion assert: red there.
+    #[tokio::test]
+    async fn a_wait_over_a_taken_limit_answers_busy_at_the_bound() {
+        let dir = crate::test_support::private_tempdir();
+        let store = Backend::open_test(dir.path()).unwrap();
+        let blob = store.blobs().put(b"x").unwrap();
+        let put = |parents, path: &str| {
+            Changeset::new(
+                parents,
+                IdentityTime::new(b"t".to_vec(), b"t@x".to_vec(), 0, 0)
+                    .expect("identity fits the format"),
+                None,
+                path.as_bytes().to_vec(),
+                [(
+                    RepoPath::new(path.as_bytes().to_vec()).unwrap(),
+                    Some(FileState::Regular {
+                        content: blob,
+                        executable: false,
+                    }),
+                )]
+                .into(),
+            )
+            .expect("changeset fits the format")
+        };
+        let cs = store
+            .write(|c| {
+                let repo = c.create_repo("r")?;
+                let root = c.insert_changeset(repo, &put(vec![], "a"))?;
+                assert!(c.cas_ref(repo, "main", None, root)?);
+                Ok(root)
+            })
+            .unwrap();
+        let metrics = Arc::new(Metrics::default());
+        let mut service = counting_service(&store, &metrics);
+        service.busy = Duration::from_millis(100);
+        // The rest of the limit is taken: every blame slot is held.
+        let held: Vec<_> = (0..MAX_BLAMES)
+            .map(|_| Arc::clone(&service.blames).try_acquire_owned().unwrap())
+            .collect();
+        let request = as_default(BlameRequest {
+            repo: "r".into(),
+            changeset_id: cs.as_bytes().to_vec(),
+            path: b"a".to_vec(),
+            cursor: Vec::new(),
+        });
+        let started = std::time::Instant::now();
+        // Bounded so a server without the bound fails this test instead
+        // of hanging it: red on main (#1391).
+        let reply = tokio::time::timeout(Duration::from_secs(5), service.blame(request)).await;
+        let status = match reply {
+            Ok(Ok(_reply)) => panic!("the taken limit answered with a reply, not busy"),
+            Ok(Err(status)) => status,
+            Err(elapsed) => panic!("the wait did not end within the test's own bound: {elapsed}"),
+        };
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the wait ended at the bound, not at a hang: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(status.code(), tonic::Code::ResourceExhausted, "{status}");
+        assert!(
+            status
+                .message()
+                .contains("busy: no blame slot free; retry later"),
+            "{status}"
+        );
+        assert_eq!(metrics.busy_timeouts(BusyLimit::Blame), 1);
+        // The export carries the limit's own series.
+        let text = metrics.render();
+        assert!(
+            text.contains("scion_busy_timeouts_total{limit=\"blame\"} 1"),
+            "{text}"
+        );
+        drop(held);
+    }
+
     /// A land whose call already ran past its deadline moves the land
     /// counter for its outcome: the caller read `deadline_exceeded`, and
     /// the operator sees the failed land.
@@ -4571,6 +4759,8 @@ mod tests {
             left: 10,
             path: None,
             deadline: Deadline::new(std::time::Instant::now() + Duration::from_secs(600)),
+            busy: BUSY_TIMEOUT,
+            metrics: Arc::new(Metrics::default()),
             stalled: None,
         }
     }
