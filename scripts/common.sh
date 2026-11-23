@@ -665,25 +665,32 @@ count_reader_failures() {
 # The damage texts (#1362): a line carrying any of them reports lost or
 # damaged data, and no expected-failure pattern may swallow it. One
 # list, shared by the classifiers of soak.sh and soak-fault.sh and by
-# capacity.sh's damage scan (#1376, #1365). scripts/test-capacity-counters.sh
-# pins each text against the Rust source it comes from, so a reword
-# fails CI instead of turning the guard off.
-damage_texts() {
+# capacity.sh's damage scan (#1376, #1365). Each row of
+# damage_text_sources names the Rust file the text comes from, which
+# scripts/test-capacity-counters.sh pins it against - a reword fails CI
+# instead of turning the guard off.
+damage_text_sources() {
   cat <<'EOF'
-appears twice on main
-lands reported the same result
-reported lands differ from main:
-server sent a bad object for
-server sent tree 
-server sent blob 
-server sent a bad tree for
-server sent an object that was not asked for
-server sent none of the requested objects
-bytes, the tree says
-the reply ended in the middle of an object
-server sent a bad ID
-code: 'DataLoss'
+appears twice on main|crates/scn/src/cmd/bench.rs
+lands reported the same result|crates/scn/src/cmd/bench.rs
+reported lands differ from main:|crates/scn/src/cmd/bench.rs
+server sent a bad object for|crates/scn/src/cmd/checkout.rs
+server sent tree |crates/scn/src/cmd/checkout.rs
+server sent blob |crates/scn/src/cmd/checkout.rs
+server sent a bad tree for|crates/scn/src/cmd/checkout.rs
+server sent an object that was not asked for|crates/scn/src/cmd/checkout.rs
+server sent none of the requested objects|crates/scn/src/cmd/checkout.rs
+bytes, the tree says|crates/scn/src/cmd/checkout.rs
+the reply ended in the middle of an object|crates/scn/src/cmd/checkout.rs
+server sent a bad ID|crates/scn/src/client.rs
+damaged data|crates/scion-server/src/error.rs
 EOF
+}
+
+# damage_texts: the texts alone, one per line - the grep patterns the
+# damage helpers and the damage scans read.
+damage_texts() {
+  damage_text_sources | cut -d'|' -f1
 }
 
 # is_damage LINE: the line reports lost or damaged data. Every
