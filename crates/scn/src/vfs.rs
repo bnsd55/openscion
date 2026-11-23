@@ -594,6 +594,8 @@ impl Vfs {
     }
 
     /// Fetches the tree of the directory `id` into its listing, once.
+    /// The write lock is held across the fetch: this is the mutations'
+    /// in-lock fallback (their SHORTCUT below).
     async fn list_dir(&self, nodes: &mut Nodes, id: u64) -> Result<(), nfsstat3> {
         let (dir_path, tree) = {
             let node = nodes.by_id.get(&id).ok_or(nfsstat3::NFS3ERR_STALE)?;
@@ -606,7 +608,6 @@ impl Vfs {
                 _ => return Err(nfsstat3::NFS3ERR_NOTDIR),
             }
         };
-        let mut listed = BTreeMap::new();
         if let Some(tree) = tree {
             let tree = self
                 .fetch_tree(tree, dir_path.as_ref())
@@ -618,6 +619,27 @@ impl Vfs {
                     };
                     self.io_at("cannot read the tree of", &at, &e)
                 })?;
+            Self::insert_listing(nodes, id, Some(tree))?;
+        } else {
+            Self::insert_listing(nodes, id, None)?;
+        }
+        Ok(())
+    }
+
+    /// Puts the entries of a fetched tree into the listing of the
+    /// directory `id`, under the caller's lock: the overlay's deletions
+    /// and files win over the ref's, and the entries' handles are minted
+    /// here, once. The caller must have re-checked under the same lock
+    /// that the directory is a `Dir` that is not listed yet.
+    fn insert_listing(nodes: &mut Nodes, id: u64, fetched: Option<Tree>) -> Result<(), nfsstat3> {
+        let dir_path = nodes
+            .by_id
+            .get(&id)
+            .ok_or(nfsstat3::NFS3ERR_STALE)?
+            .path
+            .clone();
+        let mut listed: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+        if let Some(tree) = fetched {
             for (name, entry) in tree.entries() {
                 let path = Self::child(dir_path.as_ref(), name.as_bytes())?;
                 if nodes.deleted.contains(&path) || nodes.by_path.contains_key(&Some(path.clone()))
@@ -661,7 +683,77 @@ impl Vfs {
         Ok(())
     }
 
+    /// Loads the listing of the directory `id`, with no lock held over
+    /// the fetch (#1387): the tree is fetched first, and the insert takes
+    /// the write lock after a re-check that no other call listed the
+    /// directory first. Two calls that fetch the same cold directory at
+    /// once both fetch, and the first insert wins; the loser drops its
+    /// copy before any file id of its own has escaped to the kernel, so
+    /// both calls answer the winner's handles.
+    /// SHORTCUT: while the directory is cold, both calls fetch -- an
+    /// IDE's parallel lookups of one cold directory make one fetch each
+    /// of one small tree, and only while it is cold. One fetch per
+    /// directory in flight (a single-flight map), if the fetch count of a
+    /// cold tree matters.
+    async fn listed(&self, dirid: u64) -> Result<Option<RepoPath>, nfsstat3> {
+        let (dir_path, tree) = {
+            let nodes = self.nodes.read().await;
+            let node = nodes.by_id.get(&dirid).ok_or(nfsstat3::NFS3ERR_STALE)?;
+            if !node.kind.is_dir() {
+                return Err(nfsstat3::NFS3ERR_NOTDIR);
+            }
+            match &node.kind {
+                Kind::Dir {
+                    listed: Some(_), ..
+                }
+                | Kind::LocalDir => return Ok(node.path.clone()),
+                Kind::Dir { tree, .. } => (node.path.clone(), *tree),
+                _ => return Err(nfsstat3::NFS3ERR_NOTDIR),
+            }
+        };
+        // The fetch holds no lock: a slow or parked fetch must not hold
+        // up the mount's other calls.
+        let fetched =
+            match tree {
+                Some(tree) => Some(self.fetch_tree(tree, dir_path.as_ref()).await.map_err(
+                    |e| {
+                        let at = match dir_path.as_ref() {
+                            Some(p) => self.overlay_file(p),
+                            None => self.overlay.clone(),
+                        };
+                        self.io_at("cannot read the tree of", &at, &e)
+                    },
+                )?),
+                None => None,
+            };
+        let mut nodes = self.nodes.write().await;
+        // The node may be gone or listed while the fetch ran: the first
+        // insert wins, this call drops its copy.
+        {
+            let node = nodes.by_id.get(&dirid).ok_or(nfsstat3::NFS3ERR_STALE)?;
+            match &node.kind {
+                Kind::Dir {
+                    listed: Some(_), ..
+                }
+                | Kind::LocalDir => return Ok(node.path.clone()),
+                Kind::Dir { .. } => {}
+                _ => return Err(nfsstat3::NFS3ERR_NOTDIR),
+            }
+        }
+        Self::insert_listing(&mut nodes, dirid, fetched)?;
+        Ok(dir_path)
+    }
+
     /// Loads the listing of `dirid` if it is a directory.
+    ///
+    /// SHORTCUT: the mutations (`setattr`, `write`, `create`,
+    /// `create_exclusive`, `mkdir`, `symlink`, `remove`, `rename`,
+    /// `commit`) still call this fetch under the write lock, so a slow
+    /// fetch parks every other call of the mount. It stays until #640's
+    /// rewrite opens each path step by handle; the read paths (`lookup`,
+    /// `readdir`, `read`, `readlink`) use `listed`, which fetches with no
+    /// lock held.
+    #[cfg_attr(not(feature = "unstable-writable-mount"), allow(dead_code))]
     async fn ensure_listed(
         &self,
         nodes: &mut Nodes,
@@ -744,8 +836,10 @@ impl NFSFileSystem for Vfs {
     }
 
     async fn lookup(&self, dirid: fileid3, filename: &filename3) -> Result<fileid3, nfsstat3> {
-        let mut nodes = self.nodes.write().await;
-        let dir_path = self.ensure_listed(&mut nodes, dirid).await?;
+        // The directory is listed with no lock held over the fetch
+        // (#1387): a slow fetch must not park the mount's other calls.
+        let dir_path = self.listed(dirid).await?;
+        let nodes = self.nodes.write().await;
         let path = Self::child(dir_path.as_ref(), filename.as_ref())?;
         if nodes.deleted.contains(&path) {
             return Err(nfsstat3::NFS3ERR_NOENT);
@@ -814,27 +908,40 @@ impl NFSFileSystem for Vfs {
         // cached blob, an overlay file is read from its offset. The client
         // reads in pieces, so a whole-file copy would make a big file
         // quadratic.
-        let nodes = self.nodes.read().await;
-        let node = nodes.by_id.get(&id).ok_or(nfsstat3::NFS3ERR_STALE)?;
-        match &node.kind {
-            Kind::Store { blob, len, .. } => {
+        // What the read serves, copied from the node so the read lock is
+        // not held over the fetch (#1387).
+        enum Read {
+            Store {
+                blob: BlobId,
+                path: Option<RepoPath>,
+                len: u64,
+            },
+            Local(RepoPath),
+        }
+        let what = {
+            let nodes = self.nodes.read().await;
+            let node = nodes.by_id.get(&id).ok_or(nfsstat3::NFS3ERR_STALE)?;
+            match &node.kind {
+                Kind::Store { blob, len, .. } => Read::Store {
+                    blob: *blob,
+                    path: node.path.clone(),
+                    len: *len,
+                },
+                Kind::Local { .. } => Read::Local(node.path.clone().expect("a file has a path")),
+                Kind::Dir { .. } | Kind::LocalDir => return Err(nfsstat3::NFS3ERR_ISDIR),
+                Kind::Link { .. } | Kind::StoreLink { .. } => return Err(nfsstat3::NFS3ERR_INVAL),
+            }
+        };
+        match what {
+            Read::Store { blob, path, len } => {
+                // The fetch holds no lock: a slow or parked fetch must
+                // not hold up the mount's other calls (#1387).
                 let data = self
-                    .fetch_blob(*blob, node.path.as_ref(), *len)
+                    .fetch_blob(blob, path.as_ref(), len)
                     .await
                     .map_err(io_err)?;
-                if data.len() as u64 != *len {
-                    // The tree said one size, the blob holds another: one of
-                    // them is wrong, and reading on would serve lies.
-                    let why = format!(
-                        "{}: {} bytes, the tree says {len}",
-                        node.path.as_ref().map_or_else(
-                            || "<unnamed>".to_owned(),
-                            |p| String::from_utf8_lossy(p.as_bytes()).to_string()
-                        ),
-                        data.len()
-                    );
-                    warn("a blob does not match the size of its tree entry", &why);
-                    return Err(nfsstat3::NFS3ERR_IO);
+                if data.len() as u64 != len {
+                    return Err(Self::size_mismatch(path.as_ref(), data.len(), len));
                 }
                 let len = data.len() as u64;
                 let from = usize::try_from(offset.min(len)).unwrap_or(usize::MAX);
@@ -842,31 +949,29 @@ impl NFSFileSystem for Vfs {
                     .unwrap_or(usize::MAX);
                 Ok((data[from..to].to_vec(), to as u64 >= len))
             }
-            Kind::Local { .. } => {
+            Read::Local(path) => {
                 use std::io::SeekFrom;
                 use std::io::{Read as _, Seek as _};
 
-                let path = self.overlay_file(node.path.as_ref().expect("a file has a path"));
+                let at = self.overlay_file(&path);
                 let mut file =
-                    std::fs::File::open(&path).map_err(|e| self.io_at("cannot read", &path, &e))?;
+                    std::fs::File::open(&at).map_err(|e| self.io_at("cannot read", &at, &e))?;
                 let len = file
                     .metadata()
-                    .map_err(|e| self.io_at("cannot read", &path, &e))?
+                    .map_err(|e| self.io_at("cannot read", &at, &e))?
                     .len();
                 let from = offset.min(len);
                 file.seek(SeekFrom::Start(from))
-                    .map_err(|e| self.io_at("cannot read", &path, &e))?;
+                    .map_err(|e| self.io_at("cannot read", &at, &e))?;
                 let want = usize::try_from(count).unwrap_or(usize::MAX);
                 let mut data = Vec::new();
                 let taken = file
                     .take(u64::try_from(want).unwrap_or(u64::MAX))
                     .read_to_end(&mut data)
-                    .map_err(|e| self.io_at("cannot read", &path, &e))?;
+                    .map_err(|e| self.io_at("cannot read", &at, &e))?;
                 let eof = from + taken as u64 >= len;
                 Ok((data, eof))
             }
-            Kind::Dir { .. } | Kind::LocalDir => Err(nfsstat3::NFS3ERR_ISDIR),
-            Kind::Link { .. } | Kind::StoreLink { .. } => Err(nfsstat3::NFS3ERR_INVAL),
         }
     }
 
@@ -1206,8 +1311,10 @@ impl NFSFileSystem for Vfs {
         start_after: fileid3,
         max_entries: usize,
     ) -> Result<ReadDirResult, nfsstat3> {
+        // The directory is listed with no lock held over the fetch
+        // (#1387): a slow fetch must not park the mount's other calls.
+        self.listed(dirid).await?;
         let mut nodes = self.nodes.write().await;
-        self.ensure_listed(&mut nodes, dirid).await?;
         let entries = self.merged_listing(&mut nodes, dirid).await?;
         let total = entries.len();
         let begin = if start_after == 0 {
@@ -1270,8 +1377,48 @@ impl NFSFileSystem for Vfs {
     }
 
     async fn readlink(&self, id: fileid3) -> Result<nfspath3, nfsstat3> {
-        let nodes = self.nodes.read().await;
-        let data = self.file_bytes(&nodes, id).await?;
+        // What the read serves, copied from the node so the read lock is
+        // not held over the fetch (#1387).
+        enum Link {
+            Bytes {
+                blob: BlobId,
+                path: Option<RepoPath>,
+                len: u64,
+            },
+            Local(RepoPath),
+            Target(Vec<u8>),
+        }
+        let what = {
+            let nodes = self.nodes.read().await;
+            let node = nodes.by_id.get(&id).ok_or(nfsstat3::NFS3ERR_STALE)?;
+            match &node.kind {
+                Kind::Store { blob, len, .. } | Kind::StoreLink { blob, len } => Link::Bytes {
+                    blob: *blob,
+                    path: node.path.clone(),
+                    len: *len,
+                },
+                Kind::Local { .. } => Link::Local(node.path.clone().expect("a file has a path")),
+                Kind::Link { target } => Link::Target(target.clone()),
+                Kind::Dir { .. } | Kind::LocalDir => return Err(nfsstat3::NFS3ERR_ISDIR),
+            }
+        };
+        let data = match what {
+            Link::Bytes { blob, path, len } => {
+                let bytes = self
+                    .fetch_blob(blob, path.as_ref(), len)
+                    .await
+                    .map_err(io_err)?;
+                if bytes.len() as u64 != len {
+                    return Err(Self::size_mismatch(path.as_ref(), bytes.len(), len));
+                }
+                bytes.to_vec()
+            }
+            Link::Local(path) => {
+                let file = self.overlay_file(&path);
+                std::fs::read(&file).map_err(|e| self.io_at("cannot read", &file, &e))?
+            }
+            Link::Target(target) => target,
+        };
         Ok(nfspath3::from(data))
     }
 
@@ -1408,8 +1555,24 @@ impl Vfs {
         Ok(())
     }
 
+    /// The tree said one size, the blob holds another: one of them is
+    /// wrong, and reading on would serve lies.
+    fn size_mismatch(path: Option<&RepoPath>, got: usize, want: u64) -> nfsstat3 {
+        let why = format!(
+            "{}: {} bytes, the tree says {want}",
+            path.map_or_else(
+                || "<unnamed>".to_owned(),
+                |p| String::from_utf8_lossy(p.as_bytes()).to_string()
+            ),
+            got
+        );
+        warn("a blob does not match the size of its tree entry", &why);
+        nfsstat3::NFS3ERR_IO
+    }
+
     /// Reads the bytes of the node `id`: the overlay file, the blob of the
     /// ref, or the target of a symlink.
+    #[cfg_attr(not(feature = "unstable-writable-mount"), allow(dead_code))]
     async fn file_bytes(&self, nodes: &Nodes, id: u64) -> Result<Vec<u8>, nfsstat3> {
         let node = nodes.by_id.get(&id).ok_or(nfsstat3::NFS3ERR_STALE)?;
         match &node.kind {
@@ -1419,16 +1582,7 @@ impl Vfs {
                     .await
                     .map_err(io_err)?;
                 if bytes.len() as u64 != *len {
-                    let why = format!(
-                        "{}: {} bytes, the tree says {len}",
-                        node.path.as_ref().map_or_else(
-                            || "<unnamed>".to_owned(),
-                            |p| String::from_utf8_lossy(p.as_bytes()).to_string()
-                        ),
-                        bytes.len()
-                    );
-                    warn("a blob does not match the size of its tree entry", &why);
-                    return Err(nfsstat3::NFS3ERR_IO);
+                    return Err(Self::size_mismatch(node.path.as_ref(), bytes.len(), *len));
                 }
                 Ok(bytes.to_vec())
             }
@@ -1886,8 +2040,8 @@ mod tests {
     use scion_proto::runtime::listen::Limits;
     use scion_proto::v1::objects_server::{Objects, ObjectsServer};
     use scion_proto::v1::{
-        GetRootTreeRequest as Ask, GetRootTreeResponse, ObjectPart, ResolveRefRequest,
-        ResolveRefResponse,
+        GetObjectsRequest as Fetch, GetRootTreeRequest as Ask, GetRootTreeResponse, ObjectPart,
+        ResolveRefRequest, ResolveRefResponse,
     };
     use scion_server::test_support::meta::{Meta as _, MetaTx as _};
     use scion_server::{
@@ -1896,18 +2050,154 @@ mod tests {
     };
     use std::collections::HashMap as StdHashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex as SyncMutex};
     use tempfile::TempDir;
     use tokio_stream::wrappers::TcpListenerStream;
     use tonic::{Request, Response, Status, transport::Server};
     const REPO: &str = "r";
     const TOKEN: &str = "secret";
 
-    /// A server with a repo whose `main` holds `files`, and a mount of it.
+    /// One read-path wait in the tests: shorter than any server wait
+    /// (`READ_STALL_TIMEOUT` 120 s, `REQUEST_TIMEOUT` 600 s).
+    const READS: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// The mount's upstream with one ref parked: a `get_objects` whose
+    /// refs name the armed path waits on the gate until it opens, then
+    /// forwards the request to the server. Every other call forwards at
+    /// once, so a disarmed park is invisible. The tests park a cold
+    /// directory's tree fetch, and the calls that must answer while it is
+    /// parked prove they answer (#1387).
+    struct Parked {
+        real: crate::client::Objects,
+        park: Arc<SyncMutex<Option<Vec<u8>>>>,
+        gate: tokio::sync::watch::Receiver<bool>,
+        arrived: Arc<AtomicUsize>,
+    }
+
+    #[tonic::async_trait]
+    impl Objects for Parked {
+        async fn resolve_ref(
+            &self,
+            request: Request<ResolveRefRequest>,
+        ) -> Result<Response<ResolveRefResponse>, Status> {
+            let mut real = self.real.clone();
+            real.resolve_ref(request).await
+        }
+
+        async fn get_root_tree(
+            &self,
+            request: Request<Ask>,
+        ) -> Result<Response<GetRootTreeResponse>, Status> {
+            let mut real = self.real.clone();
+            real.get_root_tree(request).await
+        }
+
+        type GetObjectsStream =
+            std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<ObjectPart, Status>> + Send>>;
+
+        async fn get_objects(
+            &self,
+            request: Request<Fetch>,
+        ) -> Result<Response<Self::GetObjectsStream>, Status> {
+            // The armed path is copied out before the wait: the guard
+            // must not sit across the await.
+            let want = self.park.lock().unwrap().clone();
+            if let Some(want) = want {
+                let named = request
+                    .get_ref()
+                    .refs
+                    .iter()
+                    .any(|r| r.path.as_slice() == want.as_slice());
+                if named {
+                    self.arrived.fetch_add(1, Ordering::SeqCst);
+                    let mut gate = self.gate.clone();
+                    while !*gate.borrow_and_update() {
+                        if gate.changed().await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            let mut real = self.real.clone();
+            let parts = real.get_objects(request).await?;
+            Ok(Response::new(Box::pin(parts.into_inner())))
+        }
+    }
+
+    /// The park's handle: the test arms it with the path of the fetch to
+    /// park, waits for arrivals, and opens it.
+    struct Park {
+        path: Arc<SyncMutex<Option<Vec<u8>>>>,
+        gate: tokio::sync::watch::Sender<bool>,
+        arrived: Arc<AtomicUsize>,
+    }
+
+    impl Park {
+        /// Parks the next fetches whose refs name `path`.
+        fn arm(&self, path: &[u8]) {
+            *self.path.lock().unwrap() = Some(path.to_vec());
+        }
+
+        /// How many fetches are parked right now.
+        fn arrived(&self) -> usize {
+            self.arrived.load(Ordering::SeqCst)
+        }
+
+        /// Opens the park; every parked fetch forwards on.
+        fn open(&self) {
+            self.gate.send(true).unwrap();
+        }
+    }
+
+    /// A server with a repo whose `main` holds `files`, and a mount of
+    /// it. The mount's upstream is the mock, so a test can park a fetch.
     struct Test {
         vfs: Vfs,
+        park: Park,
         #[allow(dead_code)]
         // Keeps the server's and the overlay's directories alive.
         dirs: [TempDir; 2],
+    }
+
+    /// Waits until `n` fetches sit in the park, or fails fast: the bound
+    /// is shorter than any server wait.
+    async fn wait_parked(park: &Park, n: usize) {
+        let deadline = tokio::time::Instant::now() + READS;
+        while park.arrived() < n {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "only {} of {n} parked fetches arrived",
+                park.arrived()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    /// Serves the mock upstream on its own listener: every call forwards
+    /// to the server at `real`, and the armed ref's fetches wait on the
+    /// returned park. The mount's clients point at the mock's URL (#1387).
+    async fn serve_park(real: crate::client::Objects) -> (Park, String) {
+        let (gate, gate_rx) = tokio::sync::watch::channel(false);
+        let arrived = Arc::new(AtomicUsize::new(0));
+        let park = Park {
+            path: Arc::new(SyncMutex::new(None)),
+            gate,
+            arrived: arrived.clone(),
+        };
+        let parked = Parked {
+            real,
+            park: park.path.clone(),
+            gate: gate_rx,
+            arrived,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(
+            Server::builder()
+                .add_service(ObjectsServer::new(parked))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        (park, url)
     }
 
     /// Starts a server, lands `files` as `main`, and mounts the ref.
@@ -1982,8 +2272,14 @@ mod tests {
             std::future::pending(),
         ));
         let client = crate::client::test_objects(&url, TOKEN).await;
+        // The upstream the mount talks to: the mock, which forwards every
+        // call to the server and parks the armed ref's fetches, so a test
+        // can hold one cold directory's tree fetch and watch the mount's
+        // other calls answer around it (#1387).
+        let (park, mock_url) = serve_park(client.clone()).await;
+        let client = crate::client::test_objects(&mock_url, TOKEN).await;
         // The server of the mount: the client that mints fresh tickets.
-        let roots = crate::client::test_objects(&url, TOKEN).await;
+        let roots = crate::client::test_objects(&mock_url, TOKEN).await;
         let reply = client
             .clone()
             .get_root_tree(GetRootTreeRequest {
@@ -2011,6 +2307,7 @@ mod tests {
         let vfs = vfs.writable(true);
         Test {
             vfs,
+            park,
             dirs: [data, overlay],
         }
     }
@@ -2024,6 +2321,89 @@ mod tests {
                 .await?;
         }
         Ok(id)
+    }
+
+    #[tokio::test]
+    async fn a_parked_directory_fetch_stalls_no_other_call() {
+        let test = start(&[
+            ("p0", b"cached\n".as_slice(), Some(false)),
+            ("d/f", b"cold\n".as_slice(), Some(false)),
+        ])
+        .await;
+        let root = NFSFileSystem::root_dir(&test.vfs);
+        // Warm the root's listing, the file's handle, and the file's
+        // cached blob: those fetches run before the park is armed.
+        let id = find(&test.vfs, "p0").await.unwrap();
+        let (data, _) = test.vfs.read(id, 0, 100).await.unwrap();
+        assert_eq!(data, b"cached\n");
+        let dir = find(&test.vfs, "d").await.unwrap();
+        // Park the fetch of the cold directory's tree; the lookup of the
+        // name under it holds nothing back while it waits.
+        let park = test.park;
+        park.arm(b"d");
+        let vfs = std::sync::Arc::new(test.vfs);
+        let cold = {
+            let vfs = vfs.clone();
+            tokio::spawn(async move { vfs.lookup(dir, &filename3::from(b"f".to_vec())).await })
+        };
+        wait_parked(&park, 1).await;
+        // A lookup of a listed path answers while the fetch is parked.
+        let again = tokio::time::timeout(READS, vfs.lookup(root, &filename3::from(b"p0".to_vec())))
+            .await
+            .expect("the listed lookup answers while the cold fetch is parked")
+            .unwrap();
+        assert_eq!(again, id);
+        // A read of the cached file answers too.
+        let (data, _) = tokio::time::timeout(READS, vfs.read(id, 0, 100))
+            .await
+            .expect("the cached read answers while the cold fetch is parked")
+            .unwrap();
+        assert_eq!(data, b"cached\n");
+        // Open the park: the cold lookup completes.
+        park.open();
+        let f = tokio::time::timeout(READS, cold)
+            .await
+            .expect("the cold lookup completes once the fetch is open")
+            .unwrap()
+            .unwrap();
+        assert_ne!(f, dir);
+        assert_ne!(f, root);
+    }
+
+    #[tokio::test]
+    async fn two_lookups_of_one_cold_name_answer_one_handle() {
+        let test = start(&[("d/f", b"cold\n".as_slice(), Some(false))]).await;
+        let dir = find(&test.vfs, "d").await.unwrap();
+        // Park the fetch of the cold directory's tree.
+        let park = test.park;
+        park.arm(b"d");
+        // Two lookups of the same cold name run at once while the fetch
+        // is parked.
+        let vfs = std::sync::Arc::new(test.vfs);
+        let both = {
+            let vfs = vfs.clone();
+            tokio::spawn(async move {
+                let name = filename3::from(b"f".to_vec());
+                tokio::join!(vfs.lookup(dir, &name), vfs.lookup(dir, &name))
+            })
+        };
+        wait_parked(&park, 2).await;
+        park.open();
+        let (a, b) = tokio::time::timeout(READS, both)
+            .await
+            .expect("the two lookups complete once the fetch is open")
+            .unwrap();
+        let a = a.unwrap();
+        let b = b.unwrap();
+        // Both answer the same file id: the loser of the insert dropped
+        // its copy before any id of its own escaped to the kernel.
+        assert_eq!(a, b, "the two lookups answer one id");
+        // A third lookup answers that id again, from the winner's listing.
+        let c = vfs
+            .lookup(dir, &filename3::from(b"f".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(c, a, "the third lookup answers the same id");
     }
 
     #[tokio::test]
@@ -2324,6 +2704,7 @@ mod tests {
         #[cfg(feature = "unstable-writable-mount")]
         let test = Test {
             vfs: test.vfs.writable(false),
+            park: test.park,
             dirs: test.dirs,
         };
         let root = NFSFileSystem::root_dir(&test.vfs);
