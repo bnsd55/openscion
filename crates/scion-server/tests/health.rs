@@ -391,6 +391,11 @@ async fn a_drain_finishes_its_in_flight_calls_and_the_store_keeps_the_promise() 
     // The watches go, so they hold nothing: the drain may end.
     drop(named);
     drop(watcher);
+    // The sleep waits for the dropped watch streams' server-side
+    // tear-down - the drain's in-flight count, which this test cannot
+    // read: the metrics export ends at the signal, and the drops come
+    // after it. SHORTCUT: no observable marks that settle; #1372's
+    // hook PR replaces this sleep with a poll of it.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // The park lifts: the upload finishes, and the drain answers it.

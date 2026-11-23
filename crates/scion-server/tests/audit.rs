@@ -810,6 +810,10 @@ async fn concurrent_lands_ref_lines_tell_one_true_history() {
     // The eight intents say every call is past its intent; their
     // first tasks read the ref within microseconds of it.
     wait_for_lines(&audit_path, 8).await;
+    // The sleep waits for the eight calls' first reads of the ref - a
+    // state no line or row records, so only time stands in for it.
+    // SHORTCUT: no observable marks a land's plan read; #1372's hook
+    // PR replaces this sleep with a poll of that marker.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     go_tx.send(()).unwrap();
     blocker.join().unwrap();
