@@ -7,7 +7,8 @@ land-cost review finding (a measurement of the bytes one land adds, at
 land rewrites one tree node and one history node per folder on each
 changed path, each holds the whole folder (history only until its 64 KiB
 bound), and the cost is linear in folder size. On the tokio store, the
-measurement read `history_nodes` 194 MB against `trees` 137 MB.
+measurement read `history_nodes` 194 MB against `trees` 137 MB
+(#509, 2026-10-21, the PR that carried this note and its measurement).
 [`format-v1.md`](../format-v1.md) is the contract this design keeps.
 Numbers marked **estimate** are back-of-envelope figures, not
 measurements; the tokio numbers are the measurements.
@@ -34,12 +35,15 @@ Everything else about the row is ours to change:
   them into the exact canonical bytes and hash them to the same ID. The
   `tag 4 dir` payload is a child's `TreeId`, so the parent-child edges
   stay the same; only how a child's bytes are laid down changes.
-- **The row schema.** `trees` is `STRICT, WITHOUT ROWID` with two columns;
-  adding chunk rows, a base pointer, or a compressed-body column is a
-  server migration (SCHEMA_VERSION 10), not a format change.
+- **The row schema.** `trees` is one Postgres table with two columns
+  (`0001_init.sql`: `id`, `body`; before #716 it was the SQLite schema's
+  `STRICT, WITHOUT ROWID` table); adding chunk rows, a base pointer, or a
+  compressed-body column is a server migration (a new schema version in
+  `pg.rs`, whose `PG_SCHEMA_VERSION` is 6), not a format change.
 
-The precedent is in-house: path-history nodes (`history_nodes`, migration
-0005) already chunk a directory level that would otherwise be one row.
+The precedent is in-house: path-history nodes (`history_nodes`, created in
+`0001_init.sql`; the SQLite schema's migration 0005 until #716) already
+chunk a directory level that would otherwise be one row.
 `history.rs`'s `Edit` splits a level into an index of leaf chunks (64 KiB
 bound, 7 bits), and a land stamps only the chunks on changed paths. The
 root tree is the one place still paying full-folder rewrites.
@@ -70,7 +74,7 @@ folders: a folder of under about 1,000 entries (history entries are
 ~64–90 bytes: name, flags, a 32-byte changeset id, a generation, and
 often a 32-byte child id) sits in **one** chunk, and every land rewrites
 that chunk whole. On the tokio store, the measurement read
-`history_nodes` at 194 MB against `trees` at 137 MB — for typical folders, history is the
+`history_nodes` at 194 MB against `trees` at 137 MB (#509, 2026-10-21) — for typical folders, history is the
 larger half of the per-land cost, not a footnote.
 
 What the two sides cost per land on a folder of n entries (estimate):
@@ -134,10 +138,12 @@ digests up to the root.
   The `Tree` reply is assembled from the chunks; for the common
   small-folder case the cut never fires and the behavior is identical.
 - Conflict check: history nodes, already chunked, unchanged.
-- Migration: schema 10 adds the chunk rows; every tree is re-derived from
-  its changesets — the same delete-and-rebuild migration 0007 ran when
-  the tree format last changed. Trees are derived data
-  (`tree::store_changeset` rebuilds from parents + changes), so the
+- Migration: a new schema version adds the chunk rows; every tree is
+  re-derived from its changesets — the same delete-and-rebuild ran when
+  the tree format last changed (the SQLite schema's migration 0007,
+  removed with #716 when Postgres became the only metadata backend).
+  Trees are derived data
+  (`tree.rs`, fn `store_changeset` rebuilds from parents + changes), so the
   rebuild code exists.
 
 ### O2 — delta nodes with a full node every k
@@ -180,7 +186,8 @@ but is not a fix.
   ≥ 64 MB/day of write amplification from one folder — 23 GB/year —
   split between its root-tree node and its history chunk.
 - Or `trees` + `history_nodes` growing **≥ 1 GB/week** with lands whose
-  changed paths share folders (on tokio the pair measured 331 MB).
+  changed paths share folders (on tokio the pair measured 331 MB,
+  #509, 2026-10-21).
 - Below 100 entries the per-land cost is ~6.4 KB per tree — nothing to
   fix; do nothing there. The migration's own cost is one rewrite of
   every tree and history node, the same bytes as one land per folder

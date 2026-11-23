@@ -63,14 +63,14 @@ v0.1 is one `scion-server serve` process on one machine.
 
 | Part | Today (`main`) | Why it does not scale out |
 |---|---|---|
-| Metadata | One SQLite file, `<data>/scion.db` (`store.rs`). | It lives on one machine's disk. SQLite takes one writer at a time, and its file locks are not reliable on many network file systems. So other machines cannot share it. |
-| Write path | One write connection behind a mutex (`Inner::db`), and 8 read-only connections. Write transactions use `BEGIN IMMEDIATE`. | Every write of every repo waits for one lock. Throughput is that of one connection on one drive. |
-| Durability | Group commit: callers share one full drive flush (`GroupFlush`). A read waits if it saw a commit that no flush covers yet. | The counters that decide when to flush (`committing`, `committed`, `flushed`) are in process memory. A commit by another process is not counted. |
+| Metadata | One Postgres database, one schema per store (`store.rs`, fn `Backend::open`; `Pg` in `pg.rs`). | It lives on one database server, and the store's blob files are on that machine's disk. One writer at a time per schema (`Pg::open_exclusive`). So other machines cannot share it as one store. |
+| Write path | One write connection behind a mutex (`pg.rs`, fn `lock_writer`), and 8 read-only connections (`store.rs`, `READERS = 8`). | Every write of every repo waits for one lock. Throughput is that of one connection. |
+| Durability | `synchronous_commit = on`: a commit is durable when its statement returns (`pg.rs`), so a read need not wait. `GroupFlush` (`store.rs`, fn `run`) shares one full flush of the blob files. | The blob flush's counters (`started`, `finished` in `FlushState`) are in process memory. A commit by another process is not counted. |
 | Land lock | One mutex per (repo, ref) in `Lands::refs` (`land.rs`). | A second process does not see it. |
 | Path index | `PathIndex`: per ref, in memory, built on the first land and pruned in cycles of 10,000 generations. | Each process builds its own copy for each ref, and a restart loses it. A base more than `MAX_DEPTH` below the tip walks history on each land ([#38](https://github.com/bnsd55/openscion/issues/38)). |
 | Blobs | One zstd file per blob in `<data>/objects/blob/` on the local disk. | Other machines cannot read them, and one drive holds the only copy. |
-| Land IDs | SQLite row IDs. The newest land row is never deleted, so an ID is never given out twice. | A counter in one file. |
-| Data directory | `Store::open` takes `<data>/server.lock`, so one server uses a directory. An import process shares it (`Store::open_shared`). | Both processes are on one machine, and the land lock is in the server's memory. |
+| Land IDs | The `lands` table's identity sequence (`0001_init.sql`): no ID is given out twice, and the newest land always has the largest one. Expiry deletes every row but the newest (`pg.rs`, fn `expire_lands`). | A sequence in the one database. |
+| Data directory | `Backend::open` takes the store's one-server lock in the database (`pg.rs`, fn `open_exclusive`), so one server uses a store. An import process shares it (`backend.rs`, fn `open_shared`). | Both processes are on one machine, and the land lock is in the server's memory. |
 
 **What makes a land correct today.** The compare-and-swap on the ref's
 `version` decides each land, not the mutex. `settle` moves the ref only if
@@ -240,8 +240,9 @@ extra jump pointer per changeset in a skew-binary scheme. From the head, the
 server finds the first-parent ancestor at B's generation in O(log n) reads,
 and compares it with B. The article keeps "skip lists for the commit graph".
 This proposal needs only a first-parent one for lands. The commit graph on
-`main` (`graph.rs`) now keeps that skip list, but the land check does not
-read it yet.
+`main` (`graph.rs`) keeps that skip list, and the land check reads it:
+`check_history` walks the graph's first parents (`land.rs`, fn
+`check_history`, via `graph::on_first_parents`), filled as derived data.
 
 Both kinds are keyed by changeset, not by ref. A new ref, or an import that
 moves a ref to a descendant through a second parent, needs no rebuild: the
@@ -355,7 +356,7 @@ read-write commit.
 | T2, move the ref | local transaction | one commit, 5 to 15 ms |
 | Durable reply | wait for a shared full drive flush | the commit is durable |
 | One land | not measured | 15 to 45 ms |
-| One ref | measured: 23 to 25 durable lands/s to one ref with no readers, 7.8 to 11.1 with 5 or 20 readers ([operations.md](../operations.md), section 7's capacity table) | about 50 lands/s without batching (below) |
+| One ref | measured: 28.0 to 32.0 durable lands/s to one ref with no readers, 12.3 to 13.6 with 5 readers and 8.4 to 8.7 with 20 ([operations.md](../operations.md), section 7's capacity table: run [42390384979](https://github.com/bnsd55/openscion/actions/runs/42390384979), 2026-11-07, main 70576f1b; every writer lands to the one ref `main`) | about 50 lands/s without batching (below) |
 
 **One ref is one row.** Let `t` be the time from the plan's read of the head
 to T2's commit, about 20 ms. Without batching, one ref takes at most about
@@ -397,7 +398,8 @@ twice.
 
 - Each land is three network commits instead of two local transactions, and
   one ref takes about 50 lands per second (**estimate**, the proposal
-  column above; one server measures 23 to 25 today with no readers).
+  column above; one server measures 28.9 to 32.0 today with no readers, per
+  the capacity table above).
 - Each changeset also writes its history nodes, about one per path part of
   each changed path. For 5 changed paths 6 levels deep that is up to 30 tree
   rows and 30 history rows, about 65 rows in all. At 30,000 lands per day
