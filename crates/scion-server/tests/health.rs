@@ -392,10 +392,13 @@ async fn a_drain_finishes_its_in_flight_calls_and_the_store_keeps_the_promise() 
     drop(named);
     drop(watcher);
     // The sleep waits for the dropped watch streams' server-side
-    // tear-down - the drain's in-flight count, which this test cannot
-    // read: the metrics export ends at the signal, and the drops come
-    // after it. SHORTCUT: no observable marks that settle; #1372's
-    // hook PR replaces this sleep with a poll of it.
+    // teardown, so the park lift below exercises the answered path.
+    // SHORTCUT: no observable marks that settle - the health service
+    // sits outside the metrics layer (service.rs wraps only scion and
+    // objects), so scion_calls_in_flight never counts the watch
+    // streams. The ceiling: on a slow runner 200 ms can be short, and
+    // the test would flake. The upgrade: a teardown signal on the
+    // health service, if S4 ever flakes.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // The park lifts: the upload finishes, and the drain answers it.
