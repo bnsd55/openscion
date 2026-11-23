@@ -114,9 +114,9 @@ jobs:
             # A filter that matches nothing also passes in 0.15 s, so
             # each green rep must prove the race ran at all: the flaky
             # test itself passed, and the pass count reached the floor
-            # the two filters matched when measured (18: 15 in
-            # cmd::mount, 3 in cmd::commit; raise the floor if the
-            # suites grow).
+            # the two filters matched when measured (the filters match
+            # 39 now: 32 in cmd::mount, 7 in cmd::commit; the floor
+            # stays 18, and a suite that shrinks below it fails here).
             grep -qF 'test cmd::mount::silent_failures::an_unmount_does_not_signal_an_unrelated_process ... ok' "$log" || {
               echo "run $i: the filters ran too few tests: the flaky test is absent"; tail -5 "$log"; exit 1
             }

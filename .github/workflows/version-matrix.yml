@@ -19,8 +19,9 @@ jobs:
   version-matrix:
     name: version matrix
     runs-on: ubuntu-24.04
-    # Two release builds, the N-1 one often from cache, then seven pair
-    # runs of the smoke story; 60 minutes bounds a hung build.
+    # Two release builds, the N-1 one often from cache, then eleven
+    # pair runs across six scenarios plus the transcripts corpus leg
+    # (#890); 60 minutes bounds a hung build.
     timeout-minutes: 60
     services:
       # Every pair's server keeps its metadata in Postgres, in the schema
@@ -48,9 +49,10 @@ jobs:
       - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: protoc
-      # The N-1 ref, before any build: the script's own resolution, the
-      # input of the dispatch when it names one. No ref: the summary says
-      # the job skipped and the run stays green, never silent.
+      # The N-1 ref, before any build: the script's own resolution - the
+      # input of the dispatch when it names one, else the newest release
+      # tag behind HEAD, else the stand-in commit - so a ref always
+      # comes out and the steps below always run.
       - name: resolve the N-1 ref
         id: prev
         env:
