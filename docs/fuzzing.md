@@ -8,8 +8,9 @@ round-trips against its encoder where one exists.
 
 The targets live beside their crates, in `crates/<crate>/fuzz/`, one file per
 target under `fuzz_targets/`. Each crate's fuzz build has its own lockfile and
-is outside the main workspace. CI runs a 60-second smoke of every target on
-each push (`.github/workflows/ci.yml`); the nightly run gives each target a
+is outside the main workspace. CI runs a smoke of all 13 targets, 20 s each,
+four at a time (about 80 s), on pushes to `main`, the nightly and a dispatch -
+not on pull requests (`.github/workflows/ci.yml`); the nightly run gives each target a
 longer budget and keeps its corpus between runs (`.github/workflows/fuzz.yml`).
 
 ## The decoder map
@@ -56,7 +57,7 @@ longer budget and keeps its corpus between runs (`.github/workflows/fuzz.yml`).
 ## Reproducing a crash locally
 
 A nightly CI run that fails uploads the crashing input as an artifact
-(`crash-<target>`); download it, or find one in
+(`crash-<crate>-<target>`); download it, or find one in
 `crates/<crate>/fuzz/artifacts/<target>/` from a local run. Then, from
 `crates/<crate>`:
 
