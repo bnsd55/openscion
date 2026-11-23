@@ -198,6 +198,8 @@ jobs:
         run: scripts/test-lint-workflows.sh
       - name: the capacity reader counters count the log's own shapes
         run: scripts/test-capacity-counters.sh
+      - name: the soak-fault classifier classifies the pg restart's refusals
+        run: scripts/test-soak-fault-classifier.sh
       - name: a script that dies leaves no owned process
         run: scripts/test-owned-run.sh
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
