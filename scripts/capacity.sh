@@ -21,9 +21,10 @@
 #
 # The edge is not enforced here: the run measures, the table's caption
 # states the limits, and the reader applies them to the CSV. What the
-# script does stop on is a failed check: bench verified main, every
-# checkout read back whole, and every client error is one the load
-# explains (the soak's classes).
+# run does with a failed check: it records a failed bench, a short
+# checkout or a client error in the cell's row and goes to the next
+# cell. Today a failed exactly-once check or a damaged checkout is
+# recorded in the row and does not fail the run (#1362).
 #
 # Set CAPACITY_MACHINE to the runner's public name and spec; the table's
 # caption carries it. Set RUN_URL to the workflow run's URL for the
@@ -62,20 +63,6 @@ LANDS=${LANDS:-1000}
 READ_SECONDS=${READ_SECONDS:-90}
 CAPACITY_MACHINE=${CAPACITY_MACHINE:-unknown runner}
 RUN_URL=${RUN_URL:-}
-
-# classifies LOG: the soak's accepted failures. A cell whose clients
-# failed with anything else is past the edge; the run stops there.
-classifies() {
-  local log=$1 line
-  while IFS= read -r line; do
-    case $line in
-      *"exit 130"* | *"exit 137"* | *"exit 143"*) ;;
-      *unavailable* | *busy* | *aborted* | *expired* | *"permission denied"*) ;;
-      *) return 1 ;;
-    esac
-  done < "$log"
-  return 0
-}
 
 need
 # jq parses bench's JSON report; only this script needs it, so its
