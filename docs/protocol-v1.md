@@ -101,11 +101,12 @@ land IDs are scoped by (repo, principal).
 **Request IDs.** A client MAY send the metadata `x-request-id` on any call:
 1 to 64 bytes of visible ASCII (bytes 0x21 to 0x7E) with no space. A value
 that does not fit is dropped whole, never cleaned up: nothing of it is
-logged. The server records a value that fits as the `request_id` of the
-call's audit and log lines, and makes one itself when the call sent none. A
-tier SHOULD forward the value it got on its upstream calls (scion's tiers
-do). The header carries no permission; a call's answer is the same with it
-and without it.
+logged. The server logs a value that fits as the `request_id` of the call's
+log lines (empty when none fits), and an audited call's intent and result
+lines carry it too; an audited call that sent none gets an ID the server
+makes, so its two lines still join. A tier SHOULD forward the value it got
+on its upstream calls (scion's tiers do). The header carries no permission;
+a call's answer is the same with it and without it.
 
 **Health.** The server also answers `grpc.health.v1.Check` and
 `grpc.health.v1.Watch` on the same address, without a token: a probe
