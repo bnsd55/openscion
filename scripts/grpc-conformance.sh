@@ -24,9 +24,9 @@ BIN=${SCION_SERVER:-target/release/scion-server}
 [ -x "$BIN" ] || die "no server at $BIN (build it first, or set SCION_SERVER)"
 
 # The server's metadata is Postgres: its URL reaches every command of
-# this run through the env, which the server reads quietly (the argv
-# form would warn). The job gives the test URL; the server takes the
-# same database, and derives each data directory's schema itself.
+# this run through the env. The job gives the test URL; the server
+# takes the same database, and this run's one data directory needs no
+# schema of its own (the schema is the URL's search_path, as given).
 [ -n "${SCION_TEST_POSTGRES_URL:-}" ] \
   || die "no SCION_TEST_POSTGRES_URL: the server's metadata is Postgres"
 export SCION_POSTGRES_URL="$SCION_TEST_POSTGRES_URL"
@@ -90,7 +90,8 @@ NO_COLOR=1 "$BIN" --data "$WORK/data" import "$WORK/git" --repo r --ref main \
 
 # The server, with a ticket key, on a port the OS picks.
 NO_COLOR=1 "$BIN" --data "$WORK/data" ticket-key --out "$WORK/ticket.key" > "$WORK/ticket.pub"
-# The token goes through the environment: the argv form warns.
+# The token goes through the environment: the argv form is refused
+# outright (--token is a removed flag).
 SCION_TOKEN=t NO_COLOR=1 "$BIN" --data "$WORK/data" serve --listen 127.0.0.1:0 \
   --ticket-key "$WORK/ticket.key" > "$WORK/server.log" 2>&1 &
 SERVER_PID=$!

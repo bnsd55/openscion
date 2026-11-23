@@ -10,8 +10,9 @@
 # After every restart, and at the end, the script checks that every
 # ledger entry is in that ref's history (`scn log`): nothing the server
 # acknowledged was lost. A land the server accepted but had not applied
-# at kill time applies during the restart, so the check retries for up
-# to 60 s, as the crash suite's `retry_lands` does in process. The
+# at kill time applies during the restart unacknowledged, so it is not
+# in the ledger; an acknowledged land was already durable when its
+# client heard 0, so the check never waits for one. The
 # server's Land counter is scraped as a resume signal only: Prometheus
 # counters start at 0 after a restart, so they say nothing about lost
 # writes.
@@ -306,11 +307,16 @@ canceller() {
 # check_ledger [FROM]: every acknowledged land from line FROM+1 is in
 # main's history. After a restart, FROM is the count already checked,
 # and the new entries sit at the top of the history; at the end, FROM
-# is 0 and the walk is the whole history. A land the server accepted
-# but had not applied at kill time applies during the restart, so the
-# check retries for up to 60 s before it fails - the crash suite's
-# `retry_lands` does the same in process. The ids come from `scn log
-# --json`, whose entries carry the full ID.
+# is 0 and the whole walk runs once the server serves (the resume probe
+# waited up to 60 s for that). A land the server accepted but had not
+# applied at kill time applies during the restart unacknowledged, so it
+# is not in this ledger: every entry here heard 0, and the server sends
+# 0 only once the land is durable (protocol-v1.md:246), so a missing
+# entry after a walk that answers fails at once. What retries is a
+# failed walk - the server not serving yet - twice more, 20 s apart.
+# (The crash suite's `retry_lands` re-drives the unacknowledged lands
+# once, in process.) The ids come from `scn log --json`, whose entries
+# carry the full ID.
 check_ledger() {
   local from=${1:-0} tries=0 count
   cat "$WORK"/ledger/*.csv 2> /dev/null | tail -n +"$((from + 1))" \

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# `scn mount` driven by a real kernel NFS client (issue #238), the way the
-# README tells users: `scn mount` runs as the user, and only the mount
-# command it prints runs under sudo. The script starts a server, lands a
+# `scn mount` driven by a real kernel NFS client (issue #238), the way
+# cli.md tells it: `scn mount` runs as the user, and only the mount
+# command it prints runs under sudo. The script starts a server, imports a
 # known changeset, mounts it, then reads with the bytes checked, writes, a
 # rename and a delete through the mount, commits from the mount, checks the
 # diff, refuses a tampered mount path, and unmounts. Every external command
@@ -101,9 +101,10 @@ SCION_POSTGRES_URL="$(pg_url_for "$WORK/server")"
 echo $! > "$WORK/server.pid"
 "$TIMEOUT" 30 bash -c 'until grep -q serving '"$WORK"'/server.log 2> /dev/null; do sleep 0.2; done' \
   || { tail -n 20 "$WORK/server.log"; die "the server did not start"; }
-# The run proves the backend it was asked for: a Postgres-backed server
-# writes the marker and no SQLite database, so a spawn that lost its
-# a URL from no source fails here, not vacuously as a second SQLite run.
+# The run proves the backend it was asked for: the marker is written
+# when a Postgres-backed store opens, and the server itself refuses a
+# directory that already holds a SQLite database, so the checks below
+# fail a spawn that never opened Postgres-backed before any client runs.
 test -f "$WORK/server/backend" || die "the data directory has no backend marker"
 test "$(head -n 1 "$WORK/server/backend")" = postgres \
   || die "the server is not Postgres-backed"

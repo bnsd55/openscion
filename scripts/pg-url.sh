@@ -6,11 +6,14 @@
 # pg_url_for DATA_DIR: the Postgres URL whose search_path names this
 # data dir's schema, created here if missing. The base URL comes from
 # SCION_TEST_POSTGRES_URL; the schema is `scion_script_<hash of the
-# dir's path>`, the test suite's own naming rule (test_support's
-# backend.rs): the canonical form of the deepest existing ancestor,
-# with the missing tail spelled as the caller did, so the name is the
-# same before and after the directory exists and one directory's
-# metadata never answers another directory's reads. The hash is the
+# dir's path>`: the shape is the test suite's own naming rule
+# (test_support's backend.rs) - the canonical form of the deepest
+# existing ancestor, with the missing tail spelled as the caller did,
+# so the name is the same before and after the directory exists and one
+# directory's metadata never answers another directory's reads. The
+# prefix and the hash are this script's own (scion_script_ and a
+# SHA-256, not the suite's scion_test_ and its hasher), so the scripts'
+# schemas stay out of the test suite's sweep. The hash is the
 # first 16 hex digits of a SHA-256 - a 64-bit name a CRC would let two
 # paths collide on. A rerun finds the schema it left. psql makes the
 # schema: the server refuses a URL whose search_path names no existing

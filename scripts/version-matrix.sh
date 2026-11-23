@@ -90,13 +90,9 @@ export SCION_TOKEN=matrix SCION_UPSTREAM_TOKEN=matrix NO_COLOR=1
 
 # pg_db_for DATA_DIR: the URL of a fresh DATABASE of this run's own,
 # dropped and created here. The matrix is the one script that runs two
-# server versions against one database server, and the older builds do
-# not keep the `options` a schema URL rides (5ae458a5 landed after the
-# pinned N-1): a schema URL would leave every version on the database's
-# public schema, where the pairs would share rows - what the dispatch
-# of 2026-10-28 proved. A database name is the one address every
-# version understands, and a drop and create gives every pair a clean
-# store, which the pairs want anyway.
+# server versions against one database server: a database name is the
+# one address every version understands, and a drop and create gives
+# every pair a clean store, which the pairs want anyway.
 pg_db_for() {
   local data=$1
   local cur=$data

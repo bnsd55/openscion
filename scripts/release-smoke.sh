@@ -93,7 +93,8 @@ run_story() {
   # can change. mktemp -d already makes 0700 on Linux and macOS; the chmod
   # says so and keeps a umask-002 run from a mktemp that does not. The
   # server's own directories are 0700 whatever the umask (#303); a
-  # group-writable parent is still refused until #302, so this parent is
+  # group-writable parent is refused - #302 is closed by choice, the
+  # rule stays fail-closed - so this parent is
   # the only one the story has to get right itself.
   WORK=$(mktemp -d "${TMPDIR:-/tmp}/scion-smoke.XXXXXX")
   chmod 700 "$WORK"
@@ -175,8 +176,8 @@ run_story() {
 
   # The backend the run really served, from the data dir: the smoke runs
   # the Postgres store, and served_backend refuses anything else (a no
-  # marker means a SQLite store ran, a damaged marker means a damaged
-  # store). served_backend comes from common.sh.
+  # marker means the server did not run Postgres-backed, a damaged
+  # marker means a damaged store). served_backend comes from common.sh.
   served=$(served_backend "$WORK/server")
   note "backend (data dir): $served"
 
