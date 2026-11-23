@@ -214,9 +214,6 @@ impl Drop for ServerGuard {
     }
 }
 
-/// Polls the health service until readiness answers SERVING. The
-/// service takes no token; a poll before the port opens errors, and the
-/// loop reads that as not yet.
 /// Waits until no session of the store's schema is left in
 /// `pg_stat_activity`: every connection names its schema as its
 /// `application_name`, so an empty listing is the store's release. The
@@ -253,6 +250,9 @@ async fn wait_store_released(schema: String) {
     .unwrap();
 }
 
+/// Polls the health service until readiness answers SERVING. The
+/// service takes no token; a poll before the port opens errors, and the
+/// loop reads that as not yet.
 async fn wait_for_serving(work: &std::path::Path) {
     let endpoint = Endpoint::from_shared(format!("http://127.0.0.1:{PORT}"))
         .unwrap()

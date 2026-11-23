@@ -708,13 +708,35 @@ fn an_open_waits_while_an_older_builds_migration_holds_the_bare_key() {
         }
     }
     assert_eq!(holding.len(), 1, "the older build's turn is real");
+    assert_eq!(holding.len(), 1, "the older build's turn is real");
     let dir = private_tempdir();
+    // The open's own session names its schema, so the wait below can
+    // tell this test's open from any other open of the database.
+    let schema = Backend::test_schema(dir.path());
     let opened = std::thread::spawn(move || Backend::open_test(dir.path()));
-    // The hold itself proves the open's wait: the open cannot pass the
-    // bare key while it is held, so the release only drops once the
-    // wait has really run. The wait is for the hold, not for a sleep's
-    // guess at one.
-    wait_advisory(held, true);
+    // The release only drops once the open is really blocking on the
+    // bare key: the open's own waiting row in pg_locks, scoped by its
+    // application_name so a concurrent test's open cannot stand in for
+    // it. Then the hold-then-release brackets a real wait.
+    let waiting = format!(
+        "SELECT 1 FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+         WHERE l.locktype = 'advisory'
+         AND l.classid = {held_hi} AND l.objid = {held_lo}
+         AND NOT l.granted
+         AND a.application_name = '{schema}'"
+    );
+    let poll = std::time::Instant::now();
+    loop {
+        let rows = connect().query(&waiting, &[]).unwrap();
+        if !rows.is_empty() {
+            break;
+        }
+        assert!(
+            poll.elapsed() < std::time::Duration::from_secs(10),
+            "the open never started waiting on the bare key"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     drop(release);
     let opened = opened.join().unwrap();
     holder.join().unwrap();
