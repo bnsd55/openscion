@@ -27,8 +27,9 @@ SOAK_FD_GROWTH=${SOAK_FD_GROWTH:-100}
 SOAK_P99_FACTOR=${SOAK_P99_FACTOR:-2}
 # The warm-up window: the RSS baseline is the first sample after it, not
 # the first sample of the run. The server's memory climbs while its
-# caches fill - sqlite page caches (8 readers plus the write connection),
-# allocator arenas, prepared statements - and on one local 35-minute run
+# caches fill - the Postgres connection caches (one write connection and
+# a pool of 8 readers), allocator arenas, prepared statements - and on
+# one local 35-minute run
 # it kept climbing for about 30 minutes before it went flat. A baseline
 # at 60 s made every longer warm-up a false red. A run shorter than the
 # window plus two samples checks no RSS bound: it cannot tell warm-up
@@ -256,8 +257,9 @@ p99() {
 }
 # A p99 of a handful of samples is their maximum, noise twice over, so
 # the latency bound applies only to a run long enough to compare steady
-# thirds (the nightly 10 minutes give 54 samples; a 3-minute PR run gives
-# 12 and checks the mechanics, not the trend).
+# thirds (a 10-minute run gives 54 samples; a 3-minute run gives 12 and
+# checks the mechanics, not the trend; the nightly soak runs 120 minutes
+# and checks the trend).
 early=""
 late=""
 if [ "$rows" -ge 30 ]; then
@@ -311,8 +313,9 @@ $(tail -n 1 "$WORK/metrics-store.csv" | cut -d, -f2) KB"
 row "p99 early -> late" "${early:-?} ms -> ${late:-?} ms"
 # The backend the run really served, from the data dir: the soak runs
 # the Postgres store, and served_backend refuses anything else (no
-# marker means a SQLite store ran, a damaged marker means a damaged
-# store). served_backend comes from common.sh.
+# marker means the server never opened a Postgres-backed store - the
+# marker is written when the store opens - and a damaged marker means
+# a damaged store). served_backend comes from common.sh.
 served=$(served_backend "$WORK/server")
 row "backend (data dir)" "$served"
 [ "${fail:-0}" -eq 0 ] || die "the soak failed its bounds"
