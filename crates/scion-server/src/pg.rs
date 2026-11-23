@@ -676,6 +676,12 @@ impl Drop for ReleaseServerLock<'_> {
     }
 }
 
+/// The client's worker thread owns the session, and a dropped handle
+/// only closes the channel: the session - and any lock it holds - ends
+/// at the worker's pace, a beat after the drop, not at it. A caller
+/// that takes the same lock again right after a drop must release it
+/// first (reset_schema_on's guard) or wait for the holder's text
+/// (reopen_test, reset_own_staging).
 struct PgClient {
     jobs: std::sync::mpsc::Sender<Job>,
 }
@@ -3448,7 +3454,27 @@ fn reset_schema_on(client: &mut PgClient) -> Result<()> {
 /// start to reset).
 pub(crate) fn reset_own_staging(url: &str, ca: Option<&Path>) -> Result<()> {
     let options = base_options();
-    let client = connect_exclusive(url, ca, &options, None, Arc::new(Fence::new()))?;
+    // The replay's own failure path: the replay's store client was
+    // dropped a statement ago, and its session's one-server lock ends
+    // at the worker's teardown pace, not at the drop (the
+    // [`PgClient`] comment names the rule). So the first try can meet
+    // the holder this run itself left - the cleanup would skip, and the
+    // schema would keep a failed replay's rows. Retry on the holder's
+    // text only, the way reopen_test waits: short steps, a bound, and
+    // any other answer fails at once. Past the bound, the warn stands:
+    // the schema is named for the next restore's start to reset.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let client = loop {
+        match connect_exclusive(url, ca, &options, None, Arc::new(Fence::new())) {
+            Ok(client) => break client,
+            Err(Error::FailedPrecondition(message))
+                if message.contains(HOLDER_MESSAGE) && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(error) => return Err(error),
+        }
+    };
     client.batch(&format!(
         "SET lock_timeout = '{RESET_LOCK_TIMEOUT}'; SET statement_timeout = '{RESET_STATEMENT_TIMEOUT}'"
     ))?;
@@ -7198,10 +7224,10 @@ impl Meta for Pg {
 #[cfg(test)]
 mod tests {
     use super::{
-        Client, Conn, Fence, Flow, Job, Kind, NoTls, Reply, SCHEMA_LOCK, Setup, SetupFailure,
-        TxState, connect_exclusive, connect_on, connection_gone, delete_prefixes, merged_options,
-        migration_lock_key, reset_schema, reset_schema_on, run_job, run_with_retry,
-        schema_lock_key, server_lock_raw,
+        Client, Conn, Fence, Flow, HOLDER_MESSAGE, Job, Kind, NoTls, Reply, SCHEMA_LOCK, Setup,
+        SetupFailure, TxState, connect_exclusive, connect_on, connection_gone, delete_prefixes,
+        merged_options, migration_lock_key, reset_own_staging, reset_schema, reset_schema_on,
+        run_job, run_with_retry, schema_lock_key, server_lock_raw,
     };
     use crate::error::{Error, Storage};
     use crate::pg::{Pairing, Pg, pairing_decision};
@@ -7845,6 +7871,59 @@ mod tests {
         );
         drop(probe);
         drop(client);
+        let mut raw = postgres::Client::connect(&base, NoTls).unwrap();
+        raw.batch_execute(&format!("DROP SCHEMA IF EXISTS {fresh} CASCADE"))
+            .unwrap();
+    }
+
+    /// S2, the replay's failure path: the replay's store client was
+    /// dropped a statement ago, and its session's one-server lock ends
+    /// at the worker's pace. reset_own_staging waits the holder out and
+    /// then cleans: the test holds the lock, releases it from another
+    /// thread after about 100 ms, and the cleanup succeeds. With the
+    /// holder never released, it gives up past the bound with the
+    /// holder's own answer, which the caller warns about.
+    #[test]
+    fn the_staging_reset_waits_out_its_own_dying_session() {
+        let base = std::env::var("SCION_TEST_POSTGRES_URL").unwrap();
+        let fresh = "staging_reset_waits_the_holder";
+        let mut raw = postgres::Client::connect(&base, NoTls).unwrap();
+        raw.batch_execute(&format!("DROP SCHEMA IF EXISTS {fresh} CASCADE"))
+            .unwrap();
+        raw.batch_execute(&format!("CREATE SCHEMA {fresh}"))
+            .unwrap();
+        drop(raw);
+        let sep = if base.contains('?') { '&' } else { '?' };
+        let url = format!("{base}{sep}options=--search_path%3D{fresh}");
+
+        // The holder: a client of the reset's own shape, released a
+        // beat later, the way a replay's dropped store ends.
+        let holder = connect_exclusive(&url, None, "", None, Arc::new(Fence::new())).unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(holder);
+        });
+        let started = std::time::Instant::now();
+        reset_own_staging(&url, None).unwrap();
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(90),
+            "the cleanup waited for the holder it waited out"
+        );
+
+        // The bound: a holder that never lets go fails the cleanup past
+        // two seconds, with the holder's text the caller warns about.
+        let holder = connect_exclusive(&url, None, "", None, Arc::new(Fence::new())).unwrap();
+        let started = std::time::Instant::now();
+        let error = reset_own_staging(&url, None).unwrap_err();
+        assert!(
+            error.to_string().contains(HOLDER_MESSAGE),
+            "the give-up names the holder: {error:#}"
+        );
+        assert!(
+            started.elapsed() >= std::time::Duration::from_secs(2),
+            "the cleanup gave the bound its two seconds"
+        );
+        drop(holder);
         let mut raw = postgres::Client::connect(&base, NoTls).unwrap();
         raw.batch_execute(&format!("DROP SCHEMA IF EXISTS {fresh} CASCADE"))
             .unwrap();
