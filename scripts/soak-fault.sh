@@ -110,6 +110,9 @@ fi
 classifies() {
   local log=$1 line
   while IFS= read -r line; do
+    # Lost or damaged data is never an expected failure (#1376): the
+    # damage texts are refused before any accepted pattern is tried.
+    if is_damage "$line"; then return 1; fi
     case $line in
       *"exit 130"* | *"exit 137"* | *"exit 143"*) ;;
       *unavailable* | *busy* | *aborted* | *expired* | *"permission denied"*) ;;
@@ -562,6 +565,18 @@ for f in read-fail latency-fail import-fail gc-fail; do
   if [ -s "$WORK/$f.log" ] && ! classifies "$WORK/$f.log"; then
     echo "FAIL: unexpected failures in $f.log:" >&2
     head -n 5 "$WORK/$f.log" >&2
+    fail=1
+  fi
+done
+
+# The logs no classifier reads (#1376 F3): a writer, import or gc that
+# died on damaged data leaves its evidence here, while the classified
+# file holds only the accepted marker line - or nothing, as a writer
+# whose land was lost does.
+for f in "$WORK"/writer-*.log "$WORK/import-soak.log" "$WORK/gc.log"; do
+  if [ -n "$(damage_in "$f")" ]; then
+    echo "FAIL: damage in ${f#"$WORK"/}:" >&2
+    damage_in "$f" >&2
     fail=1
   fi
 done

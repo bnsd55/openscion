@@ -51,6 +51,9 @@ LANDS=$((RUN_MINUTES * 60 * 100))
 classifies() {
   local log=$1 line
   while IFS= read -r line; do
+    # Lost or damaged data is never an expected failure (#1376): the
+    # damage texts are refused before any accepted pattern is tried.
+    if is_damage "$line"; then return 1; fi
     case $line in
       *"exit 130"* | *"exit 137"* | *"exit 143"*) ;;
       *unavailable* | *busy* | *aborted* | *expired* | *"permission denied"*) ;;
@@ -214,7 +217,15 @@ $(sed -n 1p "$WORK/last.sample" | cut -d, -f2),$(latency)" >> "$WORK/metrics.csv
   fi
   sleep 10
 done
-# The writers stop at the end: bench has no time limit of its own.
+# The writers stop at the end: bench has no time limit of its own. A
+# bench still running here is killed by the stop, and its missing
+# verdict is that kill's doing; one that already finished must have
+# printed it (#1376).
+bench_alive=0
+if [ -e "$WORK/owned/soak-writers" ]; then
+  bench_pid=$(sed -n 's/^pid=//p' "$WORK/owned/soak-writers" 2> /dev/null)
+  [ -n "$bench_pid" ] && kill -0 "$bench_pid" 2> /dev/null && bench_alive=1
+fi
 stop soak-writers
 sleep 2
 
@@ -287,6 +298,33 @@ for f in read-fail latency-fail import-fail gc-fail; do
     fail=1
   fi
 done
+
+# The logs no classifier reads (#1376 F3): an import or gc that died on
+# damaged data leaves its evidence here, while the classified file
+# holds only the accepted marker line.
+for f in import-soak.log gc.log; do
+  if [ -n "$(damage_in "$WORK/$f")" ]; then
+    echo "FAIL: damage in $f:" >&2
+    damage_in "$WORK/$f" >&2
+    fail=1
+  fi
+done
+
+# The bench's own verdict, which the Land counter is not (#1376 F1):
+# the counter proves activity, not exactly-once. A damage message in
+# bench.log fails the run always. A missing "verified:" line fails
+# when the bench had finished on its own; the stop killing a live
+# bench is the one sanctioned way to end without one.
+if [ -n "$(damage_in "$WORK/bench.log")" ]; then
+  echo "FAIL: the bench reported lost or damaged data:" >&2
+  damage_in "$WORK/bench.log" >&2
+  fail=1
+fi
+if [ "$bench_alive" = 0 ] && ! grep -q "verified: main gained exactly" "$WORK/bench.json" 2> /dev/null; then
+  echo "FAIL: the bench finished without its verified line" >&2
+  tail -n 5 "$WORK/bench.log" 2> /dev/null >&2 || true
+  fail=1
+fi
 
 # The writers are stopped at the end, so their report never lands in a
 # file; the server's own counter says what landed. The RPC is Scion/Land.
