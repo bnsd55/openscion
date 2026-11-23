@@ -83,8 +83,11 @@ while IFS='|' read -r text file; do
   }
 done < <(damage_text_sources)
 # The ticket refusal names no damage text: it must not match (N2).
+# The array fill is a while-read, not mapfile: macOS CI runs these
+# scripts with /bin/bash 3.2, and mapfile is a bash 4 builtin.
 ticket=$(printf 'cannot mint a fresh ticket: the server sent no ticket\n')
-mapfile -t markers < <(damage_texts)
+markers=()
+while IFS= read -r m; do markers+=("$m"); done < <(damage_texts)
 for m in "${markers[@]}"; do
   printf '%s\n' "$ticket" | grep -qF -- "$m" && {
     echo "marker '$m' matches the ticket refusal - it is not lost data" >&2
