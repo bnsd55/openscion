@@ -2,8 +2,8 @@
 # production code with a pinned tool, the exclusions checked in
 # (scripts/coverage-exclusions.txt). One Postgres job runs the whole
 # workspace against the pg17 service (every suite is Postgres now), it
-# uploads its profiles, and the gate job rebuilds the instrumented
-# binaries without tests and turns the upload into the one number it
+# uploads its profiles, and the gate job unpacks the measure's
+# uploaded binaries and turns the upload into the one number it
 # checks. The build links two objects at a time and the suite runs two
 # tests at a time, because the instrumented build plus the whole suite
 # is the heaviest thing this repository runs and the runner's agent

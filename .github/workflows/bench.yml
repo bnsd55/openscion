@@ -84,7 +84,7 @@ jobs:
           if-no-files-found: error
 
   # The capacity envelope (issue #387): one server over a grid of
-  # writers, readers and backends, until the published table is full.
+  # writers and readers, until the published table is full.
   # Dispatch only, like the checkout benchmark: a shared runner is
   # noisy, and the doc's table carries that in its caption. The
   # Postgres cells need SCION_PG_URL, which the service container

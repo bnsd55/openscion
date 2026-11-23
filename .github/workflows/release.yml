@@ -38,9 +38,6 @@ env:
 jobs:
   # The tag's identity, proven without the owner's key: GitHub verified
   # the SSH signature at push time with the key on the owner's account;
-  # the API hands back that verdict.
-  # The tag's identity, proven without the owner's key: GitHub verified
-  # the SSH signature at push time with the key on the owner's account;
   # the API hands back that verdict. The verdicts live in
   # scripts/release-verify-tag.sh, fed canned answers by
   # scripts/test-release-verify-tag.sh — no CI run holds a signed tag.
