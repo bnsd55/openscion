@@ -93,9 +93,20 @@ token fails with `UNAUTHENTICATED` before the request is read. A token names
 a principal. A server started with `SCION_TOKEN=T` (or `--token-file`)
 has one principal, `default`, which may read and write every repo. A server
 started with `--access FILE` reads the principal of each token and its rules
-from the file; the file's format is a deployment matter and lives in the
-README. The principal of a call's token is its caller. Land request keys and
+from the file; the file's format is a deployment matter and lives in
+[`operations.md`](operations.md) ("Tokens: one, or an access file"). The
+principal of a call's token is its caller. Land request keys and
 land IDs are scoped by (repo, principal).
+
+**Request IDs.** A client MAY send the metadata `x-request-id` on any call:
+1 to 64 bytes of visible ASCII (bytes 0x21 to 0x7E) with no space. A value
+that does not fit is dropped whole, never cleaned up: nothing of it is
+logged. The server logs a value that fits as the `request_id` of the call's
+log lines (empty when none fits), and an audited call's intent and result
+lines carry it too; an audited call that sent none gets an ID the server
+makes, so its two lines still join. A tier SHOULD forward the value it got
+on its upstream calls (scion's tiers do). The header carries no permission;
+a call's answer is the same with it and without it.
 
 **Health.** The server also answers `grpc.health.v1.Check` and
 `grpc.health.v1.Watch` on the same address, without a token: a probe
@@ -1064,8 +1075,6 @@ and its data directory in the same way.
 
 Tiers are trusted in v0.1. A client cannot check a `ResolveRef` or
 `GetRootTree` answer by hash, so it trusts every tier on its path for them.
-Access tickets that a tier checks are not in v1
-([#13](https://github.com/bnsd55/openscion/issues/13)).
 
 ## 9. Compatibility
 
