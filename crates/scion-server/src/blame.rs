@@ -261,6 +261,7 @@ pub fn blame(
     held: usize,
     memory: &Bytes,
     until: Option<Instant>,
+    principal: Option<&str>,
 ) -> Result<Blame> {
     // A fresh walk starts at the changeset, at line 0, and names the lines
     // of the file there. A walk that goes on starts at the version the
@@ -275,8 +276,8 @@ pub fn blame(
     // each step diffs two whole versions, so the walk checks the deadline
     // before it starts the next one, the first diff too.
     let walk_until = Deadline::new(until.unwrap_or_else(|| Instant::now() + CALL_LIMIT));
-    crate::derived::get_by::<history::PathHistory>(store, repo, start, &walk_until)?;
-    let root = tree::root_tree(store, repo, start, &walk_until)?;
+    crate::derived::get_by::<history::PathHistory>(store, repo, start, &walk_until, principal)?;
+    let root = tree::root_tree(store, repo, start, &walk_until, principal)?;
     let mut blob = regular_blob(store, root, &start_path)?;
     // The text of the version the walk starts at. Its bytes stay taken for
     // the whole call: each step's older text replaces them when it becomes
@@ -483,7 +484,8 @@ pub fn blame(
             let mut cost = 0;
             let found = match parent {
                 Some(parent) => {
-                    let root = tree::root_tree_held(store, c, repo, parent, &walk_until)?;
+                    let root =
+                        tree::root_tree_held(store, c, repo, parent, &walk_until, principal)?;
                     let budget = Budget {
                         cost: &mut cost,
                         cap: left,

@@ -111,8 +111,9 @@ pub(crate) fn get_unbounded<K: Kind>(
     store: &Backend,
     repo: RepoId,
     cs: ChangesetId,
+    principal: Option<&str>,
 ) -> Result<K::Value> {
-    get_until::<K>(store, repo, cs, None)
+    get_until::<K>(store, repo, cs, None, principal)
 }
 
 /// [`get`], but if it derives, it stops between steps once `deadline` has
@@ -126,8 +127,9 @@ pub(crate) fn get_by<K: Kind>(
     repo: RepoId,
     cs: ChangesetId,
     deadline: &Deadline,
+    principal: Option<&str>,
 ) -> Result<K::Value> {
-    get_until::<K>(store, repo, cs, Some(deadline))
+    get_until::<K>(store, repo, cs, Some(deadline), principal)
 }
 
 fn get_until<K: Kind>(
@@ -135,6 +137,7 @@ fn get_until<K: Kind>(
     repo: RepoId,
     cs: ChangesetId,
     deadline: Option<&Deadline>,
+    principal: Option<&str>,
 ) -> Result<K::Value> {
     let known = store.read(|c| {
         require(c, repo, cs)?;
@@ -147,7 +150,7 @@ fn get_until<K: Kind>(
     // the caller can send it to a client. So it waits for one full flush,
     // shared with concurrent commits. An error is an answer too, so it
     // waits as well: the steps before the error committed.
-    let value = in_one_walk::<K>(store, repo, cs, deadline);
+    let value = in_one_walk::<K>(store, repo, cs, deadline, principal);
     store.flush()?;
     value
 }
@@ -167,12 +170,13 @@ pub(crate) fn get_by_held<K: Kind>(
     repo: RepoId,
     cs: ChangesetId,
     deadline: &Deadline,
+    principal: Option<&str>,
 ) -> Result<K::Value> {
     require(c, repo, cs)?;
     if let Some(value) = load::<K>(c, cs)? {
         return Ok(value);
     }
-    let value = in_one_walk::<K>(store, repo, cs, Some(deadline));
+    let value = in_one_walk::<K>(store, repo, cs, Some(deadline), principal);
     store.flush()?;
     value
 }
@@ -230,6 +234,13 @@ pub(crate) struct DeriveFlights {
     /// the walks in flight and the walks in the wait are gauges there.
     /// Empty in import, fsck and gc, which export none.
     metrics: std::sync::OnceLock<std::sync::Arc<crate::metrics::Metrics>>,
+    /// The most walks one principal may own, under `--access`: half the
+    /// cap, rounded up. 0 is no share: single-principal mode and the
+    /// unbounded forms keep the whole cap (#1391).
+    walk_share: std::sync::atomic::AtomicUsize,
+    /// How many walks each principal owns, while it owns any. A walk's
+    /// permit gives its unit back on drop, a panic included.
+    owners: Mutex<HashMap<String, usize>>,
 }
 
 impl DeriveFlights {
@@ -246,6 +257,8 @@ impl DeriveFlights {
                     .expect("the busy bound fits in u64 nanos"),
             ),
             walk_bytes: crate::memory::Bytes::named(DERIVE_WALK_BUDGET, "derive walk"),
+            walk_share: std::sync::atomic::AtomicUsize::new(0),
+            owners: Mutex::new(HashMap::new()),
             metrics: std::sync::OnceLock::new(),
         }
     }
@@ -254,6 +267,19 @@ impl DeriveFlights {
     /// server serves.
     pub(crate) fn set_metrics(&self, metrics: std::sync::Arc<crate::metrics::Metrics>) {
         let _ = self.metrics.set(metrics);
+    }
+
+    /// Sets the share of the walks one principal may own, before the
+    /// server serves. 0 is no share: single-principal mode keeps the
+    /// whole cap (#1391).
+    pub(crate) fn set_walk_share(&self, share: usize) {
+        self.walk_share
+            .store(share, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The share of the walks one principal may own.
+    fn walk_share(&self) -> usize {
+        self.walk_share.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Sets the bound a walk's waits end within, before the server
@@ -294,6 +320,8 @@ impl DeriveFlights {
                     .expect("the busy bound fits in u64 nanos"),
             ),
             walk_bytes,
+            walk_share: std::sync::atomic::AtomicUsize::new(0),
+            owners: Mutex::new(HashMap::new()),
             metrics: std::sync::OnceLock::new(),
         }
     }
@@ -313,6 +341,9 @@ struct Permit<'a> {
     in_flight: &'a Mutex<usize>,
     woken: &'a Condvar,
     metrics: Option<&'a std::sync::Arc<crate::metrics::Metrics>>,
+    /// The principal whose share this permit counts, with the owners
+    /// map: the unit goes back on drop, a panic included (#1391).
+    owner: Option<(&'a Mutex<HashMap<String, usize>>, String)>,
 }
 
 impl Drop for Permit<'_> {
@@ -326,6 +357,15 @@ impl Drop for Permit<'_> {
         if let Some(metrics) = self.metrics {
             metrics.derive_walk_ended();
         }
+        if let Some((owners, principal)) = self.owner.take() {
+            let mut owners = owners.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(left) = owners.get_mut(&principal) {
+                *left = left.saturating_sub(1);
+                if *left == 0 {
+                    owners.remove(&principal);
+                }
+            }
+        }
     }
 }
 
@@ -334,7 +374,26 @@ impl Drop for Permit<'_> {
 fn take_walk_permit<'a>(
     walks: &'a DeriveFlights,
     deadline: Option<&Deadline>,
+    principal: Option<&str>,
 ) -> Result<Permit<'a>> {
+    // The principal's share of the walks, before any wait: a principal at
+    // its share is refused at once — it is the principal's own cap, not a
+    // wait (#1391). The count of owners rides the same lock as the
+    // in-flight count, so the check and the take are one step.
+    let share = walks.walk_share();
+    if share > 0
+        && let Some(principal) = principal
+    {
+        let owners = walks.owners.lock().unwrap_or_else(PoisonError::into_inner);
+        let owned = owners.get(principal).copied().unwrap_or(0);
+        if owned >= share {
+            return Err(Error::ResourceExhausted(format!(
+                "principal {principal:?} would hold more than its \
+                 {share} derive walk share, half of the server's cap \
+                 under --access; retry later"
+            )));
+        }
+    }
     let mut in_flight = walks
         .in_flight
         .lock()
@@ -342,6 +401,19 @@ fn take_walk_permit<'a>(
     loop {
         if *in_flight < walks.walks_cap {
             *in_flight += 1;
+            // The permit counts for its owner's share, if the walks run
+            // under `--access` and the caller named a principal. The
+            // owners lock is held only here and in the drop: the map is
+            // never locked while walking.
+            let owner = if share > 0 {
+                principal.map(|principal| {
+                    let mut owners = walks.owners.lock().unwrap_or_else(PoisonError::into_inner);
+                    *owners.entry(principal.to_owned()).or_default() += 1;
+                    (&walks.owners, principal.to_owned())
+                })
+            } else {
+                None
+            };
             if let Some(metrics) = walks.metrics.get() {
                 metrics.derive_walk_started();
             }
@@ -349,6 +421,7 @@ fn take_walk_permit<'a>(
                 in_flight: &walks.in_flight,
                 woken: &walks.woken,
                 metrics: walks.metrics.get(),
+                owner,
             });
         }
         if let Some(metrics) = walks.metrics.get() {
@@ -520,6 +593,7 @@ fn in_one_walk<K: Kind>(
     repo: RepoId,
     cs: ChangesetId,
     deadline: Option<&Deadline>,
+    principal: Option<&str>,
 ) -> Result<K::Value> {
     let walks = store.derive_flights();
     loop {
@@ -541,7 +615,7 @@ fn in_one_walk<K: Kind>(
             let _retire = RetireOnDrop(walks, &flight);
             // The walk's permit: walks beyond the cap only repeat work,
             // and starve the writes. Wait for one until the deadline.
-            let _permit = take_walk_permit(walks, deadline)?;
+            let _permit = take_walk_permit(walks, deadline, principal)?;
             return fill_until::<K>(store, repo, cs, deadline).map(|(value, _)| value);
         }
         let before = *flight.walks.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1560,7 +1634,10 @@ mod tests {
                     at_the_gate.wait();
                     let deadline =
                         crate::deadline::Deadline::new(Instant::now() + Duration::from_secs(60));
-                    assert_eq!(get_by::<Cold<1>>(store, repo, tip, &deadline).unwrap(), 12);
+                    assert_eq!(
+                        get_by::<Cold<1>>(store, repo, tip, &deadline, None).unwrap(),
+                        12
+                    );
                 });
             }
             wait_entered(1);
@@ -1782,7 +1859,7 @@ mod tests {
         let start = store.blobs().full_flushes();
         let flushes = || store.blobs().full_flushes() - start;
         assert_eq!(
-            get_unbounded::<ChangedPathsV1>(&store, repo, ids[2]).unwrap(),
+            get_unbounded::<ChangedPathsV1>(&store, repo, ids[2], None).unwrap(),
             5
         );
         assert_eq!(DERIVES.get(), 3, "each changeset once, from the root");
@@ -1791,7 +1868,7 @@ mod tests {
         assert_eq!(flushes(), one, "durable before get returns");
         let counts: Vec<u64> = ids
             .iter()
-            .map(|&cs| get_unbounded::<ChangedPathsV1>(&store, repo, cs).unwrap())
+            .map(|&cs| get_unbounded::<ChangedPathsV1>(&store, repo, cs, None).unwrap())
             .collect();
         assert_eq!(counts, [2, 4, 5]);
         assert_eq!(DERIVES.get(), 3, "later reads use the stored values");
@@ -1807,12 +1884,12 @@ mod tests {
         let other = store.write(|c| c.create_repo("other")).unwrap();
         let tip = ids[2];
         assert!(matches!(
-            get_unbounded::<ChangedPathsV1>(&store, other, tip),
+            get_unbounded::<ChangedPathsV1>(&store, other, tip, None),
             Err(Error::NotFound(_))
         ));
         let deadline = crate::deadline::Deadline::new(Instant::now() + Duration::from_secs(60));
         assert!(matches!(
-            get_by::<ChangedPathsV1>(&store, other, tip, &deadline),
+            get_by::<ChangedPathsV1>(&store, other, tip, &deadline, None),
             Err(Error::NotFound(_))
         ));
         assert!(matches!(
@@ -1873,13 +1950,13 @@ mod tests {
         let (_dir, store, repo, ids) = store_with(&HISTORY);
         let tip = ids[2];
         assert_eq!(
-            get_unbounded::<ChangedPathsV1>(&store, repo, tip).unwrap(),
+            get_unbounded::<ChangedPathsV1>(&store, repo, tip, None).unwrap(),
             5
         );
 
         DERIVES.set(0);
         assert_eq!(
-            get_unbounded::<ChangedPathsV2>(&store, repo, tip).unwrap(),
+            get_unbounded::<ChangedPathsV2>(&store, repo, tip, None).unwrap(),
             4
         );
         assert_eq!(DERIVES.get(), 3, "version 2 derives every value again");
@@ -1924,7 +2001,7 @@ mod tests {
         DERIVES.set(0);
         let commits = store.commits();
         assert_eq!(
-            get_unbounded::<ChangedPathsV1>(&store, repo, tip).unwrap(),
+            get_unbounded::<ChangedPathsV1>(&store, repo, tip, None).unwrap(),
             7
         );
         assert_eq!(DERIVES.get(), 7, "each changeset once");
@@ -1932,7 +2009,7 @@ mod tests {
         // Each step went on from the value of the step before it.
         for (count, &cs) in (1..).zip(&ids) {
             assert_eq!(
-                get_unbounded::<ChangedPathsV1>(&store, repo, cs).unwrap(),
+                get_unbounded::<ChangedPathsV1>(&store, repo, cs, None).unwrap(),
                 count
             );
         }
@@ -1947,7 +2024,7 @@ mod tests {
         // The error waits until the steps before it are durable.
         FAIL_AT.set(Some(ids[2 * STEP]));
         let flushes = store.blobs().full_flushes();
-        let failed = get_unbounded::<ChangedPathsV1>(&store, repo, tip);
+        let failed = get_unbounded::<ChangedPathsV1>(&store, repo, tip, None);
         FAIL_AT.set(None);
         assert!(matches!(failed, Err(Error::Corrupt(_))), "{failed:?}");
         let one = u64::from(FSYNC_LEAVES_DRIVE_CACHE);
@@ -1963,7 +2040,7 @@ mod tests {
 
         DERIVES.set(0);
         assert_eq!(
-            get_unbounded::<ChangedPathsV1>(&store, repo, tip).unwrap(),
+            get_unbounded::<ChangedPathsV1>(&store, repo, tip, None).unwrap(),
             7
         );
         assert_eq!(DERIVES.get(), 3, "the next read derives only the rest");
@@ -1983,7 +2060,7 @@ mod tests {
         assert_eq!(pending, ids);
         DERIVES.set(0);
         assert_eq!(
-            get_unbounded::<ChangedPathsV1>(&store, repo, tip).unwrap(),
+            get_unbounded::<ChangedPathsV1>(&store, repo, tip, None).unwrap(),
             5
         );
         assert_eq!(DERIVES.get(), 5);
@@ -2002,7 +2079,7 @@ mod tests {
             let (_dir, store, repo, ids) = store_with(&chain(n));
             let tip = ids[n - 1];
             DERIVES.set(0);
-            let late = get_by::<ChangedPathsV1>(&store, repo, tip, &past);
+            let late = get_by::<ChangedPathsV1>(&store, repo, tip, &past, None);
             assert!(
                 matches!(late, Err(Error::DeadlineExceeded(_))),
                 "{n}: {late:?}"
@@ -2015,7 +2092,7 @@ mod tests {
             assert_eq!(DERIVES.get(), 0, "{n}");
             assert!(kind_rows(&store, 1).is_empty(), "{n}");
             assert_eq!(
-                get_unbounded::<ChangedPathsV1>(&store, repo, tip).unwrap(),
+                get_unbounded::<ChangedPathsV1>(&store, repo, tip, None).unwrap(),
                 n as u64
             );
         }
@@ -2048,7 +2125,7 @@ mod tests {
             .try_take(2 * walk_step_bytes())
             .unwrap();
         let deadline = Deadline::new(Instant::now() + Duration::from_secs(60));
-        let busy = get_by::<Ancestry>(&store, repo, tip, &deadline);
+        let busy = get_by::<Ancestry>(&store, repo, tip, &deadline, None);
         let Err(Error::Unavailable(why)) = &busy else {
             panic!("not busy: {busy:?}");
         };
@@ -2072,12 +2149,12 @@ mod tests {
         );
         // A retry while the budget is still held stops busy again.
         assert!(matches!(
-            get_by::<Ancestry>(&store, repo, tip, &deadline),
+            get_by::<Ancestry>(&store, repo, tip, &deadline, None),
             Err(Error::Unavailable(_))
         ));
         // With room again, a retry resumes and finishes.
         drop(held);
-        get_by::<Ancestry>(&store, repo, tip, &deadline).unwrap();
+        get_by::<Ancestry>(&store, repo, tip, &deadline, None).unwrap();
         assert_eq!(rows_of(&store, Ancestry::NAME, Ancestry::VERSION).len(), 12);
     }
 
@@ -2105,7 +2182,7 @@ mod tests {
         )
         .unwrap();
         let (repo, ids) = store.write(|c| store_chain(c, &chain(12))).unwrap();
-        let busy = get_by::<Ancestry>(&store, repo, ids[11], &deadline);
+        let busy = get_by::<Ancestry>(&store, repo, ids[11], &deadline, None);
         assert!(
             matches!(&busy, Err(Error::Unavailable(why)) if why.contains("byte budget")),
             "not busy: {busy:?}"
@@ -2120,7 +2197,7 @@ mod tests {
         )
         .unwrap();
         let (repo, ids) = store.write(|c| store_chain(c, &chain(12))).unwrap();
-        get_by::<Ancestry>(&store, repo, ids[11], &deadline).unwrap();
+        get_by::<Ancestry>(&store, repo, ids[11], &deadline, None).unwrap();
         assert_eq!(rows_of(&store, Ancestry::NAME, Ancestry::VERSION).len(), 12);
     }
 
@@ -2139,7 +2216,7 @@ mod tests {
         .unwrap();
         let (repo, ids) = store.write(|c| store_chain(c, &chain(12))).unwrap();
         assert_eq!(
-            get_unbounded::<Ancestry>(&store, repo, ids[11])
+            get_unbounded::<Ancestry>(&store, repo, ids[11], None)
                 .unwrap()
                 .len(),
             12
@@ -2151,7 +2228,7 @@ mod tests {
     fn a_step_removes_rows_of_older_versions_only() {
         let (_dir, store, repo, ids) = store_with(&chain(7));
         assert_eq!(
-            get_unbounded::<ChangedPathsV1>(&store, repo, ids[6]).unwrap(),
+            get_unbounded::<ChangedPathsV1>(&store, repo, ids[6], None).unwrap(),
             7
         );
         assert_eq!(kind_rows(&store, 1).len(), 7);
@@ -2160,7 +2237,7 @@ mod tests {
         // The first step of version 2 derives two values and removes two
         // rows of version 1.
         assert_eq!(
-            get_unbounded::<ChangedPathsV2>(&store, repo, ids[1]).unwrap(),
+            get_unbounded::<ChangedPathsV2>(&store, repo, ids[1], None).unwrap(),
             1
         );
         assert_eq!(kind_rows(&store, 2).len(), STEP);
@@ -2185,7 +2262,7 @@ mod tests {
         assert_eq!(kind_rows(&store, 2).len(), 7);
         // A build with version 1 derives its own rows and keeps version 2.
         assert_eq!(
-            get_unbounded::<ChangedPathsV1>(&store, repo, tip).unwrap(),
+            get_unbounded::<ChangedPathsV1>(&store, repo, tip, None).unwrap(),
             7
         );
         assert_eq!(kind_rows(&store, 1).len(), 7);
@@ -2206,7 +2283,7 @@ mod tests {
         assert_eq!(kind_rows(&store, 2).len(), 7);
         assert_eq!(root_trees(&store), 7);
         assert_eq!(
-            get_unbounded::<ChangedPathsV2>(&store, repo, tip).unwrap(),
+            get_unbounded::<ChangedPathsV2>(&store, repo, tip, None).unwrap(),
             4
         );
     }
@@ -2225,7 +2302,7 @@ mod tests {
         // its own version is stored, so it derives nothing, and its own
         // sweep removes every row of the older one.
         assert_eq!(
-            get_unbounded::<ChangedPathsV1>(&store, repo, tip).unwrap(),
+            get_unbounded::<ChangedPathsV1>(&store, repo, tip, None).unwrap(),
             7
         );
         let again = backfill::<ChangedPathsV2>(&store, "r", tip).unwrap();
@@ -2353,14 +2430,14 @@ mod tests {
         DERIVES.set(0);
         let commits = store.commits();
         assert_eq!(
-            get_unbounded::<Ancestry>(&store, repo, tip).unwrap(),
+            get_unbounded::<Ancestry>(&store, repo, tip, None).unwrap(),
             model[7]
         );
         assert_eq!(DERIVES.get(), 8, "each changeset once");
         commits_delta(&store, commits, steps(8), "one per step");
         for (i, &cs) in ids.iter().enumerate() {
             assert_eq!(
-                get_unbounded::<Ancestry>(&store, repo, cs).unwrap(),
+                get_unbounded::<Ancestry>(&store, repo, cs, None).unwrap(),
                 model[i]
             );
         }
@@ -2369,7 +2446,7 @@ mod tests {
         // A first-parent kind derives only the first-parent history: 7, 5,
         // 3, 1, 0.
         DERIVES.set(0);
-        get_unbounded::<ChangedPathsV1>(&store, repo, tip).unwrap();
+        get_unbounded::<ChangedPathsV1>(&store, repo, tip, None).unwrap();
         assert_eq!(DERIVES.get(), 5);
         assert_eq!(kind_rows(&store, 1).len(), 5);
     }
@@ -2418,7 +2495,7 @@ mod tests {
                 let i = start.index(ids.len());
                 let missing = model[i].iter().filter(|id| !derived.contains_key(id)).count();
                 DERIVES.set(0);
-                proptest::prop_assert_eq!(&get_unbounded::<Ancestry>(&store, repo, ids[i]).unwrap(), &model[i]);
+                proptest::prop_assert_eq!(&get_unbounded::<Ancestry>(&store, repo, ids[i], None).unwrap(), &model[i]);
                 proptest::prop_assert_eq!(DERIVES.get(), missing);
                 derived.extend(model[i].iter().map(|&id| (id, i)));
             }
@@ -2478,15 +2555,59 @@ mod tests {
         // The cap is one, and it is held: the next wait cannot get a
         // permit. Its deadline is far, so only the busy bound can end the
         // wait (#1391).
-        let _held = take_walk_permit(&flights, None).unwrap();
+        let _held = take_walk_permit(&flights, None, None).unwrap();
         let deadline =
             crate::deadline::Deadline::new(std::time::Instant::now() + Duration::from_secs(60));
-        let err = take_walk_permit(&flights, Some(&deadline)).err().unwrap();
+        let err = take_walk_permit(&flights, Some(&deadline), None)
+            .err()
+            .unwrap();
         assert!(
             matches!(err, Error::ResourceExhausted(ref why) if why.contains("busy: no derive walk free; retry later")),
             "{err}"
         );
         assert_eq!(metrics.busy_timeouts(BusyLimit::DeriveWalk), 1);
+    }
+
+    /// A principal at its walk share is refused at once, and another
+    /// principal still gets a walk (#1391). A caller that names no
+    /// principal is outside the share: the server's own walks.
+    #[test]
+    fn a_principal_at_its_walk_share_is_refused_and_others_go_on() {
+        let flights = DeriveFlights::with_walk_bytes(8, crate::memory::Bytes::named(1 << 20, "t"));
+        flights.set_walk_share(4);
+        // `p` holds its whole share: four of the eight walks.
+        let held: Vec<_> = (0..4)
+            .map(|_| take_walk_permit(&flights, None, Some("p")).unwrap())
+            .collect();
+        let err = take_walk_permit(&flights, None, Some("p")).err().unwrap();
+        assert!(
+            matches!(err, Error::ResourceExhausted(ref why) if why.contains("its 4 derive walk share")),
+            "{err}"
+        );
+        // `b` holds none of its share: `b` gets a walk.
+        let _b = take_walk_permit(&flights, None, Some("b")).unwrap();
+        // A walk with no named principal is not the share's business.
+        let _plain = take_walk_permit(&flights, None, None).unwrap();
+        drop(held);
+        // The drops gave the share back: `p` fits again.
+        let _again = take_walk_permit(&flights, None, Some("p")).unwrap();
+    }
+
+    /// One permit counts one unit of its owner's share, and gives its
+    /// unit back on its drop (#1391).
+    #[test]
+    fn a_walk_permit_counts_its_owner_once_and_gives_back() {
+        let flights = DeriveFlights::with_walk_bytes(8, crate::memory::Bytes::named(1 << 20, "t"));
+        flights.set_walk_share(2);
+        let first = take_walk_permit(&flights, None, Some("p")).unwrap();
+        let second = take_walk_permit(&flights, None, Some("p")).unwrap();
+        assert!(take_walk_permit(&flights, None, Some("p")).is_err());
+        drop(first);
+        // One unit came back, so one more fits.
+        let third = take_walk_permit(&flights, None, Some("p")).unwrap();
+        drop(second);
+        drop(third);
+        take_walk_permit(&flights, None, Some("p")).unwrap();
     }
 
     #[test]
@@ -2509,7 +2630,10 @@ mod tests {
                     at_the_gate.wait();
                     let deadline =
                         crate::deadline::Deadline::new(Instant::now() + Duration::from_secs(60));
-                    assert_eq!(get_by::<Cold<1>>(&store, repo, tip, &deadline).unwrap(), 12);
+                    assert_eq!(
+                        get_by::<Cold<1>>(&store, repo, tip, &deadline, None).unwrap(),
+                        12
+                    );
                 });
             }
             // All eight are inside the round: the owner holds the walk at
@@ -2568,13 +2692,13 @@ mod tests {
                 .and_then(|n| n.parse::<u64>().ok())
                 .unwrap_or(0)
         };
-        let first = take_walk_permit(&flights, None).unwrap();
+        let first = take_walk_permit(&flights, None, None).unwrap();
         assert_eq!(gauge("scion_derive_walks_in_flight"), 1);
         assert_eq!(gauge("scion_derive_walks_waiting"), 0);
         // A second caller waits: the gauge says it is in the wait, without
         // a clock, because the drop of `first` is what ends it.
         let holder = std::thread::scope(|scope| {
-            let waiter = scope.spawn(|| take_walk_permit(&flights, None).unwrap());
+            let waiter = scope.spawn(|| take_walk_permit(&flights, None, None).unwrap());
             let mut spins = 0;
             while gauge("scion_derive_walks_waiting") == 0 {
                 spins += 1;
@@ -2625,7 +2749,7 @@ mod tests {
             let owner = scope.spawn(|| {
                 let deadline =
                     crate::deadline::Deadline::new(Instant::now() + Duration::from_secs(60));
-                get_by::<Cold<1>>(&store, repo1, ids1[2], &deadline).unwrap()
+                get_by::<Cold<1>>(&store, repo1, ids1[2], &deadline, None).unwrap()
             });
             // The owner is provably inside its walk: its first derive ran,
             // and it holds the one permit with the gate closed. Until the
@@ -2641,20 +2765,20 @@ mod tests {
             let beside = scope.spawn(|| {
                 let deadline =
                     crate::deadline::Deadline::new(Instant::now() + Duration::from_secs(60));
-                get_by::<Cold<1>>(&store2, repo_b, ids_b[2], &deadline).unwrap()
+                get_by::<Cold<1>>(&store2, repo_b, ids_b[2], &deadline, None).unwrap()
             });
             wait_entered(2);
             // A caller of repo two waits for the permit, then walks.
             let waited = scope.spawn(|| {
                 let deadline =
                     crate::deadline::Deadline::new(Instant::now() + Duration::from_secs(60));
-                get_by::<Cold<1>>(&store, repo2, ids2[2], &deadline).unwrap()
+                get_by::<Cold<1>>(&store, repo2, ids2[2], &deadline, None).unwrap()
             });
             // A caller of repo three with a deadline gives up: the one
             // walk is taken, and the test holds it there.
             let short = scope.spawn(|| {
                 let deadline = Deadline::new(Instant::now() + Duration::from_millis(200));
-                get_by::<Cold<1>>(&store, repo3, ids3[0], &deadline)
+                get_by::<Cold<1>>(&store, repo3, ids3[0], &deadline, None)
             });
             let short = short.join().unwrap();
             assert!(
@@ -2706,13 +2830,13 @@ mod tests {
         let owner_deadline = Deadline::new(Instant::now() + Duration::from_secs(60));
         std::thread::scope(|scope| {
             let _gate = gate_closed();
-            let owner = scope.spawn(|| get_by::<Cold<1>>(&store, repo, tip, &owner_deadline));
+            let owner = scope.spawn(|| get_by::<Cold<1>>(&store, repo, tip, &owner_deadline, None));
             wait_entered(1);
             // A waiter of the same repo, spawned while the owner walks: it
             // joins the walk's flight. The walk's end wakes it.
             let waiter = scope.spawn(|| {
                 let deadline = Deadline::new(Instant::now() + Duration::from_secs(5));
-                get_by::<Cold<1>>(&store, repo, ids[1], &deadline).unwrap()
+                get_by::<Cold<1>>(&store, repo, ids[1], &deadline, None).unwrap()
             });
             // The waiter is provably on the flight before the walk is let
             // on; the expiry of the deadline is the test's next act.
@@ -2744,7 +2868,7 @@ mod tests {
             // store: it owns a fresh walk and finishes the chain.
             gate_open();
             let deadline = Deadline::new(Instant::now() + Duration::from_secs(5));
-            let value = get_by::<Cold<1>>(&store, repo, tip, &deadline).unwrap();
+            let value = get_by::<Cold<1>>(&store, repo, tip, &deadline, None).unwrap();
             assert_eq!(value, 6);
             assert_eq!(waiter.join().unwrap(), 2);
         });
@@ -2777,16 +2901,16 @@ mod tests {
             let _gate = gate_closed();
             let holder = scope.spawn(|| {
                 let deadline = Deadline::new(Instant::now() + Duration::from_secs(30));
-                get_by::<Cold<1>>(&store, r2, tip2, &deadline).unwrap()
+                get_by::<Cold<1>>(&store, r2, tip2, &deadline, None).unwrap()
             });
             wait_entered(1);
             let short = Deadline::new(Instant::now() + Duration::from_millis(200));
-            let out = get_by::<Cold<1>>(&store, r1, tip1, &short);
+            let out = get_by::<Cold<1>>(&store, r1, tip1, &short, None);
             assert!(matches!(out, Err(Error::ResourceExhausted(_))), "{out:?}");
             gate_open();
             assert_eq!(holder.join().unwrap(), 2);
             let deadline = Deadline::new(Instant::now() + Duration::from_secs(30));
-            let value = get_by::<Cold<1>>(&store, r1, tip1, &deadline).unwrap();
+            let value = get_by::<Cold<1>>(&store, r1, tip1, &deadline, None).unwrap();
             assert_eq!(value, 2);
         });
     }
@@ -2806,7 +2930,7 @@ mod tests {
         COLD_BOMB.store(true, Ordering::Relaxed);
         let deadline = Deadline::new(Instant::now() + Duration::from_secs(30));
         let first = std::thread::scope(|scope| {
-            let owner = scope.spawn(|| get_by::<Cold<1>>(&store, repo, tip, &deadline));
+            let owner = scope.spawn(|| get_by::<Cold<1>>(&store, repo, tip, &deadline, None));
             let outcome = owner.join();
             assert!(
                 outcome.is_err(),
@@ -2816,7 +2940,7 @@ mod tests {
         });
         let _ = first;
         let deadline = Deadline::new(Instant::now() + Duration::from_secs(30));
-        let value = get_by::<Cold<1>>(&store, repo, tip, &deadline).unwrap();
+        let value = get_by::<Cold<1>>(&store, repo, tip, &deadline, None).unwrap();
         assert_eq!(value, 4);
     }
 
@@ -2843,7 +2967,7 @@ mod tests {
         let owner_deadline = Deadline::new(Instant::now() + Duration::from_secs(60));
         std::thread::scope(|scope| {
             let _gate = gate_closed();
-            let owner = scope.spawn(|| get_by::<Cold<1>>(&store, repo, tip, &owner_deadline));
+            let owner = scope.spawn(|| get_by::<Cold<1>>(&store, repo, tip, &owner_deadline, None));
             wait_entered(1);
             // The waiter joins the walk while it is still in flight, so
             // the walk's end is what wakes it. The test waits for the
@@ -2852,7 +2976,7 @@ mod tests {
             // walk ended would join nothing and check something else.
             let waiter = scope.spawn(|| {
                 let deadline = Deadline::new(Instant::now() + Duration::from_secs(5));
-                get_by::<Cold<1>>(&store, repo, tip, &deadline).unwrap()
+                get_by::<Cold<1>>(&store, repo, tip, &deadline, None).unwrap()
             });
             for _ in 0..2_000 {
                 if joined_on(&store, repo) >= 3 {
@@ -2918,7 +3042,7 @@ mod tests {
                         let deadline = crate::deadline::Deadline::new(
                             Instant::now() + Duration::from_secs(60),
                         );
-                        get_by::<Cold<1>>(&store, repo, tip, &deadline).unwrap()
+                        get_by::<Cold<1>>(&store, repo, tip, &deadline, None).unwrap()
                     })
                 })
                 .collect();
@@ -2986,7 +3110,7 @@ mod tests {
                         let deadline = crate::deadline::Deadline::new(
                             Instant::now() + Duration::from_secs(60),
                         );
-                        get_by::<Cold<1>>(&store, repo, tip, &deadline).unwrap()
+                        get_by::<Cold<1>>(&store, repo, tip, &deadline, None).unwrap()
                     })
                 })
                 .collect();
@@ -3047,7 +3171,7 @@ mod tests {
             let walker = scope.spawn(|| {
                 let deadline =
                     crate::deadline::Deadline::new(Instant::now() + Duration::from_secs(60));
-                get_by::<Cold<1>>(&store, repo, tip, &deadline).unwrap()
+                get_by::<Cold<1>>(&store, repo, tip, &deadline, None).unwrap()
             });
             wait_entered(1);
             // The writer reads the walk's derive count inside its own
@@ -3115,7 +3239,7 @@ mod tests {
             let walker = scope.spawn(|| {
                 let deadline =
                     crate::deadline::Deadline::new(Instant::now() + Duration::from_secs(60));
-                get_by::<Cold<1>>(&store, repo, tip, &deadline).unwrap()
+                get_by::<Cold<1>>(&store, repo, tip, &deadline, None).unwrap()
             });
             wait_entered(1);
             let writer = scope.spawn(|| {

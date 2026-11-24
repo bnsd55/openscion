@@ -595,9 +595,18 @@ chmod 600 /srv/scion/access.txt
 With `--access`, the per-principal caps are on by default (64 requests, 512
 MiB upload bytes, 64 pending lands per principal); raise or lower them with
 `--max-principal-requests`, `--max-principal-upload-bytes`,
-`--max-principal-pending-lands`. With the single-principal mode
-(`SCION_TOKEN` or `--token-file`), every caller is the same
-principal, so the caps are off unless a flag sets one.
+`--max-principal-pending-lands`. The small server queues get a per-principal
+share too: under `--access`, one principal holds at most half, rounded up,
+of the blame slots (2 of 4), the diff slots (2 of 4), the graph-query slots
+(2 of 4), the derive walks (4 of 8), the read budget (128 of 256 MiB) and
+the upload permits (8 of 16). A call that would take a principal over its
+share is refused at once, before any wait, with `RESOURCE_EXHAUSTED` that
+names the share - it is the principal's own cap, not a busy server. A
+principal with no rule, or with folder read rules only, keeps its old
+answer (the read refusal from the folder rules). With the
+single-principal mode (`SCION_TOKEN` or `--token-file`), every caller is
+the same principal, so the caps and the shares are off unless a flag sets
+one.
 
 Rewriting the access file takes effect at the next start (or restart): the
 server reads it once. A ticket keeps working for its whole life after a

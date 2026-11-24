@@ -79,6 +79,7 @@ fn a_diff_whose_rename_search_hits_its_bound_warns() {
             limits: Limits::default(),
             quotas: scion_server::Quotas::off(),
             pending_lands: None,
+            walk_share: 0,
             land_stale_secs: 1 << 40,
             tls: None,
             metrics: Arc::default(),

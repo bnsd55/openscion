@@ -146,7 +146,7 @@ fn one_changed_name_in_a_wide_directory() {
     // its parent's (the parent's entry for it changed with it). The
     // root here holds only `d`, so the parent is the root.
     let root_tree =
-        scion_server::test_support::read::root_tree(&store, REPO, root, &later()).unwrap();
+        scion_server::test_support::read::root_tree(&store, REPO, root, &later(), None).unwrap();
     let (dir_tree, dir_bytes, root_bytes) = store
         .read(|c| {
             let Some(Entry::Dir(dir)) = scion_server::test_support::tree::lookup(
@@ -220,7 +220,7 @@ fn a_change_to_a_supported_width_directory_stays_on_the_measured_line() {
         .expect("a landed outcome carries its changeset");
 
     let root_tree =
-        scion_server::test_support::read::root_tree(&store, REPO, root, &later()).unwrap();
+        scion_server::test_support::read::root_tree(&store, REPO, root, &later(), None).unwrap();
     let dir_bytes = store
         .read(|c| {
             let Some(Entry::Dir(dir)) = scion_server::test_support::tree::lookup(

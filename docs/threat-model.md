@@ -323,6 +323,24 @@ that breaks one is caught.
   every way a reply ends — the reply finishes, the client resets the
   stream, or the connection closes — frees its share. (#586)
   `crates/scion-server/tests/reply_budget_h2.rs`
+- **The per-principal caps bound what a client holds in flight, not
+  what the store keeps at rest.** Under `--access`, a principal holds at
+  most half, rounded up, of the blame slots, the diff slots, the
+  graph-query slots, the derive walks, the read budget and the upload
+  permits; a call over the share is refused at once, before any wait.
+  This spreads the queues across principals; it does not bound the
+  disk: every accepted write lands and stays, so a principal that may
+  write can still spend bytes at rest without limit. The wall for bytes
+  at rest is the operator's: the `scion_data_free_bytes` gauge
+  (refreshed every 30 s) arms the `DiskNearlyFull` (10 GiB) and
+  `DiskFull` (1 GiB) alerts, and the operations guide's "Disk full"
+  runbook is the response. (#1391) The share:
+  `scion-server/tests/access.rs::an_upload_over_its_share_is_refused_before_a_permit`,
+  `scion-server/src/service.rs::a_principal_at_its_blame_share_is_refused_and_others_go_on`
+  and its four sibling tests, one per limit. The gauge:
+  `scion-server/src/service.rs::a_stuck_free_space_sample_does_not_stop_the_poll`.
+  The runbook:
+  `scion-server/tests/disk_full.rs::a_disk_full_runbook_gcs_then_writes_resume`
 - **A narrowed access file does not cut outstanding tickets.** A ticket
   holds for at most 15 minutes from signing, by design; to cut one at
   once, rotate the key. The window and the cut are pinned:

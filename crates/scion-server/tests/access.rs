@@ -188,6 +188,7 @@ async fn serve(store: &Backend, dir: &std::path::Path, access: Access) -> (Stop,
             audit: scion_server::test_support::audit::Audit::off(),
             limits: Limits::default(),
             quotas: scion_server::Quotas::off(),
+            walk_share: 0,
             pending_lands: None,
             land_stale_secs: 1 << 40,
             tls: None,
@@ -650,6 +651,7 @@ fn root_tree_id(store: &Backend, tip: ChangesetId) -> TreeId {
         &scion_server::test_support::deadline::Deadline::new(
             std::time::Instant::now() + std::time::Duration::from_secs(300),
         ),
+        None,
     )
     .unwrap();
     let tree = store.read(|c| c.get_tree(root)).unwrap();
@@ -1044,6 +1046,7 @@ async fn serve_keys(
             limits: Limits::default(),
             quotas: scion_server::Quotas::off(),
             pending_lands: None,
+            walk_share: 0,
             land_stale_secs: 1 << 40,
             tls: None,
             metrics: Arc::new(Metrics::default()),
@@ -2032,6 +2035,243 @@ async fn a_principal_name_that_differs_by_case_is_another_principal() {
         Ok(reply) => panic!("a token with no principal read the repo: {reply:?}"),
     }
     let _ = tip;
+}
+
+/// One held upload: a stream whose first message names the repo and
+/// whose later messages keep it open, one a second, so the server's
+/// idle timeout never ends it. The call's reply never comes while the
+/// stream lives.
+fn hold_one(client: Scion, stop: tokio::sync::watch::Receiver<bool>) {
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    let send = tx.clone();
+    tokio::spawn(async move {
+        if send
+            .send(PutBlobRequest {
+                repo: REPO.into(),
+                data: b"held".to_vec(),
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let mut stop = stop;
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                _ = stop.changed() => return,
+            }
+            if send
+                .send(PutBlobRequest {
+                    repo: String::new(),
+                    data: b"held".to_vec(),
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+    let mut client = client;
+    tokio::spawn(async move {
+        let _reply = client
+            .put_blob(tokio_stream::wrappers::ReceiverStream::new(rx))
+            .await;
+    });
+}
+
+/// Polls `client`'s uploads until one is refused over the share: the
+/// refusal says the principal's held streams have all taken their share
+/// and permit server-side.
+async fn until_share_full(client: &Scion, what: &str, refill: &mut dyn FnMut()) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let mut probe = client.clone();
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            probe.put_blob(tokio_stream::once(PutBlobRequest {
+                repo: REPO.into(),
+                data: b"probe".to_vec(),
+            })),
+        )
+        .await
+        .expect("the probe outlived its own bound");
+        match reply {
+            Err(status) => {
+                assert_eq!(status.code(), Code::ResourceExhausted, "{status:?}");
+                assert!(
+                    status
+                        .message()
+                        .contains("its 8 upload share, half of the server's limit"),
+                    "{what}: {}",
+                    status.message()
+                );
+                return;
+            }
+            Ok(_) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "{what}'s held uploads never filled the share"
+                );
+                // The probe ran while a held stream had not taken its
+                // share yet; one more held stream refills the share.
+                let _extra = refill();
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
+/// Polls `client`'s uploads until one completes: the principal's held
+/// streams have wound down and given their share units back.
+async fn until_share_free(client: &Scion, what: &str) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let mut probe = client.clone();
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            probe.put_blob(tokio_stream::once(PutBlobRequest {
+                repo: REPO.into(),
+                data: b"probe".to_vec(),
+            })),
+        )
+        .await
+        .expect("the probe outlived its own bound");
+        match reply {
+            Ok(_) => return,
+            Err(status) => {
+                assert_eq!(status.code(), Code::ResourceExhausted, "{status:?}");
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "{what}'s share never came back"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
+/// The upload-permit share (#1391): a principal that holds its whole
+/// share, 8 of the 16 upload permits, is refused at once on the next
+/// upload, while all 16 server permits are held. A principal under its
+/// share uploads through.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upload_over_its_share_is_refused_before_a_permit() {
+    let (dir, store, _root, _blob) = store();
+    let text = format!(
+        "token\tp\t{}\n\
+         token\tb\t{}\n\
+         write\tp\t{REPO}\n\
+         read\tp\t{REPO}\n\
+         write\tb\t{REPO}\n\
+         read\tb\t{REPO}\n",
+        hex("p"),
+        hex("b"),
+    );
+    let access = Access::parse(&text).unwrap();
+    // The server runs with the `--access` shares: one principal holds at
+    // most half of each small limit.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(service::serve(
+        store.clone(),
+        listener,
+        access,
+        service::ServeOptions {
+            data: dir.path().to_path_buf(),
+            audit: scion_server::test_support::audit::Audit::off(),
+            limits: Limits::default(),
+            quotas: scion_server::Quotas::off().with_shares(scion_server::Shares::for_access()),
+            walk_share: usize::div_ceil(scion_server::DERIVE_WALKS_CAP, 2),
+            pending_lands: None,
+            land_stale_secs: 1 << 40,
+            tls: None,
+            metrics: Arc::new(Metrics::default()),
+            reply_memory_budget: scion_server::REPLY_MEMORY_BUDGET,
+        },
+        Some(Arc::new(scion_server::Keys::generate())),
+        async {
+            stopped.await.ok();
+        },
+    ));
+    // `p`'s channel has no call timeout: the held uploads must sit open
+    // for the whole test, and the default channel would cancel them.
+    let channel = common::channel_within(&url, std::time::Duration::from_secs(1 << 30))
+        .await
+        .unwrap();
+    let bearer = Bearer::token("Bearer p".parse().unwrap());
+    let p = ScionClient::with_interceptor(channel, bearer);
+    let mut b = scion(&url, Some("b")).await;
+
+    // `p` opens uploads that stay open: the first message names the
+    // repo, then one message every second keeps the server's idle
+    // timeout from ending them. Each holds a permit and a share unit
+    // until the stream ends.
+    let (p_stop, p_stops) = tokio::sync::watch::channel(false);
+    let (b_stop, b_stops) = tokio::sync::watch::channel(false);
+    for _ in 0..8 {
+        hold_one(p.clone(), p_stops.clone());
+    }
+    // `b` holds the other half of the server's permits with its own
+    // whole share, so every permit is taken: a refusal that waited for
+    // a permit could never answer at all.
+    for _ in 0..8 {
+        hold_one(b.clone(), b_stops.clone());
+    }
+
+    // The held uploads' replies never come: they end only when their
+    // streams do. A probe is a completed upload; the principal's own
+    // share refusal says its streams have all taken their share and
+    // permit server-side. The two refusals prove 16 of 16 permits held.
+    let mut extra = 0;
+    let mut refill_p = || {
+        extra += 1;
+        assert!(extra <= 32, "the held uploads never filled the share");
+        hold_one(p.clone(), p_stops.clone());
+    };
+    until_share_full(&p, "p", &mut refill_p).await;
+    until_share_full(&b, "b", &mut refill_p).await;
+
+    // Every permit is taken now: `p`'s next upload is refused at once,
+    // before it can wait for a permit.
+    let mut caller = p.clone();
+    let status = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        caller.put_blob(tokio_stream::once(PutBlobRequest {
+            repo: REPO.into(),
+            data: b"probe".to_vec(),
+        })),
+    )
+    .await
+    .expect("the share refusal did not answer in time, or waited for a permit")
+    .unwrap_err();
+    assert_eq!(status.code(), Code::ResourceExhausted, "{status:?}");
+    assert!(
+        status
+            .message()
+            .contains("its 8 upload share, half of the server's limit"),
+        "{}",
+        status.message()
+    );
+
+    // `b`'s streams end, so a permit is free: a principal under its
+    // share uploads through.
+    b_stop.send(true).ok();
+    until_share_free(&b, "b").await;
+    b.put_blob(tokio_stream::once(PutBlobRequest {
+        repo: REPO.into(),
+        data: b"under".to_vec(),
+    }))
+    .await
+    .unwrap();
+
+    // The held uploads end, and the shares and permits come back.
+    p_stop.send(true).ok();
+    drop(p);
+    drop(b);
+    stop.send(()).ok();
 }
 
 #[path = "common/mod.rs"]

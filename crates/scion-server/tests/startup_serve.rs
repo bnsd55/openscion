@@ -47,6 +47,7 @@ async fn the_server_serves_while_the_startup_memory_probe_blocks() {
             audit: scion_server::test_support::audit::Audit::off(),
             limits: Limits::default(),
             quotas: Quotas::off(),
+            walk_share: 0,
             pending_lands: None,
             land_stale_secs: 1 << 40,
             tls: None,

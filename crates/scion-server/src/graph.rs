@@ -215,8 +215,9 @@ pub(crate) fn is_ancestor(
     ancestor: ChangesetId,
     descendant: ChangesetId,
     deadline: &Deadline,
+    principal: Option<&str>,
 ) -> Result<bool> {
-    let from = At::get(store, repo, descendant, deadline)?;
+    let from = At::get(store, repo, descendant, deadline, principal)?;
     let floor = store.read(|c| c.generation(repo, ancestor))?;
     let mut search = Search::new(from, ancestor, floor);
     let mut cache = HashMap::new();
@@ -248,10 +249,11 @@ pub(crate) fn merge_bases(
     a: ChangesetId,
     b: ChangesetId,
     deadline: &Deadline,
+    principal: Option<&str>,
 ) -> Result<Vec<ChangesetId>> {
     let (a, b) = (
-        At::get(store, repo, a, deadline)?,
-        At::get(store, repo, b, deadline)?,
+        At::get(store, repo, a, deadline, principal)?,
+        At::get(store, repo, b, deadline, principal)?,
     );
     let mut cache = HashMap::new();
     let mut parents = HashMap::new();
@@ -665,15 +667,21 @@ struct At {
 impl At {
     /// A changeset of `repo` and its node. Derives the commit graph first
     /// if it has no node, until `deadline`.
-    fn get(store: &Backend, repo: RepoId, id: ChangesetId, deadline: &Deadline) -> Result<Self> {
-        let node = derived::get_by::<CommitGraph>(store, repo, id, deadline)?;
+    fn get(
+        store: &Backend,
+        repo: RepoId,
+        id: ChangesetId,
+        deadline: &Deadline,
+        principal: Option<&str>,
+    ) -> Result<Self> {
+        let node = derived::get_by::<CommitGraph>(store, repo, id, deadline, principal)?;
         Ok(Self { id, node })
     }
 
     /// [`At::get`] for tests: no request to serve, nothing bounds the fill.
     #[cfg(test)]
     fn get_unbounded(store: &Backend, repo: RepoId, id: ChangesetId) -> Result<Self> {
-        let node = derived::get_unbounded::<CommitGraph>(store, repo, id)?;
+        let node = derived::get_unbounded::<CommitGraph>(store, repo, id, None)?;
         Ok(Self { id, node })
     }
 }
@@ -880,7 +888,7 @@ mod tests {
         let parents = vec![vec![], vec![0], vec![0], vec![1, 2]];
         let (_dir, store, repo, ids) = store_graph(&parents);
         let past = Deadline::new(Instant::now());
-        let got = is_ancestor(&store, repo, ids[0], ids[3], &past);
+        let got = is_ancestor(&store, repo, ids[0], ids[3], &past, None);
         assert!(
             matches!(got, Err(crate::error::Error::DeadlineExceeded(_))),
             "{got:?}"
@@ -924,7 +932,17 @@ mod tests {
         let (_dir, store, repo, ids) = store_graph(&parents);
         // First, derive: the bound counts the query's walk, not the
         // graph's derivation.
-        assert!(is_ancestor(&store, repo, ids[0], ids[*a.last().unwrap()], &later()).unwrap());
+        assert!(
+            is_ancestor(
+                &store,
+                repo,
+                ids[0],
+                ids[*a.last().unwrap()],
+                &later(),
+                None
+            )
+            .unwrap()
+        );
         // One visit answers on a single-parent history: the walk
         // descends the jump chain to the root in one move. The small
         // bound rides this test's own Steps, so no other test's walk
@@ -1013,7 +1031,7 @@ mod tests {
         // 4 a child of 1; 5 the merge of 4 and 2 (b).
         let parents = vec![vec![], vec![0], vec![0], vec![1, 2], vec![1], vec![4, 2]];
         let (_dir, store, repo, ids) = store_graph(&parents);
-        let bases = merge_bases(&store, repo, ids[3], ids[5], &later()).unwrap();
+        let bases = merge_bases(&store, repo, ids[3], ids[5], &later(), None).unwrap();
         assert!(bases.contains(&ids[1]), "{bases:?}");
         assert!(bases.contains(&ids[2]), "{bases:?}");
     }
@@ -1290,7 +1308,7 @@ mod tests {
             let ancestors = ancestors(&parents);
             let nodes: Vec<Node> = ids
                 .iter()
-                .map(|&id| derived::get_unbounded::<CommitGraph>(&store, repo, id).unwrap())
+                .map(|&id| derived::get_unbounded::<CommitGraph>(&store, repo, id, None).unwrap())
                 .collect();
             let index_of = |id: ChangesetId| ids.iter().position(|&i| i == id).unwrap();
             for (i, node) in nodes.iter().enumerate() {
@@ -1502,9 +1520,9 @@ mod tests {
         assert!(most <= bound, "{most} reads, more than {bound}");
 
         // The calls agree.
-        assert!(is_ancestor(&store, repo, ids[0], tip, &later()).unwrap());
-        assert!(!is_ancestor(&store, repo, side, tip, &later()).unwrap());
-        let met = merge_bases(&store, repo, side, tip, &later()).unwrap();
+        assert!(is_ancestor(&store, repo, ids[0], tip, &later(), None).unwrap());
+        assert!(!is_ancestor(&store, repo, side, tip, &later(), None).unwrap());
+        let met = merge_bases(&store, repo, side, tip, &later(), None).unwrap();
         assert_eq!(met, [ids[N / 2]]);
     }
 
@@ -1514,12 +1532,12 @@ mod tests {
         let parents: Vec<Vec<usize>> = vec![vec![], vec![0], vec![0], vec![1, 2], vec![3], vec![]];
         let (_dir, store, repo, ids) = store_graph(&parents);
         let commits = store.commits();
-        assert!(is_ancestor(&store, repo, ids[2], ids[4], &later()).unwrap());
+        assert!(is_ancestor(&store, repo, ids[2], ids[4], &later(), None).unwrap());
         // Changesets 0 to 4 in steps, and nothing for 5.
         assert_eq!(store.commits() - commits, steps(5));
         let commits = store.commits();
-        assert!(!is_ancestor(&store, repo, ids[5], ids[4], &later()).unwrap());
-        let met = merge_bases(&store, repo, ids[2], ids[4], &later()).unwrap();
+        assert!(!is_ancestor(&store, repo, ids[5], ids[4], &later(), None).unwrap());
+        let met = merge_bases(&store, repo, ids[2], ids[4], &later(), None).unwrap();
         assert_eq!(met, [ids[2]]);
         assert_eq!(store.commits(), commits, "the next queries derive nothing");
 
@@ -1543,7 +1561,7 @@ mod tests {
             })
             .unwrap();
         let commits = store.commits();
-        assert!(is_ancestor(&store, repo, ids[1], merge, &later()).unwrap());
+        assert!(is_ancestor(&store, repo, ids[1], merge, &later(), None).unwrap());
         assert_eq!(store.commits(), commits, "the write stored the node");
     }
 
@@ -1602,7 +1620,7 @@ mod tests {
         let bound = (N / 1000 + 1) * (move_reads + 4);
         assert!(cost.reads <= bound, "{cost:?}, more than {bound} reads");
         assert_eq!(
-            merge_bases(&store, repo, tip, side, &later()).unwrap(),
+            merge_bases(&store, repo, tip, side, &later(), None).unwrap(),
             [ids[history[100]]]
         );
     }
@@ -1653,9 +1671,9 @@ mod tests {
         let (_dir, store, repo, ids) = store_graph_seeded(&ladder(100));
         let (side, tip) = (ids[1], *ids.last().unwrap());
         let passed = Deadline::new(Instant::now());
-        let late = is_ancestor(&store, repo, side, tip, &passed);
+        let late = is_ancestor(&store, repo, side, tip, &passed, None);
         assert!(matches!(late, Err(Error::DeadlineExceeded(_))), "{late:?}");
-        let late = merge_bases(&store, repo, side, tip, &passed);
+        let late = merge_bases(&store, repo, side, tip, &passed, None);
         assert!(matches!(late, Err(Error::DeadlineExceeded(_))), "{late:?}");
 
         // A call that goes in the middle of a walk stops it at its next read.

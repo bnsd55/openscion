@@ -117,6 +117,7 @@ fn server_with_two_changesets() -> (String, String, String, tokio::runtime::Runt
             limits: Limits::default(),
             quotas: Quotas::off(),
             pending_lands: None,
+            walk_share: 0,
             land_stale_secs: 1 << 40,
             tls: None,
             metrics: Arc::default(),

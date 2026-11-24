@@ -192,6 +192,7 @@ async fn serve_with_audit(
             audit,
             limits: Limits::default(),
             quotas: scion_server::Quotas::off(),
+            walk_share: 0,
             pending_lands: None,
             land_stale_secs: 1 << 40,
             tls: None,

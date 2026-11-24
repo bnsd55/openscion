@@ -170,7 +170,7 @@ fn merge_base_and_is_ancestor_match_git() {
             seen_unrelated |= expected.is_empty();
             for (x, y) in [(x, y), (y, x)] {
                 let (cx, cy) = (changeset_of(&store, x), changeset_of(&store, y));
-                let bases = read::merge_base(&store, REPO, cx, cy, &later()).unwrap();
+                let bases = read::merge_base(&store, REPO, cx, cy, &later(), None).unwrap();
                 let mut sorted = bases.clone();
                 sorted.sort();
                 assert_eq!(sorted, expected, "merge-base {x} {y}");
@@ -181,7 +181,7 @@ fn merge_base_and_is_ancestor_match_git() {
                 // `git merge-base --is-ancestor x y` holds exactly when the
                 // only merge base is x.
                 assert_eq!(
-                    read::is_ancestor(&store, REPO, cx, cy, &later()).unwrap(),
+                    read::is_ancestor(&store, REPO, cx, cy, &later(), None).unwrap(),
                     expected == [cx],
                     "is-ancestor {x} {y}"
                 );
@@ -233,16 +233,16 @@ fn a_history_with_no_merges_has_no_walk_bound() {
     let tip = ids[N - 1];
 
     // The commit graph reads a few nodes, at any depth.
-    assert!(read::is_ancestor(&store, REPO, ids[0], tip, &later()).unwrap());
+    assert!(read::is_ancestor(&store, REPO, ids[0], tip, &later(), None).unwrap());
     assert_eq!(
-        read::merge_base(&store, REPO, ids[0], tip, &later()).unwrap(),
+        read::merge_base(&store, REPO, ids[0], tip, &later(), None).unwrap(),
         [ids[0]]
     );
     let below = ids[N - 2];
-    assert!(!read::is_ancestor(&store, REPO, tip, below, &later()).unwrap());
-    let bases = read::merge_base(&store, REPO, tip, below, &later()).unwrap();
+    assert!(!read::is_ancestor(&store, REPO, tip, below, &later(), None).unwrap());
+    let bases = read::merge_base(&store, REPO, tip, below, &later(), None).unwrap();
     assert_eq!(bases, [below]);
-    let bases = read::merge_base(&store, REPO, tip, tip, &later()).unwrap();
+    let bases = read::merge_base(&store, REPO, tip, tip, &later(), None).unwrap();
     assert_eq!(bases, [tip]);
 }
 
@@ -317,15 +317,15 @@ fn graph_queries_across_many_merges_answer() {
         .unwrap();
     let tip = *main.last().unwrap();
 
-    assert!(read::is_ancestor(&store, REPO, sides[0], tip, &later()).unwrap());
-    assert!(!read::is_ancestor(&store, REPO, late, tip, &later()).unwrap());
+    assert!(read::is_ancestor(&store, REPO, sides[0], tip, &later(), None).unwrap());
+    assert!(!read::is_ancestor(&store, REPO, late, tip, &later(), None).unwrap());
     for (a, b, base) in [
         (sides[0], tip, sides[0]),
         (late, tip, sides[0]),
         (tip, early, main[0]),
     ] {
         assert_eq!(
-            read::merge_base(&store, REPO, a, b, &later()).unwrap(),
+            read::merge_base(&store, REPO, a, b, &later(), None).unwrap(),
             [base]
         );
     }
@@ -409,9 +409,10 @@ fn the_bulk_seed_answers_like_the_ordinary_seed() {
         (ladder.2, tip),
         (tip, ladder.1[0]),
     ] {
-        let answer = |store: &Backend| read::is_ancestor(store, REPO, a, b, &later()).unwrap();
+        let answer =
+            |store: &Backend| read::is_ancestor(store, REPO, a, b, &later(), None).unwrap();
         assert_eq!(answer(&plain), answer(&bulk), "is_ancestor({a}, {b})");
-        let bases = |store: &Backend| read::merge_base(store, REPO, a, b, &later()).unwrap();
+        let bases = |store: &Backend| read::merge_base(store, REPO, a, b, &later(), None).unwrap();
         assert_eq!(bases(&plain), bases(&bulk), "merge_base({a}, {b})");
     }
 }
@@ -442,7 +443,7 @@ fn diff_all(
     prefix: Option<&RepoPath>,
     after: Option<&RepoPath>,
 ) -> Vec<DiffEntry> {
-    let page = read::diff(store, REPO, old, new, prefix, after, &later()).unwrap();
+    let page = read::diff(store, REPO, old, new, prefix, after, &later(), None).unwrap();
     assert_eq!(page.next_after, None, "a small diff fits one page");
     page.entries
 }
@@ -614,7 +615,7 @@ fn a_diff_pages_at_the_entry_bound_and_resumes_inside_the_directory() {
     let ids = chain(&store, vec![BTreeMap::new(), files]);
     let (old, new) = (ids[0], ids[1]);
 
-    let first = read::diff(&store, REPO, old, new, None, None, &later()).unwrap();
+    let first = read::diff(&store, REPO, old, new, None, None, &later(), None).unwrap();
     assert_eq!(
         first.entries.len(),
         MAX_DIFF_ENTRIES,
@@ -632,6 +633,7 @@ fn a_diff_pages_at_the_entry_bound_and_resumes_inside_the_directory() {
         None,
         first.next_after.as_ref(),
         &later(),
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -674,7 +676,7 @@ fn diff_skips_a_subtree_with_the_same_id_on_both_sides() {
     );
     // The tree the walk will read, and the subtree whose row goes away:
     // the damage the walk must answer, not a walk that never starts.
-    let root = read::root_tree(&store, REPO, ids[0], &later()).unwrap();
+    let root = read::root_tree(&store, REPO, ids[0], &later(), None).unwrap();
     let keep = store
         .read(|c| match tree::lookup(c, root, &path("keep")) {
             Ok(Some(scion_core::Entry::Dir(keep))) => Ok(keep),
@@ -751,6 +753,7 @@ fn diff_pages_stop_at_max_diff_entries_and_resume() {
                 prefix.as_ref(),
                 after.as_ref(),
                 &later(),
+                None,
             )
             .unwrap();
             pages += 1;
@@ -772,7 +775,7 @@ fn diff_pages_stop_at_max_diff_entries_and_resume() {
     // A diff of exactly one page says that it is complete.
     let exact: BTreeMap<_, _> = changes.into_iter().take(MAX_DIFF_ENTRIES).collect();
     let ids = chain(&store, vec![BTreeMap::new(), exact]);
-    let page = read::diff(&store, REPO, ids[0], ids[1], None, None, &later()).unwrap();
+    let page = read::diff(&store, REPO, ids[0], ids[1], None, None, &later(), None).unwrap();
     assert_eq!(page.entries.len(), MAX_DIFF_ENTRIES);
     assert_eq!(page.next_after, None);
 }
@@ -1072,7 +1075,17 @@ fn diff_pages(
     // A ceiling on the pages: a server that repeats its cursor must fail
     // the test, not hang it.
     for pages in 0..10_000 {
-        let page = read::diff(store, REPO, old, new, prefix, after.as_ref(), &later()).unwrap();
+        let page = read::diff(
+            store,
+            REPO,
+            old,
+            new,
+            prefix,
+            after.as_ref(),
+            &later(),
+            None,
+        )
+        .unwrap();
         entries.extend(page.entries);
         match page.next_after {
             Some(next) => after = Some(next),
@@ -1113,7 +1126,17 @@ fn renames_are_the_same_on_every_page() {
     // A page that starts anywhere, also inside another page, agrees.
     for at in [1, 999, 1000, 1001, 1777, 2999] {
         let after = &entries[at - 1].path;
-        let page = read::diff(&store, REPO, ids[0], ids[1], None, Some(after), &later()).unwrap();
+        let page = read::diff(
+            &store,
+            REPO,
+            ids[0],
+            ids[1],
+            None,
+            Some(after),
+            &later(),
+            None,
+        )
+        .unwrap();
         assert_eq!(page.entries[..], entries[at..at + page.entries.len()]);
     }
     // Below `new`, the deleted files are outside the diff: no renames, as
@@ -1140,7 +1163,7 @@ fn a_diff_of_20_000_entries_still_pairs_exact_renames() {
     change.insert(path("aa/new"), Some(content));
     let ids = chain(&store, vec![base, change]);
 
-    let page = read::diff(&store, REPO, ids[0], ids[1], None, None, &later()).unwrap();
+    let page = read::diff(&store, REPO, ids[0], ids[1], None, None, &later(), None).unwrap();
     assert!(page.renames_incomplete, "the inexact search is skipped");
     let added = page
         .entries
@@ -1156,8 +1179,17 @@ fn a_diff_of_20_000_entries_still_pairs_exact_renames() {
     let mut after = None;
     let mut all = Vec::new();
     loop {
-        let page =
-            read::diff(&store, REPO, ids[0], ids[1], None, after.as_ref(), &later()).unwrap();
+        let page = read::diff(
+            &store,
+            REPO,
+            ids[0],
+            ids[1],
+            None,
+            after.as_ref(),
+            &later(),
+            None,
+        )
+        .unwrap();
         assert!(page.renames_incomplete, "every page says the same");
         all.extend(page.entries);
         match page.next_after {
@@ -1196,11 +1228,33 @@ fn a_diff_over_the_rename_entry_cap_gets_the_flag() {
     change.extend((0..3_000).map(|n| (path(&format!("new/f{n:05}")), Some(unstored(n)))));
     change.insert(path("aa/new"), Some(content));
     let ids = chain(&store, vec![base, change]);
-    let page = read::diff_with(&store, REPO, ids[0], ids[1], None, None, 5_000, &later()).unwrap();
+    let page = read::diff_with(
+        &store,
+        REPO,
+        ids[0],
+        ids[1],
+        None,
+        None,
+        5_000,
+        &later(),
+        None,
+    )
+    .unwrap();
     assert!(page.renames_incomplete, "past the entry bound");
     assert!(page.entries.iter().all(|e| e.rename.is_none()));
     // Under the bound, the exact rename is paired, and the page is whole.
-    let page = read::diff_with(&store, REPO, ids[0], ids[1], None, None, 10_000, &later()).unwrap();
+    let page = read::diff_with(
+        &store,
+        REPO,
+        ids[0],
+        ids[1],
+        None,
+        None,
+        10_000,
+        &later(),
+        None,
+    )
+    .unwrap();
     assert!(!page.renames_incomplete);
     let added = page
         .entries
@@ -1225,7 +1279,7 @@ fn a_diff_over_the_pair_limit_gets_the_incomplete_flag() {
         .chain((0..2_000).map(|n| (path(&format!("new/f{n:04}")), Some(unstored(n + 50_000)))))
         .collect();
     let ids = chain(&store, vec![base, change]);
-    let page = read::diff(&store, REPO, ids[0], ids[1], None, None, &later()).unwrap();
+    let page = read::diff(&store, REPO, ids[0], ids[1], None, None, &later(), None).unwrap();
     assert!(page.renames_incomplete);
     assert!(page.entries.iter().all(|e| e.rename.is_none()));
 }
@@ -1255,7 +1309,7 @@ fn the_search_for_similar_files_stops_at_its_budget() {
         let mut change: BTreeMap<_, _> = base.keys().map(|p| (p.clone(), None)).collect();
         change.insert(path("zz/new"), Some(stored(&store, new.as_bytes())));
         let ids = chain(&store, vec![base, change]);
-        let page = read::diff(&store, REPO, ids[0], ids[1], None, None, &later()).unwrap();
+        let page = read::diff(&store, REPO, ids[0], ids[1], None, None, &later(), None).unwrap();
         let renamed = page
             .entries
             .iter()
@@ -1333,13 +1387,13 @@ fn queries_check_the_repo_and_the_changesets() {
     let ids = chain(&store, vec![BTreeMap::new()]);
     let missing = ChangesetId::from_bytes([7; 32]);
     let errors = [
-        read::merge_base(&store, REPO, ids[0], missing, &later()).err(),
-        read::merge_base(&store, REPO, missing, ids[0], &later()).err(),
-        read::merge_base(&store, "nope", ids[0], ids[0], &later()).err(),
-        read::is_ancestor(&store, REPO, missing, ids[0], &later()).err(),
-        read::is_ancestor(&store, REPO, ids[0], missing, &later()).err(),
-        read::diff(&store, REPO, ids[0], missing, None, None, &later()).err(),
-        read::diff(&store, REPO, missing, ids[0], None, None, &later()).err(),
+        read::merge_base(&store, REPO, ids[0], missing, &later(), None).err(),
+        read::merge_base(&store, REPO, missing, ids[0], &later(), None).err(),
+        read::merge_base(&store, "nope", ids[0], ids[0], &later(), None).err(),
+        read::is_ancestor(&store, REPO, missing, ids[0], &later(), None).err(),
+        read::is_ancestor(&store, REPO, ids[0], missing, &later(), None).err(),
+        read::diff(&store, REPO, ids[0], missing, None, None, &later(), None).err(),
+        read::diff(&store, REPO, missing, ids[0], None, None, &later(), None).err(),
     ];
     for error in errors {
         assert!(matches!(error, Some(Error::NotFound(_))), "{error:?}");

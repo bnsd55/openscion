@@ -425,6 +425,7 @@ impl Objects for ObjectsService {
                 Arc::clone(&self.metrics),
             )
         });
+        let principal = caller.0.clone();
         let (tree, repo) = self
             .worker
             .run(move |store| {
@@ -432,10 +433,18 @@ impl Objects for ObjectsService {
                     Some((digest, prefixes, live, metrics)) => {
                         let repo_id = store.read(|c| c.repo_id(&repo))?;
                         views::view_root(
-                            &store, repo_id, digest, cs, prefixes, live, metrics, &deadline,
+                            &store,
+                            repo_id,
+                            digest,
+                            cs,
+                            prefixes,
+                            live,
+                            metrics,
+                            &deadline,
+                            Some(&principal),
                         )?
                     }
-                    None => read::root_tree(&store, &repo, cs, &deadline)?,
+                    None => read::root_tree(&store, &repo, cs, &deadline, Some(&principal))?,
                 };
                 Ok((tree, repo))
             })
@@ -1238,6 +1247,7 @@ mod tests {
             &crate::test_support::deadline::Deadline::new(
                 std::time::Instant::now() + std::time::Duration::from_secs(300),
             ),
+            None,
         )
         .unwrap();
         let keys = crate::tickets::Keys::generate();
