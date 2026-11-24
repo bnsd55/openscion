@@ -49,8 +49,10 @@ jobs:
   # The tier gate. It reads the pull request's own file list from the
   # API: no checkout, no fetch, no third-party action. A PR that touches
   # only docs/**, *.md or changes/** cannot change behavior, so
-  # docs_only=true and only the rustdoc and docs-tests jobs run for it.
-  # The risk flags add jobs: macos adds test (macOS), workflows adds
+  # docs_only=true and only the rustdoc and docs-tests jobs run for it
+  # - except the docs the tests read as their source (operations.md,
+  # architecture.md): their suites live in the test job, so they turn
+  # docs_only off. The risk flags add jobs: macos adds test (macOS), workflows adds
   # the release smoke, deps adds supply-chain, mount adds the writable
   # tests and the NFS mount, power adds the power-loss job. The
   # Postgres jobs need no flag: every ready, non-docs-only pull request
@@ -88,6 +90,25 @@ jobs:
             case "$file" in
               docs/*|*.md|changes/*) ;;
               *) docs_only=false ;;
+            esac
+            # A doc the tests read as their source is not docs-only:
+            # the test job runs suites that parse it, and a docs-only
+            # PR skips the test job. docs/operations.md is the runbook
+            # the tests execute: test_support::docs::runbook_block_with
+            # reads its blocks and runs them (gc_metrics, first_boot,
+            # backup, disk_full, crash), and common's guide_argv starts
+            # the server with its serve line - PR #1410 reworded those
+            # blocks and 12 test files failed on the next train, after
+            # a docs-only CI had passed them. docs/architecture.md is
+            # query.rs's pin source: its section 9 shortcut table must
+            # match the code's SHORTCUT markers, so a reworded row
+            # fails the test job the same way. A doc only the docs
+            # tests read stays docs-only: the docs-tests job runs for
+            # a docs-only PR too, and it reads cli.md (the CLI help
+            # pins), the drills, links, the audit table and the
+            # changes fragments.
+            case "$file" in
+              docs/operations.md|docs/architecture.md) docs_only=false ;;
             esac
             # macOS or filesystem code: the tier store, the scn vfs
             # and mount path, the permission checks — the ACL and

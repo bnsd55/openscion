@@ -355,6 +355,7 @@ mod tests {
                 limits: scion_proto::runtime::listen::Limits::default(),
                 quotas: scion_server::Quotas::off(),
                 pending_lands: None,
+                walk_share: 0,
                 land_stale_secs: 1 << 40,
                 tls: None,
                 metrics: std::sync::Arc::default(),

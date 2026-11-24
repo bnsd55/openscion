@@ -138,6 +138,7 @@ async fn server_with_tickets(
             audit: scion_server::test_support::audit::Audit::off(),
             limits: Limits::default(),
             quotas,
+            walk_share: 0,
             pending_lands: None,
             land_stale_secs: 1 << 40,
             tls: None,
@@ -469,6 +470,7 @@ fn ticket_for(keys: &scion_server::Keys, principal: &str, store: &Backend) -> Ve
         &scion_server::test_support::deadline::Deadline::new(
             std::time::Instant::now() + std::time::Duration::from_secs(300),
         ),
+        None,
     )
     .unwrap();
     keys.sign(REPO, principal, *root.as_bytes()).unwrap()

@@ -61,6 +61,7 @@ async fn serve_behind_a_relay(store: &Backend) -> (String, Arc<AtomicBool>, temp
             limits: Limits::default(),
             quotas: Quotas::off(),
             pending_lands: None,
+            walk_share: 0,
             land_stale_secs: 1 << 40,
             tls: None,
             metrics: Arc::default(),

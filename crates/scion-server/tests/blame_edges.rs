@@ -135,6 +135,7 @@ async fn serve(
             audit: scion_server::test_support::audit::Audit::off(),
             limits: Limits::default(),
             quotas: scion_server::Quotas::off(),
+            walk_share: 0,
             pending_lands: None,
             land_stale_secs: 1 << 40,
             tls: None,
@@ -843,6 +844,7 @@ fn a_rename_search_goes_on_across_calls() {
             0,
             &scion_server::test_support::memory::Bytes::new(scion_server::REPLY_MEMORY_BUDGET),
             Some(std::time::Instant::now() + std::time::Duration::from_secs(600)),
+            None,
         )
         .unwrap();
         for (id, _, path) in &out.changesets {
@@ -891,6 +893,7 @@ fn a_rename_search_at_a_root_changeset_is_refused() {
         0,
         &scion_server::test_support::memory::Bytes::new(scion_server::REPLY_MEMORY_BUDGET),
         Some(std::time::Instant::now() + std::time::Duration::from_secs(600)),
+        None,
     )
     .unwrap_err();
     assert!(

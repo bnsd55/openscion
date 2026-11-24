@@ -65,7 +65,8 @@ directory's free bytes and inodes. The token, TLS and ticket rules are
 the `serve` command's own flags check, run before any check prints.
 
 ```sh
-./scion-server --data /srv/scion serve --token-file /srv/scion-token
+./scion-server --data /srv/scion --postgres-url-file /etc/scion/db-url serve \
+  --token-file /srv/scion-token
 ```
 
 A data directory the server does not find is refused, not created: every
@@ -90,7 +91,8 @@ service name is the liveness probe (`grpc_health_probe -addr
 
 ```sh
 git -C /srv/git/my-repo log --oneline -1
-./scion-server --data /srv/scion import /srv/git/my-repo
+./scion-server --data /srv/scion --postgres-url-file /etc/scion/db-url \
+  import /srv/git/my-repo
 ```
 
 The first import makes the repo (named `main` unless `--repo` says
@@ -122,7 +124,8 @@ A repository that exists is refused: a second root would be an orphan
 history.
 
 ```sh
-./scion-server --data /srv/scion create-repo --repo fresh
+./scion-server --data /srv/scion --postgres-url-file /etc/scion/db-url \
+  create-repo --repo fresh
 ```
 
 Another ref in a repository that already holds changesets, without a
@@ -132,7 +135,8 @@ exists is refused — moving a ref is a land's compare-and-set — and a
 changeset another repository holds is refused.
 
 ```sh
-./scion-server --data /srv/scion create-ref --repo fresh \
+./scion-server --data /srv/scion --postgres-url-file /etc/scion/db-url \
+  create-ref --repo fresh \
   --ref release/2026.11 --at 64-hex-changeset-id
 ```
 
@@ -147,15 +151,21 @@ Proof: crates/scion-server/tests/admin_create.rs::a_made_repo_answers_a_live_ser
 
 ```sh
 install -d -m 0700 /srv/scion
-SCION_TOKEN=<TOKEN> ./scion-server --data /srv/scion serve
+SCION_TOKEN=<TOKEN> ./scion-server --data /srv/scion \
+  --postgres-url-file /etc/scion/db-url serve
 ```
+
+The URL file is First boot's (`/etc/scion/db-url`); the server opens the
+metadata database before it listens, and a serve without one of the
+metadata flags answers "no Postgres URL".
 
 That is the whole deployment: clients talk to `127.0.0.1:7878`. A
 different address is `serve`'s own flag, which sits after the
 subcommand like every other flag of it:
 
 ```sh
-./scion-server --data /srv/scion serve --listen 127.0.0.1:7978
+./scion-server --data /srv/scion --postgres-url-file /etc/scion/db-url \
+  serve --listen 127.0.0.1:7978
 ```
 
 The health-probe and client lines above name the default port; point
@@ -176,7 +186,8 @@ install -d -m 0700 /srv/scion-keys
 ./scion-server --data /srv/scion ticket-key --out /srv/scion-keys/ticket.key \
   | tee /srv/scion-keys/ticket.pub   # prints the public key
 chmod 600 /srv/scion-keys/ticket.key
-SCION_TOKEN=<TOKEN> ./scion-server --data /srv/scion serve \
+SCION_TOKEN=<TOKEN> ./scion-server --data /srv/scion \
+  --postgres-url-file /etc/scion/db-url serve \
   --ticket-key /srv/scion-keys/ticket.key
 ```
 
@@ -255,7 +266,11 @@ order — the health service answers `NOT_SERVING` for the service names
 (readiness goes false), the listeners close to new connections, the
 in-flight calls finish, and the process exits 0. The whole server (the
 empty health name) stays `SERVING` while it answers, so a liveness probe
-does not kill a draining server. The in-flight calls have
+does not kill a draining server. Watch the drain with the readiness
+probe of First boot (`grpc_health_probe -addr 127.0.0.1:7878 -service
+scion.v1.Scion`): it answers `NOT_SERVING` once the drain starts, and
+the process exits 0 when the in-flight calls are done. The drain itself
+writes nothing to the log. The in-flight calls have
 `--drain-timeout-secs` (default 600) to finish; past it they are cut, the
 log names the count, and the process exits 1. A second signal while the
 drain runs ends it at once, with the same exit. Wait out the drain; send
@@ -304,6 +319,7 @@ supervisor. The minimal systemd unit — the token through the file
 [Service]
 ExecStart=/usr/local/bin/scion-server --data /srv/scion serve \
   --token-file /etc/scion/token \
+  --postgres-url-file /etc/scion/db-url \
   --ticket-key /srv/scion-keys/ticket.key \
   --migrate
 Restart=on-failure
@@ -588,16 +604,26 @@ covers `src/a/...`, not `srcx`); without it the line covers the whole repo:
 TOK=$(printf %s <SECRET> | ./scion-server hash-token)
 printf 'token\tops\t%s\nread\tops\tmain\nwrite\tops\tmain\n' "$TOK" > /srv/scion/access.txt
 chmod 600 /srv/scion/access.txt
-./scion-server --data /srv/scion serve --access /srv/scion/access.txt \
+./scion-server --data /srv/scion --postgres-url-file /etc/scion/db-url \
+  serve --access /srv/scion/access.txt \
   --ticket-key /srv/scion-keys/ticket.key
 ```
 
 With `--access`, the per-principal caps are on by default (64 requests, 512
 MiB upload bytes, 64 pending lands per principal); raise or lower them with
 `--max-principal-requests`, `--max-principal-upload-bytes`,
-`--max-principal-pending-lands`. With the single-principal mode
-(`SCION_TOKEN` or `--token-file`), every caller is the same
-principal, so the caps are off unless a flag sets one.
+`--max-principal-pending-lands`. The small server queues get a per-principal
+share too: under `--access`, one principal holds at most half, rounded up,
+of the blame slots (2 of 4), the diff slots (2 of 4), the graph-query slots
+(2 of 4), the derive walks (4 of 8), the read budget (128 of 256 MiB) and
+the upload permits (8 of 16). A call that would take a principal over its
+share is refused at once, before any wait, with `RESOURCE_EXHAUSTED` that
+names the share - it is the principal's own cap, not a busy server. A
+principal with no rule, or with folder read rules only, keeps its old
+answer (the read refusal from the folder rules). With the
+single-principal mode (`SCION_TOKEN` or `--token-file`), every caller is
+the same principal, so the caps and the shares are off unless a flag sets
+one.
 
 Rewriting the access file takes effect at the next start (or restart): the
 server reads it once. A ticket keeps working for its whole life after a
@@ -1307,7 +1333,8 @@ so the server's `/metrics` cannot show what it did. Instead, give the run
 a metrics file, and scrape it from the machine:
 
 ```sh
-scion-server --data /tmp/scion gc --metrics-file /var/lib/node_exporter/textfile/scion_gc.prom
+scion-server --data /tmp/scion --postgres-url-file /etc/scion/db-url \
+  gc --metrics-file /var/lib/node_exporter/textfile/scion_gc.prom
 ```
 
 A cron line runs the collector on its schedule and writes the file, which
@@ -1731,6 +1758,44 @@ Escalate when the close notice repeats for one peer and the client is
 not yours to fix: the client's owner stops the waste, not the server.
 
 Proof: crates/scion-server/tests/log_stream.rs::a_stalled_log_reply_is_counted_and_closes_the_connection (behaviour, no command: the section's commands read a live server's metrics; the test holds the stall, the count, and the close on a paused clock, where a shell client would deadlock)
+
+### Shared limits busy
+
+`BusyTimeoutsRising` fires when a shared limit's
+`scion_busy_timeouts_total` has climbed by more than six in ten minutes
+for 15 minutes: calls are waiting for that limit and ending at the 30 s
+busy bound with a retryable `resource_exhausted`, again and again. The
+`limit` label names the limit - `blame`, `diff`, `graph_query`,
+`read_budget` or `derive_walk` - and the alert carries it.
+
+Read the series and find who holds the limit:
+
+```sh
+curl -s 127.0.0.1:9100/metrics | grep '^scion_busy_timeouts_total'
+grep 'request_id=' server.log | grep 'busy: no' | tail -20
+```
+
+The audit log pairs each busy refusal with its call's principal and
+RPC; the per-principal request counts show which principal's calls
+repeat. Tell the causes apart:
+
+- One principal, again and again: it holds the limit's places with
+  long calls. With `--access` the per-principal caps bound what one
+  principal may hold (`--max-principal-requests`,
+  `--max-principal-upload-bytes`, `--max-principal-pending-lands`);
+  a principal at its cap is working as configured, and the fix is the
+  cap or the client's habits, not the server.
+- Many principals, one limit: the work is real. The limit's own size
+  is the knob (`MAX_BLAMES`, `MAX_DIFFS`, `MAX_GRAPH_QUERIES`,
+  `READ_BUDGET_BYTES` are build constants; raising one is a change and
+  a review, not a flag).
+- One burst, then quiet: a batch job's tail. The alert's `for: 15m`
+  exists so that this does not fire; if the batch is routine, the
+  alert firing means it now runs long enough to deny others - move it
+  off the serving hours.
+
+Escalate when one principal sits at its caps for days and the work is
+legitimate: that is a capacity conversation, not a server fault.
 
 ### Tier miss rate
 

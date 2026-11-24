@@ -165,14 +165,14 @@ fn the_ladder_walks_stay_under_the_statement_budget() {
     // Measured 207 here.
     let paint_cap = u64::try_from(merges).unwrap() / 8 + 200;
     let not_ancestor = statements(&mut || {
-        assert!(!read::is_ancestor(&store, REPO, late, tip, &later()).unwrap());
+        assert!(!read::is_ancestor(&store, REPO, late, tip, &later(), None).unwrap());
     });
     assert!(
         not_ancestor <= search_cap,
         "the not-ancestor walk took {not_ancestor} statements"
     );
     let ancestor = statements(&mut || {
-        assert!(read::is_ancestor(&store, REPO, sides[0], tip, &later()).unwrap());
+        assert!(read::is_ancestor(&store, REPO, sides[0], tip, &later(), None).unwrap());
     });
     assert!(
         ancestor <= search_cap,
@@ -185,7 +185,7 @@ fn the_ladder_walks_stay_under_the_statement_budget() {
     ] {
         let count = statements(&mut || {
             assert_eq!(
-                read::merge_base(&store, REPO, a, b, &later()).unwrap(),
+                read::merge_base(&store, REPO, a, b, &later(), None).unwrap(),
                 [base]
             );
         });

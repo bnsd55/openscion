@@ -107,7 +107,7 @@ fn a_plain_page_rides_one_statement() {
     let at = tip(&store);
 
     Backend::test_reset_statement_count();
-    let page = read::log_page(&store, REPO, at, None, 64, &later()).unwrap();
+    let page = read::log_page(&store, REPO, at, None, 64, &later(), None).unwrap();
     let statements = Backend::test_statement_count();
 
     assert_eq!(page.entries.len(), 64, "a full page");
@@ -137,9 +137,9 @@ fn a_plain_pages_walk_continues_at_its_cursor() {
     let (_dir, store) = setup();
     let at = tip(&store);
 
-    let first = read::log_page(&store, REPO, at, None, 64, &later()).unwrap();
+    let first = read::log_page(&store, REPO, at, None, 64, &later(), None).unwrap();
     let next = first.next.expect("the walk has more to read");
-    let rest = read::log_page(&store, REPO, next, None, 64, &later()).unwrap();
+    let rest = read::log_page(&store, REPO, next, None, 64, &later(), None).unwrap();
 
     assert_eq!(
         first.entries[63].1.parents()[0],
@@ -168,7 +168,16 @@ fn a_path_page_rides_batches_between_its_node_reads() {
     let at = tip(&store);
 
     Backend::test_reset_statement_count();
-    let page = read::log_page(&store, REPO, at, Some(&path("sub/b.txt")), 30, &later()).unwrap();
+    let page = read::log_page(
+        &store,
+        REPO,
+        at,
+        Some(&path("sub/b.txt")),
+        30,
+        &later(),
+        None,
+    )
+    .unwrap();
     let statements = Backend::test_statement_count();
 
     assert_eq!(page.entries.len(), 30, "a full page");
@@ -204,13 +213,13 @@ fn a_path_pages_walk_continues_at_its_cursor() {
     let at = tip(&store);
     let file = path("sub/b.txt");
 
-    let first = read::log_page(&store, REPO, at, Some(&file), 30, &later()).unwrap();
+    let first = read::log_page(&store, REPO, at, Some(&file), 30, &later(), None).unwrap();
     let next = first.next.expect("61 commits change the file, 30 read");
-    let rest = read::log_page(&store, REPO, next, Some(&file), 30, &later()).unwrap();
+    let rest = read::log_page(&store, REPO, next, Some(&file), 30, &later(), None).unwrap();
 
     assert_eq!(rest.entries.len(), 30, "a full second page");
     let rest_next = rest.next.expect("the root commit made the file");
-    let last = read::log_page(&store, REPO, rest_next, Some(&file), 30, &later()).unwrap();
+    let last = read::log_page(&store, REPO, rest_next, Some(&file), 30, &later(), None).unwrap();
     assert_eq!(last.entries.len(), 1, "the root commit made the file");
     assert_eq!(last.next, None, "the walk reached the file's first change");
     let mut all: Vec<_> = first.entries.iter().map(|(id, _)| *id).collect();
@@ -317,6 +326,7 @@ fn a_blame_rides_windows_between_its_node_reads() {
         0,
         &Bytes::new(1 << 30),
         None,
+        None,
     )
     .unwrap();
     assert!(
@@ -333,6 +343,7 @@ fn a_blame_rides_windows_between_its_node_reads() {
         &blame::Resume::default(),
         0,
         &Bytes::new(1 << 30),
+        None,
         None,
     )
     .unwrap();
@@ -393,6 +404,7 @@ fn eight_walks_leave_a_reader_for_a_plain_read() {
         0,
         &Bytes::new(1 << 30),
         None,
+        None,
     )
     .unwrap();
 
@@ -417,10 +429,11 @@ fn eight_walks_leave_a_reader_for_a_plain_read() {
                             0,
                             &Bytes::new(1 << 30),
                             None,
+                            None,
                         )
                         .map(|_| ())
                     } else {
-                        read::is_ancestor(&store, REPO, root, at, &deadline).map(|_| ())
+                        read::is_ancestor(&store, REPO, root, at, &deadline, None).map(|_| ())
                     };
                     walk.unwrap();
                 }
@@ -471,6 +484,7 @@ fn a_shrunk_step_hold_answers_the_same() {
         0,
         &Bytes::new(1 << 30),
         None,
+        None,
     )
     .unwrap();
 
@@ -484,6 +498,7 @@ fn a_shrunk_step_hold_answers_the_same() {
         &blame::Resume::default(),
         0,
         &Bytes::new(1 << 30),
+        None,
         None,
     )
     .unwrap();
@@ -527,6 +542,7 @@ fn a_cold_blame_answers_like_a_warm_one() {
         0,
         &Bytes::new(1 << 30),
         None,
+        None,
     )
     .unwrap();
     let warm = blame::blame(
@@ -537,6 +553,7 @@ fn a_cold_blame_answers_like_a_warm_one() {
         &blame::Resume::default(),
         0,
         &Bytes::new(1 << 30),
+        None,
         None,
     )
     .unwrap();
@@ -576,6 +593,7 @@ fn a_blame_call_holds_one_reader_and_returns_it() {
         0,
         &Bytes::new(1 << 30),
         None,
+        None,
     )
     .unwrap();
     assert!(warm.resume.is_some(), "121 versions, 100 explained");
@@ -589,6 +607,7 @@ fn a_blame_call_holds_one_reader_and_returns_it() {
         &blame::Resume::default(),
         0,
         &Bytes::new(1 << 30),
+        None,
         None,
     )
     .unwrap();
@@ -619,6 +638,7 @@ fn a_blame_call_holds_one_reader_and_returns_it() {
         0,
         &Bytes::new(1 << 30),
         Some(Instant::now()),
+        None,
     )
     .unwrap_err();
     assert!(
@@ -693,6 +713,7 @@ fn a_blame_crosses_its_window_and_names_every_version() {
         &blame::Resume::default(),
         0,
         &Bytes::new(1 << 30),
+        None,
         None,
     )
     .unwrap();

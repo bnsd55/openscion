@@ -178,6 +178,7 @@ async fn serve_tls(certs: &TestCerts, shutdown: tokio::sync::oneshot::Receiver<(
             limits: Limits::default(),
             quotas: scion_server::Quotas::off(),
             pending_lands: None,
+            walk_share: 0,
             land_stale_secs: 1 << 40,
             tls: Some(tls),
             metrics: Arc::default(),

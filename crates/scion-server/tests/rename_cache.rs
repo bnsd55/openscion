@@ -160,7 +160,8 @@ fn page(
     new: scion_core::ChangesetId,
     after: Option<&RepoPath>,
 ) -> scion_server::test_support::read::DiffPage {
-    scion_server::test_support::read::diff(store, REPO, old, new, None, after, &later()).unwrap()
+    scion_server::test_support::read::diff(store, REPO, old, new, None, after, &later(), None)
+        .unwrap()
 }
 
 /// The renames a page answers, as the path and the other half, sorted.
@@ -387,6 +388,7 @@ fn a_scope_and_the_whole_diff_hold_different_maps() {
         Some(&scope),
         None,
         &later(),
+        None,
     )
     .unwrap();
     assert!(scoped.entries.iter().all(|entry| entry.rename.is_none()));

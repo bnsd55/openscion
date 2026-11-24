@@ -72,7 +72,7 @@ pub(crate) const READERS: usize = 8;
 /// The cap on derive walks in flight, across all kinds and repos of one
 /// backend. Each walk holds a writer's turn, so walks beyond the cap only
 /// repeat work and starve writes ([#142]).
-pub(crate) const DERIVE_WALKS_CAP: usize = 8;
+pub const DERIVE_WALKS_CAP: usize = 8;
 
 /// What is stored under a blob ID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

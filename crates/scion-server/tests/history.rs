@@ -90,7 +90,7 @@ fn path_log(
     from: ChangesetId,
     p: &str,
 ) -> (Vec<ChangesetId>, Option<ChangesetId>) {
-    let page = read::log_page(store, REPO, from, Some(&path(p)), 1000, &later()).unwrap();
+    let page = read::log_page(store, REPO, from, Some(&path(p)), 1000, &later(), None).unwrap();
     (
         page.entries.into_iter().map(|(id, _)| id).collect(),
         page.next,
@@ -171,7 +171,7 @@ fn path_log_follows_files_directories_deletes_and_first_parents() {
         assert_eq!(path_log(&store, tip, p), (ids(expected), None), "{p}");
     }
     // A limit stops the walk after the last entry it returns.
-    let page = read::log_page(&store, REPO, tip, Some(&path("a.txt")), 2, &later()).unwrap();
+    let page = read::log_page(&store, REPO, tip, Some(&path("a.txt")), 2, &later(), None).unwrap();
     let delete = changeset_of(&store, &delete_a);
     let parent = read::get_changeset(&store, REPO, delete).unwrap().parents()[0];
     assert_eq!(page.entries.len(), 2);
@@ -242,6 +242,7 @@ fn blame(store: &Backend, cs: ChangesetId, p: &str) -> Blame {
         0,
         &Bytes::new(1 << 30),
         None,
+        None,
     )
     .unwrap()
 }
@@ -267,6 +268,7 @@ fn blame_bounded(
         &Resume::default(),
         0,
         &Bytes::new(cap),
+        None,
         None,
     )
 }
@@ -406,6 +408,7 @@ fn blame_refuses_what_it_cannot_diff() {
             0,
             &Bytes::new(1 << 30),
             None,
+            None,
         );
         assert!(
             matches!(result, Err(Error::InvalidArgument(_))),
@@ -420,6 +423,7 @@ fn blame_refuses_what_it_cannot_diff() {
         &Resume::default(),
         0,
         &Bytes::new(1 << 30),
+        None,
         None,
     );
     assert!(matches!(missing, Err(Error::NotFound(_))), "{missing:?}");
@@ -468,6 +472,7 @@ fn blame_calls(
             &resume,
             0,
             &Bytes::new(1 << 30),
+            None,
             None,
         )
         .unwrap();
@@ -1086,12 +1091,12 @@ fn a_long_line_costs_once_per_64_bytes() {
 fn a_rename_search_goes_on_where_a_call_stopped() {
     let (_data, store) = open_store();
     // Files of 16 MiB, in lines of 64 bytes: n chunks each, so a call's
-    // budget is four of them. `new` is a rename of `old/7` with one
-    // line changed. `old/1` is 60% like it, the rest are not like it.
-    // A call reads `new`, then deleted files while its budget lasts, and
-    // reads the best file so far again when it goes on. `lib/new`, first by
-    // path, has the name of `new`, so step 2 of the first call reads it. The
-    // calls that go on do not run step 2 again.
+    // budget is four of them. `new` is a rename of `old/7` with one line
+    // changed. `old/1` is 60% like it, the rest are not like it. A call
+    // reads `new`, then deleted files while its budget lasts, and reads
+    // the best file so far again when it goes on. `lib/new`, first by path,
+    // has the name of `new`, so the first call's step 2 reads it; the later
+    // calls do not.
     let n = MAX_BLAME_DIFF_LINES / 4;
     assert_eq!(4 * n, MAX_BLAME_DIFF_LINES);
     let line = |byte: char| format!("{}\n", byte.to_string().repeat(63));
@@ -1120,6 +1125,7 @@ fn a_rename_search_goes_on_where_a_call_stopped() {
             0,
             &Bytes::new(1 << 30),
             None,
+            None,
         )
         .unwrap();
         assert_eq!(result.ranges, [range(1, n, None, 1)]);
@@ -1141,6 +1147,7 @@ fn a_rename_search_goes_on_where_a_call_stopped() {
         0,
         &Bytes::new(1 << 30),
         None,
+        None,
     )
     .unwrap();
     assert_eq!(last.resume, None);
@@ -1160,19 +1167,10 @@ fn a_rename_search_goes_on_where_a_call_stopped() {
         (ids[2], "new", 1, None),
     ];
     // A real reply's resume, with its search replaced by a bad one.
-    let stopped = blame::blame(
-        &store,
-        REPO,
-        ids[1],
-        &path("new"),
-        &Resume::default(),
-        0,
-        &Bytes::new(1 << 30),
-        None,
-    )
-    .unwrap()
-    .resume
-    .expect("the search stopped");
+    let stopped = blame_bounded(&store, ids[1], "new", 1 << 30)
+        .unwrap()
+        .resume
+        .expect("the search stopped");
     for (cs, p, searched, best) in bad {
         let mut resume = stopped.clone();
         resume.next = Some((cs, path(p)));
@@ -1188,6 +1186,7 @@ fn a_rename_search_goes_on_where_a_call_stopped() {
             &resume,
             0,
             &Bytes::new(1 << 30),
+            None,
             None,
         );
         assert!(
@@ -1233,6 +1232,7 @@ fn a_rename_search_moves_on_every_call() {
             0,
             &Bytes::new(1 << 30),
             None,
+            None,
         )
         .unwrap();
         let search = RenameSearch {
@@ -1252,6 +1252,7 @@ fn a_rename_search_moves_on_every_call() {
         &resume,
         0,
         &Bytes::new(1 << 30),
+        None,
         None,
     )
     .unwrap();
@@ -1697,6 +1698,7 @@ fn a_version_in_the_calls_free_gap_counts_as_absent() {
             0,
             &pool,
             None,
+            None,
         )
         .expect("a version in the free gap counts as absent");
         assert!(b.resume.is_none(), "the walk finished in one call");
@@ -1742,6 +1744,7 @@ fn a_diff_in_the_calls_free_gap_counts_as_absent() {
             &Resume::default(),
             0,
             &pool,
+            None,
             None,
         )
         .expect("a diff in the free gap counts as absent");
@@ -1817,6 +1820,7 @@ fn two_calls_whose_shares_together_pass_the_budget_answer_right_or_are_refused()
                         &Resume::default(),
                         0,
                         pool,
+                        None,
                         None,
                     )
                 })
@@ -2139,6 +2143,7 @@ fn a_call_that_holds_budget_never_waits_for_more() {
         0,
         &pool,
         None,
+        None,
     )
     .unwrap_err();
     assert!(
@@ -2154,6 +2159,7 @@ fn a_call_that_holds_budget_never_waits_for_more() {
         &Resume::default(),
         0,
         &pool,
+        None,
         None,
     )
     .expect("the retry answers once the keeper frees its bytes");
@@ -2239,6 +2245,7 @@ fn the_diff_steps_memory_guard_reads_at_the_edge_and_refuses_below() {
             &Resume::default(),
             1,
             &Bytes::new(cap),
+            None,
             None,
         ) {
             Ok(b) => b.ranges.first().map(|r| r.changeset) == Some(Some(ids[0])),
@@ -2357,6 +2364,7 @@ fn the_rename_search_reads_the_candidate_at_the_budget_edge() {
             &Resume::default(),
             1,
             &Bytes::new(cap),
+            None,
             None,
         ) {
             Ok(b) => b.changesets.iter().any(|(_, _, p)| *p == path("old")),

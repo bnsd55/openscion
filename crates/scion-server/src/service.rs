@@ -49,7 +49,7 @@ use crate::error::Result;
 use crate::land::{self, LandOutcome, LandRejectReason, LandState, Lands};
 use crate::meta::{Meta as _, MetaTx as _};
 use crate::objects::ObjectsService;
-use crate::quotas::{Call, Quotas};
+use crate::quotas::{Call, Quotas, Share, ShareKind};
 use crate::store::{MAX_OBJECT_BYTES, READER_BYTES};
 use crate::tickets::Keys;
 use crate::{blame, names, read, views, write};
@@ -65,7 +65,7 @@ pub(crate) const MAX_UPLOADS: usize = 16;
 /// permits that writes and lands share for the rest of its deadline. Four
 /// of the 256 permits can never starve a land or a read; a blame queue
 /// beyond this waits here, in async code, for a slot to free.
-const MAX_BLAMES: usize = 4;
+pub(crate) const MAX_BLAMES: usize = 4;
 /// The bytes of memory that all `Blame` calls share: a call takes the bytes
 /// of every version it reads, and `memory::BYTES_PER_LINE` per line of the
 /// blamed file, so together they hold no more than this.
@@ -74,7 +74,7 @@ pub(crate) const BLAME_MEMORY_BUDGET: usize = 1 << 30;
 /// once. A call has no bound on its reads, only its deadline: a walk, or the
 /// first derivation of path history on a database from before it. So these
 /// queries never take more than this many of the `MAX_BLOCKING` permits.
-const MAX_GRAPH_QUERIES: usize = 4;
+pub(crate) const MAX_GRAPH_QUERIES: usize = 4;
 // A graph query holds one read connection at a time, through a walk with no
 // bound on its reads. So the walks never take every one.
 const _: () = assert!(MAX_GRAPH_QUERIES < crate::store::READERS);
@@ -87,20 +87,38 @@ pub(crate) const MAX_DIFFS: usize = 4;
 /// one caller's hold cannot park another past it (#1391). The wait holds
 /// only the call's request slot. A wait that runs past the bound counts
 /// the limit's `scion_busy_timeouts_total` series.
+/// A semaphore permit and the principal's share of the same limit:
+/// both live and drop together, wherever the permit goes — a job
+/// closure, or the reply task that holds the budget until the client
+/// has read the last part (#1391).
+/// A semaphore permit and the principal's share of the same limit:
+/// both live and drop together, wherever the call holds them.
+/// The fields are read by their drops, not by code.
+#[allow(dead_code)]
+struct ShareSlot {
+    permit: OwnedSemaphorePermit,
+    quota: Option<Share>,
+}
+
 async fn take_slot(
     sem: &Arc<Semaphore>,
     busy: Duration,
     metrics: &Metrics,
     limit: BusyLimit,
     what: &str,
-) -> Result<OwnedSemaphorePermit, Status> {
+    share: Option<Share>,
+) -> Result<ShareSlot, Status> {
     let Ok(acquired) = tokio::time::timeout(busy, Arc::clone(sem).acquire_owned()).await else {
         metrics.busy_timeout(limit);
         return Err(Status::resource_exhausted(format!(
             "busy: no {what} free; retry later"
         )));
     };
-    acquired.map_err(|_| Status::unavailable("server is shutting down"))
+    let permit = acquired.map_err(|_| Status::unavailable("server is shutting down"))?;
+    Ok(ShareSlot {
+        permit,
+        quota: share,
+    })
 }
 
 /// Takes `units` of `sem`, or refuses with a retryable busy status after
@@ -110,7 +128,8 @@ async fn take_units(
     units: u32,
     busy: Duration,
     metrics: &Metrics,
-) -> Result<OwnedSemaphorePermit, Status> {
+    share: Option<Share>,
+) -> Result<ShareSlot, Status> {
     let Ok(acquired) = tokio::time::timeout(busy, Arc::clone(sem).acquire_many_owned(units)).await
     else {
         metrics.busy_timeout(BusyLimit::ReadBudget);
@@ -118,7 +137,11 @@ async fn take_units(
             "busy: no read budget free; retry later".to_owned(),
         ));
     };
-    acquired.map_err(|_| Status::unavailable("server is shutting down"))
+    let permit = acquired.map_err(|_| Status::unavailable("server is shutting down"))?;
+    Ok(ShareSlot {
+        permit,
+        quota: share,
+    })
 }
 
 /// Longest a request may take before the server gives up on it.
@@ -424,6 +447,10 @@ pub struct ServeOptions {
     pub quotas: Quotas,
     /// The most pending lands one principal may hold.
     pub pending_lands: Option<usize>,
+    /// The share of the derive walks one principal may own, under
+    /// `--access`: half the walk cap, rounded up. 0 is no share —
+    /// single-principal mode keeps the whole cap (#1391).
+    pub walk_share: usize,
     /// A land pending longer than this is rejected by the sweep.
     pub land_stale_secs: i64,
     /// With TLS, every connection is a TLS connection, whose handshake
@@ -472,6 +499,7 @@ pub async fn serve(
         limits,
         quotas,
         pending_lands,
+        walk_share,
         land_stale_secs,
         tls,
         metrics,
@@ -488,6 +516,8 @@ pub async fn serve(
     // The walks' busy bound: the default a serve keeps; the tests set a
     // short one on their own service (#1391).
     store.derive_flights().set_busy(BUSY_TIMEOUT);
+    // The walks one principal may own, under `--access` (#1391).
+    store.derive_flights().set_walk_share(walk_share);
     let fence = store.fence_flag();
     let worker = Worker::new(store);
     let lands = Arc::new(Lands::new(pending_lands, Some(Arc::clone(&metrics))));
@@ -770,23 +800,28 @@ impl Drop for LandAnswer {
 }
 
 impl ScionService {
-    /// Sends `data` in parts of up to `CHUNK_BYTES`, as `ReadFile` sends a
-    /// file. Holds the whole bytes, so the share is their size.
     /// The budget share a whole-object reply needs: the object's own
     /// bytes, taken BEFORE the object is read and built, so the count
     /// of replies in flight bounds the memory they hold. An object over
-    /// the cap is refused here, before any of its bytes are read.
-    async fn whole_share_of(&self, size: usize) -> Result<OwnedSemaphorePermit, Status> {
+    /// the cap is refused here, before any of its bytes are read. The
+    /// principal's read-budget share is checked first, at once: a
+    /// principal holding its half is refused before it waits (#1391).
+    async fn whole_share_of(&self, caller: &Caller, size: usize) -> Result<ShareSlot, Status> {
         if size > MAX_OBJECT_BYTES {
             return Err(Status::resource_exhausted(format!(
                 "the object is {size} bytes, over the {MAX_OBJECT_BYTES}-byte reply cap"
             )));
         }
+        let share = self
+            .quotas
+            .take(caller, ShareKind::ReadBytes, size)
+            .map_err(Status::from)?;
         take_units(
             &self.reads,
             u32::try_from(size).expect("the cap asserts u32 fit"),
             self.busy,
             &self.metrics,
+            Some(share),
         )
         .await
     }
@@ -795,7 +830,7 @@ impl ScionService {
     fn stream_whole_holding<T: Send + 'static>(
         call: Call,
         data: Vec<u8>,
-        share: OwnedSemaphorePermit,
+        holding: ShareSlot,
         stalled: Option<scion_proto::runtime::listen::Stalled>,
         make: fn(Vec<u8>) -> T,
     ) -> Response<ReceiverStream<Part<T>>> {
@@ -805,7 +840,7 @@ impl ScionService {
                 data: data.into(),
                 offset: 0,
             },
-            share,
+            holding,
             call,
             tx,
             READ_STALL_TIMEOUT,
@@ -996,7 +1031,12 @@ impl ScionService {
     /// Runs a `MergeBase`, `IsAncestor` or `Log` with a path: at most
     /// `MAX_GRAPH_QUERIES` at once, each until its call ends or its
     /// `deadline` passes.
-    async fn graph_query<T, F>(&self, deadline: Deadline, query: F) -> Result<T, Status>
+    async fn graph_query<T, F>(
+        &self,
+        deadline: Deadline,
+        caller: &Caller,
+        query: F,
+    ) -> Result<T, Status>
     where
         T: Send + 'static,
         F: FnOnce(&Backend, &Deadline) -> Result<T> + Send + 'static,
@@ -1007,6 +1047,8 @@ impl ScionService {
             deadline,
             self.busy,
             &self.metrics,
+            &self.quotas,
+            Some(caller),
             query,
         )
         .await
@@ -1381,12 +1423,15 @@ impl Parts {
 /// deadline when this call ends or is dropped. The slot is taken before
 /// the worker permit, and held until the job ends, also when the client
 /// leaves first.
+#[allow(clippy::too_many_arguments)] // the wait's knobs, and the caller's share
 async fn run_graph_query<T, F>(
     worker: &Worker,
     permits: &Arc<Semaphore>,
     deadline: Deadline,
     busy: Duration,
     metrics: &Metrics,
+    quotas: &Quotas,
+    caller: Option<&Caller>,
     query: F,
 ) -> Result<T, Status>
 where
@@ -1397,6 +1442,13 @@ where
     // that cancels, drops this call but not a job that is running. The
     // guard ends the deadline when this call ends or is dropped.
     let _call = deadline.guard();
+    // The principal's share of the graph-query slots, checked before the
+    // wait: a principal holding its half is refused at once, not after
+    // the wait (#1391). The guard lives in the job, beside the slot.
+    let share = caller
+        .map(|caller| quotas.take(caller, ShareKind::GraphQuery, 1))
+        .transpose()
+        .map_err(Status::from)?;
     // The wait is bounded, as every shared-limit wait is (#1391).
     let slot = take_slot(
         permits,
@@ -1404,6 +1456,7 @@ where
         metrics,
         BusyLimit::GraphQuery,
         "graph query slot",
+        share,
     )
     .await?;
     worker
@@ -1421,6 +1474,10 @@ struct LogWalk {
     worker: Worker,
     repo: String,
     graph_queries: Arc<Semaphore>,
+    quotas: Quotas,
+    /// The caller of the `Log`: its graph-query share is checked at each
+    /// page fetch (#1391).
+    principal: String,
     /// The request slot, held until the reply ends.
     _call: Call,
     next: Option<ChangesetId>,
@@ -1434,9 +1491,6 @@ struct LogWalk {
 }
 
 /// Splits a fetched page into parts: groups of entries whose encoded bytes
-/// stay within [`CHUNK_BYTES`], one part each. The last part carries where
-/// the walk continues; the walk stops, with the rest of the page unsent, at
-/// the `limit` of the call.
 fn log_page_parts(entries: Vec<(ChangesetId, Changeset)>, walk: &mut LogWalk) -> Vec<LogResponse> {
     let mut parts = Vec::new();
     let mut group: Vec<LogEntry> = Vec::new();
@@ -1620,12 +1674,15 @@ struct LogPageRequest {
 /// Fetches one page of the log: a graph query when `path` is set, because
 /// it may derive the path history of a long history first, a plain read
 /// otherwise.
+#[allow(clippy::too_many_arguments)] // the wait's knobs, and the caller's share
 async fn log_page(
     worker: &Worker,
     graph_queries: &Arc<Semaphore>,
     deadline: Deadline,
     busy: Duration,
     metrics: &Metrics,
+    quotas: &Quotas,
+    caller: Option<&Caller>,
     req: LogPageRequest,
 ) -> Result<read::LogPage, Status> {
     let LogPageRequest {
@@ -1635,18 +1692,31 @@ async fn log_page(
         limit,
     } = req;
     if let Some(path) = path {
+        let principal = caller.map(|caller| caller.0.clone());
         run_graph_query(
             worker,
             graph_queries,
             deadline,
             busy,
             metrics,
-            move |store, deadline| read::log_page(store, &repo, from, Some(&path), limit, deadline),
+            quotas,
+            caller,
+            move |store, deadline| {
+                read::log_page(
+                    store,
+                    &repo,
+                    from,
+                    Some(&path),
+                    limit,
+                    deadline,
+                    principal.as_deref(),
+                )
+            },
         )
         .await
     } else {
         worker
-            .run(move |store| read::log_page(&store, &repo, from, None, limit, &deadline))
+            .run(move |store| read::log_page(&store, &repo, from, None, limit, &deadline, None))
             .await
     }
 }
@@ -1691,12 +1761,15 @@ async fn log_parts(mut walk: LogWalk, page: read::LogPage, tx: mpsc::Sender<Part
         }
         let from = walk.next.unwrap();
         let limit = walk.left.min(read::MAX_SCAN);
+        let caller = scion_proto::runtime::auth::Caller(std::mem::take(&mut walk.principal));
         page = match log_page(
             &walk.worker,
             &walk.graph_queries,
             walk.deadline.clone(),
             walk.busy,
             &walk.metrics,
+            &walk.quotas,
+            Some(&caller),
             LogPageRequest {
                 repo: walk.repo.clone(),
                 path: walk.path.clone(),
@@ -1709,6 +1782,7 @@ async fn log_parts(mut walk: LogWalk, page: read::LogPage, tx: mpsc::Sender<Part
             Ok(page) => page,
             Err(status) => return fail(status),
         };
+        walk.principal = caller.0;
         // The next page's continuation is the walk's: without this, the
         // page after the second one starts at the second page's start, and
         // the reply repeats it.
@@ -1718,7 +1792,7 @@ async fn log_parts(mut walk: LogWalk, page: read::LogPage, tx: mpsc::Sender<Part
 
 async fn send_parts<T: Send + 'static>(
     mut parts: Parts,
-    _share: OwnedSemaphorePermit,
+    _share: ShareSlot,
     _call: Call,
     tx: mpsc::Sender<Part<T>>,
     stall: Duration,
@@ -1898,7 +1972,7 @@ where
 async fn send_file(
     worker: Worker,
     blob: BlobId,
-    share: OwnedSemaphorePermit,
+    share: ShareSlot,
     call: Call,
     tx: mpsc::Sender<Part<ReadFileResponse>>,
     stall: Duration,
@@ -1936,6 +2010,13 @@ impl Scion for ScionService {
         // the memory floor counts one message per permit (`floor.rs`),
         // and the permit still covers exactly those reads.
         self.access.check_writer_anywhere(&caller)?;
+        // The principal's share of the upload permits, before the wait:
+        // a principal at its half is refused at once, and cannot hold a
+        // permit while it waits (#1391).
+        let _upload_share = self
+            .quotas
+            .take(&caller, ShareKind::UploadPermit, 1)
+            .map_err(Status::from)?;
         let _upload = Arc::clone(&self.uploads)
             .acquire_owned()
             .await
@@ -2238,7 +2319,7 @@ impl Scion for ScionService {
                 Ok(len)
             })
             .await?;
-        let share = self.whole_share_of(size).await?;
+        let share = self.whole_share_of(&caller, size).await?;
         let data = self
             .worker
             .run(move |store| Ok(read::get_changeset(&store, &req.repo, id)?.encode()))
@@ -2297,6 +2378,7 @@ impl Scion for ScionService {
             }
             None => None,
         };
+        let principal = caller.0.clone();
         let (blob, size) = self
             .worker
             .run(move |store| {
@@ -2304,19 +2386,35 @@ impl Scion for ScionService {
                     Some((digest, prefixes, live)) => {
                         let repo_id = store.read(|c| c.repo_id(&req.repo))?;
                         let root = views::view_root(
-                            &store, repo_id, digest, id, prefixes, live, &metrics, &deadline,
+                            &store,
+                            repo_id,
+                            digest,
+                            id,
+                            prefixes,
+                            live,
+                            &metrics,
+                            &deadline,
+                            Some(&principal),
                         )?;
                         read::file_blob_at(&store, root, &path)?
                     }
-                    None => read::file_blob(&store, &req.repo, id, &path, &deadline)?,
+                    None => {
+                        read::file_blob(&store, &req.repo, id, &path, &deadline, Some(&principal))?
+                    }
                 };
                 Ok((blob, store.blobs().size(blob)?))
             })
             .await?;
         // Taken before any content is read, so a call that waits holds none.
-        // The wait is bounded, as every shared-limit wait is (#1391).
+        // The wait is bounded, as every shared-limit wait is (#1391). The
+        // principal's read-budget share is checked first: at its half, the
+        // call is refused at once (#1391).
         let share = u32::try_from(read_share(size)).expect("asserted to fit in u32");
-        let share = take_units(&self.reads, share, self.busy, &self.metrics).await?;
+        let quota = self
+            .quotas
+            .take(&caller, ShareKind::ReadBytes, share as usize)
+            .map_err(Status::from)?;
+        let share = take_units(&self.reads, share, self.busy, &self.metrics, Some(quota)).await?;
         // The request slot lives until the reply ends, not until this
         // handler returns: the reply's work goes on in the producer.
         let (tx, rx) = mpsc::channel(2);
@@ -2376,6 +2474,7 @@ impl Scion for ScionService {
         // taken from that length, before the build reads the row it
         // already named; a changeset-pinned tree cannot change between
         // the two reads.
+        let principal = caller.0.clone();
         let (dir_id, size) = self
             .worker
             .run(move |store| {
@@ -2383,10 +2482,18 @@ impl Scion for ScionService {
                     Some((digest, prefixes, live)) => {
                         let repo_id = store.read(|c| c.repo_id(&req.repo))?;
                         views::view_root(
-                            &store, repo_id, digest, id, prefixes, live, &metrics, &deadline,
+                            &store,
+                            repo_id,
+                            digest,
+                            id,
+                            prefixes,
+                            live,
+                            &metrics,
+                            &deadline,
+                            Some(&principal),
                         )?
                     }
-                    None => read::root_tree(&store, &req.repo, id, &deadline)?,
+                    None => read::root_tree(&store, &req.repo, id, &deadline, Some(&principal))?,
                 };
                 let dir_id = store.read(|c| match path.as_ref() {
                     None => Ok(root),
@@ -2402,7 +2509,7 @@ impl Scion for ScionService {
                 Ok((dir_id, size))
             })
             .await?;
-        let share = self.whole_share_of(size).await?;
+        let share = self.whole_share_of(&caller, size).await?;
         let data = self
             .worker
             .run(move |store| Ok(store.read(|c| c.get_tree(dir_id))?.encode()))
@@ -2435,6 +2542,8 @@ impl Scion for ScionService {
             deadline.clone(),
             self.busy,
             &self.metrics,
+            &self.quotas,
+            Some(&caller),
             LogPageRequest {
                 repo: req.repo.clone(),
                 path: path.clone(),
@@ -2451,6 +2560,8 @@ impl Scion for ScionService {
             worker: self.worker.clone(),
             repo: req.repo.clone(),
             graph_queries: Arc::clone(&self.graph_queries),
+            quotas: self.quotas.clone(),
+            principal: caller.0.clone(),
             _call: call,
             next: page.next,
             left: limit,
@@ -2476,6 +2587,13 @@ impl Scion for ScionService {
         check_whole_reader(&self.access, &caller, &req.repo)?;
         let id = parse_id(&req.changeset_id, "changeset_id")?;
         let path = parse_path(req.path.clone())?;
+        // The principal's share of the blame slots, before the wait: a
+        // principal at its half share is refused at once, not after the
+        // bound (#1391). The share rides the job beside the slot.
+        let share = self
+            .quotas
+            .take(&caller, ShareKind::Blame, 1)
+            .map_err(Status::from)?;
         // Taken before the worker permit, and held until the job ends, also
         // when the client leaves first. The wait is bounded: a caller that
         // holds every slot cannot park this one past the busy bound (#1391).
@@ -2485,6 +2603,7 @@ impl Scion for ScionService {
             &self.metrics,
             BusyLimit::Blame,
             "blame slot",
+            Some(share),
         )
         .await?;
         let memory = self.blame_memory.clone();
@@ -2492,6 +2611,7 @@ impl Scion for ScionService {
         let repo = req.repo.clone();
         let cursor_bytes = req.cursor.clone();
         let walk_path = path.clone();
+        let principal = caller.0.clone();
         let blame = self
             .worker
             .run(move |store| {
@@ -2517,7 +2637,17 @@ impl Scion for ScionService {
                 };
                 let held = cursor.as_ref().map_or(0, crate::memory::Held::len);
                 let _cursor = cursor;
-                blame::blame(&store, &repo, id, &walk_path, &resume, held, &memory, until)
+                blame::blame(
+                    &store,
+                    &repo,
+                    id,
+                    &walk_path,
+                    &resume,
+                    held,
+                    &memory,
+                    until,
+                    Some(&principal),
+                )
             })
             .await?;
         let ranges = blame
@@ -2571,9 +2701,10 @@ impl Scion for ScionService {
         check_whole_reader(&self.access, &caller, &req.repo)?;
         let a = parse_id(&req.a_changeset_id, "a_changeset_id")?;
         let b = parse_id(&req.b_changeset_id, "b_changeset_id")?;
+        let principal = caller.0.clone();
         let bases = self
-            .graph_query(deadline, move |store, deadline| {
-                read::merge_base(store, &req.repo, a, b, deadline)
+            .graph_query(deadline, &caller, move |store, deadline| {
+                read::merge_base(store, &req.repo, a, b, deadline, Some(&principal))
             })
             .await?;
         Ok(count_reply(Response::new(MergeBaseResponse {
@@ -2592,9 +2723,17 @@ impl Scion for ScionService {
         check_whole_reader(&self.access, &caller, &req.repo)?;
         let ancestor = parse_id(&req.ancestor_id, "ancestor_id")?;
         let descendant = parse_id(&req.descendant_id, "descendant_id")?;
+        let principal = caller.0.clone();
         let is_ancestor = self
-            .graph_query(deadline, move |store, deadline| {
-                read::is_ancestor(store, &req.repo, ancestor, descendant, deadline)
+            .graph_query(deadline, &caller, move |store, deadline| {
+                read::is_ancestor(
+                    store,
+                    &req.repo,
+                    ancestor,
+                    descendant,
+                    deadline,
+                    Some(&principal),
+                )
             })
             .await?;
         Ok(count_reply(Response::new(IsAncestorResponse {
@@ -2613,6 +2752,11 @@ impl Scion for ScionService {
         let new = parse_id(&req.new_changeset_id, "new_changeset_id")?;
         let path = parse_optional_path(req.path)?;
         let after = parse_optional_path(req.after)?;
+        // The principal's share of the diff slots, before the wait (#1391).
+        let share = self
+            .quotas
+            .take(&caller, ShareKind::Diff, 1)
+            .map_err(Status::from)?;
         // Held until the job ends, as for `Blame`. The wait is bounded as
         // every shared-limit wait is (#1391).
         let slot = take_slot(
@@ -2621,8 +2765,10 @@ impl Scion for ScionService {
             &self.metrics,
             BusyLimit::Diff,
             "diff slot",
+            Some(share),
         )
         .await?;
+        let principal = caller.0.clone();
         let page = self
             .worker
             .run(move |store| {
@@ -2635,6 +2781,7 @@ impl Scion for ScionService {
                     path.as_ref(),
                     after.as_ref(),
                     &deadline,
+                    Some(&principal),
                 )
             })
             .await?;
@@ -2702,6 +2849,7 @@ pub(crate) use tests::{test_init_log, test_log_text};
 mod tests {
     use crate::backend::Backend;
     use crate::meta::testing;
+    use crate::quotas::Shares;
     use scion_proto::v1::objects_server::Objects as _;
     use std::sync::atomic::Ordering;
     use std::time::Instant;
@@ -3071,7 +3219,10 @@ mod tests {
         let task = tokio::spawn(send_file(
             Worker::new(store),
             blob,
-            share,
+            ShareSlot {
+                permit: share,
+                quota: None,
+            },
             Call::default(),
             tx,
             stall,
@@ -3101,7 +3252,10 @@ mod tests {
                 data: data.into(),
                 offset: 0,
             },
-            share,
+            ShareSlot {
+                permit: share,
+                quota: None,
+            },
             Call::default(),
             tx,
             stall,
@@ -3166,6 +3320,40 @@ mod tests {
         let caller = Caller(scion_proto::runtime::auth::DEFAULT_PRINCIPAL.into());
         request.extensions_mut().insert(caller);
         request
+    }
+
+    /// `message` as a request of the named principal.
+    fn as_caller<T>(principal: &str, message: T) -> Request<T> {
+        let mut request = Request::new(message);
+        request
+            .extensions_mut()
+            .insert(Caller(principal.to_owned()));
+        request
+    }
+
+    /// A service whose quotas carry the `--access` shares (#1391): one
+    /// principal holds at most half of each small limit. `p` and `b` may
+    /// read and write the fixture's repo `r`.
+    fn shared_service(store: &Backend, metrics: &Arc<Metrics>) -> ScionService {
+        let mut service = counting_service(store, metrics);
+        service.quotas = Quotas::off().with_shares(Shares::for_access());
+        let hex = |token: &str| {
+            blake3::Hash::from(scion_proto::runtime::auth::token_digest(token))
+                .to_hex()
+                .to_string()
+        };
+        let text = format!(
+            "token\tp\t{}\n\
+             token\tb\t{}\n\
+             read\tp\tr\n\
+             write\tp\tr\n\
+             read\tb\tr\n\
+             write\tb\tr\n",
+            hex("p"),
+            hex("b"),
+        );
+        service.access = Arc::new(Access::parse(&text).unwrap());
+        service
     }
 
     /// A request the objects service's own auth answers: the token the
@@ -4735,6 +4923,257 @@ mod tests {
         drop(held);
     }
 
+    /// Asserts the call is refused at once with a `resource_exhausted`
+    /// whose message carries `message`: the principal's own cap, not a
+    /// wait for a server slot (#1391).
+    async fn refused_at_its_share<T>(
+        call: impl std::future::Future<Output = Result<Response<T>, Status>>,
+        message: &str,
+    ) {
+        let started = Instant::now();
+        let reply = tokio::time::timeout(Duration::from_secs(5), call).await;
+        let Err(status) = reply.unwrap_or_else(|elapsed| {
+            panic!("the share refusal did not answer in time: {elapsed}")
+        }) else {
+            panic!("a principal at its share was served, not refused");
+        };
+        assert_eq!(status.code(), Code::ResourceExhausted, "{status}");
+        assert!(status.message().contains(message), "{status}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the share refusal waited: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A principal at its whole blame share is refused at once, and
+    /// another principal's blame still runs (#1391). Every server slot is
+    /// held too, so a mutant that moves the check behind the wait answers
+    /// the busy message and fails this test's message assert.
+    #[tokio::test]
+    async fn a_principal_at_its_blame_share_is_refused_and_others_go_on() {
+        let (_dir, store, cs) = a_store_with_a_file();
+        let metrics = Arc::new(Metrics::default());
+        let mut service = shared_service(&store, &metrics);
+        service.busy = Duration::from_millis(100);
+        let p = Caller("p".to_owned());
+        // `p` holds its whole share of the blame slots: two of four.
+        let held_share: Vec<_> = (0..2)
+            .map(|_| service.quotas.take(&p, ShareKind::Blame, 1).unwrap())
+            .collect();
+        let held: Vec<_> = (0..MAX_BLAMES)
+            .map(|_| Arc::clone(&service.blames).try_acquire_owned().unwrap())
+            .collect();
+        refused_at_its_share(
+            service.blame(as_caller(
+                "p",
+                BlameRequest {
+                    repo: "r".into(),
+                    changeset_id: cs.as_bytes().to_vec(),
+                    path: b"a".to_vec(),
+                    cursor: Vec::new(),
+                },
+            )),
+            "its 2 blame share",
+        )
+        .await;
+        drop(held);
+        // `b` holds none of its own share: `b`'s blame runs to a reply.
+        service
+            .blame(as_caller(
+                "b",
+                BlameRequest {
+                    repo: "r".into(),
+                    changeset_id: cs.as_bytes().to_vec(),
+                    path: b"a".to_vec(),
+                    cursor: Vec::new(),
+                },
+            ))
+            .await
+            .unwrap();
+        drop(held_share);
+    }
+
+    /// A principal at its whole diff share is refused at once, and
+    /// another principal's diff still runs (#1391).
+    #[tokio::test]
+    async fn a_principal_at_its_diff_share_is_refused_and_others_go_on() {
+        let (_dir, store, cs) = a_store_with_a_file();
+        let metrics = Arc::new(Metrics::default());
+        let mut service = shared_service(&store, &metrics);
+        service.busy = Duration::from_millis(100);
+        let p = Caller("p".to_owned());
+        let held_share: Vec<_> = (0..2)
+            .map(|_| service.quotas.take(&p, ShareKind::Diff, 1).unwrap())
+            .collect();
+        let held: Vec<_> = (0..MAX_DIFFS)
+            .map(|_| Arc::clone(&service.diffs).try_acquire_owned().unwrap())
+            .collect();
+        refused_at_its_share(
+            service.diff(as_caller(
+                "p",
+                DiffRequest {
+                    repo: "r".into(),
+                    old_changeset_id: cs.as_bytes().to_vec(),
+                    new_changeset_id: cs.as_bytes().to_vec(),
+                    path: Vec::new(),
+                    after: Vec::new(),
+                },
+            )),
+            "its 2 diff share",
+        )
+        .await;
+        drop(held);
+        service
+            .diff(as_caller(
+                "b",
+                DiffRequest {
+                    repo: "r".into(),
+                    old_changeset_id: cs.as_bytes().to_vec(),
+                    new_changeset_id: cs.as_bytes().to_vec(),
+                    path: Vec::new(),
+                    after: Vec::new(),
+                },
+            ))
+            .await
+            .unwrap();
+        drop(held_share);
+    }
+
+    /// A principal at its whole graph-query share is refused at once,
+    /// and another principal's `MergeBase` still runs (#1391).
+    #[tokio::test]
+    async fn a_principal_at_its_graph_query_share_is_refused_and_others_go_on() {
+        let (_dir, store, cs) = a_store_with_a_file();
+        let metrics = Arc::new(Metrics::default());
+        let mut service = shared_service(&store, &metrics);
+        service.busy = Duration::from_millis(100);
+        let p = Caller("p".to_owned());
+        let held_share: Vec<_> = (0..2)
+            .map(|_| service.quotas.take(&p, ShareKind::GraphQuery, 1).unwrap())
+            .collect();
+        let held: Vec<_> = (0..MAX_GRAPH_QUERIES)
+            .map(|_| {
+                Arc::clone(&service.graph_queries)
+                    .try_acquire_owned()
+                    .unwrap()
+            })
+            .collect();
+        refused_at_its_share(
+            service.merge_base(as_caller(
+                "p",
+                MergeBaseRequest {
+                    repo: "r".into(),
+                    a_changeset_id: cs.as_bytes().to_vec(),
+                    b_changeset_id: cs.as_bytes().to_vec(),
+                },
+            )),
+            "its 2 graph-query share",
+        )
+        .await;
+        drop(held);
+        service
+            .merge_base(as_caller(
+                "b",
+                MergeBaseRequest {
+                    repo: "r".into(),
+                    a_changeset_id: cs.as_bytes().to_vec(),
+                    b_changeset_id: cs.as_bytes().to_vec(),
+                },
+            ))
+            .await
+            .unwrap();
+        drop(held_share);
+    }
+
+    /// A principal that holds its whole read-budget share is refused at
+    /// once, and another principal is still served (#1391). Both reply
+    /// paths are pinned: `GetChangeset`'s whole share (`whole_share_of`)
+    /// and `ReadFile`'s inline take of the file's bytes.
+    #[tokio::test]
+    async fn a_principal_at_its_read_share_is_refused_and_others_go_on() {
+        let (_dir, store, cs) = a_store_with_a_file();
+        let metrics = Arc::new(Metrics::default());
+        let service = shared_service(&store, &metrics);
+        let p = Caller("p".to_owned());
+        let half = usize::div_ceil(READ_BUDGET_BYTES, 2);
+        let held_share = service.quotas.take(&p, ShareKind::ReadBytes, half).unwrap();
+        refused_at_its_share(
+            service.get_changeset(as_caller(
+                "p",
+                GetChangesetRequest {
+                    repo: "r".into(),
+                    changeset_id: cs.as_bytes().to_vec(),
+                },
+            )),
+            &format!("its {half} read-budget share"),
+        )
+        .await;
+        refused_at_its_share(
+            service.read_file(as_caller(
+                "p",
+                ReadFileRequest {
+                    repo: "r".into(),
+                    changeset_id: cs.as_bytes().to_vec(),
+                    path: b"a".to_vec(),
+                },
+            )),
+            &format!("its {half} read-budget share"),
+        )
+        .await;
+        service
+            .get_changeset(as_caller(
+                "b",
+                GetChangesetRequest {
+                    repo: "r".into(),
+                    changeset_id: cs.as_bytes().to_vec(),
+                },
+            ))
+            .await
+            .unwrap();
+        service
+            .read_file(as_caller(
+                "b",
+                ReadFileRequest {
+                    repo: "r".into(),
+                    changeset_id: cs.as_bytes().to_vec(),
+                    path: b"a".to_vec(),
+                },
+            ))
+            .await
+            .unwrap();
+        drop(held_share);
+    }
+
+    /// A server of one token keeps the whole limits: no share refuses a
+    /// principal, and the busy bound still answers a taken limit (#1391).
+    #[tokio::test]
+    async fn a_single_principal_server_answers_busy_not_share() {
+        let (_dir, store, cs) = a_store_with_a_file();
+        let metrics = Arc::new(Metrics::default());
+        let mut service = counting_service(&store, &metrics);
+        service.busy = Duration::from_millis(100);
+        // Every blame slot is held: the call waits to the busy bound, as
+        // a server without `--access` always has. A share refusal here
+        // would be the bug: quotas are off in single-principal mode.
+        let held: Vec<_> = (0..MAX_BLAMES)
+            .map(|_| Arc::clone(&service.blames).try_acquire_owned().unwrap())
+            .collect();
+        busy_at_the_bound(
+            &metrics,
+            BusyLimit::Blame,
+            "busy: no blame slot free; retry later",
+            service.blame(as_default(BlameRequest {
+                repo: "r".into(),
+                changeset_id: cs.as_bytes().to_vec(),
+                path: b"a".to_vec(),
+                cursor: Vec::new(),
+            })),
+        )
+        .await;
+        drop(held);
+    }
+
     /// A land whose call already ran past its deadline moves the land
     /// counter for its outcome: the caller read `deadline_exceeded`, and
     /// the operator sees the failed land.
@@ -4946,6 +5385,8 @@ mod tests {
             worker: Worker::new(store),
             repo: "r".to_owned(),
             graph_queries: Arc::new(Semaphore::new(1)),
+            quotas: Quotas::off(),
+            principal: "t".to_owned(),
             _call: Call::default(),
             next: Some(ChangesetId::try_from(&[9_u8; 32][..]).unwrap()),
             left: 10,

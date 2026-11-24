@@ -753,3 +753,78 @@ tests:
       - eval_time: 21m
         alertname: AuditReopenFailing
         exp_alerts: []
+
+  # A21 BusyTimeoutsRising: the blame limit's busy timeouts climb at more
+  # than one a minute for over 10 minutes - a sustained rise fires after
+  # the 15m `for`.
+  - interval: 1m
+    input_series:
+      - series: 'scion_busy_timeouts_total{limit="blame"}'
+        values: "0+10x30"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: BusyTimeoutsRising
+        exp_alerts: []
+      - eval_time: 28m
+        alertname: BusyTimeoutsRising
+        exp_alerts:
+          - exp_labels:
+              severity: medium
+              limit: blame
+            exp_annotations:
+              response: >-
+                A shared limit's 30 s busy bound kept refusing waits; the
+                limit label names which one. Its holders run long or are
+                many. Find who holds it - the audit log's recent calls
+                and the per-principal request counts
+                (docs/operations.md section 6, the busy-timeouts
+                runbook); the per-principal caps
+                (--max-principal-requests and friends) are the knob.
+
+  # A21 BusyTimeoutsRising: one burst (12 timeouts in one minute, then
+  # quiet) must not fire - the increase over the window falls under the
+  # threshold, and the `for` is never met.
+  - interval: 1m
+    input_series:
+      - series: 'scion_busy_timeouts_total{limit="blame"}'
+        values: "0 0 0 0 0 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12 12"
+    alert_rule_test:
+      - eval_time: 28m
+        alertname: BusyTimeoutsRising
+        exp_alerts: []
+
+  # A21 BusyTimeoutsRising: a quiet series - a busy timeout long past,
+  # then nothing - never fires.
+  - interval: 1m
+    input_series:
+      - series: 'scion_busy_timeouts_total{limit="diff"}'
+        values: "0 0 0 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3"
+    alert_rule_test:
+      - eval_time: 28m
+        alertname: BusyTimeoutsRising
+        exp_alerts: []
+
+  # A21 BusyTimeoutsRising: one limit rising while another is quiet - the
+  # alert carries the rising limit's label, not the quiet one's.
+  - interval: 1m
+    input_series:
+      - series: 'scion_busy_timeouts_total{limit="graph_query"}'
+        values: "0+8x30"
+      - series: 'scion_busy_timeouts_total{limit="read_budget"}'
+        values: "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 28m
+        alertname: BusyTimeoutsRising
+        exp_alerts:
+          - exp_labels:
+              severity: medium
+              limit: graph_query
+            exp_annotations:
+              response: >-
+                A shared limit's 30 s busy bound kept refusing waits; the
+                limit label names which one. Its holders run long or are
+                many. Find who holds it - the audit log's recent calls
+                and the per-principal request counts
+                (docs/operations.md section 6, the busy-timeouts
+                runbook); the per-principal caps
+                (--max-principal-requests and friends) are the knob.

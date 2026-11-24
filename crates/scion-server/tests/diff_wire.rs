@@ -75,6 +75,7 @@ async fn served() -> (tempfile::TempDir, Scion, ChangesetId, BlobId) {
             data: dir.path().to_path_buf(),
             audit: scion_server::test_support::audit::Audit::off(),
             quotas: scion_server::Quotas::off(),
+            walk_share: 0,
             pending_lands: None,
             land_stale_secs: 1 << 40,
             tls: None,

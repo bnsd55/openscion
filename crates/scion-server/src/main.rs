@@ -18,8 +18,9 @@ use scion_proto::runtime::tls::ServerTls;
 use scion_server::{ImportOptions, admin, import_git};
 
 use scion_server::Metrics;
-use scion_server::Quotas;
 use scion_server::{Backend, Error, ServeOptions, archive, fsck, gc};
+use scion_server::{Quotas, Shares};
+
 use tracing_subscriber::EnvFilter;
 
 /// The scion server: import, serve and derive.
@@ -1138,6 +1139,7 @@ async fn main() -> anyhow::Result<()> {
                     data: cli.data.clone(),
                     quotas: flags.caps.quotas,
                     pending_lands: flags.caps.pending_lands,
+                    walk_share: flags.caps.walk_share,
                     land_stale_secs: flags.land_stale_secs,
                     server_tls: flags.server_tls,
                     max_connections: flags.max_connections,
@@ -1308,6 +1310,9 @@ fn server_tls(
 struct Caps {
     quotas: Quotas,
     pending_lands: Option<usize>,
+    /// The share of the derive walks one principal may own, under
+    /// `--access`. 0 is no share (single-principal mode).
+    walk_share: usize,
 }
 
 fn caps(
@@ -1327,8 +1332,18 @@ fn caps(
         quotas: Quotas::new(
             with_default(requests, 64),
             with_default(upload_bytes, 512 << 20),
-        ),
+        )
+        .with_shares(if single {
+            Shares::off()
+        } else {
+            Shares::for_access()
+        }),
         pending_lands: with_default(pending_lands, 64),
+        walk_share: if single {
+            0
+        } else {
+            usize::div_ceil(scion_server::DERIVE_WALKS_CAP, 2)
+        },
     }
 }
 
@@ -1337,6 +1352,7 @@ fn caps(
 struct ServeConfig {
     quotas: Quotas,
     pending_lands: Option<usize>,
+    walk_share: usize,
     land_stale_secs: i64,
     server_tls: Option<ServerTls>,
     max_connections: NonZeroUsize,
@@ -1510,6 +1526,7 @@ async fn serve(
             },
             quotas: config.quotas,
             pending_lands: config.pending_lands,
+            walk_share: config.walk_share,
             land_stale_secs: config.land_stale_secs,
             tls: config.server_tls,
             metrics,

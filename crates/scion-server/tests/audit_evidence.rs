@@ -115,12 +115,12 @@ fn a_tampered_history_node_reads_as_corrupt() {
 
     // The read answers whole before the tamper: the path log walks the
     // history nodes this test is about.
-    let before = read::log_page(&store, REPO, tip, Some(&path("a")), 10, &later()).unwrap();
+    let before = read::log_page(&store, REPO, tip, Some(&path("a")), 10, &later(), None).unwrap();
     assert_eq!(before.entries.len(), 2, "{before:?}");
 
     tamper_history(&store, dir.path(), &history_rows(&store));
 
-    match read::log_page(&store, REPO, tip, Some(&path("a")), 10, &later()) {
+    match read::log_page(&store, REPO, tip, Some(&path("a")), 10, &later(), None) {
         Err(Error::Corrupt(why)) => assert!(
             why.contains("does not match its ID"),
             "the refusal names the check: {why}"

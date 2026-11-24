@@ -1786,7 +1786,7 @@ mod tests {
             let deadline = crate::deadline::Deadline::new(
                 std::time::Instant::now() + std::time::Duration::from_secs(60),
             );
-            let root = tree::root_tree(&self.store, self.repo, cs, &deadline).unwrap();
+            let root = tree::root_tree(&self.store, self.repo, cs, &deadline, None).unwrap();
             self.store
                 .read(|c| tree::lookup(c, root, &RepoPath::new(path).unwrap()))
                 .unwrap()
@@ -3843,7 +3843,7 @@ mod tests {
         let deadline = crate::deadline::Deadline::new(
             std::time::Instant::now() + std::time::Duration::from_secs(60),
         );
-        let tree = |cs| tree::root_tree(&f.store, f.repo, cs, &deadline).unwrap();
+        let tree = |cs| tree::root_tree(&f.store, f.repo, cs, &deadline, None).unwrap();
         assert_eq!(tree(tip), tree(before.target));
     }
 

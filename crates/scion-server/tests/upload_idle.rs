@@ -105,6 +105,7 @@ async fn serve_store(
             audit: scion_server::test_support::audit::Audit::off(),
             limits: Limits::default(),
             quotas: Quotas::off(),
+            walk_share: 0,
             pending_lands: None,
             land_stale_secs: 1 << 40,
             tls: None,

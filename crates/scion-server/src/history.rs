@@ -883,7 +883,7 @@ mod tests {
         let base = ids[0];
         let base_gen = store.read(|c| c.generation(repo, base)).unwrap();
         let tip = ids[ids.len() - 1];
-        let root = derived::get_by::<PathHistory>(&store, repo, tip, &later()).unwrap();
+        let root = derived::get_by::<PathHistory>(&store, repo, tip, &later(), None).unwrap();
         let touched = store
             .read(|c| touched_after(c, root, &[path("a/b/c")], base_gen, &later()))
             .unwrap();
@@ -910,7 +910,7 @@ mod tests {
         let ids = store_chain(&store, repo, None, &edits, true);
         let base_gen = store.read(|c| c.generation(repo, ids[0])).unwrap();
         let tip = ids[1];
-        let root = derived::get_by::<PathHistory>(&store, repo, tip, &later()).unwrap();
+        let root = derived::get_by::<PathHistory>(&store, repo, tip, &later(), None).unwrap();
         let touched = store
             .read(|c| touched_after(c, root, &[path("a/b/c")], base_gen, &later()))
             .unwrap();
@@ -926,7 +926,7 @@ mod tests {
         ];
         let ids = store_chain(&store, repo, None, &edits, true);
         let tip = ids[2];
-        let root = derived::get_by::<PathHistory>(&store, repo, tip, &later()).unwrap();
+        let root = derived::get_by::<PathHistory>(&store, repo, tip, &later(), None).unwrap();
         let own = store.read(|c| c.generation(repo, ids[1])).unwrap();
         let touched = store
             .read(|c| touched_after(c, root, &[path("a/b/c")], own, &later()))
@@ -1014,7 +1014,8 @@ mod tests {
         let mut ids = Vec::new();
         let mut next = Some(from);
         while let Some(from) = next {
-            let page = read::log_page(store, "r", from, Some(&path(p)), limit, &later()).unwrap();
+            let page =
+                read::log_page(store, "r", from, Some(&path(p)), limit, &later(), None).unwrap();
             // Small directories never reach the bound of node bytes.
             assert!(
                 page.entries.len() == limit.min(read::MAX_SCAN) || page.next.is_none(),
@@ -1155,7 +1156,7 @@ mod tests {
                 .checked_sub(std::time::Duration::from_secs(1))
                 .unwrap(),
         );
-        let page = read::log_page(&store, "r", *ids.last().unwrap(), None, 10, &past);
+        let page = read::log_page(&store, "r", *ids.last().unwrap(), None, 10, &past, None);
         assert!(matches!(page, Err(Error::DeadlineExceeded(_))), "{page:?}");
     }
 
@@ -1177,7 +1178,7 @@ mod tests {
         // page's per-row checks stay green: only the membership catches
         // the crossing.
         crate::pg::damage::redirect_first_parent(&store, ids.last().unwrap(), &foreign[0]).unwrap();
-        let page = read::log_page(&store, "r", *ids.last().unwrap(), None, 10, &later());
+        let page = read::log_page(&store, "r", *ids.last().unwrap(), None, 10, &later(), None);
         let Err(Error::Corrupt(marked)) = &page else {
             panic!("the page refuses a history it cannot follow: {page:?}");
         };
@@ -1202,7 +1203,7 @@ mod tests {
         let checks = 40_usize.div_ceil(read::DEADLINE_EVERY);
         for (p, want) in [(None, 1), (Some(path("d/f")), checks)] {
             crate::deadline::CHECKS.set(0);
-            let page = read::log_page(&store, "r", tip, p.as_ref(), 40, &later()).unwrap();
+            let page = read::log_page(&store, "r", tip, p.as_ref(), 40, &later(), None).unwrap();
             assert_eq!(page.entries.len(), 40, "{p:?}");
             assert_eq!(crate::deadline::CHECKS.get(), want, "{p:?}");
         }
@@ -1250,7 +1251,7 @@ mod tests {
             .collect();
 
         // The path history of the tip, derived once, gives the root.
-        let root = derived::get_by::<PathHistory>(&store, repo, tip, &later()).unwrap();
+        let root = derived::get_by::<PathHistory>(&store, repo, tip, &later(), None).unwrap();
 
         // No cap: the answer, with each distinct row read once.
         CHECK_NODE_BYTES_CAP.with(|c| c.set(usize::MAX));
@@ -1335,7 +1336,15 @@ mod tests {
 
         CHANGESET_READS.set(0);
         NODE_READS.set(0);
-        let page = read::log_page(&store, "r", tip, Some(&path("d/f")), usize::MAX, &later());
+        let page = read::log_page(
+            &store,
+            "r",
+            tip,
+            Some(&path("d/f")),
+            usize::MAX,
+            &later(),
+            None,
+        );
         let page = page.unwrap();
         // One call returns a full page, past 3,000 changesets.
         let found: Vec<ChangesetId> = page.entries.iter().map(|(id, _)| *id).collect();
@@ -1352,6 +1361,7 @@ mod tests {
             Some(&path("d/f")),
             usize::MAX,
             &later(),
+            None,
         );
         let rest = rest.unwrap();
         let found: Vec<ChangesetId> = rest.entries.iter().map(|(id, _)| *id).collect();
@@ -1371,7 +1381,7 @@ mod tests {
         history.extend([&[("d/f0", true)][..]; 3]);
         let ids = store_chain(&store, repo, None, &history, true);
         let page_of = |from| {
-            let page = read::log_page(&store, "r", from, Some(&path("d/f0")), 10, &later());
+            let page = read::log_page(&store, "r", from, Some(&path("d/f0")), 10, &later(), None);
             let page = page.unwrap();
             let found: Vec<ChangesetId> = page.entries.iter().map(|(id, _)| *id).collect();
             (found, page.next)
@@ -1385,7 +1395,7 @@ mod tests {
         assert_eq!(next, None);
         // A file in a small directory fills its page.
         let small = store_chain(&store, repo, Some(ids[3]), &[&[("e", true)][..]; 3], true);
-        let page = read::log_page(&store, "r", small[2], Some(&path("e")), 10, &later());
+        let page = read::log_page(&store, "r", small[2], Some(&path("e")), 10, &later(), None);
         assert_eq!(page.unwrap().entries.len(), 3);
     }
 
@@ -1423,10 +1433,18 @@ mod tests {
         assert!(written < whole / 4, "{written} against the level's {whole}");
         // The lookup still answers.
         assert_eq!(
-            read::log_page(&store, "r", ids[1], Some(&path("d/f50000")), 10, &later())
-                .unwrap()
-                .entries
-                .len(),
+            read::log_page(
+                &store,
+                "r",
+                ids[1],
+                Some(&path("d/f50000")),
+                10,
+                &later(),
+                None
+            )
+            .unwrap()
+            .entries
+            .len(),
             2
         );
     }
@@ -1746,7 +1764,7 @@ mod tests {
             let roots: Vec<String> = ids
                 .iter()
                 .map(|&cs| {
-                    derived::get_unbounded::<PathHistory>(&store, repo, cs)
+                    derived::get_unbounded::<PathHistory>(&store, repo, cs, None)
                         .unwrap()
                         .to_string()
                 })

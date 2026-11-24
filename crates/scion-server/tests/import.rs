@@ -458,6 +458,7 @@ fn root_entry(store: &Backend, cs: ChangesetId, name: &str) -> Option<Entry> {
         "r",
         cs,
         &Deadline::new(Instant::now() + Duration::from_secs(300)),
+        None,
     )
     .unwrap();
     store
@@ -511,7 +512,7 @@ fn files_read_back_with_git_content() {
             let (meta, name) = line.split_once('\t').unwrap();
             let fields: Vec<&str> = meta.split(' ').collect();
             let deadline = Deadline::new(Instant::now() + Duration::from_secs(300));
-            let content = read::read_file(&store, "r", cs, &path(name), &deadline);
+            let content = read::read_file(&store, "r", cs, &path(name), &deadline, None);
             if fields[1] == "commit" {
                 assert!(matches!(content, Err(Error::InvalidArgument(_))));
                 continue;
@@ -632,7 +633,7 @@ fn log_follows_git_first_parents() {
         .map(|commit| changeset_of(&store, commit))
         .collect();
     let later = Deadline::new(Instant::now() + Duration::from_secs(600));
-    let log: Vec<ChangesetId> = read::log_page(&store, "r", report.tip, None, 100, &later)
+    let log: Vec<ChangesetId> = read::log_page(&store, "r", report.tip, None, 100, &later, None)
         .unwrap()
         .entries
         .into_iter()

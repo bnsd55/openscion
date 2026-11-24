@@ -260,8 +260,9 @@ pub fn root_tree(
     repo: RepoId,
     cs: ChangesetId,
     deadline: &Deadline,
+    principal: Option<&str>,
 ) -> Result<TreeId> {
-    derived::get_by::<RootTree>(store, repo, cs, deadline)
+    derived::get_by::<RootTree>(store, repo, cs, deadline, principal)
 }
 
 /// [`root_tree`], for a caller that already holds a read transaction: the
@@ -277,8 +278,9 @@ pub(crate) fn root_tree_held(
     repo: RepoId,
     cs: ChangesetId,
     deadline: &Deadline,
+    principal: Option<&str>,
 ) -> Result<TreeId> {
-    derived::get_by_held::<RootTree>(store, c, repo, cs, deadline)
+    derived::get_by_held::<RootTree>(store, c, repo, cs, deadline, principal)
 }
 
 /// [`root_tree`] with no deadline: the caller has no request to serve, so
@@ -289,7 +291,7 @@ pub(crate) fn root_tree_held(
 /// As [`root_tree`], without [`Error::DeadlineExceeded`].
 #[cfg(any(test, feature = "test-hooks"))]
 pub fn root_tree_unbounded(store: &Backend, repo: RepoId, cs: ChangesetId) -> Result<TreeId> {
-    derived::get_unbounded::<RootTree>(store, repo, cs)
+    derived::get_unbounded::<RootTree>(store, repo, cs, None)
 }
 
 /// Derives the root tree of `cs` in steps if it is missing, as the
@@ -1273,6 +1275,7 @@ mod tests {
             cs,
             &scion_core::RepoPath::new("a/b").unwrap(),
             &past,
+            None,
         );
         assert!(matches!(got, Err(Error::DeadlineExceeded(_))), "{got:?}");
         let cold = store.read(|c| Ok(derived::load::<RootTree>(c, cs).unwrap()));
@@ -1299,7 +1302,7 @@ mod tests {
             let deadline = crate::deadline::Deadline::new(
                 std::time::Instant::now() + crate::deadline::CALL_LIMIT,
             );
-            let tree = crate::read::root_tree(&store, "r", cs, &deadline).unwrap();
+            let tree = crate::read::root_tree(&store, "r", cs, &deadline, None).unwrap();
             (tree, store.blobs().full_flushes() - before)
         };
         let (tree, flushes) = get_root_tree();

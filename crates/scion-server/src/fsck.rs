@@ -945,7 +945,7 @@ mod tests {
         let deadline = crate::deadline::Deadline::new(
             std::time::Instant::now() + std::time::Duration::from_secs(600),
         );
-        crate::derived::get_by::<PathHistory>(&store, repo, id, &deadline).unwrap();
+        crate::derived::get_by::<PathHistory>(&store, repo, id, &deadline, None).unwrap();
         let report = run(&store, 1, &mut |_| {}).unwrap();
         assert!(report.is_clean(), "{:?}", kinds(&report));
     }

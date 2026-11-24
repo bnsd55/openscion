@@ -72,7 +72,31 @@ pub fn runbook_block_with(heading: &str, needle: &str, subs: &[(&str, &str)]) ->
             format!(" mentions {needle}")
         }
     );
-    let mut command = block.join("\n");
+    let mut command = {
+        // The guide wraps a long command with a backslash continuation,
+        // the way a shell does; a shell joins them into one line. Fold
+        // the block the same way before anything picks a line out of
+        // it: a wrapped command stays one command, and a line-picker
+        // that splits on whitespace sees the whole argv.
+        let mut folded: Vec<String> = Vec::with_capacity(block.len());
+        for line in &block {
+            match folded.last_mut() {
+                Some(prev) if prev.ends_with('\\') => {
+                    prev.pop();
+                    while prev.ends_with(' ') {
+                        prev.pop();
+                    }
+                    let next = line.trim();
+                    if !next.is_empty() {
+                        prev.push(' ');
+                        prev.push_str(next);
+                    }
+                }
+                _ => folded.push(line.trim_end().to_owned()),
+            }
+        }
+        folded.join("\n")
+    };
     // The longest documented literal goes first: /srv/scion is a prefix
     // of /srv/scion-token, and a prefix-first replace would destroy the
     // longer literal before its turn.

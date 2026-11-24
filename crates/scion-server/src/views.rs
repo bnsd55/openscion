@@ -205,8 +205,9 @@ pub(crate) fn view_root(
     live: &[[u8; 32]],
     metrics: &crate::metrics::Metrics,
     deadline: &Deadline,
+    principal: Option<&str>,
 ) -> Result<TreeId> {
-    let real = crate::tree::root_tree(store, repo, cs, deadline)?;
+    let real = crate::tree::root_tree(store, repo, cs, deadline, principal)?;
     let context: Vec<Vec<u8>> = prefixes.iter().map(|p| p.as_bytes().to_vec()).collect();
     let ctx_digest = context_digest(&context);
     // The digest the caller derives under is live: every caller holds it
@@ -1261,7 +1262,7 @@ mod tests {
         let live = [digest];
         let metrics = crate::metrics::Metrics::default();
         let first = view_root(
-            &store, repo, &digest, tip, &prefixes, &live, &metrics, &deadline,
+            &store, repo, &digest, tip, &prefixes, &live, &metrics, &deadline, None,
         )
         .unwrap();
         // A cold derivation walks, and the counter says so: the operator
@@ -1274,7 +1275,7 @@ mod tests {
         // the walk counter does not move.
         let walked_before = metrics.view_trees_walked();
         let again = view_root(
-            &store, repo, &digest, tip, &prefixes, &live, &metrics, &deadline,
+            &store, repo, &digest, tip, &prefixes, &live, &metrics, &deadline, None,
         )
         .unwrap();
         assert_eq!(again, first, "the same view");
@@ -1310,7 +1311,7 @@ mod tests {
             .unwrap();
         let before = rows(&store);
         let third = view_root(
-            &store, repo, &digest, cs2, &prefixes, &live, &metrics, &deadline,
+            &store, repo, &digest, cs2, &prefixes, &live, &metrics, &deadline, None,
         )
         .unwrap();
         assert_eq!(third, first, "the same view, from the rows");
@@ -1333,7 +1334,7 @@ mod tests {
         let live = [digest];
         let metrics = crate::metrics::Metrics::default();
         let view = view_root(
-            &store, repo, &digest, tip, &prefixes, &live, &metrics, &deadline,
+            &store, repo, &digest, tip, &prefixes, &live, &metrics, &deadline, None,
         )
         .unwrap();
         let fresh = rows(&store);
@@ -1385,7 +1386,7 @@ mod tests {
             })
             .unwrap();
         let again = view_root(
-            &store, repo, &digest, cs2, &prefixes, &live, &metrics, &deadline,
+            &store, repo, &digest, cs2, &prefixes, &live, &metrics, &deadline, None,
         )
         .unwrap();
         assert_eq!(again, view, "the current rows still serve the view");
@@ -1431,7 +1432,7 @@ mod tests {
         let live = [digest];
         let metrics = crate::metrics::Metrics::default();
         let view = view_root(
-            &store, repo, &digest, tip, &prefixes, &live, &metrics, &deadline,
+            &store, repo, &digest, tip, &prefixes, &live, &metrics, &deadline, None,
         )
         .unwrap();
         let fresh = rows(&store);
@@ -1487,7 +1488,7 @@ mod tests {
             })
             .unwrap();
         let again = view_root(
-            &store, repo, &digest, cs2, &prefixes, &live, &metrics, &deadline,
+            &store, repo, &digest, cs2, &prefixes, &live, &metrics, &deadline, None,
         )
         .unwrap();
         assert_eq!(again, view, "the live digest's rows still serve the view");
@@ -1566,7 +1567,7 @@ mod tests {
         let live = [digest];
         let metrics = crate::metrics::Metrics::default();
         let head = view_root(
-            &store, repo, &digest, tip, &prefixes, &live, &metrics, &deadline,
+            &store, repo, &digest, tip, &prefixes, &live, &metrics, &deadline, None,
         )
         .unwrap();
         // head+1: the file under `left` changes; `right` keeps its tree.
@@ -1608,6 +1609,7 @@ mod tests {
             &live,
             &metrics,
             &deadline,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -1734,7 +1736,10 @@ mod tests {
     ) -> (TreeId, u64, std::time::Duration) {
         let start = std::time::Instant::now();
         let before = metrics.view_trees_walked();
-        let view = view_root(store, repo, &digest, cs, prefixes, live, metrics, deadline).unwrap();
+        let view = view_root(
+            store, repo, &digest, cs, prefixes, live, metrics, deadline, None,
+        )
+        .unwrap();
         (view, metrics.view_trees_walked() - before, start.elapsed())
     }
 
@@ -2033,6 +2038,7 @@ mod tests {
             &[digest],
             &crate::metrics::Metrics::default(),
             &alive(),
+            None,
         )
         .unwrap();
         assert!(
@@ -2050,6 +2056,7 @@ mod tests {
             &[digest],
             &crate::metrics::Metrics::default(),
             &alive(),
+            None,
         )
         .unwrap();
         assert_eq!(view, again, "the same view");
@@ -2084,7 +2091,7 @@ mod tests {
         let started = std::time::Instant::now();
         let short = Deadline::new(started + Duration::from_millis(100));
         let answer = view_root(
-            &store, repo, &digest, tip, &prefixes, &live, &metrics, &short,
+            &store, repo, &digest, tip, &prefixes, &live, &metrics, &short, None,
         );
         assert!(
             started.elapsed() < Duration::from_secs(5),
@@ -2106,6 +2113,7 @@ mod tests {
             &live,
             &metrics,
             &alive(),
+            None,
         );
         assert!(answer.is_ok(), "the waiter ran once a place freed");
         drop(second);
