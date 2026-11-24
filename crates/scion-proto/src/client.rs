@@ -11,11 +11,11 @@
 //! `GOAWAY`; see `fut_ctx` in hyper's `proto/h2/client.rs`), and tonic
 //! drops it, so a back-to-back writer loses a call at the age even
 //! though the server never saw it. [`Resend`] wraps the channel and
-//! sends such a call again, once, with the very request it was built
-//! with, on a connection of its own: `connect_lazy` on the same
-//! endpoint, so the connection the call was lost on - which would
-//! refuse the resent stream - is bypassed, and the fresh connection
-//! is dropped when the call ends.
+//! sends such a call again, up to [`MAX_ATTEMPTS`] tries, with the
+//! very request it was built with, on a connection of its own:
+//! `connect_lazy` on the same endpoint, so the connection the call
+//! was lost on - which would refuse the resent stream - is bypassed,
+//! and the fresh connection is dropped when the call ends.
 //!
 //! A call that was sent and then lost is never resent: by then hyper
 //! has polled the request body - the proxy body took the real body
@@ -25,13 +25,14 @@
 use std::error::Error as _;
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::PoisonError;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use http::Request;
 use http_body::{Body as HttpBody, Frame, SizeHint};
 use hyper::Error as HyperError;
+use tonic::Status;
 use tonic::body::Body;
 use tonic::transport::{Channel, Endpoint, Error as TransportError};
 use tower::Service;
@@ -53,20 +54,6 @@ pub struct Resend {
     /// connection of its own with it, so the connection the call was
     /// lost on - which would refuse the resent stream - is bypassed.
     endpoint: Endpoint,
-    /// The attempts of the calls, for the tests that size the resend
-    /// cap.
-    counts: Option<Arc<AttemptCounts>>,
-}
-
-/// What the tests count while the resend runs.
-#[derive(Debug, Default)]
-struct AttemptCounts {
-    /// The attempts of every call, first send included.
-    attempts: AtomicUsize,
-    /// A first attempt the server refused after hyper had taken the
-    /// body out of the slot: the call cannot be resent, and the lead
-    /// wants to know how often the wire does this.
-    refused_first_body_gone: AtomicUsize,
 }
 
 impl Resend {
@@ -76,21 +63,7 @@ impl Resend {
     /// the one the channel was built from.
     #[must_use]
     pub fn new(inner: Channel, endpoint: Endpoint) -> Self {
-        Self {
-            inner,
-            endpoint,
-            counts: None,
-        }
-    }
-
-    /// The same, with counters, for the tests.
-    #[cfg(test)]
-    fn with_counts(inner: Channel, endpoint: Endpoint, counts: Arc<AttemptCounts>) -> Self {
-        Self {
-            inner,
-            endpoint,
-            counts: Some(counts),
-        }
+        Self { inner, endpoint }
     }
 }
 
@@ -104,52 +77,29 @@ impl Service<Request<Body>> for Resend {
     }
 
     fn call(&mut self, request: Request<Body>) -> Self::Future {
-        // The channel and the endpoint are cloned into the future: the
-        // second attempt runs on a connection of its own, and the
-        // middleware stays usable.
-        Box::pin(run(
-            self.inner.clone(),
-            self.endpoint.clone(),
-            self.counts.clone(),
-            request,
-        ))
+        // The ready channel handle moves into the future: it holds the
+        // buffer slot that poll_ready reserved, and attempt 0 runs on
+        // it as it is. Self takes a fresh clone, so a polled clone
+        // never holds a slot it does not use - enough polled clones
+        // would run the buffer dry and hang poll_ready.
+        let fresh_handle = self.inner.clone();
+        let inner = std::mem::replace(&mut self.inner, fresh_handle);
+        Box::pin(run(inner, self.endpoint.clone(), request))
     }
 }
 
 /// Whether the error's source chain carries a `hyper::Error` - the
 /// transport failure of the connection, which at a connection's end
 /// means a request that was never sent: still in the dispatch queue
-/// (`Canceled`), or taken with its HTTP/2 stream pending open
-/// (dispatch-gone). The chain walk fails closed: no `hyper::Error`,
-/// no resend. The slot check in [`run`] does the rest: a body hyper
-/// polled is a request on the wire, never resent.
-///
-/// One exception the protocol hands us: `REFUSED_STREAM`. It is the
-/// one reset the server sends before it processes a stream (RFC 9113
-/// 8.7: the stream is not processed, the request may be retried), and
-/// hyper's eager body pipe takes the body out of the slot even for a
-/// stream it is refused, so the slot alone cannot vouch for it. A
-/// refused call never ran, whatever its body had sent.
+/// (`Canceled`), or taken by the dispatcher with its HTTP/2 stream
+/// pending open (dispatch-gone). The chain walk fails closed: no
+/// `hyper::Error`, no resend. The slot check in [`run`] does the rest:
+/// a body hyper polled is a request on the wire, never resent, whether
+/// the server processed it or refused the stream.
 fn is_unsent(error: &(dyn std::error::Error + 'static)) -> bool {
     let mut chain = Some(error);
     while let Some(error) = chain {
         if error.downcast_ref::<HyperError>().is_some() {
-            return true;
-        }
-        chain = error.source();
-    }
-    false
-}
-
-/// Whether the error's chain carries an HTTP/2 `REFUSED_STREAM` reset:
-/// the one reset the server sends before it processes a stream (RFC
-/// 9113 8.7), so the call never ran, whatever its body had sent.
-fn is_refused(error: &(dyn std::error::Error + 'static)) -> bool {
-    let mut chain = Some(error);
-    while let Some(error) = chain {
-        if let Some(h2) = error.downcast_ref::<h2::Error>()
-            && h2.reason() == Some(h2::Reason::REFUSED_STREAM)
-        {
             return true;
         }
         chain = error.source();
@@ -177,7 +127,6 @@ fn kind_of(error: &HyperError) -> &'static str {
 async fn run(
     mut inner: Channel,
     endpoint: Endpoint,
-    counts: Option<Arc<AttemptCounts>>,
     request: Request<Body>,
 ) -> Result<http::Response<Body>, TransportError> {
     let (parts, body) = request.into_parts();
@@ -187,15 +136,13 @@ async fn run(
     // hyper never read a byte of the request, and the request can be
     // sent again as it is. The generation says which attempt's proxy
     // may take it: a proxy of an older attempt, still alive in hyper
-    // after its connection was lost, yields nothing instead.
+    // after its connection was lost, sends nothing instead.
     let slot = Arc::new(Mutex::new(Slot {
         body: Some(body),
         generation: 0,
     }));
-    for attempt in 0..MAX_ATTEMPTS {
-        if let Some(counts) = &counts {
-            counts.attempts.fetch_add(1, Ordering::SeqCst);
-        }
+    let mut attempt = 0;
+    loop {
         if attempt > 0 {
             tracing::debug!(
                 rpc = %path,
@@ -204,19 +151,25 @@ async fn run(
                 "sending a call again that hyper never put on the wire"
             );
         }
-        slot.lock().unwrap().generation = attempt;
-        // Every attempt is a call of its own: the shared channel
+        slot.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .generation = attempt;
+        // Every attempt is a call of its own: the ready channel of the
         // first, a connection of its own after - the connection the
         // call was lost on would refuse the resent stream.
         let mut fresh;
         let channel = if attempt == 0 {
+            // The handle from poll_ready: it holds the reserved buffer
+            // slot, and it is ready to be called as it is.
             &mut inner
         } else {
             fresh = endpoint.connect_lazy();
             &mut fresh
         };
-        // The channel must say it is ready first.
-        poll_fn(|cx| channel.poll_ready(cx)).await?;
+        // The fresh connection must say it is ready first.
+        if attempt > 0 {
+            poll_fn(|cx| channel.poll_ready(cx)).await?;
+        }
         let request = Request::from_parts(
             parts.clone(),
             Body::new(ProxyBody::new(Arc::clone(&slot), attempt)),
@@ -225,19 +178,13 @@ async fn run(
         match response {
             Ok(response) => return Ok(response),
             Err(error) => {
-                if attempt == 0 && is_refused(&error) && slot.lock().unwrap().body.is_none() {
-                    // The server refused the stream after hyper had
-                    // taken the body: counted, never resent, the error
-                    // goes to the caller.
-                    if let Some(counts) = &counts {
-                        counts
-                            .refused_first_body_gone
-                            .fetch_add(1, Ordering::SeqCst);
-                    }
-                }
-                let unsent = is_unsent(&error) && slot.lock().unwrap().body.is_some();
-                let again = attempt + 1 < MAX_ATTEMPTS && unsent;
-                if !again {
+                let unsent = is_unsent(&error)
+                    && slot
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .body
+                        .is_some();
+                if attempt + 1 == MAX_ATTEMPTS || !unsent {
                     if attempt > 0 {
                         tracing::warn!(
                             rpc = %path,
@@ -257,10 +204,10 @@ async fn run(
                     kind,
                     "call lost before the wire"
                 );
+                attempt += 1;
             }
         }
     }
-    unreachable!("the resend loop returns on its last attempt")
 }
 
 /// The slot a call's body waits in for its next attempt. The
@@ -304,24 +251,43 @@ impl HttpBody for ProxyBody {
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         if self.inner.is_none() {
             let taken = {
-                let mut slot = self.slot.lock().unwrap();
+                let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
                 if slot.generation != self.generation {
                     // This attempt was superseded: its connection was
                     // lost, and a newer attempt owns the body now.
-                    // Nothing is left for this proxy to send.
-                    return Poll::Ready(None);
+                    // An error frame makes hyper reset this stream; a
+                    // clean end would send END_STREAM and the server
+                    // would see a complete request with an empty body,
+                    // which for a client-streaming upload is a valid
+                    // zero-message call it may act on.
+                    return Poll::Ready(Some(Err(Status::cancelled(
+                        "the call was lost before it was sent",
+                    ))));
                 }
                 slot.body.take()
             };
             match taken {
                 Some(body) => self.inner = Some(body),
-                // The body of this attempt is already gone. Nothing is
-                // left to send, and a panic inside hyper's connection
-                // task would end every call on the connection.
-                None => return Poll::Ready(None),
+                // The body of this attempt is already gone. An error
+                // frame resets the stream; a clean end would hand the
+                // server a complete empty request, and a panic inside
+                // hyper's connection task would end every call on the
+                // connection.
+                None => {
+                    return Poll::Ready(Some(Err(Status::cancelled(
+                        "the call was lost before it was sent",
+                    ))));
+                }
             }
         }
-        Pin::new(self.inner.as_mut().unwrap()).poll_frame(cx)
+        match self.inner.as_mut() {
+            Some(body) => Pin::new(body).poll_frame(cx),
+            // The take above always fills the body, so this arm never
+            // runs; it is here so a poll of this body can never panic.
+            None => Poll::Ready(Some(Err(Status::cancelled(
+                "the call was lost before it was sent",
+            )))),
+        }
     }
 
     fn size_hint(&self) -> SizeHint {
@@ -369,7 +335,7 @@ mod tests {
     use tonic::transport::{Channel, Endpoint, Server};
     use tonic::{Code, Request, Response, Status};
 
-    use super::{AttemptCounts, ProxyBody, Resend, Slot, is_unsent};
+    use super::{ProxyBody, Resend, Slot, is_unsent};
 
     /// The stub: `ResolveRef` answers at once, so back-to-back calls
     /// queue behind each other in hyper's dispatch; `GetObjects`
@@ -644,81 +610,6 @@ mod tests {
         );
     }
 
-    /// The attempts each back-to-back call takes at the age: the data
-    /// that sizes [`MAX_ATTEMPTS`]. Three writers make calls back to
-    /// back across the age, the bench's shape, and each counts the
-    /// attempts of its own calls. (#1419)
-    #[tokio::test]
-    async fn counting_attempts_at_the_goaway() {
-        let addr = serve(Duration::from_secs(1), Stub::default()).await;
-        let endpoint = Endpoint::from_shared(format!("http://{addr}")).unwrap();
-        let channel = endpoint.connect().await.unwrap();
-        assert_eq!(
-            ObjectsClient::new(channel.clone())
-                .resolve_ref(ResolveRefRequest::default())
-                .await
-                .unwrap_err()
-                .code(),
-            Code::NotFound
-        );
-        tokio::time::sleep(Duration::from_millis(900)).await;
-        let mut writers = Vec::new();
-        for _ in 0..3 {
-            let counts = Arc::new(AttemptCounts::default());
-            let mut client = ObjectsClient::new(Resend::with_counts(
-                channel.clone(),
-                endpoint.clone(),
-                Arc::clone(&counts),
-            ));
-            writers.push(tokio::spawn(async move {
-                let mut attempts = [0usize; 5];
-                let mut calls = 0usize;
-                let mut ran_out = 0usize;
-                let start = std::time::Instant::now();
-                while start.elapsed() < Duration::from_millis(300) {
-                    let before = counts.attempts.load(Ordering::SeqCst);
-                    calls += 1;
-                    let result = client.resolve_ref(ResolveRefRequest::default()).await;
-                    let spent = (counts.attempts.load(Ordering::SeqCst) - before).min(4);
-                    attempts[spent - 1] += 1;
-                    // A call that ran out counts, but the measurement
-                    // goes on: the point of the test is the numbers.
-                    // The stub's own refusal is NotFound.
-                    if let Err(status) = result
-                        && status.code() != Code::NotFound
-                    {
-                        ran_out += 1;
-                    }
-                }
-                (
-                    calls,
-                    attempts,
-                    ran_out,
-                    counts.refused_first_body_gone.load(Ordering::SeqCst),
-                )
-            }));
-        }
-        let mut totals = [0usize; 5];
-        let mut calls = 0usize;
-        let mut ran_out = 0usize;
-        let mut refused_body_gone = 0usize;
-        for writer in writers {
-            let (writer_calls, attempts, writer_ran_out, refused) =
-                writer.await.expect("the writer's task ran");
-            calls += writer_calls;
-            ran_out += writer_ran_out;
-            refused_body_gone += refused;
-            for (bucket, count) in attempts.iter().enumerate() {
-                totals[bucket] += count;
-            }
-        }
-        println!(
-            "attempts over {calls} calls: 1={} 2={} 3={} 4+={} ran-out={ran_out} refused-first-body-gone={refused_body_gone}",
-            totals[0], totals[1], totals[2], totals[3]
-        );
-        assert!(calls > 10, "the writers ran: {calls} calls");
-    }
-
     /// A resent call leaves no connection behind: the fresh channel
     /// of the resend lives only as long as the call, so after the
     /// writers end, the only connection still open is the one the
@@ -768,12 +659,14 @@ mod tests {
         );
     }
 
-    /// A proxy of an older attempt yields nothing once a newer attempt
-    /// owns the body: polled after the resend started, it sends no
-    /// frame and leaves the body where it is, so no panic can reach
-    /// hyper's connection task. (#1419)
+    /// A proxy of an older attempt ends its stream with an error once
+    /// a newer attempt owns the body: polled after the resend started,
+    /// it sends a cancellation - which makes hyper reset the stream -
+    /// and never a clean end, which would reach the server as a
+    /// complete request with an empty body, a zero-message call a
+    /// client-streaming handler may act on. (#1419)
     #[test]
-    fn a_superseded_proxy_yields_nothing() {
+    fn a_superseded_proxy_resets_its_stream() {
         let slot = Arc::new(Mutex::new(Slot {
             body: Some(Body::empty()),
             generation: 1,
@@ -785,13 +678,12 @@ mod tests {
         };
         let waker = std::task::Waker::noop();
         let mut cx = Context::from_waker(waker);
-        assert!(
-            matches!(
-                HttpBody::poll_frame(Pin::new(&mut old), &mut cx),
-                Poll::Ready(None)
-            ),
-            "a superseded proxy sends nothing"
-        );
+        match HttpBody::poll_frame(Pin::new(&mut old), &mut cx) {
+            Poll::Ready(Some(Err(error))) => {
+                assert_eq!(error.code(), tonic::Code::Cancelled);
+            }
+            other => panic!("a superseded proxy must reset its stream, not send {other:?}"),
+        }
         assert!(
             slot.lock().unwrap().body.is_some(),
             "the body stays with the attempt that owns it"

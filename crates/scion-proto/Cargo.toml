@@ -21,7 +21,6 @@ ed25519-dalek.workspace = true
 http.workspace = true
 http-body.workspace = true
 http-body-util.workspace = true
-h2.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 open-scion-core.workspace = true
