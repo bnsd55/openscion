@@ -2058,7 +2058,7 @@ fn hold_one(client: Scion, stop: tokio::sync::watch::Receiver<bool>) {
         let mut stop = stop;
         loop {
             tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
                 _ = stop.changed() => return,
             }
             if send
@@ -2097,29 +2097,26 @@ async fn until_share_full(client: &Scion, what: &str, refill: &mut dyn FnMut()) 
         )
         .await
         .expect("the probe outlived its own bound");
-        match reply {
-            Err(status) => {
-                assert_eq!(status.code(), Code::ResourceExhausted, "{status:?}");
-                assert!(
-                    status
-                        .message()
-                        .contains("its 8 upload share, half of the server's limit"),
-                    "{what}: {}",
-                    status.message()
-                );
-                return;
-            }
-            Ok(_) => {
-                assert!(
-                    tokio::time::Instant::now() < deadline,
-                    "{what}'s held uploads never filled the share"
-                );
-                // The probe ran while a held stream had not taken its
-                // share yet; one more held stream refills the share.
-                let _extra = refill();
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        }
+        let Err(status) = reply else {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{what}'s held uploads never filled the share"
+            );
+            // The probe ran while a held stream had not taken its
+            // share yet; one more held stream refills the share.
+            refill();
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            continue;
+        };
+        assert_eq!(status.code(), Code::ResourceExhausted, "{status:?}");
+        assert!(
+            status
+                .message()
+                .contains("its 8 upload share, half of the server's limit"),
+            "{what}: {}",
+            status.message()
+        );
+        return;
     }
 }
 
@@ -2138,17 +2135,15 @@ async fn until_share_free(client: &Scion, what: &str) {
         )
         .await
         .expect("the probe outlived its own bound");
-        match reply {
-            Ok(_) => return,
-            Err(status) => {
-                assert_eq!(status.code(), Code::ResourceExhausted, "{status:?}");
-                assert!(
-                    tokio::time::Instant::now() < deadline,
-                    "{what}'s share never came back"
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        }
+        let Err(status) = reply else {
+            return;
+        };
+        assert_eq!(status.code(), Code::ResourceExhausted, "{status:?}");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{what}'s share never came back"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
 
