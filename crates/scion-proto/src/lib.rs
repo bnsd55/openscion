@@ -44,6 +44,7 @@
 /// against [`v1`], the wire constants, and [`ticket`] instead. The crate
 /// publishes it for the server, the tiers and the daemon of this
 /// repository, which share it.
+pub mod client;
 pub mod runtime;
 
 pub mod ticket;

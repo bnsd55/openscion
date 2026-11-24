@@ -44,6 +44,7 @@ use std::{fmt, io, iter};
 
 use anyhow::Context as _;
 use scion_core::{BlobId, Tree, TreeId};
+use scion_proto::client::Resend;
 use scion_proto::runtime::auth::{Auth, Bearer};
 use scion_proto::runtime::check;
 use scion_proto::runtime::deadline::Until;
@@ -70,7 +71,7 @@ use tokio_stream::Stream;
 use tonic::service::Interceptor;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::server::Connected;
-use tonic::transport::{Channel, Endpoint, Server};
+use tonic::transport::{Endpoint, Server};
 use tonic::{Code, Request, Response, Status, Streaming};
 use tracing::Instrument as _;
 
@@ -298,8 +299,11 @@ impl fmt::Display for Key {
     }
 }
 
-/// The client for the next tier up.
-type Upstream = ObjectsClient<InterceptedService<Channel, UpstreamAuth>>;
+/// The client for the next tier up. The channel is wrapped in
+/// [`Resend`]: a call that never reached the wire at a connection's
+/// end is sent again, and the interceptor sits outside it, so the
+/// resent attempt keeps the one request ID the fetch was given.
+type Upstream = ObjectsClient<InterceptedService<Resend, UpstreamAuth>>;
 
 /// What the replies that wait for one object get from its fetch: nothing yet,
 /// then the object in its stored form, or why the fetch failed.
@@ -573,14 +577,14 @@ impl<S: Store> Tier<S> {
         // `CLIENT_KEEPALIVE_INTERVAL` plus its timeout, not at the tier's
         // upstream timeout of a whole call.
         let (interval, answer) = scion_proto::runtime::listen::client_keepalive();
-        let channel = endpoint
+        let endpoint = endpoint
             .http2_keep_alive_interval(interval)
             .keep_alive_timeout(answer)
             // An idle channel must notice a dead peer too: the next call
             // answers at once, not after the upstream window.
             .keep_alive_while_idle(true)
-            .tcp_keepalive(Some(scion_proto::runtime::listen::client_tcp_keepalive()))
-            .connect_lazy();
+            .tcp_keepalive(Some(scion_proto::runtime::listen::client_tcp_keepalive()));
+        let channel = endpoint.connect_lazy();
         let bearer = if upstream_token.is_empty() {
             None
         } else {
@@ -591,7 +595,7 @@ impl<S: Store> Tier<S> {
             bearer,
             calls: Arc::clone(&upstream_calls),
         };
-        let upstream = ObjectsClient::with_interceptor(channel, auth)
+        let upstream = ObjectsClient::with_interceptor(Resend::new(channel, endpoint), auth)
             .max_decoding_message_size(MAX_PART_MESSAGE_BYTES)
             .max_encoding_message_size(MAX_MESSAGE_BYTES);
         Ok(Self {

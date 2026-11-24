@@ -27,6 +27,7 @@ http = "1.5"
 http-body = "1.1"
 http-body-util = "0.1"
 hyper = "1.12"
+h2 = "0.4"
 hyper-util = { version = "0.1", features = ["tokio"] }
 tower = "0.5"
 blake3 = "1.8"
