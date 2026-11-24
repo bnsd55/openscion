@@ -3085,18 +3085,21 @@ mod tests {
     /// next calls move to a new connection. Only a call that runs longer
     /// than the grace may be cut. (#1419: the soak's one connection
     /// served new unary lands from the age to age + grace, then died
-    /// with a broken pipe.)
+    /// with a broken pipe.) The loop stops once a call has landed on a
+    /// new peer, well before that new connection runs out its own age.
     #[tokio::test]
     async fn new_calls_cross_the_connection_age() {
-        let (addr, _) = serve(Limits::default(), timers("keepalive")).await;
+        let (addr, _) = serve(Limits::default(), age_timers()).await;
         let mut client = ObjectsClient::new(endpoint(addr).connect().await.unwrap());
         let mut peers: Vec<String> = Vec::new();
         let mut calls = 0usize;
         let start = std::time::Instant::now();
-        // Continuous calls across the age (100 ms) and the grace (ends at
-        // 200 ms), the soak's own shape: back-to-back unary calls on one
-        // client while the connection passes its age.
-        while start.elapsed() < Duration::from_millis(400) {
+        // Continuous calls across the age (1 s) and the grace (ends at
+        // 2 s), the soak's own shape: back-to-back unary calls on one
+        // client while the connection passes its age. The loop stops
+        // once the calls have landed on a second connection, well before
+        // that connection's own end at about 3 s.
+        while peers.len() < 2 && start.elapsed() < Duration::from_millis(2500) {
             let error = client
                 .resolve_ref(ResolveRefRequest::default())
                 .await
@@ -3119,10 +3122,15 @@ mod tests {
                 peers.push(peer);
             }
             calls += 1;
-            tokio::time::sleep(Duration::from_millis(60)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         println!("calls across the age: {calls}, connections the calls landed on: {peers:?}");
         assert!(calls > 5, "the calls ran: {calls}");
+        assert_eq!(
+            peers.len(),
+            2,
+            "the calls crossed the age onto a new connection: {peers:?}"
+        );
     }
 
     /// The same promise through the TLS accept path: the peer of a
