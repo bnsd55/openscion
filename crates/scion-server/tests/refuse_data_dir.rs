@@ -48,6 +48,10 @@ fn a_missing_data_directory_is_refused_not_created() {
     refuses(empty, &["export", "--repo", "r", "--out", "out"]);
     refuses(empty, &["derive", "--kind", "root_tree"]);
     refuses(empty, &["ticket-key", "--out", "k.pub"]);
+    // ticket-key's audit log lives in the data directory, so its
+    // refusal lands before the key file is written: --out appears
+    // nowhere.
+    assert!(!empty.join("k.pub").exists(), "ticket-key wrote the key");
     // fsck's refusal is its "could not run" exit, 2.
     let out = run(empty, &["fsck"]);
     assert_eq!(out.status.code(), Some(2), "fsck's refusal exits 2");
