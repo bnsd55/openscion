@@ -21,8 +21,10 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::Duration;
 
 use scion_core::{Changeset, ChangesetId};
+use scion_proto::runtime::metrics::BusyLimit;
 
 use crate::backend::Backend;
 use crate::deadline::Deadline;
@@ -210,6 +212,14 @@ pub(crate) struct DeriveFlights {
     /// The cap on walks in flight. Each walk holds the write connection in
     /// turns, so walks beyond the cap only repeat work and starve writes.
     walks_cap: usize,
+    /// The bound a walk's wait for a permit, or a caller's wait for a
+    /// running walk, ends within: past it the call answers with a
+    /// retryable busy status and counts `scion_busy_timeouts_total` for
+    /// the derive walks (#1391). `reply::BUSY_TIMEOUT` (30 s) in a serve;
+    /// the tests set it short. A wait still ends at the call's own
+    /// deadline first: the bound is the shorter of the two. Nanoseconds,
+    /// so `set_busy` needs no `&mut` on a store the server shares.
+    busy: std::sync::atomic::AtomicU64,
     /// The bytes the bounded walks of this store may hold for their
     /// frontiers, as one pool they take from per step. A walk over the
     /// budget stops at its step boundary, and the call answers busy, so a
@@ -229,6 +239,12 @@ impl DeriveFlights {
             in_flight: Mutex::new(0),
             woken: Condvar::new(),
             walks_cap,
+            busy: std::sync::atomic::AtomicU64::new(
+                scion_proto::runtime::reply::BUSY_TIMEOUT
+                    .as_nanos()
+                    .try_into()
+                    .expect("the busy bound fits in u64 nanos"),
+            ),
             walk_bytes: crate::memory::Bytes::named(DERIVE_WALK_BUDGET, "derive walk"),
             metrics: std::sync::OnceLock::new(),
         }
@@ -238,6 +254,22 @@ impl DeriveFlights {
     /// server serves.
     pub(crate) fn set_metrics(&self, metrics: std::sync::Arc<crate::metrics::Metrics>) {
         let _ = self.metrics.set(metrics);
+    }
+
+    /// Sets the bound a walk's waits end within, before the server
+    /// serves. A serve keeps the default; the tests set it short.
+    pub(crate) fn set_busy(&self, busy: Duration) {
+        self.busy.store(
+            busy.as_nanos()
+                .try_into()
+                .expect("the busy bound fits in u64 nanos"),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// The bound a walk's waits end within.
+    fn busy(&self) -> Duration {
+        Duration::from_nanos(self.busy.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// The bytes pool the bounded walks of this store share. Cheap: the
@@ -255,6 +287,12 @@ impl DeriveFlights {
             in_flight: Mutex::new(0),
             woken: Condvar::new(),
             walks_cap,
+            busy: std::sync::atomic::AtomicU64::new(
+                scion_proto::runtime::reply::BUSY_TIMEOUT
+                    .as_nanos()
+                    .try_into()
+                    .expect("the busy bound fits in u64 nanos"),
+            ),
             walk_bytes,
             metrics: std::sync::OnceLock::new(),
         }
@@ -324,7 +362,11 @@ fn take_walk_permit<'a>(
                     .unwrap_or_else(PoisonError::into_inner);
             }
             Some(deadline) => {
-                let budget = deadline.remaining();
+                // The wait ends within the busy bound, even when the call's
+                // own deadline is later, so one caller's holds cannot park
+                // another past the bound (#1391).
+                let busy_bound = walks.busy() < deadline.remaining();
+                let budget = walks.busy().min(deadline.remaining());
                 let (guard, result) = walks
                     .woken
                     .wait_timeout_while(in_flight, budget, |in_flight| {
@@ -335,10 +377,19 @@ fn take_walk_permit<'a>(
                 if result.timed_out() {
                     if let Some(metrics) = walks.metrics.get() {
                         metrics.derive_walk_wait_ended();
+                        if busy_bound {
+                            metrics.busy_timeout(BusyLimit::DeriveWalk);
+                        }
                     }
-                    return Err(Error::ResourceExhausted(
-                        "no derive walk free before the deadline".to_owned(),
-                    ));
+                    return Err(if busy_bound {
+                        Error::ResourceExhausted(
+                            "busy: no derive walk free; retry later".to_owned(),
+                        )
+                    } else {
+                        Error::ResourceExhausted(
+                            "no derive walk free before the deadline".to_owned(),
+                        )
+                    });
                 }
             }
         }
@@ -408,28 +459,51 @@ fn retire(walks: &DeriveFlights, flight: &Arc<Flight>) {
 
 /// Waits for the walk of `flight` to end, until the deadline. False when
 /// the deadline passed first.
-fn waited(flight: &Arc<Flight>, before: u64, deadline: Option<&Deadline>) -> bool {
-    let mut walks = flight.walks.lock().unwrap_or_else(PoisonError::into_inner);
+/// Waits for the walk of `flight` to end. Progress makes the caller read
+/// again; a wait past the busy bound answers busy, and one past the call's
+/// own deadline answers deadline-exceeded, as before (#1391).
+enum WaitEnd {
+    Progress,
+    Deadline,
+    Busy,
+}
+
+fn waited(
+    walks: &DeriveFlights,
+    flight: &Arc<Flight>,
+    before: u64,
+    deadline: Option<&Deadline>,
+) -> WaitEnd {
+    let mut walks_held = flight.walks.lock().unwrap_or_else(PoisonError::into_inner);
     loop {
-        if *walks > before {
-            return true;
+        if *walks_held > before {
+            return WaitEnd::Progress;
         }
         match deadline {
             None => {
-                walks = flight
+                walks_held = flight
                     .woken
-                    .wait(walks)
+                    .wait(walks_held)
                     .unwrap_or_else(PoisonError::into_inner);
             }
             Some(deadline) => {
-                let budget = deadline.remaining();
+                // The wait ends within the busy bound, even when the call's
+                // own deadline is later (#1391).
+                let busy_bound = walks.busy() < deadline.remaining();
+                let budget = walks.busy().min(deadline.remaining());
                 let (guard, result) = flight
                     .woken
-                    .wait_timeout_while(walks, budget, |walks| *walks <= before)
+                    .wait_timeout_while(walks_held, budget, |walks_held| *walks_held <= before)
                     .unwrap_or_else(PoisonError::into_inner);
-                walks = guard;
+                walks_held = guard;
                 if result.timed_out() {
-                    return false;
+                    if busy_bound {
+                        if let Some(metrics) = walks.metrics.get() {
+                            metrics.busy_timeout(BusyLimit::DeriveWalk);
+                        }
+                        return WaitEnd::Busy;
+                    }
+                    return WaitEnd::Deadline;
                 }
             }
         }
@@ -471,10 +545,18 @@ fn in_one_walk<K: Kind>(
             return fill_until::<K>(store, repo, cs, deadline).map(|(value, _)| value);
         }
         let before = *flight.walks.lock().unwrap_or_else(PoisonError::into_inner);
-        if !waited(&flight, before, deadline) {
-            return Err(Error::DeadlineExceeded(
-                "the call ran past its deadline".to_owned(),
-            ));
+        match waited(walks, &flight, before, deadline) {
+            WaitEnd::Progress => {}
+            WaitEnd::Busy => {
+                return Err(Error::ResourceExhausted(
+                    "busy: no derive walk free; retry later".to_owned(),
+                ));
+            }
+            WaitEnd::Deadline => {
+                return Err(Error::DeadlineExceeded(
+                    "the call ran past its deadline".to_owned(),
+                ));
+            }
         }
     }
 }
@@ -2385,6 +2467,26 @@ mod tests {
                 Ok((repo, ids))
             })
             .unwrap()
+    }
+
+    #[test]
+    fn a_walk_wait_past_the_busy_bound_answers_busy() {
+        let flights = DeriveFlights::with_walk_bytes(1, crate::memory::Bytes::named(1 << 20, "t"));
+        flights.set_busy(Duration::from_millis(50));
+        let metrics = std::sync::Arc::new(crate::metrics::Metrics::default());
+        flights.set_metrics(std::sync::Arc::clone(&metrics));
+        // The cap is one, and it is held: the next wait cannot get a
+        // permit. Its deadline is far, so only the busy bound can end the
+        // wait (#1391).
+        let _held = take_walk_permit(&flights, None).unwrap();
+        let deadline =
+            crate::deadline::Deadline::new(std::time::Instant::now() + Duration::from_secs(60));
+        let err = take_walk_permit(&flights, Some(&deadline)).err().unwrap();
+        assert!(
+            matches!(err, Error::ResourceExhausted(ref why) if why.contains("busy: no derive walk free; retry later")),
+            "{err}"
+        );
+        assert_eq!(metrics.busy_timeouts(BusyLimit::DeriveWalk), 1);
     }
 
     #[test]

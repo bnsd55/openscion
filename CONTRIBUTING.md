@@ -91,6 +91,8 @@ branch does.
 
 - **Idiomatic and simple.** Prefer the smallest change that solves the real
   problem. No abstraction without a second use.
+- **Scripts run under bash 3.2**, which macOS ships as `/bin/bash`; the
+  lint's bash 3.2 gate (`scripts/check-bash3.sh`) refuses the bash 4 forms.
 - **Documented.** Every public item has a doc comment. Functions that return
   `Result` have an `# Errors` section.
 - **No hidden panics.** Avoid `unwrap` and `expect` outside tests, unless the

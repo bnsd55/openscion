@@ -38,6 +38,11 @@ tag exists, a build from source is the way:
 
 Source: §1 "One server", §2 "Ticket keys", §6 "Health".
 
+Every `serve` in this drill carries the metadata flags of §1's first
+boot — the URL file (`--postgres-url-file`) and the token file. The
+snippets below leave them out for brevity; without the URL file the
+server answers "no Postgres URL".
+
 1. `mkdir /srv/scion && chmod 0700 /srv/scion`
 
 2. `SCION_TOKEN=<TOKEN> ./scion-server --data /srv/scion serve`
@@ -46,11 +51,14 @@ Source: §1 "One server", §2 "Ticket keys", §6 "Health".
 
 3. Stop it (Ctrl-C). Mint a ticket key — without one no object is
    readable. The seed's directories must be root's or yours, and not
-   group- or others-writable (§2), so make the keys directory first:
+   group- or others-writable (§2), so make the keys directory first,
+   and capture the public key beside the seed (§2's rotation step 1
+   reads it back at the first rotation):
 
    ```sh
    install -d -m 0700 /srv/scion-keys
-   ./scion-server ticket-key --out /srv/scion-keys/ticket.key
+   ./scion-server --data /srv/scion ticket-key --out /srv/scion-keys/ticket.key \
+     | tee /srv/scion-keys/ticket.pub
    chmod 600 /srv/scion-keys/ticket.key
    ```
 
@@ -114,7 +122,12 @@ Source: §3 "Backup and restore".
 
 1. Put the metadata, the `backend` marker, and `objects/`, into a
    fresh directory (§3's restore list names all three; the marker is
-   the one T3 step 1 copied).
+   the one T3 step 1 copied). The metadata is the dump: load it with
+   `psql -f /backups/scion-<date>/metadata.sql <a new database URL>`
+   into a fresh database — the dump recreates the schema it
+   carries — and the restored server's Postgres URL points at that
+   database. If the old server still runs, the restored one needs a
+   port it does not hold (`serve --listen`).
 
 2. `fsck` on it.
 
@@ -160,8 +173,17 @@ Source: §5 "Routines" (gc), §6 "What to watch" (`scion_data_free_bytes`).
 
 Source: §2 "Ticket keys" (the four steps are quoted there in order).
 
-1. Make the new key: `scion-server ticket-key --out NEW.key` — it
-   prints the new public key, 64 hex characters.
+1. Make the new key: `scion-server --data /srv/scion ticket-key --out
+   NEW.key` — it prints the new public key, 64 hex characters. The
+   first rotation's OLD key is the one T2 step 3 captured: its `.pub`
+   file. On a store whose first boot predates that capture, there is
+   no OLD-PUBLIC; restart with the new key alone and skip step 3's
+   `--ticket-key-old`.
+
+   Skipping the old key has a cost an operator must weigh first: every
+   live ticket the old key signed is refused at once — up to 15
+   minutes' worth — and the clients and caches that hold one must mint
+   again.
 
 2. Give the tiers BOTH public keys, new first, before the server moves:
    `--ticket-public-key <NEW_HEX> --ticket-public-key <OLD_HEX>`.
@@ -172,7 +194,11 @@ Source: §2 "Ticket keys" (the four steps are quoted there in order).
    the OLD key's public hex, not its seed.
 
 4. After 15 minutes (a ticket's whole life), restart the server without
-   `--ticket-key-old`, and the caches with only the new public key.
+   `--ticket-key-old`, and the caches with only the new public key. A
+   real drill waits the 15 minutes out; a rehearsal may compress the
+   wait to seconds (a client that holds no old ticket at the last
+   restart proves the same), and the behaviour's test holds it:
+   crates/scn/tests/rotation.rs.
 
 Done when: a checkout reads through the whole rotation without a
 refused ticket in the log, and the last state carries no old key
@@ -197,7 +223,11 @@ Source: §4 "Upgrades", §3 for the backup copy.
 2. Copy the data directory as a backup (§3: with the server stopped the
    copy is exact).
 
-3. Start the new binary on the same directory. Watch the log.
+3. Start the new binary on the same directory. Watch the log. A
+   database the new build finds behind its schema refuses every open
+   but the two that move it (§4): run `scion-server --data /srv/scion
+   migrate` between the stop and the start, or start with `serve
+   --migrate`. The migration logs its steps.
 
    Done when: the server listens, `fsck` after it exits 0, and you
    recorded the schema version before and after (`psql "<the metadata

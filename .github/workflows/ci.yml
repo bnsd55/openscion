@@ -206,10 +206,14 @@ jobs:
       # those PRs' diff resolves; it joins the check right after.
       - name: shellcheck over scripts
         run: scripts/lint-scripts.sh
+      - name: the scripts' bash 3.2 gate refuses the bash 4 forms
+        run: scripts/test-check-bash3.sh
       - name: the capacity reader counters count the log's own shapes
         run: scripts/test-capacity-counters.sh
       - name: the soak-fault classifier classifies the pg restart's refusals
         run: scripts/test-soak-fault-classifier.sh
+      - name: the soaks' classifiers refuse lost or damaged data
+        run: scripts/test-soak-damage.sh
       - name: a script that dies leaves no owned process
         run: scripts/test-owned-run.sh
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable

@@ -10,6 +10,9 @@ set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 
+# shellcheck source=common.sh source-path=SCRIPTDIR
+. "$here/common.sh"
+
 # The classifier, eval'd out of soak-fault.sh: the check tests the
 # function the run uses, not a copy.
 eval "$(awk '/^classifies\(\)/, /^}/' "$here/soak-fault.sh")"

@@ -872,10 +872,13 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve(args) => Some(serve_flags(args)?),
         _ => None,
     };
-    // `hash-token`, `verify`, and `restore` need no data directory (verify
-    // reads only the archive; restore makes a new one), and `hash-token`
-    // and `ticket-key` read no store, so none of the four needs the
-    // Postgres URL. An import does not land, so it can run beside the
+    // `hash-token`, `verify`, and `restore` need no existing data
+    // directory (verify reads only the archive; restore makes a new
+    // one; hash-token touches nothing on disk), and all four of these
+    // read no store, so none of them needs the Postgres URL.
+    // `ticket-key` is the exception on the directory: its audit log
+    // lives in it, so the refusal below is its answer for a missing
+    // one, not a free pass. An import does not land, so it can run beside the
     // server. `derive` removes rows of older versions of a kind, which a
     // running server of an older build may read, so it opens as the
     // server.
@@ -997,8 +1000,10 @@ async fn main() -> anyhow::Result<()> {
     // A missing data directory is refused, not created (#578). Every
     // subcommand that touches a store or writes into the directory must
     // find it there; `restore` is the one command whose job is to
-    // create one, and `verify`, `hash-token` and `ticket-key` returned
-    // above. A silent `./scion-data` in whatever directory a
+    // create one, and `verify` and `hash-token` returned above.
+    // `ticket-key` does not return: it needs an existing directory for
+    // its audit log, so the refusal below is its answer too. A silent
+    // `./scion-data` in whatever directory a
     // run happened to start in has bitten once already: ticket-key
     // wrote an audit log into the cwd's default, where CI's ACL
     // refused it.
@@ -1011,24 +1016,28 @@ async fn main() -> anyhow::Result<()> {
         }
         return Err(refusal);
     }
-    // `ticket-key` writes the key file and the audit log, and reads no
-    // store: it runs before the URL is resolved, so a key run needs no
-    // database.
+    // `ticket-key` reached here only with an existing data directory:
+    // the refusal above is its answer when the directory is missing,
+    // because its audit log lives there (#578). It writes the key file
+    // and the audit log, and reads no store: it runs before the URL is
+    // resolved, so a key run needs no database.
     if let Command::TicketKey { out, audit_file } = cli.command {
         // The key file lives wherever the operator says; the audit
         // log lives in the data directory, as for every other
         // command. A run that cannot record refuses to make the key.
-        scion_proto::runtime::auth::create_private_dir_all(&cli.data)
-            .with_context(|| format!("cannot create {}", cli.data.display()))?;
+        // The directory exists: the refusal above checked it, so
+        // nothing creates it here.
         let audit = cli_audit(&cli.data, audit_file.as_deref())?;
         return ticket_key_command(audit, &out).await;
     }
     // Every remaining command opens the store, so all of them need the
     // Postgres URL: resolve it once, here. The commands that read none
-    // of the store - `verify`, `hash-token`, `ticket-key` - returned
-    // above, and never refuse a missing one. `fsck`'s exit table
-    // promises 2 for "could not run", and a missing URL is that case;
-    // the other commands fail with the generic open failure's 1.
+    // of the store - `verify` and `hash-token` - returned above, and
+    // never refuse a missing directory; `ticket-key` returned too, but
+    // only past the refusal, which is its answer for a missing one.
+    // `fsck`'s exit table promises 2 for "could not run", and a missing
+    // URL is that case; the other commands fail with the generic open
+    // failure's 1.
     let postgres_url = match postgres_url_of(cli.postgres_url_file.as_ref()) {
         Ok(url) => url,
         Err(why) => {

@@ -71,37 +71,24 @@ printf '1234 (a )b c) R 0 0 0 0 0 0 0 0 0 7 40 5 0 0\n' > "$work/stat"
 got=$(awk "$prog" "$work/stat")
 [ "$got" -eq 45 ] || { echo "cpu_ms: wanted utime+stime = 45, got $got" >&2; exit 1; }
 
-# The damage guard's markers, pinned to the Rust source (#1362 N3): a
-# reword fails here instead of silently turning the guard off. Each
-# line is "text:file"; the marker list in capacity.sh's scan_damage
-# must stay in step with this list.
+# The damage guard's texts, pinned to the Rust source (#1362 N3): a
+# reword fails here instead of silently turning the guard off. The
+# rows are common.sh's damage_text_sources - text|file, the one list
+# capacity.sh's scan_damage and the soaks' classifiers read.
 root=$(cd "$here/.." && pwd)
 while IFS='|' read -r text file; do
   grep -qF -- "$text" "$root/$file" || {
-    echo "marker '$text' is gone from $file - reword the scan_damage marker with it" >&2
+    echo "marker '$text' is gone from $file - reword the damage list with it" >&2
     exit 1
   }
-done <<'EOF'
-appears twice on main|crates/scn/src/cmd/bench.rs
-lands reported the same result|crates/scn/src/cmd/bench.rs
-reported lands differ from main:|crates/scn/src/cmd/bench.rs
-server sent a bad object for|crates/scn/src/cmd/checkout.rs
-server sent tree |crates/scn/src/cmd/checkout.rs
-server sent blob |crates/scn/src/cmd/checkout.rs
-server sent a bad tree for|crates/scn/src/cmd/checkout.rs
-server sent an object that was not asked for|crates/scn/src/cmd/checkout.rs
-server sent none of the requested objects|crates/scn/src/cmd/checkout.rs
-bytes, the tree says|crates/scn/src/cmd/checkout.rs
-the reply ended in the middle of an object|crates/scn/src/cmd/checkout.rs
-server sent a bad ID|crates/scn/src/client.rs
-damaged data|crates/scion-server/src/error.rs
-EOF
-# The ticket refusal names no damage marker: it must not match (N2).
+done < <(damage_text_sources)
+# The ticket refusal names no damage text: it must not match (N2).
+# The array fill is a while-read, not mapfile: macOS CI runs these
+# scripts with /bin/bash 3.2, and mapfile is a bash 4 builtin.
 ticket=$(printf 'cannot mint a fresh ticket: the server sent no ticket\n')
-for m in "server sent a bad object for" "server sent tree " "server sent blob " \
-  "server sent a bad tree for" "server sent a bad ID" \
-  "server sent an object that was not asked for" "server sent none of the requested objects" \
-  "bytes, the tree says" "code: 'DataLoss'"; do
+markers=()
+while IFS= read -r m; do markers+=("$m"); done < <(damage_texts)
+for m in "${markers[@]}"; do
   printf '%s\n' "$ticket" | grep -qF -- "$m" && {
     echo "marker '$m' matches the ticket refusal - it is not lost data" >&2
     exit 1

@@ -168,7 +168,9 @@ sweep never moves a ref.
 
 **Timeouts.** The server ends a call with `CANCELLED` when its reply has not
 started after 600 s, or earlier if the client's `grpc-timeout` is shorter.
-For `PutBlob` this covers the whole upload. For a streamed reply (`ReadFile`,
+For `PutBlob` this covers the whole upload, and the upload has its own
+pace limit: it ends with `DEADLINE_EXCEEDED` when the client sends no
+message for 120 s. For a streamed reply (`ReadFile`,
 `GetObjects`) it covers only the start. A `ReadFile` reply has its own limits
 (section 6.7). A call that ends this way may still finish its work on the
 server (section 6.3).
@@ -179,9 +181,18 @@ at most 4 `Blame` calls run at once, at most 4 `MergeBase`, `IsAncestor`
 and `Log` calls with a path together, and at most 4 `Diff` calls run at
 once. A `ReadFile` call waits for its share of a memory budget
 (section 6.7). Time in a queue counts toward the timeout.
-One wait has its own limit: a `GetObjects` call that gets no memory for its
-first object within 30 s, or before the caller's `grpc-timeout`, fails with
-`RESOURCE_EXHAUSTED` (section 7.3).
+A wait for one of the blame, diff, graph-query, read-budget or
+derive-walk limits ends within 30 s (the busy bound): a wait that finds
+no room within it fails at once with a retryable `RESOURCE_EXHAUSTED`,
+whose message says `busy: no <limit> free; retry later`, and the server
+counts it in the limit's series of `scion_busy_timeouts_total`
+(section 8). This covers the `Blame`, `MergeBase`, `IsAncestor`, `Log`
+and `Diff` slots, the `ReadFile` budget, and the derive walks a cold
+read makes (section 7.2). The 256 jobs and the `PutBlob` uploads keep
+the call's own deadline. One wait keeps its own shape: a `GetObjects`
+call that gets no memory for its first object within 30 s, or before
+the caller's `grpc-timeout`, fails with `RESOURCE_EXHAUSTED`
+(section 7.3).
 
 ## 3. Common rules
 
@@ -237,9 +248,9 @@ contract. A client MUST NOT depend on its text.
 | `ABORTED` | `Land` only: other writers kept moving the ref. The land stays `PENDING`. | Yes, with the same request key (a key is remembered for at least 7 days, section 6.3) |
 | `OUT_OF_RANGE` | A message is larger than its limit. | After the cause is fixed |
 | `CANCELLED` | The server's 600 s limit or the client's `grpc-timeout` ran out. A client library can report its own deadline as `DEADLINE_EXCEEDED`. | Yes. A `Land` retry uses the same request key, remembered for at least 7 days (section 6.3). |
-| `DEADLINE_EXCEEDED` | `ReadFile`: the client took no message for 120 s. `GetObjects`: the client took no part for 120 s in the middle of an object (section 7.3). `Land`: the land ran past 600 s from the start of the call. The land stays `PENDING`. `MergeBase`, `IsAncestor`, `Log` with a path: the call ran past its deadline, 600 s from its start or the caller's `grpc-timeout`. From a tier: the caller's deadline ran out while the tier waited for its first object (section 8). | Yes. A `Land` retry uses the same request key, remembered for at least 7 days (section 6.3). |
+| `DEADLINE_EXCEEDED` | `ReadFile`: the client took no message for 120 s. `GetObjects`: the client took no part for 120 s in the middle of an object (section 7.3). `PutBlob`: the client sent no message for 120 s - the first one or a later chunk - and the upload ended. `Land`: the land ran past 600 s from the start of the call. The land stays `PENDING`. `MergeBase`, `IsAncestor`, `Log` with a path: the call ran past its deadline, 600 s from its start or the caller's `grpc-timeout`. From a tier: the caller's deadline ran out while the tier waited for its first object (section 8). | Yes, from the start. A `Land` retry uses the same request key, remembered for at least 7 days (section 6.3). |
 | `UNAVAILABLE` | The server cannot be reached or is shutting down, or its database stayed busy for 5 s (another process, such as an import, held its write lock). A tier also replies `UNAVAILABLE` when its upstream does not answer in time, or when it finds no room to fetch an object from upstream within 30 s (section 8). | Yes |
-| `RESOURCE_EXHAUSTED` | A server limit stopped the call, and the message names it: a per-principal quota (section 2); a memory budget that the call's share does not fit, or did not get in time, such as `GetObjects` with no memory for the first object within 30 s or before the caller's deadline (section 7.3) and `Blame` (section 6.10); a graph query (`MergeBase`, `IsAncestor`) whose walk passed its million-visit bound (section 6.11); the server's budget of unary replies its clients have not read; a reply over its size cap; or a server out of disk space. | Yes, after a wait, except a graph query at its visit bound: its retry visits the same changesets and fails the same way. A call whose share is more than the whole budget, or whose reply is over its cap, fails the same way again. |
+| `RESOURCE_EXHAUSTED` | A server limit stopped the call, and the message names it: a per-principal quota (section 2); a memory budget that the call's share does not fit, or did not get in time, such as `GetObjects` with no memory for the first object within 30 s or before the caller's deadline (section 7.3) and `Blame` (section 6.10); a graph query (`MergeBase`, `IsAncestor`) whose walk passed its million-visit bound (section 6.11); the server's budget of unary replies its clients have not read; a reply over its size cap; or a server out of disk space. A wait for a shared limit that found no room within the 30 s busy bound fails the same way, with `busy: no <limit> free; retry later` (section 2). | Yes, after a wait, except a graph query at its visit bound: its retry visits the same changesets and fails the same way. A call whose share is more than the whole budget, or whose reply is over its cap, fails the same way again. A busy refusal is retryable at once: a place frees when a held limit is given back, or the next wait ends at the bound again. |
 | `DATA_LOSS` | Stored data is damaged: a tier's upstream sent bytes that are not the object asked for (section 8), or the server's stored copy failed its own check. The message is `damaged data`; the detail stays in the server log. | MAY |
 | `INTERNAL` | A database, I/O or Git error, or a server bug. The message is `internal error`; the detail stays in the server log. | MAY |
 | `UNIMPLEMENTED` | The server does not have the call, the request is compressed, or the caller is a partial reader of folder read rules and the call reads history or writes (section 2). | After the cause is fixed |
@@ -318,7 +329,12 @@ file's content.
   1 MiB. An empty file is one message with empty `data`.
 - The server checks the repo when the first message arrives, before it reads
   the rest. The caller needs a write rule for the repo: an upload names no
-  path, so any write rule covers it.
+  path, so any write rule covers it. A principal that reads whole repos and
+  may write none is refused before the first message.
+- An upload that sends no message for 120 s - the first one or a later
+  chunk - ends with `DEADLINE_EXCEEDED` and frees its upload slot. The
+  server's own work between messages (the spool appends) does not count
+  against the limit.
 - The reply's `blob_id` is the `BlobId` of all the bytes together
   ([`format-v1.md`](format-v1.md)).
 - The blob then belongs to the repo: a changeset of the repo may name it
@@ -491,7 +507,9 @@ parts together are the changeset's bytes, not a file's content, and there is
 no per-message check against a stored blob. A client MUST take the changeset
 as whole only when the reply ends with `OK`, and it checks the bytes against
 the changeset ID it asked for. `NOT_FOUND` if the repo or the changeset does
-not exist for that repo.
+not exist for that repo. Like `ReadFile`, the call waits for its share of
+the read budget before its first part; a wait that finds no room within the
+30 s busy bound fails with a retryable `RESOURCE_EXHAUSTED` (section 2).
 
 ### 6.7 ReadFile
 
@@ -514,7 +532,9 @@ content of a regular file, or the target of a symlink, at `path` in
   when its connection is closed for its age (section 2).
 - Before the reply starts, the call waits for its share of a memory budget of
   256 MiB that all `ReadFile` replies share: the file's size for a file of at
-  most 1 MiB, 5 MiB for a larger one. A stalled reply frees its share. Up to
+  most 1 MiB, 5 MiB for a larger one. A stalled reply frees its share. A wait
+  that finds no room within the 30 s busy bound fails the call with a
+  retryable `RESOURCE_EXHAUSTED` (section 2). Up to
   three messages stay in the server and in HTTP/2 until the stream ends or
   the connection closes (section 2).
 
@@ -522,6 +542,7 @@ content of a regular file, or the target of a symlink, at `path` in
 |---|---|
 | `INVALID_ARGUMENT` | A bad repo name or ID; a bad or empty path; the path is a directory or a submodule. |
 | `NOT_FOUND` | The repo or changeset does not exist; nothing is at the path. |
+| `RESOURCE_EXHAUSTED` | Before the first message: the wait for the read budget found no room within the 30 s busy bound. |
 | `DEADLINE_EXCEEDED` | After zero or more messages: the client took no message for 120 s. |
 | `DATA_LOSS` | After zero or more messages: the stored blob is damaged. |
 
@@ -532,12 +553,15 @@ directory level as its `TreeV1` bytes, in parts that follow the rules of
 `ReadFile` (section 6.7), with the same two differences as `GetChangeset`
 (section 6.6). An empty path is the repo root. A client MUST take the tree
 as whole only when the reply ends with `OK`, and it checks the bytes against
-the tree ID when it knows it.
+the tree ID when it knows it. Like `ReadFile`, the call waits for its share
+of the read budget before its first part; a wait that finds no room within
+the 30 s busy bound fails with a retryable `RESOURCE_EXHAUSTED` (section 2).
 
 | Error | When |
 |---|---|
 | `INVALID_ARGUMENT` | A bad repo name or ID; a bad path; the path is a file. |
 | `NOT_FOUND` | The repo or changeset does not exist; nothing is at the path. |
+| `RESOURCE_EXHAUSTED` | Before the first part: the wait for the read budget found no room within the 30 s busy bound. |
 
 ### 6.9 Log
 
@@ -548,6 +572,10 @@ each part's entries within 1 MiB of encoded bytes, in history order. A
 client joins the parts' entries in order into one page; the caps below hold
 over the whole stream, not per part. Only the last part carries
 `next_changeset_id`; the parts before it carry it empty.
+
+Every page fetch with a `path` waits for one of the 4 graph-query slots; a
+wait that finds no room within the 30 s busy bound fails the call with a
+retryable `RESOURCE_EXHAUSTED` (section 2), after zero or more parts.
 
 - With a `path`, the reply holds only the changesets whose changes include
   the path or a path below it. The test uses each changeset's own list of
@@ -580,6 +608,7 @@ stops at 600 s; what it derived stays, so the next call goes on from there.
 |---|---|
 | `INVALID_ARGUMENT` | A bad repo name or ID; a bad path. |
 | `NOT_FOUND` | The repo or changeset does not exist. |
+| `RESOURCE_EXHAUSTED` | With a `path`: a page fetch's wait for one of the 4 graph-query slots found no room within the 30 s busy bound (section 2). |
 | `DEADLINE_EXCEEDED` | With a `path`: the server ran past 600 s from the start of the call. After zero or more parts: the client took no part for 120 s. |
 
 ### 6.10 Blame
@@ -679,7 +708,7 @@ of its own steps).
 |---|---|
 | `INVALID_ARGUMENT` | A bad repo name or ID; a bad or empty path; the file is not a regular file; a cursor that was not made for the repo, changeset and path of the request, is damaged, or names a changeset the repo does not have, or lines that do not fit its window. |
 | `NOT_FOUND` | The repo or changeset does not exist; nothing is at the path. |
-| `RESOURCE_EXHAUSTED` | The call's share does not fit the memory budget. |
+| `RESOURCE_EXHAUSTED` | The call's share does not fit the memory budget. A wait for one of the 4 blame slots that found no room within the 30 s busy bound, before the first part (section 2). |
 | `DEADLINE_EXCEEDED` | A wait for memory bytes ran past the call's deadline. |
 
 ### 6.11 MergeBase
@@ -723,7 +752,7 @@ budget (section 6.10) does. A call also stops at the 600 s limit
 |---|---|
 | `INVALID_ARGUMENT` | A bad repo name or ID. |
 | `NOT_FOUND` | The repo or a changeset does not exist. |
-| `RESOURCE_EXHAUSTED` | The walk passed its million-visit bound. A retry of the same query fails the same way. |
+| `RESOURCE_EXHAUSTED` | The walk passed its million-visit bound. A retry of the same query fails the same way. A wait for one of the 4 graph-query slots that found no room within the 30 s busy bound (section 2) is retryable at once. |
 | `CANCELLED`, `DEADLINE_EXCEEDED` | The call ran past 600 s, or the client cancelled it. |
 
 ### 6.12 IsAncestor
@@ -746,6 +775,7 @@ its client cancels it.
 |---|---|
 | `INVALID_ARGUMENT` | A bad repo name or ID. |
 | `NOT_FOUND` | The repo or a changeset does not exist. |
+| `RESOURCE_EXHAUSTED` | A wait for one of the 4 graph-query slots that found no room within the 30 s busy bound (section 2) is retryable at once. |
 | `CANCELLED`, `DEADLINE_EXCEEDED` | The call ran past 600 s, or the client cancelled it. |
 
 ### 6.13 Diff
@@ -851,6 +881,7 @@ The search never ends a page early.
 |---|---|
 | `INVALID_ARGUMENT` | A bad repo name, ID, `path` or `after`. |
 | `NOT_FOUND` | The repo or a changeset does not exist. |
+| `RESOURCE_EXHAUSTED` | A wait for one of the 4 diff slots that found no room within the 30 s busy bound (section 2) is retryable at once. |
 
 ## 7. The `Objects` service
 

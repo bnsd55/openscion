@@ -81,7 +81,8 @@ grpc_health_probe -addr 127.0.0.1:7878 -service scion.v1.Scion
 The probe binary is not part of this repository and does not come with
 the platform; get it from the `grpc-ecosystem/grpc-health-probe`
 project's GitHub releases (a single static binary per platform — no
-other install), or use Kubernetes probes, which speak the same
+other install; the runbook was last tried with v0.4.37), or use
+Kubernetes probes, which speak the same
 protocol natively. The readiness probe
 answers `SERVING` once the server listens; the empty
 service name is the liveness probe (`grpc_health_probe -addr
@@ -972,13 +973,18 @@ commits, so a metadata snapshot never names a blob that a later copy of
 that a row of its own metadata names.
 
 The metadata snapshot is a dump, which reads a consistent committed
-state and does not stop the server:
+state and does not stop the server. Make the backup's dated directory
+first — the copy commands below need it, and the whole tree must pass
+the mode check (fsck refuses a data directory that group or others can
+read or write):
 
 ```sh
-pg_dump --no-owner --file /backups/metadata.sql <the metadata database>
+install -d -m 700 /backups/scion-$(date +%F)
+pg_dump --no-owner --file /backups/scion-$(date +%F)/metadata.sql \
+  <the metadata database>
 ```
 
-Then copy the blob files and the marker into the backup:
+Then copy the blob files and the marker into it:
 
 ```sh
 cp -R /srv/scion/objects /backups/scion-$(date +%F)/objects
@@ -1013,9 +1019,13 @@ Two things bound a backup taken while the server runs:
   before the copy reaches it, and the restored store names a blob that
   is gone.
 
-To restore: put the metadata (the snapshot, or the dump loaded into a
-new database), the marker, and `objects/` into a fresh directory; run
-`fsck` on it; start the server. `fsck` catches the gap a torn or
+To restore: load the metadata dump into a fresh database (`psql -f
+/backups/scion-<date>/metadata.sql <a new database URL>`; the dump
+recreates the schema it carries, so the new database holds the same
+schema names the dump's rows do), and put the marker and `objects/`
+into a fresh directory. The restored server's Postgres URL points at
+that new database; its data directory is the fresh one. Run `fsck` on
+the directory; start the server. `fsck` catches the gap a torn or
 gc-raced backup left, so run it after every restore, before the server
 serves.
 
@@ -1457,6 +1467,14 @@ the process, scraped from there. The names:
   walks that hold a permit, and walks that wait for one; waits that pile
   up while the in-flight count sits at the cap mean a cold history read
   that queues behind the walkers.
+- `scion_busy_timeouts_total{limit}` — waits for a shared limit that
+  found no room within the 30 s busy bound, by limit: `blame`, `diff`,
+  `graph_query` (the `MergeBase`, `IsAncestor` and `Log`-with-a-path
+  slots), `read_budget` (the read shares), `derive_walk`. A wait ends
+  there with a retryable busy reply (section 2 of docs/protocol-v1.md),
+  so a rate that climbs means a limit whose holders run long, not a
+  server fault; read it next to the limit's own gauges, such as
+  `scion_derive_walks_in_flight`.
 - `scion_pg_collector_key_wait_seconds` — a Postgres write's wait for the
   collector's advisory key, measured across the transaction's open batch
   (BEGIN, the lock-timeout guard, and the key's wait in one round trip);
