@@ -5087,9 +5087,9 @@ mod tests {
     }
 
     /// A principal that holds its whole read-budget share is refused at
-    /// once, and another principal's `GetChangeset` still runs (#1391).
-    /// The held share is the half budget, 128 MiB, as a whole reply of
-    /// any size would go over it.
+    /// once, and another principal is still served (#1391). Both reply
+    /// paths are pinned: `GetChangeset`'s whole share (`whole_share_of`)
+    /// and `ReadFile`'s inline take of the file's bytes.
     #[tokio::test]
     async fn a_principal_at_its_read_share_is_refused_and_others_go_on() {
         let (_dir, store, cs) = a_store_with_a_file();
@@ -5109,12 +5109,35 @@ mod tests {
             &format!("its {half} read-budget share"),
         )
         .await;
+        refused_at_its_share(
+            service.read_file(as_caller(
+                "p",
+                ReadFileRequest {
+                    repo: "r".into(),
+                    changeset_id: cs.as_bytes().to_vec(),
+                    path: b"a".to_vec(),
+                },
+            )),
+            &format!("its {half} read-budget share"),
+        )
+        .await;
         service
             .get_changeset(as_caller(
                 "b",
                 GetChangesetRequest {
                     repo: "r".into(),
                     changeset_id: cs.as_bytes().to_vec(),
+                },
+            ))
+            .await
+            .unwrap();
+        service
+            .read_file(as_caller(
+                "b",
+                ReadFileRequest {
+                    repo: "r".into(),
+                    changeset_id: cs.as_bytes().to_vec(),
+                    path: b"a".to_vec(),
                 },
             ))
             .await
