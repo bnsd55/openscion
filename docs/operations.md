@@ -1728,6 +1728,44 @@ not yours to fix: the client's owner stops the waste, not the server.
 
 Proof: crates/scion-server/tests/log_stream.rs::a_stalled_log_reply_is_counted_and_closes_the_connection (behaviour, no command: the section's commands read a live server's metrics; the test holds the stall, the count, and the close on a paused clock, where a shell client would deadlock)
 
+### Shared limits busy
+
+`BusyTimeoutsRising` fires when a shared limit's
+`scion_busy_timeouts_total` has climbed by more than six in ten minutes
+for 15 minutes: calls are waiting for that limit and ending at the 30 s
+busy bound with a retryable `resource_exhausted`, again and again. The
+`limit` label names the limit - `blame`, `diff`, `graph_query`,
+`read_budget` or `derive_walk` - and the alert carries it.
+
+Read the series and find who holds the limit:
+
+```sh
+curl -s 127.0.0.1:9100/metrics | grep '^scion_busy_timeouts_total'
+grep 'request_id=' server.log | grep 'busy: no' | tail -20
+```
+
+The audit log pairs each busy refusal with its call's principal and
+RPC; the per-principal request counts show which principal's calls
+repeat. Tell the causes apart:
+
+- One principal, again and again: it holds the limit's places with
+  long calls. With `--access` the per-principal caps bound what one
+  principal may hold (`--max-principal-requests`,
+  `--max-principal-upload-bytes`, `--max-principal-pending-lands`);
+  a principal at its cap is working as configured, and the fix is the
+  cap or the client's habits, not the server.
+- Many principals, one limit: the work is real. The limit's own size
+  is the knob (`MAX_BLAMES`, `MAX_DIFFS`, `MAX_GRAPH_QUERIES`,
+  `READ_BUDGET_BYTES` are build constants; raising one is a change and
+  a review, not a flag).
+- One burst, then quiet: a batch job's tail. The alert's `for: 15m`
+  exists so that this does not fire; if the batch is routine, the
+  alert firing means it now runs long enough to deny others - move it
+  off the serving hours.
+
+Escalate when one principal sits at its caps for days and the work is
+legitimate: that is a capacity conversation, not a server fault.
+
 ### Tier miss rate
 
 `TierMissRate` fires when a tier's misses have held over half its reads

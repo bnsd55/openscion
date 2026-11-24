@@ -271,6 +271,20 @@ groups:
             symlink at the path, an unwritable directory, a full disk)
             and signal again (docs/operations.md section 5, the audit
             log's rotation).
+      - alert: BusyTimeoutsRising
+        expr: >-
+          sum by (limit) (increase(scion_busy_timeouts_total[10m])) > 6
+        for: 15m
+        labels:
+          severity: medium
+        annotations:
+          response: >-
+            A shared limit's 30 s busy bound kept refusing waits; the
+            limit label names which one. Its holders run long or are
+            many. Find who holds it - the audit log's recent calls and
+            the per-principal request counts (docs/operations.md section
+            6, the busy-timeouts runbook); the per-principal caps
+            (--max-principal-requests and friends) are the knob.
   - name: gc
     rules:
       - alert: GcStale
