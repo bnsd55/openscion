@@ -123,7 +123,7 @@ fn every_command_the_drills_copy_is_in_the_operations_guide() {
                 continue;
             }
             misses.push(format!(
-                "{drill}.md:{line}: {stripped} - not in docs/operations.md"
+                "{drill}.md: the sh block at line {line}: {stripped} - not in docs/operations.md"
             ));
         }
     }
