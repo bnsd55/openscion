@@ -437,9 +437,13 @@ fn take_walk_permit<'a>(
             Some(deadline) => {
                 // The wait ends within the busy bound, even when the call's
                 // own deadline is later, so one caller's holds cannot park
-                // another past the bound (#1391).
-                let busy_bound = walks.busy() < deadline.remaining();
-                let budget = walks.busy().min(deadline.remaining());
+                // another past the bound (#1391). One read of the remaining
+                // time serves both the choice and the wait: a second read
+                // could cross the bound between them and count a deadline
+                // end in the busy metric.
+                let remaining = deadline.remaining();
+                let busy_bound = walks.busy() < remaining;
+                let budget = walks.busy().min(remaining);
                 let (guard, result) = walks
                     .woken
                     .wait_timeout_while(in_flight, budget, |in_flight| {
@@ -453,6 +457,17 @@ fn take_walk_permit<'a>(
                         if busy_bound {
                             metrics.busy_timeout(BusyLimit::DeriveWalk);
                         }
+                    }
+                    // One warn per refusal, as the slots' takes log theirs:
+                    // the call waited the busy bound first, so the rate is
+                    // bounded. A deadline end is the caller's own time, not
+                    // the limit's hold, and stays unlogged. The worker job
+                    // carries the call's span (rpc, request_id, principal).
+                    if busy_bound {
+                        tracing::warn!(
+                            limit = BusyLimit::DeriveWalk.label(),
+                            "busy: no derive walk free; retry later"
+                        );
                     }
                     return Err(if busy_bound {
                         Error::ResourceExhausted(
@@ -561,9 +576,12 @@ fn waited(
             }
             Some(deadline) => {
                 // The wait ends within the busy bound, even when the call's
-                // own deadline is later (#1391).
-                let busy_bound = walks.busy() < deadline.remaining();
-                let budget = walks.busy().min(deadline.remaining());
+                // own deadline is later (#1391). One read of the remaining
+                // time serves both the choice and the wait, as
+                // `take_walk_permit`'s does.
+                let remaining = deadline.remaining();
+                let busy_bound = walks.busy() < remaining;
+                let budget = walks.busy().min(remaining);
                 let (guard, result) = flight
                     .woken
                     .wait_timeout_while(walks_held, budget, |walks_held| *walks_held <= before)
@@ -574,6 +592,13 @@ fn waited(
                         if let Some(metrics) = walks.metrics.get() {
                             metrics.busy_timeout(BusyLimit::DeriveWalk);
                         }
+                        // One warn per refusal, as `take_walk_permit`'s:
+                        // the call waited the busy bound first, so the
+                        // rate is bounded.
+                        tracing::warn!(
+                            limit = BusyLimit::DeriveWalk.label(),
+                            "busy: no derive walk free; retry later"
+                        );
                         return WaitEnd::Busy;
                     }
                     return WaitEnd::Deadline;
