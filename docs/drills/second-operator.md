@@ -27,7 +27,8 @@ only on Linux is marked **(Linux)**.
 2. Start the server, the runbook's own command:
 
    ```sh
-   SCION_TOKEN=<TOKEN> ./scion-server --data /srv/scion serve
+   SCION_TOKEN=<TOKEN> ./scion-server --data /srv/scion \
+     --postgres-url-file /etc/scion/db-url serve
    ```
 
    Done when: the log says the server listens on `127.0.0.1:7878` (or
@@ -35,10 +36,13 @@ only on Linux is marked **(Linux)**.
 
    Notes: ___
 
-3. Stop it, and watch the drain (§1): readiness answers `NOT_SERVING`,
-   the listeners close, the in-flight calls finish, exit 0.
+3. Stop it, and watch the drain (§1): readiness answers `NOT_SERVING`
+   while it drains (First boot's readiness probe line), the listeners
+   close, the in-flight calls finish, exit 0.
 
-   Done when: the process exits 0 and the log shows the drain order.
+   Done when: the process exits 0 and the readiness probe answered
+   `NOT_SERVING` during the drain (the drain itself writes nothing to
+   the log).
 
    Notes: ___
 
@@ -50,19 +54,22 @@ only on Linux is marked **(Linux)**.
 
    ```sh
    install -d -m 0700 /srv/scion-keys
-   ./scion-server ticket-key --out /srv/scion-keys/ticket.key   # prints the public key
+   ./scion-server --data /srv/scion ticket-key --out /srv/scion-keys/ticket.key \
+     | tee /srv/scion-keys/ticket.pub   # prints the public key
    chmod 600 /srv/scion-keys/ticket.key
    ```
 
    Done when: the public key prints as 64 hex characters, and a second
-   run of the same command is an error.
+   run of the same command is an error. The public key also lands in
+   `ticket.pub`, which T3's `--ticket-key-old` reads.
 
    Notes: ___
 
 2. Start the server again with the key, the runbook's line:
 
    ```sh
-   SCION_TOKEN=<TOKEN> ./scion-server --data /srv/scion serve \
+   SCION_TOKEN=<TOKEN> ./scion-server --data /srv/scion \
+     --postgres-url-file /etc/scion/db-url serve \
      --ticket-key /srv/scion-keys/ticket.key
    ```
 
@@ -77,14 +84,16 @@ only on Linux is marked **(Linux)**.
 
 2. Give the tiers BOTH public keys, new first, before the server moves:
    `--ticket-public-key <NEW_HEX> --ticket-public-key <OLD_HEX>`.
-   Restart the caches.
+   If the deployment has caches, restart them (a one-server deployment
+   has none, and this step is then nothing to run).
 
 3. Restart the server with both keys: `--ticket-key NEW.key
    --ticket-key-old OLD-PUBLIC`, where `OLD-PUBLIC` is a file holding
    the OLD key's public hex, not its seed.
 
 4. After 15 minutes (a ticket's whole life), restart the server without
-   `--ticket-key-old`, and the caches with only the new public key.
+   `--ticket-key-old`, and the caches (if the deployment has them) with
+   only the new public key.
 
    Done when: a checkout reads through the whole rotation without a
    refused ticket in the log, and the last state carries no old key
@@ -94,10 +103,17 @@ only on Linux is marked **(Linux)**.
 
 ### T4 - Backup a running server (§3 "Backup and restore")
 
-1. The metadata snapshot first, then the blobs - never the other order:
+1. The metadata snapshot first, then the blobs - never the other order.
+   The runbook makes the dated directory first (the copy commands below
+   need it), then dumps into it, then copies the blobs and the marker:
 
    ```sh
-   pg_dump --no-owner --file /backups/metadata.sql <the metadata database>
+   install -d -m 700 /backups/scion-$(date +%F)
+   pg_dump --no-owner --file /backups/scion-$(date +%F)/metadata.sql \
+     <the metadata database>
+   ```
+
+   ```sh
    cp -R /srv/scion/objects /backups/scion-$(date +%F)/objects
    chmod 700 /backups/scion-$(date +%F)/objects
    cp /srv/scion/backend /backups/scion-$(date +%F)/backend
@@ -125,7 +141,11 @@ only on Linux is marked **(Linux)**.
 
 ### T5 - Restore (§3)
 
-1. Put the metadata, the marker, and `objects/` into a fresh directory.
+1. Load the metadata dump into a fresh database (`psql -f
+   /backups/scion-<date>/metadata.sql <a new database URL>`; the dump
+   recreates the schema it carries), and put the marker and `objects/`
+   into a fresh directory. The restored server's Postgres URL points at
+   that new database; its data directory is the fresh one.
 
 2. `fsck` on it.
 
@@ -156,14 +176,29 @@ only on Linux is marked **(Linux)**.
    cp -R /srv/scion /backups/scion-$(date +%F)
    ```
 
-3. Start the new binary on the same directory. Watch the log.
+3. Move the schema with the runbook's own two commands (§4): the check
+   first (it reads the state and writes nothing, exit 3 when steps are
+   pending), then the migrate:
 
-   Done when: the migration progress is in the log, the server
-   listens, and `fsck` after it exits 0.
+   ```sh
+   scion-server --data /srv/scion \
+     --postgres-url-file /etc/scion/db-url migrate --check
+   ```
+
+   ```sh
+   scion-server --data /srv/scion \
+     --postgres-url-file /etc/scion/db-url migrate
+   ```
+
+4. Start the new binary on the same directory. Watch the log.
+
+   Done when: the server listens, and `fsck` after it exits 0. (The
+   migrate's own output carries the migration progress; a serve started
+   with `--migrate` instead logs it.)
 
    Notes: ___
 
-4. Prove the guard the runbook promises: never let a newer database
+5. Prove the guard the runbook promises: never let a newer database
    open with an older binary. The runbook quotes the refusal -
    `database schema version N is newer than this build` - see it once
    by starting the OLD binary on the upgraded directory.
@@ -190,7 +225,8 @@ only on Linux is marked **(Linux)**.
    substitute:
 
    ```sh
-   scion-server --data /tmp/scion gc --metrics-file /var/lib/node_exporter/textfile/scion_gc.prom
+   scion-server --data /tmp/scion --postgres-url-file /etc/scion/db-url \
+     gc --metrics-file /var/lib/node_exporter/textfile/scion_gc.prom
    ```
 
    The disk-full runbook's first run takes the `--dry-run` flag ("first
@@ -206,7 +242,10 @@ only on Linux is marked **(Linux)**.
 
 ### T8 - A failing disk is a restore (§5 "A failing disk", §3)
 
-1. Damage on disk shows as `fsck` exit 1 with the problem named. The
+1. Damage on disk shows as `fsck` exit 1 with the problem named. To
+   see it once without a failing disk: damage a COPY of the data
+   directory (for example, flip one byte in one blob file under
+   `objects/`), never the live one, and run `fsck` on the copy. The
    runbook's answer is the restore of section 3: the server stops, the
    copy goes into a fresh directory, fsck is clean on the restored copy
    before the server starts.
@@ -250,7 +289,10 @@ only on Linux is marked **(Linux)**.
    Notes: ___
 
 2. Walk the other three alert runbooks of §6 (latency p99, view memo,
-   tier miss rate) the same way, from their own blocks.
+   tier miss rate) the same way, from their own blocks. The tier-miss
+   runbook reads a tier's metrics (`scion_cache_hits_total` and
+   `scion_cache_misses_total`): a one-server deployment has no tier,
+   and that walk is then nothing to run.
 
    Notes: ___
 

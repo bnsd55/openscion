@@ -17,7 +17,25 @@ fn run_gc(dir: &std::path::Path, metrics: &std::path::Path, dry: bool) -> Output
     scion_proto::runtime::auth::create_private_dir_all(&data).unwrap();
     // The collector's command is the routine's own line, with the
     // test's data directory and metrics file in place of the
-    // documented ones. A dry run is the documented `--dry-run` flag.
+    // documented ones. The line names the metadata URL file: the test's
+    // URL rides the same flag, in a 0600 file, and the environment form
+    // stays away ("give one, not both"). A dry run is the documented
+    // `--dry-run` flag.
+    let url = scion_server::Backend::test_postgres_url(&data).unwrap();
+    let url_file = dir.join("db-url");
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&url_file)
+            .unwrap()
+            .write_all(url.as_bytes())
+            .unwrap();
+    }
     let line = runbook_block_with(
         "5. Routines",
         "metrics-file",
@@ -27,6 +45,7 @@ fn run_gc(dir: &std::path::Path, metrics: &std::path::Path, dry: bool) -> Output
                 "/var/lib/node_exporter/textfile/scion_gc.prom",
                 metrics.to_str().unwrap(),
             ),
+            ("/etc/scion/db-url", url_file.to_str().unwrap()),
         ],
     );
     let mut argv: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
@@ -42,12 +61,9 @@ fn run_gc(dir: &std::path::Path, metrics: &std::path::Path, dry: bool) -> Output
     Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(&collector_args)
         .env("NO_COLOR", "1")
-        // The documented line carries no URL: the operator's env gives
-        // it. The schema is the data directory's own.
-        .env(
-            "SCION_POSTGRES_URL",
-            scion_server::Backend::test_postgres_url(&data).unwrap(),
-        )
+        // The URL rides the argv's --postgres-url-file now: the
+        // documented line carries it, and the environment form beside
+        // it is refused.
         .output()
         .unwrap()
 }

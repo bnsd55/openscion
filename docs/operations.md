@@ -65,7 +65,8 @@ directory's free bytes and inodes. The token, TLS and ticket rules are
 the `serve` command's own flags check, run before any check prints.
 
 ```sh
-./scion-server --data /srv/scion serve --token-file /srv/scion-token
+./scion-server --data /srv/scion --postgres-url-file /etc/scion/db-url serve \
+  --token-file /srv/scion-token
 ```
 
 A data directory the server does not find is refused, not created: every
@@ -90,7 +91,8 @@ service name is the liveness probe (`grpc_health_probe -addr
 
 ```sh
 git -C /srv/git/my-repo log --oneline -1
-./scion-server --data /srv/scion import /srv/git/my-repo
+./scion-server --data /srv/scion --postgres-url-file /etc/scion/db-url \
+  import /srv/git/my-repo
 ```
 
 The first import makes the repo (named `main` unless `--repo` says
@@ -122,7 +124,8 @@ A repository that exists is refused: a second root would be an orphan
 history.
 
 ```sh
-./scion-server --data /srv/scion create-repo --repo fresh
+./scion-server --data /srv/scion --postgres-url-file /etc/scion/db-url \
+  create-repo --repo fresh
 ```
 
 Another ref in a repository that already holds changesets, without a
@@ -132,7 +135,8 @@ exists is refused — moving a ref is a land's compare-and-set — and a
 changeset another repository holds is refused.
 
 ```sh
-./scion-server --data /srv/scion create-ref --repo fresh \
+./scion-server --data /srv/scion --postgres-url-file /etc/scion/db-url \
+  create-ref --repo fresh \
   --ref release/2026.11 --at 64-hex-changeset-id
 ```
 
@@ -147,15 +151,21 @@ Proof: crates/scion-server/tests/admin_create.rs::a_made_repo_answers_a_live_ser
 
 ```sh
 install -d -m 0700 /srv/scion
-SCION_TOKEN=<TOKEN> ./scion-server --data /srv/scion serve
+SCION_TOKEN=<TOKEN> ./scion-server --data /srv/scion \
+  --postgres-url-file /etc/scion/db-url serve
 ```
+
+The URL file is First boot's (`/etc/scion/db-url`); the server opens the
+metadata database before it listens, and a serve without one of the
+metadata flags answers "no Postgres URL".
 
 That is the whole deployment: clients talk to `127.0.0.1:7878`. A
 different address is `serve`'s own flag, which sits after the
 subcommand like every other flag of it:
 
 ```sh
-./scion-server --data /srv/scion serve --listen 127.0.0.1:7978
+./scion-server --data /srv/scion --postgres-url-file /etc/scion/db-url \
+  serve --listen 127.0.0.1:7978
 ```
 
 The health-probe and client lines above name the default port; point
@@ -176,7 +186,8 @@ install -d -m 0700 /srv/scion-keys
 ./scion-server --data /srv/scion ticket-key --out /srv/scion-keys/ticket.key \
   | tee /srv/scion-keys/ticket.pub   # prints the public key
 chmod 600 /srv/scion-keys/ticket.key
-SCION_TOKEN=<TOKEN> ./scion-server --data /srv/scion serve \
+SCION_TOKEN=<TOKEN> ./scion-server --data /srv/scion \
+  --postgres-url-file /etc/scion/db-url serve \
   --ticket-key /srv/scion-keys/ticket.key
 ```
 
@@ -255,7 +266,11 @@ order — the health service answers `NOT_SERVING` for the service names
 (readiness goes false), the listeners close to new connections, the
 in-flight calls finish, and the process exits 0. The whole server (the
 empty health name) stays `SERVING` while it answers, so a liveness probe
-does not kill a draining server. The in-flight calls have
+does not kill a draining server. Watch the drain with the readiness
+probe of First boot (`grpc_health_probe -addr 127.0.0.1:7878 -service
+scion.v1.Scion`): it answers `NOT_SERVING` once the drain starts, and
+the process exits 0 when the in-flight calls are done. The drain itself
+writes nothing to the log. The in-flight calls have
 `--drain-timeout-secs` (default 600) to finish; past it they are cut, the
 log names the count, and the process exits 1. A second signal while the
 drain runs ends it at once, with the same exit. Wait out the drain; send
@@ -304,6 +319,7 @@ supervisor. The minimal systemd unit — the token through the file
 [Service]
 ExecStart=/usr/local/bin/scion-server --data /srv/scion serve \
   --token-file /etc/scion/token \
+  --postgres-url-file /etc/scion/db-url \
   --ticket-key /srv/scion-keys/ticket.key \
   --migrate
 Restart=on-failure
@@ -588,7 +604,8 @@ covers `src/a/...`, not `srcx`); without it the line covers the whole repo:
 TOK=$(printf %s <SECRET> | ./scion-server hash-token)
 printf 'token\tops\t%s\nread\tops\tmain\nwrite\tops\tmain\n' "$TOK" > /srv/scion/access.txt
 chmod 600 /srv/scion/access.txt
-./scion-server --data /srv/scion serve --access /srv/scion/access.txt \
+./scion-server --data /srv/scion --postgres-url-file /etc/scion/db-url \
+  serve --access /srv/scion/access.txt \
   --ticket-key /srv/scion-keys/ticket.key
 ```
 
@@ -1316,7 +1333,8 @@ so the server's `/metrics` cannot show what it did. Instead, give the run
 a metrics file, and scrape it from the machine:
 
 ```sh
-scion-server --data /tmp/scion gc --metrics-file /var/lib/node_exporter/textfile/scion_gc.prom
+scion-server --data /tmp/scion --postgres-url-file /etc/scion/db-url \
+  gc --metrics-file /var/lib/node_exporter/textfile/scion_gc.prom
 ```
 
 A cron line runs the collector on its schedule and writes the file, which

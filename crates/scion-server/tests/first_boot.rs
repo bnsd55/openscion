@@ -88,8 +88,8 @@ async fn a_first_boot_serves_probes_and_reads_back() {
     // The one-server section's command is the same command: the guide's
     // own serve line, in both sections' words, is this spawn's argv.
     assert_eq!(
-        Server::guide_argv("One server", &data),
-        Server::guide_argv("First boot", &data),
+        Server::guide_argv("One server", &data, None),
+        Server::guide_argv("First boot", &data, None),
         "the one-server command and the first boot's serve line agree"
     );
     let mode = std::fs::metadata(common::token_file())
