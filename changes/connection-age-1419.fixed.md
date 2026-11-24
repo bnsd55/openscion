@@ -6,7 +6,7 @@ still in it. Before, tonic's own age timer was given both the age and
 the grace, and a build that sets both never sends the GOAWAY: the
 connection was force-closed at age + grace under whatever call it held
 - the nightly soak's bench lost a call that was in flight at exactly 40
-minutes every run and stopped there. The close at the grace is now
+minutes and stopped there (two runs were checked). The close at the grace is now
 ours, on the connection's own IO, and it fires with no traffic.
 
 The client half: a call hyper never put on the wire is sent again. At
@@ -16,5 +16,5 @@ open), and tonic drops it, so a back-to-back writer lost a call the
 server never saw. The new `Resend` middleware, wrapped around every
 scion client's channel, sends such a call again on a connection of its
 own - the gate is a hyper error in the chain and the request body
-still in its slot, which proves no byte reached the wire - and a call
-the server may have seen is never resent.
+still in its slot, which proves no message byte went out (HEADERS may
+have) - and a call the server may have seen is never resent.
