@@ -1372,7 +1372,12 @@ The disk the data directory sits on has two alerts: `DiskNearlyFull` at
 1. Run the gc routine (above): first a `--dry-run` to see what it would
    collect, then a real run. The collector is safe beside a live server,
    and on a store whose repos grew by accident (a forgotten import, a
-   test repo nobody removed), this alone frees the space.
+   test repo nobody removed), this alone frees the space:
+
+   ```sh
+   scion-server --data /srv/scion --postgres-url-file /etc/scion/db-url \
+     gc --dry-run
+   ```
 2. Run `fsck` when the run ends. A full disk can leave a write that
    failed mid-way; fsck tells you whether anything was damaged (there
    is no repair: restore from a backup, section 3, when it reports one).

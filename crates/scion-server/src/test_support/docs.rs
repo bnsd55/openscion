@@ -8,6 +8,34 @@
 use std::path::Path;
 use std::process::Command;
 
+/// Folds a block's shell backslash continuations the way a shell joins
+/// them: a line that ends with `\\` continues on the next line, one
+/// command per folded line. The one joiner for the guide's wrapped
+/// commands: [`runbook_block_with`] folds the block it will run, and the
+/// docs-drill pinning test folds the blocks it pins against the runbook,
+/// so both read a wrapped command as the shell does.
+#[must_use]
+pub fn fold_continuations(block: &[&str]) -> Vec<String> {
+    let mut folded: Vec<String> = Vec::with_capacity(block.len());
+    for line in block {
+        match folded.last_mut() {
+            Some(prev) if prev.ends_with('\\') => {
+                prev.pop();
+                while prev.ends_with(' ') {
+                    prev.pop();
+                }
+                let next = line.trim();
+                if !next.is_empty() {
+                    prev.push(' ');
+                    prev.push_str(next);
+                }
+            }
+            _ => folded.push(line.trim_end().to_owned()),
+        }
+    }
+    folded
+}
+
 /// The first fenced `sh` block under `heading` of docs/operations.md,
 /// with the documented literals swapped for the test's values:
 /// `subs` pairs a literal the guide prints (an address, a data
@@ -78,24 +106,7 @@ pub fn runbook_block_with(heading: &str, needle: &str, subs: &[(&str, &str)]) ->
         // the block the same way before anything picks a line out of
         // it: a wrapped command stays one command, and a line-picker
         // that splits on whitespace sees the whole argv.
-        let mut folded: Vec<String> = Vec::with_capacity(block.len());
-        for line in &block {
-            match folded.last_mut() {
-                Some(prev) if prev.ends_with('\\') => {
-                    prev.pop();
-                    while prev.ends_with(' ') {
-                        prev.pop();
-                    }
-                    let next = line.trim();
-                    if !next.is_empty() {
-                        prev.push(' ');
-                        prev.push_str(next);
-                    }
-                }
-                _ => folded.push(line.trim_end().to_owned()),
-            }
-        }
-        folded.join("\n")
+        fold_continuations(&block).join("\n")
     };
     // The longest documented literal goes first: /srv/scion is a prefix
     // of /srv/scion-token, and a prefix-first replace would destroy the
