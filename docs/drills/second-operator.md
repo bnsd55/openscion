@@ -173,7 +173,12 @@ only on Linux is marked **(Linux)**.
    copy is exact):
 
    ```sh
-   cp -R /srv/scion /backups/scion-$(date +%F)
+   install -d -m 700 /backups/scion-$(date +%F)
+   pg_dump --no-owner --file /backups/scion-$(date +%F)/metadata.sql \
+     <the metadata database>
+   cp -R /srv/scion/objects /backups/scion-$(date +%F)/objects
+   chmod 700 /backups/scion-$(date +%F)/objects
+   cp /srv/scion/backend /backups/scion-$(date +%F)/backend
    ```
 
 3. Move the schema with the runbook's own two commands (§4): the check

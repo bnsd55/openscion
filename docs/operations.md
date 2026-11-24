@@ -1375,7 +1375,8 @@ The disk the data directory sits on has two alerts: `DiskNearlyFull` at
    test repo nobody removed), this alone frees the space:
 
    ```sh
-   scion-server --data /srv/scion gc --dry-run
+   scion-server --data /srv/scion --postgres-url-file /etc/scion/db-url \
+     gc --dry-run
    ```
 2. Run `fsck` when the run ends. A full disk can leave a write that
    failed mid-way; fsck tells you whether anything was damaged (there

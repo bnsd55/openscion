@@ -68,7 +68,8 @@ server answers "no Postgres URL".
 4. Start for real:
 
    ```sh
-   SCION_TOKEN=<TOKEN> ./scion-server --data /srv/scion serve \
+   SCION_TOKEN=<TOKEN> ./scion-server --data /srv/scion \
+     --postgres-url-file /etc/scion/db-url serve \
      --ticket-key /srv/scion-keys/ticket.key
    ```
 
@@ -163,7 +164,8 @@ Source: §5 "Routines" (gc), §6 "What to watch" (`scion_data_free_bytes`).
    get space back. The runbook's tool for this is the collector:
 
    ```sh
-   scion-server --data /srv/scion gc --dry-run
+   scion-server --data /srv/scion --postgres-url-file /etc/scion/db-url \
+     gc --dry-run
    ```
 
    then, when the report makes sense, without `--dry-run`, and with a

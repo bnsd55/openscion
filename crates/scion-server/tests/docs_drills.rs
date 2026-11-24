@@ -47,38 +47,31 @@ fn sh_commands(doc: &str) -> Vec<(usize, String)> {
     let mut commands = Vec::new();
     let mut in_block = false;
     let mut start = 0;
-    let mut current = String::new();
+    let mut block: Vec<&str> = Vec::new();
     for (at, line) in doc.lines().enumerate() {
         let trimmed = line.trim();
         if !in_block {
             if trimmed == "```sh" {
                 in_block = true;
                 start = at + 1;
-                current.clear();
+                block.clear();
             }
             continue;
         }
         if trimmed == "```" {
             in_block = false;
-            if !current.trim().is_empty() {
-                commands.push((start, current.trim().to_string()));
+            // The continuation join is the runbook reader's own
+            // (test_support::docs::fold_continuations): one joiner, so a
+            // wrapped command reads the same to the pinning test and to
+            // the tests that run the guide.
+            for folded in scion_server::test_support::docs::fold_continuations(&block) {
+                if !folded.trim().is_empty() {
+                    commands.push((start, folded));
+                }
             }
             continue;
         }
-        // A comment that ends a line marks the whole command it is on:
-        // either prose (operations.md documents why) or the drill's own
-        // `# drill-only` mark.
-        let body = strip_comment(line.trim());
-        let continuation = body.ends_with('\\');
-        let body = body.trim_end_matches('\\').trim();
-        if !current.is_empty() {
-            current.push(' ');
-        }
-        current.push_str(body);
-        if !continuation && !current.trim().is_empty() {
-            commands.push((start, current.trim().to_string()));
-            current.clear();
-        }
+        block.push(line);
     }
     commands
 }
@@ -98,7 +91,7 @@ fn doc(name: &str) -> String {
 fn every_command_the_drills_copy_is_in_the_operations_guide() {
     let runbook: HashSet<String> = sh_commands(&doc("operations"))
         .into_iter()
-        .map(|(_, c)| normalize(&c))
+        .map(|(_, c)| normalize(strip_comment(&c).trim()))
         .collect();
     assert!(
         runbook.len() >= 20,
@@ -115,15 +108,22 @@ fn every_command_the_drills_copy_is_in_the_operations_guide() {
             commands.len()
         );
         for (line, command) in commands {
-            if command.ends_with(DRILL_ONLY) {
+            // The mark rides on the folded command's last line, before
+            // the prose comments go. A comment-only line is prose: it is
+            // no command, so an empty strip is skipped too.
+            if command.starts_with('#') || command.ends_with(DRILL_ONLY) {
                 continue;
             }
-            let normalized = normalize(&command);
-            if normalized.starts_with('#') || runbook.contains(&normalized) {
+            let stripped = strip_comment(&command).trim().to_string();
+            if stripped.is_empty() {
+                continue;
+            }
+            let normalized = normalize(&stripped);
+            if runbook.contains(&normalized) {
                 continue;
             }
             misses.push(format!(
-                "{drill}.md:{line}: {command} - not in docs/operations.md"
+                "{drill}.md:{line}: {stripped} - not in docs/operations.md"
             ));
         }
     }
