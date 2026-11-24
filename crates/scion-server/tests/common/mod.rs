@@ -121,13 +121,37 @@ pub(crate) fn token_file() -> &'static std::path::PathBuf {
     FILE.get_or_init(|| std::env::temp_dir().join(format!("scion-token-{}", std::process::id())))
 }
 
-/// One staging name per call: two tests spawning at once must not race
-/// one staging file's rename.
 fn staging() -> &'static std::sync::atomic::AtomicU64 {
     use std::sync::OnceLock;
     use std::sync::atomic::AtomicU64;
     static STAGING: OnceLock<AtomicU64> = OnceLock::new();
     STAGING.get_or_init(|| AtomicU64::new(0))
+}
+
+/// The 0600 file that carries a test URL where the guide's own line
+/// names `/etc/scion/db-url`. One per data directory - the URL names
+/// the directory's own schema - written through a staging rename, so a
+/// concurrent reader of the same directory's file sees whole bytes.
+fn url_file(url: &str, data: &Path) -> std::path::PathBuf {
+    let schema = Backend::test_schema(data);
+    let file = std::env::temp_dir().join(format!("scion-url-{}-{schema}", std::process::id()));
+    let n = staging().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = file.with_extension(format!("tmp{n}"));
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .unwrap()
+            .write_all(url.as_bytes())
+            .unwrap();
+    }
+    fs::rename(tmp, &file).unwrap();
+    file
 }
 
 impl Server {
@@ -270,6 +294,16 @@ impl Server {
         }
         if raw.contains("127.0.0.1:7878") {
             subs.push(("127.0.0.1:7878", "127.0.0.1:0"));
+        }
+        // The guide's lines name the metadata URL file where they once
+        // named nothing: the test's URL rides the same flag, in a 0600
+        // file (the token file's pattern), so the spawn carries the URL
+        // the way the guide writes it and the runbook's own line runs.
+        let url_path;
+        if raw.contains("/etc/scion/db-url") {
+            let url = postgres_url(data);
+            url_path = url_file(&url, data).to_str().unwrap().to_owned();
+            subs.push(("/etc/scion/db-url", url_path.as_str()));
         }
         let block = runbook_block_with(heading, " serve", &subs);
         let line = block
@@ -490,8 +524,13 @@ impl Server {
             // libpq `options` parameter, which the open merges with its own
             // options, so the tables and rows of this directory land in it.
             // It rides the environment (no binary takes a secret as a
-            // flag), so the spawn carries it whatever the subcommand.
-            if let Some(url) = &postgres_url {
+            // flag), so the spawn carries it whatever the subcommand -
+            // unless the guide's own argv already names a URL file: the
+            // two forms together are refused ("give one, not both"),
+            // and the file is the form the runbook writes.
+            if let Some(url) = &postgres_url
+                && !argv.iter().any(|p| p == "--postgres-url-file")
+            {
                 cmd.env("SCION_POSTGRES_URL", url);
             }
             cmd.args(serve_args);
