@@ -632,16 +632,42 @@ impl Vfs {
     /// here, once. The caller must have re-checked under the same lock
     /// that the directory is a `Dir` that is not listed yet.
     fn insert_listing(nodes: &mut Nodes, id: u64, fetched: Option<Tree>) -> Result<(), nfsstat3> {
-        let dir_path = nodes
-            .by_id
-            .get(&id)
-            .ok_or(nfsstat3::NFS3ERR_STALE)?
-            .path
-            .clone();
+        // The slot is checked before anything is added: a node gone or no
+        // longer a directory is a stale handle here, before the first add
+        // (#1392). The insert is all-or-nothing: pass one checks every
+        // entry's name and builds its kind, and a refused name leaves the
+        // node maps and the listing untouched. A walk that added as it
+        // went would leave its own orphans in by_path, and the next walk
+        // would drop them from the listing for good.
+        let (dir_path, is_dir) = {
+            let node = nodes.by_id.get(&id).ok_or(nfsstat3::NFS3ERR_STALE)?;
+            (node.path.clone(), node.kind.is_dir())
+        };
+        if !is_dir {
+            return Err(nfsstat3::NFS3ERR_STALE);
+        }
         let mut listed: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
         if let Some(tree) = fetched {
+            let mut kept: Vec<(Vec<u8>, RepoPath, Kind)> = Vec::new();
             for (name, entry) in tree.entries() {
-                let path = Self::child(dir_path.as_ref(), name.as_bytes())?;
+                let path = match Self::child(dir_path.as_ref(), name.as_bytes()) {
+                    Ok(path) => path,
+                    Err(stat) => {
+                        let note = format!(
+                            "{}: {:?}: {stat:?}",
+                            dir_path.as_ref().map_or_else(
+                                || "<unnamed>".to_owned(),
+                                |p| String::from_utf8_lossy(p.as_bytes()).to_string()
+                            ),
+                            String::from_utf8_lossy(name.as_bytes()),
+                        );
+                        warn(
+                            "a tree entry's name is refused, the directory stays unlisted",
+                            &note,
+                        );
+                        return Err(nfsstat3::NFS3ERR_IO);
+                    }
+                };
                 if nodes.deleted.contains(&path) || nodes.by_path.contains_key(&Some(path.clone()))
                 {
                     continue;
@@ -671,8 +697,14 @@ impl Vfs {
                         (FileState::Gitlink { .. }, _) => continue,
                     },
                 };
+                kept.push((name.as_bytes().to_vec(), path, kind));
+            }
+            // Nothing above this loop can fail, and nothing in it can:
+            // the walk that adds runs to its end, and the listing is set
+            // right after.
+            for (name, path, kind) in kept {
                 let child = Self::add(nodes, Some(path), kind, true);
-                listed.insert(name.as_bytes().to_vec(), child);
+                listed.insert(name, child);
             }
         }
         let node = nodes.by_id.get_mut(&id).ok_or(nfsstat3::NFS3ERR_STALE)?;
@@ -2038,10 +2070,11 @@ mod tests {
     use super::*;
     use scion_core::{Changeset, FileEntry, FileState, IdentityTime, PathElem};
     use scion_proto::runtime::listen::Limits;
+    use scion_proto::runtime::object::Header;
     use scion_proto::v1::objects_server::{Objects, ObjectsServer};
     use scion_proto::v1::{
-        GetObjectsRequest as Fetch, GetRootTreeRequest as Ask, GetRootTreeResponse, ObjectPart,
-        ResolveRefRequest, ResolveRefResponse,
+        GetObjectsRequest as Fetch, GetRootTreeRequest as Ask, GetRootTreeResponse, ObjectKind,
+        ObjectPart, ResolveRefRequest, ResolveRefResponse,
     };
     use scion_server::test_support::meta::{Meta as _, MetaTx as _};
     use scion_server::{
@@ -2061,6 +2094,10 @@ mod tests {
     /// (`READ_STALL_TIMEOUT` 120 s, `REQUEST_TIMEOUT` 600 s).
     const READS: std::time::Duration = std::time::Duration::from_secs(5);
 
+    /// The poison the mock holds: a tree id and the bytes it serves for
+    /// that id instead of the real root (#1392).
+    type Poison = Arc<SyncMutex<Option<(TreeId, Vec<u8>)>>>;
+
     /// The mount's upstream with one ref parked: a `get_objects` whose
     /// refs name the armed path waits on the gate until it opens, then
     /// forwards the request to the server. Every other call forwards at
@@ -2072,6 +2109,10 @@ mod tests {
         park: Arc<SyncMutex<Option<Vec<u8>>>>,
         gate: tokio::sync::watch::Receiver<bool>,
         arrived: Arc<AtomicUsize>,
+        /// When armed, the tree id and bytes the mock serves instead of
+        /// the real root: `get_root_tree` names this id, and the tree
+        /// fetch for it gets these bytes (#1392).
+        poison: Poison,
     }
 
     #[tonic::async_trait]
@@ -2089,7 +2130,11 @@ mod tests {
             request: Request<Ask>,
         ) -> Result<Response<GetRootTreeResponse>, Status> {
             let mut real = self.real.clone();
-            real.get_root_tree(request).await
+            let mut reply = real.get_root_tree(request).await?.into_inner();
+            if let Some((tree_id, _)) = self.poison.lock().unwrap().clone() {
+                reply.tree_id = tree_id.as_bytes().to_vec();
+            }
+            Ok(Response::new(reply))
         }
 
         type GetObjectsStream =
@@ -2099,6 +2144,29 @@ mod tests {
             &self,
             request: Request<Fetch>,
         ) -> Result<Response<Self::GetObjectsStream>, Status> {
+            // The poisoned tree's bytes go out for its own id: the vfs
+            // hash-checks the reply against the id it asked for, so the
+            // bytes must be the tree the id was made from (#1392).
+            if let Some((tree_id, bytes)) = self.poison.lock().unwrap().clone()
+                && request
+                    .get_ref()
+                    .refs
+                    .iter()
+                    .any(|r| r.id.as_slice() == tree_id.as_bytes())
+            {
+                let len = bytes.len();
+                let header = Header {
+                    kind: ObjectKind::Tree,
+                    id: *tree_id.as_bytes(),
+                    encoding: Encoding::Raw,
+                    encoded_size: len,
+                    size: len,
+                };
+                let parts = header.parts(vec![scion_proto::Bytes::from(bytes)]);
+                let stream: Self::GetObjectsStream =
+                    Box::pin(tokio_stream::iter(parts.into_iter().map(Ok)));
+                return Ok(Response::new(stream));
+            }
             // The armed path is copied out before the wait: the guard
             // must not sit across the await.
             let want = self.park.lock().unwrap().clone();
@@ -2130,6 +2198,7 @@ mod tests {
         path: Arc<SyncMutex<Option<Vec<u8>>>>,
         gate: tokio::sync::watch::Sender<bool>,
         arrived: Arc<AtomicUsize>,
+        poison: Poison,
     }
 
     impl Park {
@@ -2147,6 +2216,11 @@ mod tests {
         fn open(&self) {
             self.gate.send(true).unwrap();
         }
+
+        /// Ends the poisoning: every call forwards to the real server.
+        fn disarm(&self) {
+            *self.poison.lock().unwrap() = None;
+        }
     }
 
     /// A server with a repo whose `main` holds `files`, and a mount of
@@ -2154,6 +2228,10 @@ mod tests {
     struct Test {
         vfs: Vfs,
         park: Park,
+        /// The mock upstream's URL, for a second mount in the same test.
+        url: String,
+        /// The landed changeset the first mount pinned.
+        base: ChangesetId,
         #[allow(dead_code)]
         // Keeps the server's and the overlay's directories alive.
         dirs: [TempDir; 2],
@@ -2176,19 +2254,24 @@ mod tests {
     /// Serves the mock upstream on its own listener: every call forwards
     /// to the server at `real`, and the armed ref's fetches wait on the
     /// returned park. The mount's clients point at the mock's URL (#1387).
-    async fn serve_park(real: crate::client::Objects) -> (Park, String) {
+    async fn serve_park(
+        real: crate::client::Objects,
+        poison: Option<(TreeId, Vec<u8>)>,
+    ) -> (Park, String) {
         let (gate, gate_rx) = tokio::sync::watch::channel(false);
         let arrived = Arc::new(AtomicUsize::new(0));
         let park = Park {
             path: Arc::new(SyncMutex::new(None)),
             gate,
             arrived: arrived.clone(),
+            poison: Arc::new(SyncMutex::new(poison)),
         };
         let parked = Parked {
             real,
             park: park.path.clone(),
             gate: gate_rx,
             arrived,
+            poison: park.poison.clone(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -2201,10 +2284,14 @@ mod tests {
     }
 
     /// Starts a server, lands `files` as `main`, and mounts the ref.
-    /// Starts a server, lands `files` as `main`, and mounts the ref.
     /// A file is `Some(exec)` for a regular file, `None` for a symlink
-    /// whose blob holds the target bytes.
-    async fn start(files: &[(&str, &[u8], Option<bool>)]) -> Test {
+    /// whose blob holds the target bytes. With `poison`, the mount's root
+    /// tree is `tree_id` instead of the ref's, and its bytes come from the
+    /// mock (#1392).
+    async fn start_inner(
+        files: &[(&str, &[u8], Option<bool>)],
+        poison: Option<(TreeId, Vec<u8>)>,
+    ) -> Test {
         let data = scion_server::test_support::private_tempdir();
         let overlay = tempfile::tempdir().unwrap();
         let store = Backend::open_test(&data.path().join("store")).unwrap();
@@ -2276,10 +2363,9 @@ mod tests {
         // call to the server and parks the armed ref's fetches, so a test
         // can hold one cold directory's tree fetch and watch the mount's
         // other calls answer around it (#1387).
-        let (park, mock_url) = serve_park(client.clone()).await;
+        let (park, mock_url) = serve_park(client.clone(), poison).await;
         let client = crate::client::test_objects(&mock_url, TOKEN).await;
-        // The server of the mount: the client that mints fresh tickets.
-        let roots = crate::client::test_objects(&mock_url, TOKEN).await;
+        let roots = client.clone();
         let reply = client
             .clone()
             .get_root_tree(GetRootTreeRequest {
@@ -2308,8 +2394,15 @@ mod tests {
         Test {
             vfs,
             park,
+            url: mock_url,
+            base,
             dirs: [data, overlay],
         }
+    }
+
+    /// A mount whose upstream serves the landed files as they are.
+    async fn start(files: &[(&str, &[u8], Option<bool>)]) -> Test {
+        start_inner(files, None).await
     }
 
     /// Looks up `path` from the root.
@@ -2404,6 +2497,171 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(c, a, "the third lookup answers the same id");
+    }
+
+    /// A tree with two valid names and a refused one between them: the
+    /// name carries a control character, which the tree format carries
+    /// and the name check refuses (#1392).
+    fn poisoned_tree() -> Tree {
+        let blob = BlobId::of(b"content\n");
+        let file = |name: &str| {
+            (
+                PathElem::new(name).unwrap(),
+                Entry::File(FileEntry::new(
+                    FileState::Regular {
+                        content: blob,
+                        executable: false,
+                    },
+                    8,
+                )),
+            )
+        };
+        Tree::new(BTreeMap::from([
+            file("a.txt"),
+            file("b\u{1}d"),
+            file("z.txt"),
+        ]))
+        .unwrap()
+    }
+
+    /// The listing insert changes nothing unless every entry is valid:
+    /// a refused name leaves no node added, and the next listing - the
+    /// tree the upstream serves once the bad name is gone - holds every
+    /// valid name. A walk that added as it went would leave a.txt in
+    /// `by_path`, and the clean listing would drop it for good (#1392).
+    #[test]
+    fn a_refused_entry_leaves_no_orphans_for_the_next_listing() {
+        let mut nodes = Nodes {
+            next: 2,
+            by_id: BTreeMap::from([(
+                ROOT_ID,
+                Node {
+                    path: None,
+                    kind: Kind::Dir {
+                        tree: None,
+                        listed: None,
+                    },
+                    #[cfg(feature = "unstable-writable-mount")]
+                    from_ref: true,
+                },
+            )]),
+            by_path: HashMap::from([(None, ROOT_ID)]),
+            deleted: HashSet::new(),
+        };
+        let poisoned = poisoned_tree();
+        let first = Vfs::insert_listing(&mut nodes, ROOT_ID, Some(poisoned));
+        assert!(first.is_err(), "the refused name must fail the listing");
+        assert_eq!(
+            nodes.by_path.len(),
+            1,
+            "the refusal must leave no node added: by_path {:?}",
+            nodes.by_path
+        );
+        assert!(
+            matches!(first, Err(nfsstat3::NFS3ERR_IO)),
+            "the refusal must answer IO, got {first:?}"
+        );
+        let clean = Tree::new(BTreeMap::from([
+            (
+                PathElem::new("a.txt").unwrap(),
+                Entry::File(FileEntry::new(
+                    FileState::Regular {
+                        content: BlobId::of(b"content\n"),
+                        executable: false,
+                    },
+                    8,
+                )),
+            ),
+            (
+                PathElem::new("z.txt").unwrap(),
+                Entry::File(FileEntry::new(
+                    FileState::Regular {
+                        content: BlobId::of(b"content\n"),
+                        executable: false,
+                    },
+                    8,
+                )),
+            ),
+        ]))
+        .unwrap();
+        Vfs::insert_listing(&mut nodes, ROOT_ID, Some(clean)).unwrap();
+        let Kind::Dir {
+            listed: Some(listed),
+            ..
+        } = &nodes.by_id[&ROOT_ID].kind
+        else {
+            panic!("the clean tree must set the listing");
+        };
+        let names: Vec<String> = listed
+            .keys()
+            .map(|n| String::from_utf8_lossy(n).to_string())
+            .collect();
+        assert_eq!(
+            names,
+            ["a.txt".to_owned(), "z.txt".to_owned()],
+            "the clean listing must hold both valid names"
+        );
+    }
+
+    /// The whole directory answers the refusal, and keeps answering it:
+    /// the listing never comes back partial, and a mount whose tree is
+    /// good lists fully (#1392).
+    #[tokio::test]
+    async fn a_refused_root_entry_fails_every_listing_until_the_tree_is_good() {
+        let bytes = poisoned_tree().encode();
+        let (tree, tree_id) = Tree::decode_with_id(&bytes).unwrap();
+        let _ = tree;
+        let test = start_inner(
+            &[("p0", b"kept\n".as_slice(), Some(false))],
+            Some((tree_id, bytes)),
+        )
+        .await;
+        let root = NFSFileSystem::root_dir(&test.vfs);
+        // The first listing answers the refusal, never a partial listing.
+        let first = test.vfs.readdir(root, 0, 100).await;
+        assert!(
+            matches!(first, Err(nfsstat3::NFS3ERR_IO)),
+            "the poisoned root must answer IO, got {first:?}"
+        );
+        // The second listing stays failed the same way: the directory
+        // never lies about what it holds.
+        let again = test.vfs.readdir(root, 0, 100).await;
+        assert!(
+            matches!(again, Err(nfsstat3::NFS3ERR_IO)),
+            "the second listing must fail the same way, got {again:?}"
+        );
+        // A mount whose tree is good lists fully: the refusal names the
+        // tree, not the mount.
+        test.park.disarm();
+        let client = crate::client::test_objects(&test.url, TOKEN).await;
+        let roots = crate::client::test_objects(&test.url, TOKEN).await;
+        let reply = client
+            .clone()
+            .get_root_tree(GetRootTreeRequest {
+                repo: REPO.to_owned(),
+                changeset_id: test.base.as_bytes().to_vec(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        let overlay = tempfile::tempdir().unwrap();
+        let vfs = Vfs::new(
+            client,
+            roots,
+            REPO.to_owned(),
+            test.base,
+            id_from(&reply.tree_id).unwrap(),
+            &reply.ticket,
+            overlay.path().to_path_buf(),
+        )
+        .expect("the clean vfs is made");
+        let root = NFSFileSystem::root_dir(&vfs);
+        let listed = vfs.readdir(root, 0, 100).await.unwrap();
+        let names: Vec<Vec<u8>> = listed.entries.iter().map(|e| e.name.0.clone()).collect();
+        assert!(
+            names.contains(&b"p0".to_vec()),
+            "the clean mount lists its file, got {names:?}"
+        );
     }
 
     #[tokio::test]
@@ -2705,6 +2963,8 @@ mod tests {
         let test = Test {
             vfs: test.vfs.writable(false),
             park: test.park,
+            url: test.url,
+            base: test.base,
             dirs: test.dirs,
         };
         let root = NFSFileSystem::root_dir(&test.vfs);
