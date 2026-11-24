@@ -392,7 +392,7 @@ fn created_changesets_have_the_expected_root_tree() {
         std::time::Instant::now() + std::time::Duration::from_secs(300),
     );
     let lookup = |cs, p: &str| {
-        let root = tree::root_tree(&f.store, repo, cs, &deadline).unwrap();
+        let root = tree::root_tree(&f.store, repo, cs, &deadline, None).unwrap();
         f.store.read(|c| tree::lookup(c, root, &path(p))).unwrap()
     };
     // The tree lens reads the stored blob files, so entries carry true lengths.

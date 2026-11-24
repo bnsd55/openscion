@@ -591,7 +591,7 @@ fn point_ref(store: &Backend, repo: RepoId, name: &str, tip: ChangesetId) -> Res
     // reads O(log n) nodes of the derived commit graph, and stops at the
     // deadline of a job with no call of its own.
     let deadline = Deadline::new(Instant::now() + CALL_LIMIT);
-    let contains = |head, cs| graph::is_ancestor(store, repo, cs, head, &deadline);
+    let contains = |head, cs| graph::is_ancestor(store, repo, cs, head, &deadline, None);
     for attempt in 0..REF_TRIES {
         let current = store.read(|c| c.get_ref(repo, name))?;
         if let Some(current) = current {

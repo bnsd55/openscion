@@ -416,10 +416,11 @@ pub use history::{PathHistory, backfill_path_history};
 pub use import::set_import_per_commit_txs;
 pub use import::{ImportOptions, ImportReport, import_git};
 pub use pg::{SchemaCheck, check_db_url, check_schema, migrate_store};
-pub use quotas::Quotas;
+pub use quotas::{Quotas, Shares};
 pub use reply::REPLY_MEMORY_BUDGET;
 pub use scion_proto::runtime::metrics::Metrics;
 pub use service::{ServeOptions, serve};
+pub use store::DERIVE_WALKS_CAP;
 // `ServeOptions` is public and holds the audit handle, so the handle is
 // public too; unreachable_pub does not see through the re-export.
 #[allow(unreachable_pub)]

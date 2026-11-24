@@ -97,6 +97,7 @@ async fn served() -> (
             limits: Limits::default(),
             quotas: scion_server::Quotas::off(),
             audit: scion_server::test_support::audit::Audit::off(),
+            walk_share: 0,
             pending_lands: None,
             land_stale_secs: 1 << 40,
             tls: None,

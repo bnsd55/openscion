@@ -49,9 +49,10 @@ pub fn root_tree(
     repo: &str,
     cs: ChangesetId,
     deadline: &Deadline,
+    principal: Option<&str>,
 ) -> Result<TreeId> {
     let repo = store.read(|c| c.repo_id(repo))?;
-    tree::root_tree(store, repo, cs, deadline)
+    tree::root_tree(store, repo, cs, deadline, principal)
 }
 
 /// The content of a regular file, or the target of a symlink.
@@ -70,10 +71,11 @@ pub fn read_file(
     cs: ChangesetId,
     path: &RepoPath,
     deadline: &Deadline,
+    principal: Option<&str>,
 ) -> Result<Vec<u8>> {
     store
         .blobs()
-        .get(file_blob(store, repo, cs, path, deadline)?)
+        .get(file_blob(store, repo, cs, path, deadline, principal)?)
 }
 
 /// The blob of a regular file, or of a symlink's target.
@@ -87,8 +89,9 @@ pub fn file_blob(
     cs: ChangesetId,
     path: &RepoPath,
     deadline: &Deadline,
+    principal: Option<&str>,
 ) -> Result<BlobId> {
-    let root = root_tree(store, repo, cs, deadline)?;
+    let root = root_tree(store, repo, cs, deadline, principal)?;
     file_blob_at(store, root, path)
 }
 
@@ -161,7 +164,15 @@ pub fn log(
     let mut next = Some(cs);
     let deadline = Deadline::new(std::time::Instant::now() + crate::deadline::CALL_LIMIT);
     while let Some(from) = next.filter(|_| entries.len() < limit) {
-        let page = log_page(store, repo, from, None, limit - entries.len(), &deadline)?;
+        let page = log_page(
+            store,
+            repo,
+            from,
+            None,
+            limit - entries.len(),
+            &deadline,
+            None,
+        )?;
         entries.extend(page.entries);
         next = page.next;
     }
@@ -194,6 +205,7 @@ pub fn log_page(
     path: Option<&RepoPath>,
     limit: usize,
     deadline: &Deadline,
+    principal: Option<&str>,
 ) -> Result<LogPage> {
     let limit = limit.min(MAX_SCAN);
     let Some(path) = path else {
@@ -253,7 +265,7 @@ pub fn log_page(
         });
     };
     let repo = store.read(|c| c.repo_id(repo))?;
-    derived::get_by::<PathHistory>(store, repo, cs, deadline)?;
+    derived::get_by::<PathHistory>(store, repo, cs, deadline, principal)?;
     // Each statement sees its own snapshot, and none needs another's: a
     // changeset, a node and a value of this version never change and are
     // never removed, and a node is stored in the transaction of the value
@@ -427,9 +439,10 @@ pub fn is_ancestor(
     ancestor: ChangesetId,
     descendant: ChangesetId,
     deadline: &Deadline,
+    principal: Option<&str>,
 ) -> Result<bool> {
     let repo = store.read(|c| c.repo_id(repo))?;
-    graph::is_ancestor(store, repo, ancestor, descendant, deadline)
+    graph::is_ancestor(store, repo, ancestor, descendant, deadline, principal)
 }
 
 /// The best common ancestors of `a` and `b`, over all parents: every common
@@ -453,9 +466,10 @@ pub fn merge_base(
     a: ChangesetId,
     b: ChangesetId,
     deadline: &Deadline,
+    principal: Option<&str>,
 ) -> Result<Vec<ChangesetId>> {
     let repo = store.read(|c| c.repo_id(repo))?;
-    graph::merge_bases(store, repo, a, b, deadline)
+    graph::merge_bases(store, repo, a, b, deadline, principal)
 }
 
 /// Most paths one `Diff` call returns. Each path costs at most one tree read
@@ -578,6 +592,7 @@ pub struct DiffPage {
 /// # Errors
 ///
 /// [`Error::NotFound`] if the repo or a changeset does not exist.
+#[allow(clippy::too_many_arguments)] // the two snapshots, the scope, and the caller's share
 pub fn diff(
     store: &Backend,
     repo: &str,
@@ -586,6 +601,7 @@ pub fn diff(
     path: Option<&RepoPath>,
     after: Option<&RepoPath>,
     deadline: &Deadline,
+    principal: Option<&str>,
 ) -> Result<DiffPage> {
     diff_with(
         store,
@@ -596,6 +612,7 @@ pub fn diff(
         after,
         max_rename_entries(),
         deadline,
+        principal,
     )
 }
 
@@ -962,10 +979,11 @@ pub fn diff_with(
     after: Option<&RepoPath>,
     rename_entries: usize,
     deadline: &Deadline,
+    principal: Option<&str>,
 ) -> Result<DiffPage> {
     let roots = (
-        root_tree(store, repo, old, deadline)?,
-        root_tree(store, repo, new, deadline)?,
+        root_tree(store, repo, old, deadline, principal)?,
+        root_tree(store, repo, new, deadline, principal)?,
     );
     let key = RenameKey {
         old: roots.0,
@@ -1346,7 +1364,16 @@ mod tests {
         // The walk visits every link - each commit changes `f0` - and
         // stops at the 513th, whose check first sees 512 rows of 1,024
         // bytes: 512 entries, one per link, and a cursor at the 513th.
-        let page = log_page(&store, "r", ids[519], Some(&path("f0")), 1000, &later()).unwrap();
+        let page = log_page(
+            &store,
+            "r",
+            ids[519],
+            Some(&path("f0")),
+            1000,
+            &later(),
+            None,
+        )
+        .unwrap();
         assert_eq!(
             page.entries.len(),
             512,
@@ -1361,7 +1388,7 @@ mod tests {
         );
         // A call from the cursor continues down the 8 remaining links and
         // ends the history there.
-        let rest = log_page(&store, "r", ids[7], Some(&path("f0")), 1000, &later()).unwrap();
+        let rest = log_page(&store, "r", ids[7], Some(&path("f0")), 1000, &later(), None).unwrap();
         assert_eq!(rest.entries.len(), 8, "the rest of the history, 520 - 512");
         assert_eq!(rest.entries[0].0, ids[7]);
         assert_eq!(rest.next, None, "the walk reached the root");

@@ -2337,7 +2337,6 @@ mod tests {
                 Ok(id)
             })
             .unwrap();
-
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(service::serve(
@@ -2350,6 +2349,7 @@ mod tests {
                 limits: Limits::default(),
                 quotas: scion_server::Quotas::off(),
                 pending_lands: None,
+                walk_share: 0,
                 land_stale_secs: 1 << 40,
                 tls: None,
                 metrics: std::sync::Arc::new(scion_server::Metrics::default()),
@@ -2359,13 +2359,11 @@ mod tests {
             std::future::pending(),
         ));
         let client = crate::client::test_objects(&url, TOKEN).await;
-        // The upstream the mount talks to: the mock, which forwards every
-        // call to the server and parks the armed ref's fetches, so a test
-        // can hold one cold directory's tree fetch and watch the mount's
-        // other calls answer around it (#1387).
+        // The upstream the mount talks to: the mock, which forwards every call
+        // to the server and parks the armed ref's fetches, so a test can hold
+        // one cold directory's tree fetch and watch the mount's other calls
         let (park, mock_url) = serve_park(client.clone(), poison).await;
         let client = crate::client::test_objects(&mock_url, TOKEN).await;
-        let roots = client.clone();
         let reply = client
             .clone()
             .get_root_tree(GetRootTreeRequest {
@@ -2377,8 +2375,8 @@ mod tests {
             .into_inner();
         let root = id_from(&reply.tree_id).unwrap();
         let vfs = Vfs::new(
+            client.clone(),
             client,
-            roots,
             REPO.to_owned(),
             base,
             root,
@@ -2387,8 +2385,8 @@ mod tests {
         )
         .expect("the vfs is made");
         // The unit tests of the VFS carry writes: a `--unstable-writable`
-        // mount is what they exercise. A build without the feature has no
-        // write path; its tests here are the read-side ones.
+        // mount is what they exercise; a build without the feature has no
+        // write path, and its tests here are the read-side ones.
         #[cfg(feature = "unstable-writable-mount")]
         let vfs = vfs.writable(true);
         Test {
