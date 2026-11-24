@@ -574,8 +574,18 @@ impl Limits {
             .max_concurrent_streams(self.streams.get())
             .http2_keepalive_interval(Some(accepting.keepalive))
             .http2_keepalive_timeout(Some(accepting.keepalive_timeout))
-            .max_connection_age(accepting.age)
-            .max_connection_age_grace(accepting.grace);
+            // The age alone, never with the grace: tonic 0.14.9's
+            // connection timer (its src/transport/server/mod.rs, around
+            // lines 926-937) sleeps age plus grace and breaks the
+            // connection when a grace is set - the graceful arm, the one
+            // that sends the HTTP/2 GOAWAY and lets the calls in flight
+            // finish, runs only when there is no grace. With both set,
+            // the soak's client lost every call that was in the
+            // connection at the age, with no GOAWAY on the wire at all.
+            // The close at the grace is ours instead: the connection IO
+            // ends the connection at its age plus its grace, whatever
+            // call is still in it. A tonic bump must check this again.
+            .max_connection_age(accepting.age);
         // The accept path owns the shutdown future and sets the watch when
         // it resolves (or when the listener ends); the serve below reads
         // the same watch, so the drain starts at the signal itself.
@@ -942,6 +952,8 @@ fn spawn_tls_accepted<IO>(
         max,
         handshake,
         wait,
+        age,
+        grace,
         stalled_bytes,
         total,
         waits,
@@ -989,6 +1001,7 @@ fn spawn_tls_accepted<IO>(
                         preface,
                         stalled: Stalled::new(peer, stalled_bytes, metrics, total),
                         born: std::time::Instant::now(),
+                        end: Some(hard_end(age, grace)),
                         first_poll: true,
                     }))
                     .await;
@@ -1129,6 +1142,8 @@ where
         max,
         handshake,
         wait,
+        age,
+        grace,
         stalled_bytes,
         total,
         waits,
@@ -1232,6 +1247,7 @@ where
                         preface: Some((PREFACE_BYTES, Box::pin(tokio::time::sleep(handshake)))),
                         stalled: Stalled::new(peer, stalled_bytes, metrics, total),
                         born,
+                        end: Some(hard_end(age, grace)),
                         first_poll: true,
                     }))
                     .await;
@@ -1296,9 +1312,32 @@ struct Connection<IO> {
     stalled: Stalled,
     /// When the socket reached the accept's task, for the first-poll mark.
     born: std::time::Instant,
+    /// When the connection must be fully over: the age plus the grace,
+    /// counted from the accept. The GOAWAY goes out at the age; this
+    /// end cuts whatever call is still in the connection at the grace.
+    end: Option<Pin<Box<Sleep>>>,
     /// Whether the server has read the connection yet: the first read
     /// logs itself once, with the wait it had.
     first_poll: bool,
+}
+
+impl<IO> Connection<IO> {
+    /// The connection's hard end, polled: the timer's own waker goes
+    /// with every poll, so the end fires with no traffic at all. An
+    /// end the IO only checked when bytes move would never fire on a
+    /// held call over a quiet peer, because hyper parks its read.
+    fn poll_end(&mut self, cx: &mut Context<'_>) -> Option<io::Error> {
+        match &mut self.end {
+            Some(end) => match end.as_mut().poll(cx) {
+                Poll::Ready(()) => Some(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "the connection passed its age and its grace",
+                )),
+                Poll::Pending => None,
+            },
+            None => None,
+        }
+    }
 }
 
 impl<IO> Connected for Connection<IO> {
@@ -1323,6 +1362,12 @@ impl<IO: AsyncRead + PeerOf + Unpin> AsyncRead for Connection<IO> {
                 thread = ?std::thread::current().id(),
                 "the server read the connection for the first time"
             );
+        }
+        // The hard end of the connection's age, polled, so it fires with
+        // no traffic: the GOAWAY went out at the age, and whatever call
+        // is still in the connection ends here, at the grace.
+        if let Some(error) = this.poll_end(cx) {
+            return Poll::Ready(Err(error));
         }
         // Over the limit, the connection is closed, so hyper frees what its
         // stalled streams hold.
@@ -1363,6 +1408,11 @@ impl<IO: AsyncWrite + Unpin> AsyncWrite for Connection<IO> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        // The same hard end on the write path: a connection past its
+        // grace takes no more bytes in either direction.
+        if let Some(error) = self.poll_end(cx) {
+            return Poll::Ready(Err(error));
+        }
         if self.stalled.over() {
             return Poll::Ready(Err(self.stalled.error()));
         }
@@ -1374,6 +1424,9 @@ impl<IO: AsyncWrite + Unpin> AsyncWrite for Connection<IO> {
         cx: &mut Context<'_>,
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
+        if let Some(error) = self.poll_end(cx) {
+            return Poll::Ready(Err(error));
+        }
         Pin::new(&mut self.io).poll_write_vectored(cx, bufs)
     }
 
@@ -1382,12 +1435,28 @@ impl<IO: AsyncWrite + Unpin> AsyncWrite for Connection<IO> {
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if let Some(error) = self.poll_end(cx) {
+            return Poll::Ready(Err(error));
+        }
         Pin::new(&mut self.io).poll_flush(cx)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if let Some(error) = self.poll_end(cx) {
+            return Poll::Ready(Err(error));
+        }
         Pin::new(&mut self.io).poll_shutdown(cx)
     }
+}
+
+/// The hard end of a connection: a sleep of its age plus its grace,
+/// counted from the accept, that the connection's IO polls in every
+/// read and write. Tonic's own age timer is given the age alone - with
+/// a grace set on it, no GOAWAY is ever sent (see the serve builder) -
+/// so the close at the grace is ours: the GOAWAY goes at the age, and
+/// this end cuts whatever call is still in the connection then.
+fn hard_end(age: Duration, grace: Duration) -> Pin<Box<Sleep>> {
+    Box::pin(tokio::time::sleep(age + grace))
 }
 
 /// Checks that only this user can reach `dir`: a real directory (not a
@@ -1515,6 +1584,18 @@ mod tests {
     /// A wait that ends at once when nothing holds the call back.
     const HELD: Duration = Duration::from_millis(500);
 
+    /// The hold of a call that must outlive the tail of a first
+    /// connection's grace, yet still finish inside a fresh connection's
+    /// age plus grace: longer than what is left of the grace, shorter
+    /// than the age plus the grace.
+    const HELD_SOON: Duration = Duration::from_millis(120);
+
+    /// The ref name whose call the stub holds for [`HELD`].
+    const HELD_REF: &str = "hold";
+
+    /// The repo name whose call the stub holds for [`HELD_SOON`].
+    const HELD_SOON_REF: &str = "hold-soon";
+
     /// Short timers, each of 100 ms, except `slow`.
     fn timers(slow: &str) -> Timers {
         let (short, long) = (Duration::from_millis(100), Duration::from_secs(3600));
@@ -1544,6 +1625,20 @@ mod tests {
             request: Request<ResolveRefRequest>,
         ) -> Result<Response<ResolveRefResponse>, Status> {
             let peer = Stalled::of(&request).and_then(|s| s.peer());
+            // A call the server holds before it answers, so a test can
+            // have a unary call in flight at a connection's end: the
+            // long hold outlives an age plus a grace, the short one only
+            // the tail of a grace.
+            let hold = if request.get_ref().name == HELD_REF {
+                Some(HELD)
+            } else if request.get_ref().repo == HELD_SOON_REF {
+                Some(HELD_SOON)
+            } else {
+                None
+            };
+            if let Some(hold) = hold {
+                tokio::time::sleep(hold).await;
+            }
             Err(Status::not_found(format!("no ref; peer is {peer:?}")))
         }
 
@@ -2053,10 +2148,45 @@ mod tests {
         client.get_objects(request).await.unwrap().into_inner()
     }
 
+    /// A `ResolveRef` call the server holds for [`HELD`] before it
+    /// answers, so a unary call can be in flight at a connection's end.
+    async fn held_call(client: &mut ObjectsClient<Channel>) -> Code {
+        let request = ResolveRefRequest {
+            name: HELD_REF.to_owned(),
+            ..Default::default()
+        };
+        client.resolve_ref(request).await.unwrap_err().code()
+    }
+
+    /// The same, held for [`HELD_SOON`]: it outlives the tail of a
+    /// first connection's grace, and finishes inside a fresh
+    /// connection's age plus grace.
+    async fn held_soon_call(client: &mut ObjectsClient<Channel>) -> Code {
+        let request = ResolveRefRequest {
+            repo: HELD_SOON_REF.to_owned(),
+            ..Default::default()
+        };
+        client.resolve_ref(request).await.unwrap_err().code()
+    }
+
     /// The code of a call that the stub answers at once.
     async fn quick(client: &mut ObjectsClient<Channel>) -> Code {
         let request = ResolveRefRequest::default();
         client.resolve_ref(request).await.unwrap_err().code()
+    }
+
+    /// The code and the served peer of a call that the stub answers at
+    /// once: the stub refuses with the peer in the message, so a call
+    /// that reaches it names the connection it rode.
+    async fn quick_with_peer(client: &mut ObjectsClient<Channel>) -> (Code, String) {
+        let request = ResolveRefRequest::default();
+        let error = client.resolve_ref(request).await.unwrap_err();
+        let peer = error
+            .message()
+            .split_once("peer is ")
+            .map(|(_, peer)| peer.to_owned())
+            .unwrap_or_default();
+        (error.code(), peer)
     }
 
     /// The deadline the refusal tests put on their client's handshake
@@ -2661,6 +2791,7 @@ mod tests {
                 Arc::new(TotalBytes::new(1 << 20)),
             ),
             born: std::time::Instant::now(),
+            end: None,
             first_poll: false,
         });
         let mut cx = Context::from_waker(Waker::noop());
@@ -2817,6 +2948,85 @@ mod tests {
         assert!(closes_a_peer_that_sends(addr, b"PRI * HT").await);
     }
 
+    /// A call started after the age, inside the grace window: it must
+    /// land on a new connection and finish. Red on main: with both age
+    /// timers set, tonic never sends the GOAWAY, the call opens on the
+    /// doomed connection, and the force close at age + grace cuts it -
+    /// the soak's own shape. Green with the fix: the GOAWAY at the age
+    /// moves the client, so the call rides a new connection. (#1419)
+    #[tokio::test]
+    async fn a_call_started_in_the_grace_window_lands_on_a_new_connection() {
+        let (addr, _) = serve(Limits::default(), timers("keepalive")).await;
+        let mut client = ObjectsClient::new(endpoint(addr).connect().await.unwrap());
+        // One call before the age, so the first connection is served and
+        // its peer is known.
+        let (first, first_peer) = quick_with_peer(&mut client).await;
+        assert_eq!(first, Code::NotFound, "the first call reaches the stub");
+        // Past the age (100 ms), inside the grace (ends at 200 ms): a
+        // unary call that the server holds for 120 ms, so on main its
+        // answer lands after the force close at age + grace and the
+        // call dies with the connection - the soak's own shape.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let held = held_soon_call(&mut client).await;
+        assert_eq!(
+            held,
+            Code::NotFound,
+            "a call started in the grace window must finish"
+        );
+        // A later call rides the new connection, not the first one.
+        let (later, later_peer) = quick_with_peer(&mut client).await;
+        assert_eq!(later, Code::NotFound, "the later call reaches the stub");
+        assert!(
+            !later_peer.is_empty() && later_peer != first_peer,
+            "the calls after the age land on a new connection: first {first_peer}, later {later_peer}"
+        );
+    }
+
+    /// A call started before the age and still open past age + grace is
+    /// cut at about age + grace: the hard end at the grace closes
+    /// whatever is still in the connection, so a held call cannot hold
+    /// its place forever. The stub answers this call only after 500 ms,
+    /// so on a server that never cuts, the call completes instead - the
+    /// graceful shutdown alone would wait forever. (#1419)
+    #[tokio::test]
+    async fn a_call_held_past_the_grace_is_cut() {
+        let (addr, _) = serve(Limits::default(), timers("keepalive")).await;
+        let mut client = ObjectsClient::new(endpoint(addr).connect().await.unwrap());
+        // A unary call in flight from before the age: the server holds
+        // its answer for [`HELD`], so the call is still open at
+        // age + grace (200 ms) and would be answered at about 500 ms.
+        let held = tokio::time::timeout(Duration::from_secs(2), held_call(&mut client)).await;
+        let held = held.expect("the call must end, either by the cut or by its answer");
+        // The cut ends the call with a transport error. The stub's own
+        // answer would be `NotFound`: an answer means the call was
+        // served whole past the grace - no cut.
+        assert_ne!(
+            held,
+            Code::NotFound,
+            "the held call was answered past the grace: it was not cut"
+        );
+    }
+
+    /// A probe for #1419: does a served connection close at age + grace
+    /// at all? A peer that connects, sends the preface, and then reads:
+    /// with age = grace = 100 ms the connection must end at about
+    /// 200 ms, GOAWAY or no GOAWAY.
+    #[tokio::test]
+    async fn a_served_connection_ends_at_its_age_plus_grace() {
+        let (addr, _) = serve(Limits::default(), timers("keepalive")).await;
+        let opened = std::time::Instant::now();
+        assert!(
+            closes_a_peer_that_sends(
+                addr,
+                b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\x04\0\0\0\0\0"
+            )
+            .await,
+            "the served connection ends at its age plus grace"
+        );
+        let took = opened.elapsed();
+        println!("the connection ended after {took:?}");
+    }
+
     /// The served connection's peer reaches the stub: the audit's refusal
     /// lines name it, so a serve that attaches None makes every call
     /// anonymous. Over plain TCP.
@@ -2833,6 +3043,51 @@ mod tests {
             "the stub sees the loopback peer: {}",
             error.message()
         );
+    }
+
+    /// A client's new calls cross the connection age: the server asks
+    /// the connection to close at the age (a GOAWAY), and the client's
+    /// next calls move to a new connection. Only a call that runs longer
+    /// than the grace may be cut. (#1419: the soak's one connection
+    /// served new unary lands from the age to age + grace, then died
+    /// with a broken pipe.)
+    #[tokio::test]
+    async fn new_calls_cross_the_connection_age() {
+        let (addr, _) = serve(Limits::default(), timers("keepalive")).await;
+        let mut client = ObjectsClient::new(endpoint(addr).connect().await.unwrap());
+        let mut peers: Vec<String> = Vec::new();
+        let mut calls = 0usize;
+        let start = std::time::Instant::now();
+        // Continuous calls across the age (100 ms) and the grace (ends at
+        // 200 ms), the soak's own shape: back-to-back unary calls on one
+        // client while the connection passes its age.
+        while start.elapsed() < Duration::from_millis(400) {
+            let error = client
+                .resolve_ref(ResolveRefRequest::default())
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.code(),
+                Code::NotFound,
+                "call {} at {:?} must reach the stub: {}",
+                calls,
+                start.elapsed(),
+                error
+            );
+            let peer = error
+                .message()
+                .split_once("peer is ")
+                .map(|(_, p)| p.to_owned())
+                .unwrap_or_default();
+            println!("call {} at {:?}: peer {}", calls, start.elapsed(), peer);
+            if peers.last() != Some(&peer) {
+                peers.push(peer);
+            }
+            calls += 1;
+            tokio::time::sleep(Duration::from_millis(60)).await;
+        }
+        println!("calls across the age: {calls}, connections the calls landed on: {peers:?}");
+        assert!(calls > 5, "the calls ran: {calls}");
     }
 
     /// The same promise through the TLS accept path: the peer of a
