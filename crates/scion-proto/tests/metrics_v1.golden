@@ -357,6 +357,9 @@ scion_connections_refused_total
 # HELP scion_accept_errors_total Accepts the listener failed; a persistent failure leaves new clients unserved, and the accept task paces itself after failures.
 # TYPE scion_accept_errors_total counter
 scion_accept_errors_total
+# HELP scion_stalled_reply_bytes Bytes that stalled replies hold in HTTP/2, as one estimate per stalled reply.
+# TYPE scion_stalled_reply_bytes gauge
+scion_stalled_reply_bytes
 # HELP scion_calls_in_flight Calls whose reply body has not ended, as the count a drain still waits for.
 # TYPE scion_calls_in_flight gauge
 scion_calls_in_flight
