@@ -1771,9 +1771,10 @@ curl -s 127.0.0.1:9100/metrics | grep '^scion_busy_timeouts_total'
 grep 'request_id=' server.log | grep 'busy: no' | tail -20
 ```
 
-The audit log pairs each busy refusal with its call's principal and
-RPC; the per-principal request counts show which principal's calls
-repeat. Tell the causes apart:
+Each busy refusal writes one warn line in the server log, inside the
+call's span: the line names the limit under the metric's label, and the
+span carries the principal and the RPC that was refused, with the
+call's request id. Tell the causes apart:
 
 - One principal, again and again: it holds the limit's places with
   long calls. With `--access` the per-principal caps bound what one

@@ -437,9 +437,13 @@ fn take_walk_permit<'a>(
             Some(deadline) => {
                 // The wait ends within the busy bound, even when the call's
                 // own deadline is later, so one caller's holds cannot park
-                // another past the bound (#1391).
-                let busy_bound = walks.busy() < deadline.remaining();
-                let budget = walks.busy().min(deadline.remaining());
+                // another past the bound (#1391). One read of the remaining
+                // time serves both the choice and the wait: a second read
+                // could cross the bound between them and count a deadline
+                // end in the busy metric.
+                let remaining = deadline.remaining();
+                let busy_bound = walks.busy() < remaining;
+                let budget = walks.busy().min(remaining);
                 let (guard, result) = walks
                     .woken
                     .wait_timeout_while(in_flight, budget, |in_flight| {
@@ -453,6 +457,18 @@ fn take_walk_permit<'a>(
                         if busy_bound {
                             metrics.busy_timeout(BusyLimit::DeriveWalk);
                         }
+                    }
+                    if busy_bound {
+                        // One warn per refusal, as the slots' takes log
+                        // theirs: the call waited the busy bound first, so
+                        // the rate is bounded. A deadline end is the
+                        // caller's own time, not the limit's hold, and
+                        // stays unlogged. The worker job carries the
+                        // call's span (rpc, request_id, principal).
+                        tracing::warn!(
+                            limit = BusyLimit::DeriveWalk.label(),
+                            "busy: no derive walk free; retry later"
+                        );
                     }
                     return Err(if busy_bound {
                         Error::ResourceExhausted(
@@ -561,9 +577,12 @@ fn waited(
             }
             Some(deadline) => {
                 // The wait ends within the busy bound, even when the call's
-                // own deadline is later (#1391).
-                let busy_bound = walks.busy() < deadline.remaining();
-                let budget = walks.busy().min(deadline.remaining());
+                // own deadline is later (#1391). One read of the remaining
+                // time serves both the choice and the wait, as
+                // `take_walk_permit`'s does.
+                let remaining = deadline.remaining();
+                let busy_bound = walks.busy() < remaining;
+                let budget = walks.busy().min(remaining);
                 let (guard, result) = flight
                     .woken
                     .wait_timeout_while(walks_held, budget, |walks_held| *walks_held <= before)
@@ -574,6 +593,13 @@ fn waited(
                         if let Some(metrics) = walks.metrics.get() {
                             metrics.busy_timeout(BusyLimit::DeriveWalk);
                         }
+                        // One warn per refusal, as `take_walk_permit`'s:
+                        // the call waited the busy bound first, so the
+                        // rate is bounded.
+                        tracing::warn!(
+                            limit = BusyLimit::DeriveWalk.label(),
+                            "busy: no derive walk free; retry later"
+                        );
                         return WaitEnd::Busy;
                     }
                     return WaitEnd::Deadline;
@@ -2548,6 +2574,7 @@ mod tests {
 
     #[test]
     fn a_walk_wait_past_the_busy_bound_answers_busy() {
+        crate::service::test_init_log();
         let flights = DeriveFlights::with_walk_bytes(1, crate::memory::Bytes::named(1 << 20, "t"));
         flights.set_busy(Duration::from_millis(50));
         let metrics = std::sync::Arc::new(crate::metrics::Metrics::default());
@@ -2558,14 +2585,114 @@ mod tests {
         let _held = take_walk_permit(&flights, None, None).unwrap();
         let deadline =
             crate::deadline::Deadline::new(std::time::Instant::now() + Duration::from_secs(60));
+        // The call's span, the way the server's worker job carries one:
+        // the warn the refusal writes rides in it, and the request id
+        // names this test's line in the shared log buffer.
+        let span = tracing::error_span!(
+            "call",
+            rpc = "GetChangeset",
+            request_id = "busy-log-1417-permit",
+            principal = "default"
+        );
+        let guard = span.enter();
         let err = take_walk_permit(&flights, Some(&deadline), None)
             .err()
             .unwrap();
+        drop(guard);
         assert!(
             matches!(err, Error::ResourceExhausted(ref why) if why.contains("busy: no derive walk free; retry later")),
             "{err}"
         );
         assert_eq!(metrics.busy_timeouts(BusyLimit::DeriveWalk), 1);
+        // The refusal warned, inside the call's span, under the metric's
+        // own label.
+        let lines: Vec<String> = crate::service::test_log_text()
+            .lines()
+            .filter(|line| line.contains("busy-log-1417-permit"))
+            .map(std::borrow::ToOwned::to_owned)
+            .collect();
+        assert_eq!(lines.len(), 1, "ALL:\n{}", crate::service::test_log_text());
+        assert!(lines[0].contains("WARN"), "{}", lines[0]);
+        assert!(
+            lines[0].contains("busy: no derive walk free"),
+            "{}",
+            lines[0]
+        );
+        assert!(lines[0].contains("limit=\"derive_walk\""), "{}", lines[0]);
+        assert!(lines[0].contains("rpc=\"GetChangeset\""), "{}", lines[0]);
+    }
+
+    /// The waiter's busy end: a caller that joined a running walk, whose
+    /// wait ends at the busy bound, is refused with the busy answer and
+    /// its own warn line. Fails if the warn at `waited`'s busy end goes.
+    #[test]
+    fn a_joined_walk_wait_past_the_busy_bound_answers_busy() {
+        let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        crate::service::test_init_log();
+        COLD_DERIVES.store(0, Ordering::Relaxed);
+        let (_dir, store, repo, ids) = store_with(&chain(12));
+        let tip = *ids.last().unwrap();
+        store.derive_flights().set_busy(Duration::from_millis(50));
+        std::thread::scope(|scope| {
+            let _gate = gate_closed();
+            let owner = scope.spawn(|| {
+                let deadline = Deadline::new(Instant::now() + Duration::from_secs(60));
+                get_by::<Cold<1>>(&store, repo, tip, &deadline, None)
+            });
+            wait_entered(1);
+            // The waiter joins the walk mid-flight; its deadline is far,
+            // so only the busy bound can end its wait (#1391).
+            let waiter = scope.spawn(|| {
+                let deadline = Deadline::new(Instant::now() + Duration::from_secs(60));
+                // The call's span, the way the server's worker job
+                // carries one: the warn the refusal writes rides in it,
+                // and the request id names this test's line in the
+                // shared log buffer.
+                let span = tracing::error_span!(
+                    "call",
+                    rpc = "GetChangeset",
+                    request_id = "busy-log-1417-join",
+                    principal = "default"
+                );
+                let _guard = span.enter();
+                get_by::<Cold<1>>(&store, repo, tip, &deadline, None)
+            });
+            for _ in 0..2_000 {
+                if joined_on(&store, repo) >= 3 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(
+                joined_on(&store, repo) >= 3,
+                "the waiter never joined the flight"
+            );
+            let err = waiter.join().unwrap();
+            assert!(
+                matches!(&err, Err(Error::ResourceExhausted(why)) if why.contains("busy: no derive walk free; retry later")),
+                "{err:?}"
+            );
+            // The joiner's busy end warned: one line, inside its span,
+            // with the metric's own label. The owner's walk logs none: it
+            // never waits.
+            let lines: Vec<String> = crate::service::test_log_text()
+                .lines()
+                .filter(|line| line.contains("busy-log-1417-join"))
+                .map(std::borrow::ToOwned::to_owned)
+                .collect();
+            assert_eq!(lines.len(), 1, "ALL:\n{}", crate::service::test_log_text());
+            assert!(lines[0].contains("WARN"), "{}", lines[0]);
+            assert!(
+                lines[0].contains("busy: no derive walk free"),
+                "{}",
+                lines[0]
+            );
+            assert!(lines[0].contains("limit=\"derive_walk\""), "{}", lines[0]);
+            assert!(lines[0].contains("rpc=\"GetChangeset\""), "{}", lines[0]);
+            // The owner's walk goes on, and the gate lets it finish.
+            gate_open();
+            owner.join().unwrap().unwrap();
+        });
     }
 
     /// A principal at its walk share is refused at once, and another
