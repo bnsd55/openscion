@@ -580,8 +580,8 @@ impl Limits {
             // connection when a grace is set - the graceful arm, the one
             // that sends the HTTP/2 GOAWAY and lets the calls in flight
             // finish, runs only when there is no grace. With both set,
-            // the soak's client lost every call that was in the
-            // connection at the age, with no GOAWAY on the wire at all.
+            // the soak's client lost every call that was in flight at
+            // age + grace, with no GOAWAY on the wire at all.
             // The close at the grace is ours instead: the connection IO
             // ends the connection at its age plus its grace, whatever
             // call is still in it. A tonic bump must check this again.
@@ -1584,13 +1584,18 @@ mod tests {
     /// A wait that ends at once when nothing holds the call back.
     const HELD: Duration = Duration::from_millis(500);
 
+    /// The hold of a call that a test keeps in flight across age +
+    /// grace: longer than the age plus the grace, so the connection's
+    /// end overtakes the answer.
+    const HELD_LONG: Duration = Duration::from_millis(2500);
+
     /// The hold of a call that must outlive the tail of a first
     /// connection's grace, yet still finish inside a fresh connection's
     /// age plus grace: longer than what is left of the grace, shorter
     /// than the age plus the grace.
-    const HELD_SOON: Duration = Duration::from_millis(120);
+    const HELD_SOON: Duration = Duration::from_millis(1200);
 
-    /// The ref name whose call the stub holds for [`HELD`].
+    /// The ref name whose call the stub holds for [`HELD_LONG`].
     const HELD_REF: &str = "hold";
 
     /// The repo name whose call the stub holds for [`HELD_SOON`].
@@ -1607,6 +1612,21 @@ mod tests {
             age: pick("age"),
             grace: pick("age"),
             wait: short,
+        }
+    }
+
+    /// A one-second age and grace, for the tests that walk a call
+    /// across the connection's age: short enough to finish, wide
+    /// enough that a busy runner does not eat the margins between the
+    /// GOAWAY, the held call, and the new connection's own end.
+    fn age_timers() -> Timers {
+        Timers {
+            handshake: Duration::from_millis(100),
+            keepalive: Duration::from_millis(100),
+            keepalive_timeout: Duration::from_millis(100),
+            age: Duration::from_secs(1),
+            grace: Duration::from_secs(1),
+            wait: Duration::from_millis(100),
         }
     }
 
@@ -1630,7 +1650,7 @@ mod tests {
             // long hold outlives an age plus a grace, the short one only
             // the tail of a grace.
             let hold = if request.get_ref().name == HELD_REF {
-                Some(HELD)
+                Some(HELD_LONG)
             } else if request.get_ref().repo == HELD_SOON_REF {
                 Some(HELD_SOON)
             } else {
@@ -2148,8 +2168,9 @@ mod tests {
         client.get_objects(request).await.unwrap().into_inner()
     }
 
-    /// A `ResolveRef` call the server holds for [`HELD`] before it
-    /// answers, so a unary call can be in flight at a connection's end.
+    /// A `ResolveRef` call the server holds for [`HELD_LONG`] before it
+    /// answers, so a unary call can be in flight across a connection's
+    /// age and its grace.
     async fn held_call(client: &mut ObjectsClient<Channel>) -> Code {
         let request = ResolveRefRequest {
             name: HELD_REF.to_owned(),
@@ -2956,18 +2977,21 @@ mod tests {
     /// moves the client, so the call rides a new connection. (#1419)
     #[tokio::test]
     async fn a_call_started_in_the_grace_window_lands_on_a_new_connection() {
-        let (addr, _) = serve(Limits::default(), timers("keepalive")).await;
+        let (addr, _) = serve(Limits::default(), age_timers()).await;
         let mut client = ObjectsClient::new(endpoint(addr).connect().await.unwrap());
         // One call before the age, so the first connection is served and
         // its peer is known.
         let (first, first_peer) = quick_with_peer(&mut client).await;
         assert_eq!(first, Code::NotFound, "the first call reaches the stub");
-        // Past the age (100 ms), inside the grace (ends at 200 ms): a
-        // unary call that the server holds for 120 ms, so on main its
-        // answer lands after the force close at age + grace and the
-        // call dies with the connection - the soak's own shape.
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        let held = held_soon_call(&mut client).await;
+        // Past the age (1 s), inside the grace (ends at 2 s): a unary
+        // call that the server holds for 1.2 s, so its answer lands at
+        // about 2.7 s - after the force close at age + grace on main,
+        // and inside a fresh connection's age plus grace (3.5 s) with
+        // the fix.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let held = tokio::time::timeout(Duration::from_secs(10), held_soon_call(&mut client))
+            .await
+            .expect("the call started in the grace window must return");
         assert_eq!(
             held,
             Code::NotFound,
@@ -2983,19 +3007,21 @@ mod tests {
     }
 
     /// A call started before the age and still open past age + grace is
-    /// cut at about age + grace: the hard end at the grace closes
-    /// whatever is still in the connection, so a held call cannot hold
-    /// its place forever. The stub answers this call only after 500 ms,
-    /// so on a server that never cuts, the call completes instead - the
-    /// graceful shutdown alone would wait forever. (#1419)
+    /// cut at age + grace, not earlier: the hard end at the grace
+    /// closes whatever is still in the connection, so a held call
+    /// cannot hold its place forever, and a lost grace (a cut at the
+    /// age) is a regression. The stub answers this call only after 2.5
+    /// s, so on a server that never cuts, the call completes instead -
+    /// the graceful shutdown alone would wait forever. (#1419)
     #[tokio::test]
     async fn a_call_held_past_the_grace_is_cut() {
-        let (addr, _) = serve(Limits::default(), timers("keepalive")).await;
+        let (addr, _) = serve(Limits::default(), age_timers()).await;
         let mut client = ObjectsClient::new(endpoint(addr).connect().await.unwrap());
         // A unary call in flight from before the age: the server holds
-        // its answer for [`HELD`], so the call is still open at
-        // age + grace (200 ms) and would be answered at about 500 ms.
-        let held = tokio::time::timeout(Duration::from_secs(2), held_call(&mut client)).await;
+        // its answer for [`HELD_LONG`], so the call is still open at
+        // age + grace (2 s) and would be answered at about 2.5 s.
+        let started = std::time::Instant::now();
+        let held = tokio::time::timeout(Duration::from_secs(5), held_call(&mut client)).await;
         let held = held.expect("the call must end, either by the cut or by its answer");
         // The cut ends the call with a transport error. The stub's own
         // answer would be `NotFound`: an answer means the call was
@@ -3004,6 +3030,15 @@ mod tests {
             held,
             Code::NotFound,
             "the held call was answered past the grace: it was not cut"
+        );
+        // And the cut is no earlier than the grace: a connection whose
+        // end fires at the age (the grace lost) cuts this call at the
+        // age, half the promise. The cut must come at or after
+        // age + grace, with a small slack below for the runner.
+        let took = started.elapsed();
+        assert!(
+            took >= Duration::from_millis(1800),
+            "the call was cut before its grace ran out, at {took:?}"
         );
     }
 
