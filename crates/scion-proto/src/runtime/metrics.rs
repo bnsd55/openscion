@@ -989,19 +989,19 @@ impl Metrics {
         );
     }
 
-    /// What the stalled replies of the process's connections hold. Nothing
-    /// renders while no reply is stalled.
+    /// What the stalled replies of the process's connections hold. The
+    /// gauge renders from the start, at 0: an operator who greps the
+    /// export reads the zero as "no reply is stalled", not as a missing
+    /// series (#1409), the same shape `scion_busy_timeouts_total` takes.
     fn render_stalled(&self, text: &mut String) {
         use std::fmt::Write as _;
         let value = self.stalled_reply_bytes.load(Ordering::Relaxed);
-        if value > 0 {
-            let _ = writeln!(
-                text,
-                "# HELP scion_stalled_reply_bytes Bytes that stalled replies hold in HTTP/2, as one estimate per stalled reply.\n\
-                 # TYPE scion_stalled_reply_bytes gauge\n\
-                 scion_stalled_reply_bytes {value}"
-            );
-        }
+        let _ = writeln!(
+            text,
+            "# HELP scion_stalled_reply_bytes Bytes that stalled replies hold in HTTP/2, as one estimate per stalled reply.\n\
+             # TYPE scion_stalled_reply_bytes gauge\n\
+             scion_stalled_reply_bytes {value}"
+        );
         // The in-flight gauge always renders: a drain watcher reads it
         // before and during the stop, and zero is a reading.
         let _ = writeln!(
@@ -1746,14 +1746,14 @@ mod tests {
         assert_eq!(found, RPCS.len(), "the proto has rpcs the table misses");
     }
 
-    /// The stalled gauge hides until a reply stalls, so the golden of
-    /// the metric surface (`tests/metrics_golden.rs`) cannot exercise
-    /// it: its name, type and label set pin here instead.
+    /// The stalled gauge renders from the start, at 0: an operator who
+    /// greps the export on a quiet server reads the zero as "no reply is
+    /// stalled", not a missing series (#1409). The golden of the metric
+    /// surface (`tests/metrics_golden.rs`) cannot exercise the value a
+    /// hold carries, so that pins here.
     #[test]
-    fn the_stalled_gauge_renders_once_a_reply_holds_bytes() {
+    fn the_stalled_gauge_renders_from_the_start_at_zero() {
         let metrics = Metrics::default();
-        assert!(!metrics.render().contains("scion_stalled_reply_bytes"));
-        metrics.stalled_reply_held(512);
         let text = metrics.render();
         assert!(
             text.contains(
@@ -1766,9 +1766,14 @@ mod tests {
             text.contains("# TYPE scion_stalled_reply_bytes gauge\n"),
             "{text}"
         );
+        assert!(text.contains("scion_stalled_reply_bytes 0"), "{text}");
+        metrics.stalled_reply_held(512);
+        let text = metrics.render();
         assert!(text.contains("scion_stalled_reply_bytes 512"), "{text}");
         metrics.stalled_reply_freed(512);
-        assert!(!metrics.render().contains("scion_stalled_reply_bytes"));
+        let text = metrics.render();
+        // Back to 0, and still rendered: a reading of nothing held.
+        assert!(text.contains("scion_stalled_reply_bytes 0"), "{text}");
     }
 
     /// The Postgres pool metrics render with their names, units, and the
