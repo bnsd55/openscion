@@ -188,6 +188,11 @@ pub struct Metrics {
     host_memory_set: std::sync::atomic::AtomicBool,
     /// Derive walks in flight, and walks waiting for a permit.
     derive_walks_in_flight: AtomicU64,
+    /// Waits for a shared limit that found no room within the limit's
+    /// busy bound and answered with a retryable busy status, by limit
+    /// (`scion_busy_timeouts_total{limit}`): blame, diff, graph query,
+    /// read budget, derive walk. Never by principal.
+    busy_timeouts: [AtomicU64; BUSY_LIMITS.len()],
     derive_walks_waiting: AtomicU64,
     /// The bytes the paged diffs' rename maps hold in the read path's
     /// cache, as its cap reports.
@@ -233,6 +238,40 @@ pub struct Metrics {
 /// A metric name, as the index of its RPC.
 #[derive(Clone, Copy)]
 pub struct Rpc(usize);
+
+/// The shared limits whose waits end at a busy bound, as the label of
+/// `scion_busy_timeouts_total` and the index of its count.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BusyLimit {
+    /// A `Blame` call waiting for one of the blame slots.
+    Blame,
+    /// A `Diff` call waiting for one of the diff slots.
+    Diff,
+    /// A graph query (`MergeBase`, `IsAncestor`, `Log` with a path)
+    /// waiting for one of the graph-query slots.
+    GraphQuery,
+    /// A `ReadFile`, `ListDir` or `GetChangeset` reply waiting for the
+    /// shared read budget.
+    ReadBudget,
+    /// A derived read whose walk waits for one of the derive-walk
+    /// permits.
+    DeriveWalk,
+}
+
+impl BusyLimit {
+    /// The label the registry renders for this limit.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        BUSY_LIMITS[self as usize]
+    }
+
+    fn slot(self) -> usize {
+        self as usize
+    }
+}
+
+/// The busy limits' labels, in [`BusyLimit`] order.
+const BUSY_LIMITS: [&str; 5] = ["blame", "diff", "graph_query", "read_budget", "derive_walk"];
 
 /// The blob count docs/support.md supports per data directory: what
 /// `scion_blob_ceiling_share` divides by.
@@ -550,6 +589,21 @@ impl Metrics {
         self.connections_refused.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Counts a wait for the shared limit `limit` that found no room
+    /// within its busy bound and answered with a retryable busy status.
+    /// The export renders it as `scion_busy_timeouts_total{limit}`.
+    pub fn busy_timeout(&self, limit: BusyLimit) {
+        self.busy_timeouts[limit.slot()].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The busy timeouts a limit has counted, as the tests read them.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[must_use]
+    pub fn busy_timeouts(&self, limit: BusyLimit) -> u64 {
+        self.busy_timeouts[limit.slot()].load(Ordering::Relaxed)
+    }
+
     /// Counts one accept the listener failed. The export renders it as
     /// `scion_accept_errors_total`.
     pub(crate) fn accept_error(&self) {
@@ -643,6 +697,7 @@ impl Metrics {
             );
         }
         self.render_derive_walks(&mut text);
+        self.render_busy_timeouts(&mut text);
         self.render_pg(&mut text);
         self.render_connections(&mut text);
         self.render_stalled(&mut text);
@@ -849,6 +904,24 @@ impl Metrics {
                     "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}"
                 );
             }
+        }
+    }
+
+    /// The busy timeouts of the shared limits, one series per limit,
+    /// rendered even at zero: an operator reads the zeros as the bound
+    /// holding. [`Metrics::render`] hands the text over.
+    fn render_busy_timeouts(&self, text: &mut String) {
+        use std::fmt::Write as _;
+        text.push_str(
+            "# HELP scion_busy_timeouts_total Waits for a shared limit that found no room within the limit's busy bound (30 s) and answered with a retryable busy status; by limit, never by principal. A count that climbs says the limit is too small for the clients, or a client holds its share without reading.\n",
+        );
+        text.push_str("# TYPE scion_busy_timeouts_total counter\n");
+        for (i, name) in BUSY_LIMITS.iter().enumerate() {
+            let _ = writeln!(
+                text,
+                "scion_busy_timeouts_total{{limit=\"{name}\"}} {}",
+                self.busy_timeouts[i].load(Ordering::Relaxed)
+            );
         }
     }
 

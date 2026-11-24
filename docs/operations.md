@@ -1467,6 +1467,14 @@ the process, scraped from there. The names:
   walks that hold a permit, and walks that wait for one; waits that pile
   up while the in-flight count sits at the cap mean a cold history read
   that queues behind the walkers.
+- `scion_busy_timeouts_total{limit}` — waits for a shared limit that
+  found no room within the 30 s busy bound, by limit: `blame`, `diff`,
+  `graph_query` (the `MergeBase`, `IsAncestor` and `Log`-with-a-path
+  slots), `read_budget` (the read shares), `derive_walk`. A wait ends
+  there with a retryable busy reply (section 2 of docs/protocol-v1.md),
+  so a rate that climbs means a limit whose holders run long, not a
+  server fault; read it next to the limit's own gauges, such as
+  `scion_derive_walks_in_flight`.
 - `scion_pg_collector_key_wait_seconds` — a Postgres write's wait for the
   collector's advisory key, measured across the transaction's open batch
   (BEGIN, the lock-timeout guard, and the key's wait in one round trip);
