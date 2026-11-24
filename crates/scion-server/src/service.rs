@@ -116,7 +116,6 @@ async fn take_slot(
         // metric's own label, so the log line and the series name the
         // limit alike.
         tracing::warn!(limit = limit.label(), "busy: no {what} free; retry later");
-
         return Err(Status::resource_exhausted(format!(
             "busy: no {what} free; retry later"
         )));
@@ -4806,7 +4805,7 @@ mod tests {
         let span = tracing::error_span!(
             "call",
             rpc = "Blame",
-            request_id = "busy-log-1417",
+            request_id = "busy-log-1417-slot",
             principal = "default"
         );
         let guard = span.enter();
@@ -4826,7 +4825,7 @@ mod tests {
         );
         // The refusal warned, inside the call's span: one line, with the
         // limit under the busy metric's label and the span's fields.
-        let lines = log_lines("busy-log-1417");
+        let lines = log_lines("busy-log-1417-slot");
         assert_eq!(lines.len(), 1, "ALL:\n{}", log_text());
         assert!(lines[0].contains("WARN"), "{}", lines[0]);
         assert!(
@@ -4910,6 +4909,7 @@ mod tests {
     /// Fails if the wrap at the `read_file` share site goes.
     #[tokio::test]
     async fn a_read_file_waits_for_its_share_at_the_busy_bound() {
+        init_log();
         let (_dir, store, cs) = a_store_with_a_file();
         let metrics = Arc::new(Metrics::default());
         let mut service = counting_service(&store, &metrics);
@@ -4923,6 +4923,15 @@ mod tests {
             changeset_id: cs.as_bytes().to_vec(),
             path: b"a".to_vec(),
         });
+        // The call's span, the way the gRPC layer opens one: the warn the
+        // refusal writes carries these fields.
+        let span = tracing::error_span!(
+            "call",
+            rpc = "ReadFile",
+            request_id = "busy-log-1417-read",
+            principal = "default"
+        );
+        let guard = span.enter();
         busy_at_the_bound(
             &metrics,
             BusyLimit::ReadBudget,
@@ -4930,6 +4939,19 @@ mod tests {
             service.read_file(request),
         )
         .await;
+        drop(guard);
+        // The refusal warned, inside the call's span, under the metric's
+        // own label.
+        let lines = log_lines("busy-log-1417-read");
+        assert_eq!(lines.len(), 1, "ALL:\n{}", log_text());
+        assert!(lines[0].contains("WARN"), "{}", lines[0]);
+        assert!(
+            lines[0].contains("busy: no read budget free"),
+            "{}",
+            lines[0]
+        );
+        assert!(lines[0].contains("limit=\"read_budget\""), "{}", lines[0]);
+        assert!(lines[0].contains("rpc=\"ReadFile\""), "{}", lines[0]);
         drop(held);
     }
 
