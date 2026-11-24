@@ -129,12 +129,18 @@ fn staging() -> &'static std::sync::atomic::AtomicU64 {
 }
 
 /// The 0600 file that carries a test URL where the guide's own line
-/// names `/etc/scion/db-url`. One per data directory - the URL names
-/// the directory's own schema - written through a staging rename, so a
-/// concurrent reader of the same directory's file sees whole bytes.
-fn url_file(url: &str, data: &Path) -> std::path::PathBuf {
-    let schema = Backend::test_schema(data);
-    let file = std::env::temp_dir().join(format!("scion-url-{}-{schema}", std::process::id()));
+/// names `/etc/scion/db-url`. The name comes from the URL itself, not
+/// from a data path: one schema is one file whatever directory serves
+/// it, and a reopen's rewrite of the same URL lands in the same file.
+fn url_file(url: &str) -> std::path::PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    url.hash(&mut hasher);
+    let file = std::env::temp_dir().join(format!(
+        "scion-url-{}-{:x}",
+        std::process::id(),
+        hasher.finish()
+    ));
     let n = staging().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = file.with_extension(format!("tmp{n}"));
     {
@@ -276,8 +282,13 @@ impl Server {
     /// test's values in place of the documented ones. A section whose
     /// block names no token file or port gets the documented forms
     /// appended, since a test must not share a port and must not hold
-    /// the token in argv.
-    pub(crate) fn guide_argv(heading: &'static str, data: &Path) -> Vec<String> {
+    /// the token in argv. `url` is the Postgres URL this spawn must
+    /// open - the caller's choice, not one derived from `data` here:
+    /// the schema follows the store, not the path (a reopen serves a
+    /// copy of the directory under another path, and the store's
+    /// metadata stays in the schema the first open filled). `None`
+    /// derives it from `data`, the way a first boot does.
+    pub(crate) fn guide_argv(heading: &'static str, data: &Path, url: Option<&str>) -> Vec<String> {
         use scion_server::test_support::docs::runbook_block_with;
         let binary = env!("CARGO_BIN_EXE_scion-server");
         // A section's first block may be a step before the serve (the
@@ -299,10 +310,12 @@ impl Server {
         // named nothing: the test's URL rides the same flag, in a 0600
         // file (the token file's pattern), so the spawn carries the URL
         // the way the guide writes it and the runbook's own line runs.
+        // The URL is the spawn's own, never one this call derives from
+        // the path alone.
         let url_path;
         if raw.contains("/etc/scion/db-url") {
-            let url = postgres_url(data);
-            url_path = url_file(&url, data).to_str().unwrap().to_owned();
+            let url = url.map_or_else(|| postgres_url(data), str::to_owned);
+            url_path = url_file(&url).to_str().unwrap().to_owned();
             subs.push(("/etc/scion/db-url", url_path.as_str()));
         }
         let block = runbook_block_with(heading, " serve", &subs);
@@ -475,7 +488,7 @@ impl Server {
             #[cfg(not(unix))]
             scion_proto::runtime::auth::create_private_dir_all(data).unwrap();
         }
-        let argv = Self::guide_argv(heading, data);
+        let argv = Self::guide_argv(heading, data, postgres_url);
         let log_file = fs::OpenOptions::new()
             .create(true)
             .append(true)

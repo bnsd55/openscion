@@ -1712,9 +1712,7 @@ crosses the total, is closed with everything it holds, and the server
 logs `closing a connection: its stalled replies hold too much` once,
 with the bytes it held.
 
-Read the gauge and find the client that stopped (a quiet server exports
-no `scion_stalled_reply_bytes` series: the gauge appears with the first
-stalled reply, so an empty grep means no reply has stalled):
+Read the gauge and find the client that stopped:
 
 ```sh
 curl -s 127.0.0.1:9100/metrics | grep '^scion_stalled_reply_bytes'
