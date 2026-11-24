@@ -3,7 +3,7 @@
 //!
 //! The server asks its connections to close at `MAX_CONNECTION_AGE`
 //! (the HTTP/2 `GOAWAY` goes out then; see the serve builder in
-//! [`runtime::listen`]). A client whose request is still queued in
+//! [`runtime::listen`](crate::runtime::listen)). A client whose request is still queued in
 //! hyper's dispatch at that moment loses the call: hyper names a call
 //! it never sent either `hyper::Error::is_canceled()` (still in the
 //! dispatch queue) or dispatch-gone (taken by the dispatcher, its
@@ -11,7 +11,7 @@
 //! `GOAWAY`; see `fut_ctx` in hyper's `proto/h2/client.rs`), and tonic
 //! drops it, so a back-to-back writer loses a call at the age even
 //! though the server never saw it. [`Resend`] wraps the channel and
-//! sends such a call again, up to [`MAX_ATTEMPTS`] tries, with the
+//! sends such a call again, up to `MAX_ATTEMPTS` tries, with the
 //! very request it was built with, on a connection of its own:
 //! `connect_lazy` on the same endpoint, so the connection the call
 //! was lost on - which would refuse the resent stream - is bypassed,
