@@ -24,7 +24,7 @@ tag exists, a build from source is the way:
    — onto the machine:
 
    ```sh
-   cargo build --release
+   cargo build --release --locked
    # then the three from target/release/
    ```
 
@@ -68,7 +68,7 @@ server answers "no Postgres URL".
 4. Start for real:
 
    ```sh
-   ./scion-server --data /srv/scion serve --token-file <TOKEN_FILE> \
+   SCION_TOKEN=<TOKEN> ./scion-server --data /srv/scion serve \
      --ticket-key /srv/scion-keys/ticket.key
    ```
 
@@ -97,7 +97,9 @@ Source: §3 "Backup and restore".
    order:
 
    ```sh
-   pg_dump --no-owner --file /backups/metadata.sql <the metadata database>
+   install -d -m 700 /backups/scion-$(date +%F)
+   pg_dump --no-owner --file /backups/scion-$(date +%F)/metadata.sql \
+     <the metadata database>
    cp -R /srv/scion/objects /backups/scion-$(date +%F)/objects
    chmod 700 /backups/scion-$(date +%F)/objects
    cp /srv/scion/backend /backups/scion-$(date +%F)/backend
