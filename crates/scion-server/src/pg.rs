@@ -1154,13 +1154,24 @@ fn refuse_naming_the_schema_record(_writer: &mut PgClient, error: Error) -> Erro
 /// of another store would name blobs of another disk. The comparison and
 /// the mint run before anything else is written, so a refusal leaves the
 /// schema untouched.
-fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
+fn store_identity(writer: &mut PgClient, marker: Marker, schema: &str) -> Result<[u8; 16]> {
+    // Every lookup names the schema the open resolved once, quoted
+    // (see [`quote_ident`]): an unqualified read of an empty target
+    // falls through the search_path to a later member's tables and
+    // reads another store's identity (#1429) - the exact open that
+    // started #1428. The callers refuse a search_path that names no
+    // schema before this runs, and the migrations have run, so the
+    // tables exist in the target.
+    let q = quote_ident(schema);
     let first = writer
-        .query("SELECT uuid FROM store_uuid WHERE one = 1", &[])
+        .query(
+            &format!("SELECT uuid FROM {q}.store_uuid WHERE one = 1"),
+            &[],
+        )
         .map_err(|e| {
             named_step(
                 "the store identity read",
-                "SELECT uuid FROM store_uuid WHERE one = 1",
+                "SELECT uuid FROM <schema>.store_uuid WHERE one = 1",
                 e,
             )
         })?;
@@ -1178,11 +1189,11 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
         // statements.
         let has_repos = marker.uuid.is_none()
             && !writer
-                .query("SELECT 1 FROM repos LIMIT 1", &[])
+                .query(&format!("SELECT 1 FROM {q}.repos LIMIT 1"), &[])
                 .map_err(|e| {
                     named_step(
                         "the store identity's repos probe",
-                        "SELECT 1 FROM repos LIMIT 1",
+                        "SELECT 1 FROM <schema>.repos LIMIT 1",
                         e,
                     )
                 })?
@@ -1224,8 +1235,10 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
         // with no error at the start. An empty schema refuses while
         // the marker names a store, and mints when it names none.
         let repos = writer
-            .query("SELECT 1 FROM repos LIMIT 1", &[])
-            .map_err(|e| named_step("the repos probe", "SELECT 1 FROM repos LIMIT 1", e))?;
+            .query(&format!("SELECT 1 FROM {q}.repos LIMIT 1"), &[])
+            .map_err(|e| {
+                named_step("the repos probe", "SELECT 1 FROM <schema>.repos LIMIT 1", e)
+            })?;
         let has_repos = !repos.is_empty();
         let fresh = match pairing_decision(marker.uuid, None, has_repos) {
             Pairing::Agree | Pairing::AdoptCut => unreachable!("the database holds no store"),
@@ -1236,14 +1249,17 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
         };
         writer
             .query(
-                "INSERT INTO store_uuid (one, uuid) VALUES (1, $1) \
-             ON CONFLICT (one) DO NOTHING",
+                &format!(
+                    "INSERT INTO {q}.store_uuid (one, uuid) VALUES (1, $1) \
+                     ON CONFLICT (one) DO NOTHING"
+                ),
                 &[P::bytes(&fresh)],
             )
             .map_err(|e| {
                 named_step(
                     "the store identity write",
-                    "INSERT INTO store_uuid (one, uuid) VALUES (1, $1) ON CONFLICT (one) DO NOTHING",
+                    "INSERT INTO <schema>.store_uuid (one, uuid) VALUES (1, $1) \
+                     ON CONFLICT (one) DO NOTHING",
                     e,
                 )
             })?;
@@ -1251,11 +1267,14 @@ fn store_identity(writer: &mut PgClient, marker: Marker) -> Result<[u8; 16]> {
         // row again, and whatever it holds is the identity.
         Ok(uuid_of(
             writer
-                .query("SELECT uuid FROM store_uuid WHERE one = 1", &[])
+                .query(
+                    &format!("SELECT uuid FROM {q}.store_uuid WHERE one = 1"),
+                    &[],
+                )
                 .map_err(|e| {
                     named_step(
                         "the store identity read",
-                        "SELECT uuid FROM store_uuid WHERE one = 1",
+                        "SELECT uuid FROM <schema>.store_uuid WHERE one = 1",
                         e,
                     )
                 })?[0]
@@ -1359,7 +1378,25 @@ impl Pg {
         } else {
             connect_with(url, ca, &options, schema)?
         };
-        let migrated = migrate(&mut writer, allow_migrate)?;
+        // The schema the connection actually writes into, resolved ONCE
+        // and quoted: the migration probe and the store identity must
+        // both act on this name, never on a later search_path member's
+        // tables (#1429). A search_path whose members all miss answers
+        // NULL: the connection would create nothing, so refuse with the
+        // fix - the same refusal the exclusive setup and the drop guard
+        // give.
+        let target: String = writer
+            .query("SELECT current_schema()::text", &[])
+            .map_err(|e| named_step("the open's schema read", "SELECT current_schema()::text", e))?
+            .into_iter()
+            .next()
+            .and_then(|row| row.get::<_, Option<String>>(0))
+            .ok_or_else(|| {
+                Error::InvalidArgument(
+                    "the URL's search_path names no existing schema; create it first".into(),
+                )
+            })?;
+        let migrated = migrate(&mut writer, allow_migrate, &target)?;
         // The durability of a commit is a promise of this backend: check
         // that the server kept its side of it.
         let on: String = writer
@@ -1376,7 +1413,7 @@ impl Pg {
         // The identity of this database, minted at the first open, and
         // the marker's agreement checked before anything is written: see
         // [`store_identity`].
-        let store_uuid = store_identity(&mut writer, marker)?;
+        let store_uuid = store_identity(&mut writer, marker, &target)?;
         let blobs = Blobs::open(data)?;
         let inner = Arc::new(PgInner {
             writer: Mutex::new(writer),
@@ -4095,11 +4132,18 @@ pub(crate) fn preflight_client(url: &str, ca: Option<&Path>) -> Result<Client> {
 pub(crate) trait SchemaRows {
     /// The statement's rows, in this backend's errors.
     fn schema_query(&mut self, sql: &str) -> Result<Vec<postgres::Row>>;
+
+    /// The statement's rows, with the target schema bound as `$1` (text).
+    fn schema_query_schema(&mut self, sql: &str, schema: &str) -> Result<Vec<postgres::Row>>;
 }
 
 impl SchemaRows for Client {
     fn schema_query(&mut self, sql: &str) -> Result<Vec<postgres::Row>> {
         Client::query(self, sql, &[]).map_err(map_pg_error)
+    }
+
+    fn schema_query_schema(&mut self, sql: &str, schema: &str) -> Result<Vec<postgres::Row>> {
+        Client::query(self, sql, &[&schema]).map_err(map_pg_error)
     }
 }
 
@@ -4107,19 +4151,52 @@ impl SchemaRows for PgClient {
     fn schema_query(&mut self, sql: &str) -> Result<Vec<postgres::Row>> {
         self.query(sql, &[])
     }
+
+    fn schema_query_schema(&mut self, sql: &str, schema: &str) -> Result<Vec<postgres::Row>> {
+        self.query(sql, &[Param::text(schema)])
+    }
 }
 
-fn schema_version(client: &mut impl SchemaRows) -> Result<u32> {
+/// Quotes `name` as one SQL identifier, the way the database's
+/// `format %I` does: double quotes around the name, doubled inside.
+/// The open's schema-qualified statements take the schema the open
+/// resolved once through this, so a mixed-case name, a quote or a
+/// space stays the one name every statement acts on - never the
+/// hard-wired `public` (#1429).
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('\"', "\"\""))
+}
+
+fn schema_version(client: &mut impl SchemaRows, schema: &str) -> Result<u32> {
+    // The ledger OF THE TARGET SCHEMA ONLY. `to_regclass` resolves an
+    // unqualified name through the whole search_path, so a probe of
+    // `'schema_migrations'` on an empty target found a later member's
+    // ledger (#1429): the open took the database for that other store,
+    // and every later unqualified statement resolved to its tables.
+    // The name is qualified here from the schema the open resolved
+    // once - the same value the migration lock is keyed on - so an
+    // empty target reads as empty (version 0) whatever the later
+    // members hold, and migrates itself. The callers refuse a
+    // search_path that names no schema before this runs.
     let ledger: Option<String> = client
-        .schema_query("SELECT to_regclass('schema_migrations')::text")?
+        .schema_query_schema(
+            "SELECT to_regclass(format('%I.schema_migrations', $1::text))::text",
+            schema,
+        )?
         .into_iter()
         .next()
         .and_then(|row| row.get(0));
-    if ledger.is_none() {
+    let Some(_) = ledger else {
         return Ok(0);
-    }
+    };
+    // The read is qualified the same way: regclass's text form drops
+    // the schema whenever the table is visible on the search_path, so
+    // embedding the probe's answer would resolve through the
+    // search_path again - the fallthrough shape this probe removes.
+    // The quoted schema names the one ledger, whatever the path holds.
+    let q = quote_ident(schema);
     let version: i64 = client
-        .schema_query("SELECT max(version) FROM schema_migrations")?
+        .schema_query(&format!("SELECT max(version) FROM {q}.schema_migrations"))?
         .first()
         .and_then(|row| row.get::<_, Option<i64>>(0))
         .unwrap_or(0);
@@ -4187,7 +4264,21 @@ pub fn check_schema(url: &str, ca: Option<&Path>) -> Result<SchemaCheck> {
 /// What the database returns, and the newer-schema refusal a newer
 /// database gives every opener.
 pub(crate) fn check_schema_on(client: &mut impl SchemaRows) -> Result<SchemaCheck> {
-    let db_version = schema_version(client)?;
+    // The target schema, resolved once: the version probe must read
+    // the ledger of the schema the URL names, not of a later
+    // search_path member (#1429). A search_path whose members all
+    // miss refuses, as every opener does.
+    let schema: Option<String> = client
+        .schema_query("SELECT current_schema()::text")?
+        .into_iter()
+        .next()
+        .and_then(|row| row.get::<_, Option<String>>(0));
+    let Some(schema) = schema else {
+        return Err(Error::InvalidArgument(
+            "the URL's search_path names no existing schema; create it first".into(),
+        ));
+    };
+    let db_version = schema_version(client, &schema)?;
     if db_version > PG_SCHEMA_VERSION {
         return Err(Error::FailedPrecondition(format!(
             "database schema version {db_version} is newer than this build \
@@ -4247,7 +4338,7 @@ pub fn migrate_store(url: &str, ca: Option<&Path>) -> Result<Option<(u32, u32)>>
             "{HOLDER_MESSAGE}; stop the server first"
         )));
     }
-    migrate(&mut client, true)
+    migrate(&mut client, true, &current)
 }
 
 /// Brings the database to this build's schema: runs every migration it has
@@ -4262,7 +4353,13 @@ pub fn migrate_store(url: &str, ca: Option<&Path>) -> Result<Option<(u32, u32)>>
 /// `serve --migrate` passes false, so an upgrade happens when the
 /// operator asks for it.
 #[allow(clippy::needless_pass_by_ref_mut)]
-fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
+fn migrate(
+    client: &mut PgClient,
+    allow: bool,
+    // The schema the open resolved once: the lock is keyed on it and
+    // the version probe reads it, so both act on the one name.
+    schema: &str,
+) -> Result<Option<(u32, u32)>> {
     // One process at a time migrates: a lock of the session, held across
     // the migrations, so a server and an import started together take
     // turns while the migrations are quick, and the version the loser
@@ -4280,18 +4377,8 @@ fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
     // When the search path names no schema, both takes land on the
     // bare key itself - exclusive, then shared, which one session may
     // hold together - and the two unlocks below match them one for
-    // one.
-    let schema: Option<String> = client
-        .query_opt("SELECT current_schema()::text", &[])
-        .map_err(|e| {
-            named_step(
-                "the migration lock's schema read",
-                "SELECT current_schema()::text",
-                e,
-            )
-        })?
-        .and_then(|row| row.get::<_, Option<String>>(0));
-    let lock = schema.as_deref().map_or(SCHEMA_LOCK, migration_lock_key);
+    // one. The callers refuse a schema of `None` before this runs.
+    let lock = migration_lock_key(schema);
     client
         .query_opt("SELECT pg_advisory_lock($1)", &[P::i64(lock)])
         .map_err(|e| {
@@ -4313,7 +4400,7 @@ fn migrate(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
                 e,
             )
         })?;
-    let outcome = migrate_under_lock(client, allow);
+    let outcome = migrate_under_lock(client, allow, schema);
     // The base statement budget goes back whatever the migrations did:
     // only the migration window ran without it, and this client — for
     // `serve --migrate`, the writer the store keeps — must not serve a
@@ -4392,14 +4479,19 @@ fn run_one_migration(client: &mut PgClient, from_version: u32, n: u32, sql: &str
 /// The migrations themselves, under the session's schema lock. `allow`
 /// is the opener's right to move the schema: false turns a behind
 /// database into the refusal that names `scion-server migrate`.
-fn migrate_under_lock(client: &mut PgClient, allow: bool) -> Result<Option<(u32, u32)>> {
+fn migrate_under_lock(
+    client: &mut PgClient,
+    allow: bool,
+    schema: &str,
+) -> Result<Option<(u32, u32)>> {
     // The version the database stands at, read without writing: a
-    // missing ledger is version 0. The refusals below run before this
-    // open has written anything, so a refusing open leaves the catalog
-    // alone — and a role that may read the ledger but not create in the
-    // schema still reaches the refusal instead of dying on the ledger's
-    // DDL first.
-    let version = schema_version(client).map_err(|e| {
+    // missing ledger is version 0. The probe is qualified to the
+    // schema the open resolved (#1429). The refusals below run before
+    // this open has written anything, so a refusing open leaves the
+    // catalog alone — and a role that may read the ledger but not
+    // create in the schema still reaches the refusal instead of dying
+    // on the ledger's DDL first.
+    let version = schema_version(client, schema).map_err(|e| {
         named_step(
             "the migration's version read",
             "the schema_migrations ledger",
@@ -7230,8 +7322,18 @@ mod tests {
         run_job, run_with_retry, schema_lock_key, server_lock_raw,
     };
     use crate::error::{Error, Storage};
-    use crate::pg::{Pairing, Pg, pairing_decision};
+    use crate::pg::{Pairing, Pg, pairing_decision, quote_ident};
     use std::sync::Arc;
+
+    /// The open's schema quoting: whatever the name carries, the
+    /// quoted form names exactly that schema (#1429).
+    #[test]
+    fn quote_ident_quotes_what_the_name_carries() {
+        assert_eq!(quote_ident("plain"), "\"plain\"");
+        assert_eq!(quote_ident("Mixed Case"), "\"Mixed Case\"");
+        assert_eq!(quote_ident("has\"quote"), "\"has\"\"quote\"");
+        assert_eq!(quote_ident("has space"), "\"has space\"");
+    }
 
     /// A connection description for one test: the real url or a dead
     /// port, an optional schema, and whether the session is exclusive.
