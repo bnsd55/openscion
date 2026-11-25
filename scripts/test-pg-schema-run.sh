@@ -1,13 +1,16 @@
 #!/bin/bash
 # The parent half of the schema-cleanup test (#1422): a script run - a
-# normal exit, an error exit, an INT, a TERM - leaves no
-# scion_script_ schema of its own behind; a run with SCION_KEEP_LOGS
-# keeps its schema and writes its name next to the kept logs; a schema
-# made for a caller's own directory, outside $WORK, outlives the run.
-# The schema list is taken before and after every run, and the child's
-# record says a schema was really made, so a run that made none fails
-# here instead of passing vacuously. Needs psql and
-# SCION_TEST_POSTGRES_URL; starts no server, builds nothing.
+# normal exit, an error exit, an INT, a TERM - leaves the run's own
+# schema gone; a run with SCION_KEEP_LOGS keeps its schema and writes
+# its name next to the kept logs; a schema made for a caller's own
+# directory, outside $WORK, outlives the run.
+#
+# The test-database rule: the parent checks and drops only the name the
+# run's own record names - never a listing of the database, never a
+# pattern. Another session's schemas are invisible here: on a shared
+# database, a whole-list comparison would make this test answer for
+# runs it did not make. Needs psql and SCION_TEST_POSTGRES_URL; starts
+# no server, builds nothing.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 
@@ -19,12 +22,10 @@ fail() {
 : "${SCION_TEST_POSTGRES_URL:?SCION_TEST_POSTGRES_URL must name the test database}"
 command -v psql > /dev/null || fail "needs psql"
 
-# The scripts' schemas, sorted: the list the issue's rule is checked
-# against. The escape keeps _ a literal, so the test suite's own
-# scion_test_ schemas never enter this test's view.
-schemas() {
+# present NAME: the schema named NAME exists in the test database.
+present() {
   psql "$SCION_TEST_POSTGRES_URL" -tAc \
-    "SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname LIKE 'scion\\_script\\_%'" | sort
+    "SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = '$1'" | grep -q 1
 }
 
 drop_one() {
@@ -34,26 +35,24 @@ drop_one() {
 
 out=$(mktemp -d "${TMPDIR:-/tmp}/test-pg-schema-run.XXXXXX")
 trap 'rm -rf "$out"' EXIT
-before=$(schemas) || fail "cannot list the schemas before the runs"
 
 # run_case MODE LOG: one child run; its exit code stands in $?. The
-# child's record names the schema it made.
+# child's record names the schema its own run made.
 run_case() {
   local mode=$1 log=$2
   bash "$here/test-pg-schema.sh" "$mode" "$out/record" > "$log" 2>&1
 }
 
-# assert_no_schema RC WANT_RC MODE: the child ended with WANT_RC, made
-# a schema, and the list after the run equals the list before it.
+# assert_gone RC WANT_RC MODE: the child ended with WANT_RC, recorded
+# the schema its own run made, and that schema is out of the database
+# after the run.
 assert_no_schema() {
-  local rc=$1 want_rc=$2 mode=$3 after
+  local rc=$1 want_rc=$2 mode=$3 name
   [ "$rc" -eq "$want_rc" ] || fail "$mode: the run ended $rc, not $want_rc: $(cat "$out/child.$mode.log")"
-  [ -s "$out/record" ] || fail "$mode: the run made no schema"
-  after=$(schemas) || fail "$mode: cannot list the schemas"
-  [ "$after" = "$before" ] || {
-    diff <(printf '%s\n' "$before") <(printf '%s\n' "$after") >&2
-    fail "$mode: the run left a schema behind"
-  }
+  name=$(sed -n '1p' "$out/record")
+  [ -n "$name" ] || fail "$mode: the run made no schema"
+  present "$name" && fail "$mode: the run's own schema $name stayed behind"
+  return 0
 }
 
 # Normal exit.
@@ -97,16 +96,17 @@ for sig in INT TERM; do
 done
 set +m
 
-# SCION_KEEP_LOGS: the schema stays, and its name is written next to
-# the kept logs. The parent drops it after, so the test leaves nothing.
+# SCION_KEEP_LOGS: the run's schema stays, and its name is written next
+# to the kept logs. The parent drops the name its own run recorded, so
+# the test leaves nothing behind.
 keep=$out/kept-logs
-SCION_KEEP_LOGS=$keep bash "$here/test-pg-schema.sh" keep "$out/record" > "$out/child.keep.log" 2>&1
+SCION_KEEP_LOGS=$keep run_case keep "$out/child.keep.log"
 rc=$?
 [ "$rc" -eq 0 ] || fail "keep: the run failed: $(cat "$out/child.keep.log")"
 name=$(sed -n '1p' "$out/record")
 [ -n "$name" ] || fail "keep: the run made no schema"
-after=$(schemas) || fail "keep: cannot list the schemas"
-grep -qxF "$name" <<< "$after" || fail "keep: the run's schema $name did not stay"
+present "$name" || fail "keep: the run's schema $name did not stay"
+[ -d "$keep" ] || fail "keep: no logs directory was kept"
 kept=
 for f in "$keep"/*.schemas; do
   [ -e "$f" ] || continue
@@ -116,22 +116,19 @@ done
 [ -n "$kept" ] || fail "keep: no schema list was written next to the kept logs"
 grep -qxF "$name" "$keep/$kept" || fail "keep: the kept list does not name $name"
 drop_one "$name"
-after=$(schemas) || fail "keep: cannot list the schemas"
-[ "$after" = "$before" ] || fail "keep: the test left a schema behind"
+present "$name" && fail "keep: the test left the schema $name behind"
 
-# A caller's own directory, outside $WORK (the mount-nfs shape): its
-# schema outlives the run, and no schema was recorded. The parent takes
-# the leak from the list delta and drops it after, as the caller
-# would; the child's own directory outside $WORK goes too.
+# A caller's own directory, outside $WORK (the mount-nfs shape): the
+# schema the run made there outlives it, under the name the child
+# recorded. The parent drops that name only; the caller's directory
+# went with the child's run.
 run_case outside "$out/child.outside.log"
 rc=$?
 [ "$rc" -eq 0 ] || fail "outside: the run failed: $(cat "$out/child.outside.log")"
-after=$(schemas) || fail "outside: cannot list the schemas"
-name=$(comm -13 <(printf '%s\n' "$before" | sort) <(printf '%s\n' "$after" | sort) | head -n 1)
-[ -n "$name" ] || fail "outside: the caller's own schema never appeared"
-grep -qxF "$name" <<< "$after" || fail "outside: the caller's schema $name did not outlive the run"
+name=$(sed -n '1p' "$out/record")
+[ -n "$name" ] || fail "outside: the child recorded no schema name"
+present "$name" || fail "outside: the caller's schema $name did not outlive the run"
 drop_one "$name"
-after=$(schemas) || fail "outside: cannot list the schemas"
-[ "$after" = "$before" ] || fail "outside: the test left a schema behind"
+present "$name" && fail "outside: the test left the schema $name behind"
 
 echo "test-pg-schema: a run that exits normally, by error, by INT or by TERM leaves no schema; SCION_KEEP_LOGS keeps it with its name; a caller's own directory keeps its schema"
