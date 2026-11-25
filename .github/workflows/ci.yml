@@ -370,6 +370,15 @@ jobs:
           df -h /
         env:
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+      # The scripts' schema rule (#1422): a run that ends normally, by
+      # error, by INT or by TERM drops the scion_script_ schema it made;
+      # SCION_KEEP_LOGS keeps it with its name; a caller's own directory
+      # keeps its schema. Postgres and psql are what the run needs; the
+      # job's service is the database.
+      - name: a script's Postgres schema goes with its work directory
+        run: scripts/test-pg-schema-run.sh
+        env:
+          SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
 
   supply-chain:
     name: cargo-deny

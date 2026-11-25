@@ -42,6 +42,8 @@ cleanup() {
   sudo umount -f -l "$VIEW" 2> /dev/null || true
   [ -f "$WORK/mount.pid" ] && kill -9 "$(cat "$WORK/mount.pid")" 2> /dev/null || true
   [ -f "$WORK/server.pid" ] && kill "$(cat "$WORK/server.pid")" 2> /dev/null || true
+  # The schemas whose data dir lived under $WORK go with it (#1422).
+  finish_script_schemas
   rm -rf "$WORK"
 }
 trap cleanup EXIT

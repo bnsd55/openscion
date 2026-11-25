@@ -156,6 +156,9 @@ cleanup() {
       if [ -e "$f" ]; then cp "$f" "$SCION_KEEP_LOGS/$(basename "$WORK").$(basename "$f")"; fi
     done
   fi
+  # The schemas whose data dir lived under $WORK go with it (#1422).
+  # Kept: the schema stays and its name lands next to the kept logs.
+  finish_script_schemas
   rm -rf "$WORK"
 }
 
