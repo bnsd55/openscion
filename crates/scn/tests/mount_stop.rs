@@ -174,6 +174,18 @@ fn a_terminated_mount_unmounts_and_answers_0() {
         Some(0),
         "a stopped mount answers 0: {stderr}"
     );
+    // The startup outcome went to stderr, where a log subscriber
+    // would have rendered it (#1421): a serving mount's operator sees
+    // what did and did not happen, pinned to the exact line for the
+    // platform the test runs on.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    let line = "malloc arenas capped at 2";
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    let line = "not capped: the allocator is not glibc";
+    assert!(
+        stderr.contains(&format!("scn mount: {line}")),
+        "the mount prints its arena outcome: {stderr}"
+    );
     // The rest of the stdout: the stop's own line ends it, and it names
     // the dir the mount stopped serving.
     let mut rest = String::new();
@@ -185,7 +197,22 @@ fn a_terminated_mount_unmounts_and_answers_0() {
         rest.contains(&format!("stopped serving {}", serving.dir.display())),
         "the mount names the dir it stopped serving: {rest}"
     );
-    assert!(!stderr.contains("scn mount:"), "a clean stop warns nothing");
+    // The startup outcome went to stderr; a clean stop warns nothing
+    // else: only the outcome line is allowed through (umount's own
+    // noise on --no-mount rides in the stderr pipe and is not scn's).
+    let warnings: String = stderr
+        .lines()
+        .filter(|line| {
+            line.contains("scn mount:")
+                && !line.contains("malloc arenas")
+                && !line.contains("not capped")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        warnings.is_empty(),
+        "a clean stop warns nothing but the arena decision: {warnings}"
+    );
     // The overlay is gone, and the table holds no record: the next
     // mount of the dir is not refused, and the next unmount finds
     // nothing to clean.

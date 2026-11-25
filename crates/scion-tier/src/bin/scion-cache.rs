@@ -176,8 +176,7 @@ fn tier_limits(cli: &Cli) -> Limits {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     // Logs go to stderr: stdout may carry command output that callers
     // capture with $(...).
     // Color only when stderr is a terminal: a file or a pipe is a log
@@ -187,6 +186,18 @@ async fn main() -> anyhow::Result<()> {
         .with_ansi(std::io::stderr().is_terminal())
         .with_writer(std::io::stderr)
         .init();
+    // The arena cap rides ahead of the tokio runtime's workers: a cap
+    // set after the workers exist reaches only the arenas they have
+    // not minted yet (#1421). This binary is always a long-lived
+    // server.
+    scion_proto::runtime::arena::cap_malloc_arenas();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> anyhow::Result<()> {
     refuse_removed_flags();
     let cli = Cli::parse();
     let (token, upstream) = resolve_tokens(&cli)?;

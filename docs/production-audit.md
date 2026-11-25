@@ -390,6 +390,11 @@ reads this block - it keeps no list of its own.
   file)
 - no branch: `crates/scion-proto/src/lib.rs` (`descriptor_set` returns a
   compiled-in byte slice)
+- no panic site, one branch: `crates/scion-proto/src/runtime/arena.rs`
+  (the startup arena cap: the decision is a pure function pinned by the
+  file's own tests, the platform call lives in the crate's one
+  platform-FFI module, and a failed tuning logs a warning and carries
+  on — the default arena behavior, which is the pre-#1421 world)
 
 ## The open list (the v1.0 blockers this audit leaves)
 
