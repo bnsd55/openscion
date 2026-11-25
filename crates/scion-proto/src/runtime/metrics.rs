@@ -298,13 +298,17 @@ fn share_of_ceiling(count: u64) -> f64 {
 }
 
 impl Metrics {
-    /// The counter of the RPC at `path` (like `/scion.v1.Scion/Blame`).
+    /// The counter of the RPC at `path` (like `/scion.v1.Scion/Blame`),
+    /// found by comparing each known path without allocating: a call's
+    /// own hot path runs this, and the old `format!` per known RPC was
+    /// the soak's second largest source of short-lived allocations
+    /// (#1436).
     #[must_use]
     pub fn rpc(&self, path: &str) -> Option<Rpc> {
         let (service, method) = path.rsplit_once('/')?;
         let service = service.rsplit('.').next()?;
         RPCS.iter()
-            .position(|known| *known == format!("{service}/{method}"))
+            .position(|known| known.split_once('/') == Some((service, method)))
             .map(Rpc)
     }
 
@@ -1744,6 +1748,31 @@ mod tests {
             }
         }
         assert_eq!(found, RPCS.len(), "the proto has rpcs the table misses");
+    }
+
+    /// The mapping pins: every known path maps to its own counter (the
+    /// RPCS table's order), and a path that names no known RPC - an
+    /// unknown method, an unknown service, no slash, or an empty path -
+    /// answers None.
+    #[test]
+    fn a_path_maps_to_its_own_counter_and_an_unknown_one_answers_none() {
+        for (i, known) in RPCS.iter().enumerate() {
+            let metrics = Metrics::default();
+            let path = format!("/scion.v1.{known}");
+            let rpc = metrics
+                .rpc(&path)
+                .unwrap_or_else(|| panic!("{path} maps to no counter"));
+            assert_eq!(rpc.0, i, "{known} maps to the wrong slot");
+        }
+        let metrics = Metrics::default();
+        for path in [
+            "/scion.v1.Scion/NoSuchMethod",
+            "/scion.v1.NoSuch/Blame",
+            "/Blame",
+            "",
+        ] {
+            assert!(metrics.rpc(path).is_none(), "{path} maps somewhere");
+        }
     }
 
     /// The stalled gauge renders from the start, at 0: an operator who
