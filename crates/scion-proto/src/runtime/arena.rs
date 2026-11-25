@@ -1,16 +1,13 @@
 //! The malloc arena cap of the long-lived serving processes (#1421).
 //!
-//! glibc's allocator mints one arena per contending thread, up to 8
-//! per core by default, and never returns the memory of a retired
-//! arena to the OS. A server whose thread count rises over a run can
-//! therefore step its RSS by tens of megabytes while its live heap
-//! stays flat - the soak measured the step (18-30 MB at ~56 minutes
-//! into #1421's runs) and a heap profile showed only ~11 MB live.
-//! Capping the arenas at 2 held RSS at 35.8 MB where the uncapped
-//! server reached 73.5 MB at 24k lands, with p99 unchanged.
+//! Under thread contention glibc opens more arenas, and each arena
+//! keeps its own freed memory, while the live heap stays near 11 MB -
+//! at 24k lands, 73.5 MB uncapped against 35.8 MB capped, p99
+//! unchanged. The cap holds that climb at 2.
 //!
 //! The cap applies where a process serves for a long time: the server,
-//! the cache, and the daemon. One-shot commands keep the default.
+//! scn mount, the cache, and the daemon. One-shot commands keep the
+//! default.
 
 /// The arena count a serving process caps itself at when the operator
 /// says nothing: one main arena plus one shared worker arena. The

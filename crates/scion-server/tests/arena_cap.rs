@@ -1,6 +1,7 @@
-//! The serving processes cap their glibc malloc arenas (#1421): a
-//! server whose thread count rises stepped its RSS by tens of MB once
-//! while its live heap stayed at ~11 MB - a new arena's heap. The cap
+//! The serving processes cap their glibc malloc arenas (#1421): under
+//! thread contention glibc opens more arenas and each keeps its own
+//! freed memory, while the live heap stays near 11 MB - at 24k lands,
+//! 73.5 MB uncapped against 35.8 MB capped, p99 unchanged. The cap
 //! applies at the very start of main, before the tokio runtime's
 //! workers exist, and the operator's `MALLOC_ARENA_MAX` wins over it.
 //! The observable is the startup log, so this test drives the real
@@ -113,12 +114,12 @@ fn serve_logs_the_arena_cap_decision() {
         std::fs::read_to_string(&log).unwrap_or_default()
     );
     let log_text = std::fs::read_to_string(&log).expect("the log reads");
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     assert!(
         log_text.contains("malloc arenas capped at 2"),
         "the serve path applies the built-in cap: {log_text}"
     );
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
     assert!(
         log_text.contains("not capped: the allocator is not glibc"),
         "the serve path says what did not happen: {log_text}"
