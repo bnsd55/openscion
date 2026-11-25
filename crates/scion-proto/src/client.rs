@@ -42,6 +42,13 @@ use tower::Service;
 /// still holds the body, so each one must re-earn it.
 const MAX_ATTEMPTS: usize = 3;
 
+/// The most body hyper may have taken from a call while the middleware
+/// still keeps a copy of it, as refcounted `Bytes` frames. gRPC's own
+/// default for this kind of retry: a call whose body was bigger than
+/// this when it was refused loses its copy and fails like it did
+/// before the resend existed.
+const RESEND_BODY_KEEP_BYTES: usize = 256 * 1024;
+
 /// The client half of the connection age. A tower service that wraps
 /// the channel: a call whose error's source chain holds a
 /// `hyper::Error` - hyper's transport failures, both of them marks of
@@ -107,6 +114,29 @@ fn is_unsent(error: &(dyn std::error::Error + 'static)) -> bool {
     false
 }
 
+/// The remote's own proof that a stream it refused was never
+/// processed, so sending it again is safe even though hyper already
+/// took the body. Two frames carry it: a `RST_STREAM` with
+/// `REFUSED_STREAM` from the remote, and a `GOAWAY` delivered to this
+/// stream - h2 hands the GOAWAY error only to streams above the
+/// frame's last stream id (h2-0.4.20/src/proto/streams/streams.rs:
+/// 812-829), so the delivery itself is the check that the server
+/// never saw this one. Any other failure after the take - a plain
+/// connection close, a reset with another reason - says nothing about
+/// what the server read, and is never resent.
+fn refused_without_processing(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut chain = Some(error);
+    while let Some(error) = chain {
+        if let Some(h2) = error.downcast_ref::<h2::Error>() {
+            return h2.is_remote()
+                && ((h2.is_reset() && h2.reason() == Some(h2::Reason::REFUSED_STREAM))
+                    || h2.is_go_away());
+        }
+        chain = error.source();
+    }
+    false
+}
+
 /// A short name for the transport failure, for the resend log line.
 fn kind_of(error: &HyperError) -> &'static str {
     if error.is_canceled() {
@@ -140,6 +170,7 @@ async fn run(
     let slot = Arc::new(Mutex::new(Slot {
         body: Some(body),
         generation: 0,
+        sent: Some(Sent::default()),
     }));
     let mut attempt = 0;
     loop {
@@ -182,8 +213,7 @@ async fn run(
                     && slot
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
-                        .body
-                        .is_some();
+                        .may_resend(&error);
                 if attempt + 1 == MAX_ATTEMPTS || !unsent {
                     if attempt > 0 {
                         tracing::warn!(
@@ -218,6 +248,40 @@ async fn run(
 struct Slot {
     body: Option<Body>,
     generation: usize,
+    /// The frames hyper took, kept as refcounted clones while the body
+    /// streams and its total stays under [`RESEND_BODY_KEEP_BYTES`].
+    /// The stream's end marks the copy complete - the whole body is in
+    /// the list, and the list lives until the call ends. Going over
+    /// the cap, or a trailers frame, drops the copy: without a
+    /// complete copy a refused-after-the-take call is not resent,
+    /// because sending half a call twice is a duplicate write.
+    sent: Option<Sent>,
+}
+
+/// The kept frames of a body hyper took.
+#[derive(Debug, Default)]
+struct Sent {
+    frames: Vec<bytes::Bytes>,
+    complete: bool,
+}
+
+impl Slot {
+    /// The call may be sent again on one of two proofs. One: hyper
+    /// never polled the body - the slot still holds it, so no byte
+    /// left the client. Two: hyper took the body, but the copy it
+    /// streamed from is complete and the remote refused the stream as
+    /// unprocessed, so the whole call is safe to put on the wire
+    /// again. Anything else is not a resend: a body without its end,
+    /// or a refusal that says nothing about what the server read.
+    fn may_resend(&self, error: &(dyn std::error::Error + 'static)) -> bool {
+        if self.body.is_some() {
+            return true;
+        }
+        match &self.sent {
+            Some(sent) => sent.complete && refused_without_processing(error),
+            None => false,
+        }
+    }
 }
 
 /// The body of a possibly-resent call: the real body waits in the
@@ -229,6 +293,8 @@ struct ProxyBody {
     slot: Arc<Mutex<Slot>>,
     generation: usize,
     inner: Option<Body>,
+    /// The next kept frame a resent attempt replays from the slot.
+    replay: usize,
 }
 
 impl ProxyBody {
@@ -237,6 +303,7 @@ impl ProxyBody {
             slot,
             generation,
             inner: None,
+            replay: 0,
         }
     }
 }
@@ -249,56 +316,102 @@ impl HttpBody for ProxyBody {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        if self.inner.is_none() {
-            let taken = {
-                let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
-                if slot.generation != self.generation {
-                    // This attempt was superseded: its connection was
-                    // lost, and a newer attempt owns the body now.
-                    // An error frame makes hyper reset this stream; a
-                    // clean end would send END_STREAM and the server
-                    // would see a complete request with an empty body,
-                    // which for a client-streaming upload is a valid
-                    // zero-message call it may act on.
-                    return Poll::Ready(Some(Err(Status::cancelled(
-                        "the call was lost before it was sent",
-                    ))));
-                }
-                slot.body.take()
-            };
-            match taken {
-                Some(body) => self.inner = Some(body),
-                // The body of this attempt is already gone. An error
-                // frame resets the stream; a clean end would hand the
-                // server a complete empty request, and a panic inside
-                // hyper's connection task would end every call on the
-                // connection.
-                None => {
-                    return Poll::Ready(Some(Err(Status::cancelled(
-                        "the call was lost before it was sent",
-                    ))));
-                }
+        // The slot decides what this attempt streams, then the lock
+        // goes away: the polls below borrow the body.
+        let (taken, replay) = {
+            let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+            if slot.generation != self.generation {
+                // This attempt was superseded: its connection was
+                // lost, and a newer attempt owns the body now. An
+                // error frame makes hyper reset this stream; a clean
+                // end would send END_STREAM and the server would see a
+                // complete request with an empty body, which for a
+                // client-streaming upload is a valid zero-message call
+                // it may act on.
+                return Poll::Ready(Some(Err(Status::cancelled(
+                    "the call was lost before it was sent",
+                ))));
             }
-        }
-        match self.inner.as_mut() {
-            Some(body) => Pin::new(body).poll_frame(cx),
-            // The take above always fills the body, so this arm never
-            // runs; it is here so a poll of this body can never panic.
-            None => Poll::Ready(Some(Err(Status::cancelled(
-                "the call was lost before it was sent",
-            )))),
+            (
+                slot.body.take(),
+                slot.sent
+                    .as_ref()
+                    .filter(|sent| sent.complete)
+                    .map(|sent| sent.frames.clone()),
+            )
+        };
+        if self.inner.is_some() || taken.is_some() {
+            // The attempt that got the body: it streams from the real
+            // one, and every frame hyper takes is kept as a refcount
+            // clone until the body ends or the copy passes the cap.
+            if let Some(body) = taken {
+                self.inner = Some(body);
+            }
+            match Pin::new(self.inner.as_mut().expect("the body was just taken")).poll_frame(cx) {
+                Poll::Ready(Some(Ok(frame))) => {
+                    let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+                    match (&mut slot.sent, frame.data_ref()) {
+                        (Some(sent), Some(bytes)) => {
+                            sent.frames.push(bytes.clone());
+                            let total = sent.frames.iter().map(bytes::Bytes::len).sum::<usize>();
+                            if total > RESEND_BODY_KEEP_BYTES {
+                                slot.sent = None;
+                            }
+                        }
+                        // A trailers frame, or the copy already gone
+                        // over the cap: the copy stops being a proof.
+                        _ => slot.sent = None,
+                    }
+                    Poll::Ready(Some(Ok(frame)))
+                }
+                Poll::Ready(None) => {
+                    // The body reached its end: the copy is complete,
+                    // and it lives until the call ends.
+                    let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+                    if let Some(sent) = slot.sent.as_mut() {
+                        sent.complete = true;
+                    }
+                    Poll::Ready(None)
+                }
+                poll => poll,
+            }
+        } else {
+            // The body of this attempt is gone: a resent attempt
+            // replays the kept frames, the whole body as hyper took
+            // it. Without a complete copy - the cap dropped it, or
+            // hyper never ended the stream - an error frame makes
+            // hyper reset this stream; a clean end would hand the
+            // server a request of its own.
+            let Some(frames) = replay else {
+                return Poll::Ready(Some(Err(Status::cancelled(
+                    "the call was lost before it was sent",
+                ))));
+            };
+            match frames.get(self.replay) {
+                Some(bytes) => {
+                    self.replay += 1;
+                    Poll::Ready(Some(Ok(Frame::data(bytes.clone()))))
+                }
+                None => Poll::Ready(None),
+            }
         }
     }
 
     fn size_hint(&self) -> SizeHint {
-        match &self.inner {
-            Some(body) => body.size_hint(),
+        let slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+        match (&self.inner, &slot.sent) {
+            (Some(body), _) => body.size_hint(),
+            (None, Some(sent)) if sent.complete => {
+                let mut hint = SizeHint::default();
+                hint.set_exact(sent.frames.iter().map(bytes::Bytes::len).sum::<usize>() as u64);
+                hint
+            }
             // Unknown until taken, never the real body's hint: hyper
             // sends HEADERS with END_STREAM when the hint is exactly
             // zero, without ever polling the body, and an empty
             // client-streaming call could then reach the server while
             // the slot is still full. Unknown makes hyper poll.
-            None => SizeHint::default(),
+            (None, _) => SizeHint::default(),
         }
     }
 
@@ -335,7 +448,7 @@ mod tests {
     use tonic::transport::{Channel, Endpoint, Server};
     use tonic::{Code, Request, Response, Status};
 
-    use super::{ProxyBody, Resend, Slot, is_unsent};
+    use super::{ProxyBody, RESEND_BODY_KEEP_BYTES, Resend, Sent, Slot, is_unsent};
 
     /// The stub: `ResolveRef` answers at once, so back-to-back calls
     /// queue behind each other in hyper's dispatch; `GetObjects`
@@ -713,6 +826,322 @@ mod tests {
         );
     }
 
+    /// What a raw HTTP/2 server does to the one request it gets.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Refusal {
+        /// Read the request to its end, then `RST_STREAM` with a reason.
+        Reset(h2::Reason),
+        /// Read the request to its end, then a hand-written GOAWAY
+        /// whose last stream id is zero, then close: every local
+        /// stream is above that id, so this one was never processed.
+        GoAwayAboveEveryStream,
+        /// Read the request to its end, then h2's own abrupt
+        /// shutdown: its GOAWAY's last stream id covers the request,
+        /// so the server may have processed it.
+        GoAwayCoveringTheCall,
+        /// Read the request to its end, then answer `NOT_FOUND`.
+        Answer,
+    }
+
+    /// The raw path behind `GoAwayAboveEveryStream`: the handshake,
+    /// the request read frame by frame to the end of its stream, then
+    /// a hand-written GOAWAY whose last stream id is zero - every
+    /// local stream is above it - and the connection closes.
+    async fn go_away_above_every_stream(mut io: tokio::net::TcpStream) {
+        let settings: &[u8] = &[0, 0, 0, 4, 0, 0, 0, 0, 0];
+        if tokio::io::AsyncWriteExt::write_all(&mut io, settings)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let mut preface = [0u8; 24];
+        if tokio::io::AsyncReadExt::read_exact(&mut io, &mut preface)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        loop {
+            let mut header = [0u8; 9];
+            if tokio::io::AsyncReadExt::read_exact(&mut io, &mut header)
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let length = u32::from_be_bytes([0, header[0], header[1], header[2]]) as usize;
+            let kind = header[3];
+            let end_stream = header[4] & 0x1 != 0;
+            let mut payload = vec![0u8; length];
+            if length > 0
+                && tokio::io::AsyncReadExt::read_exact(&mut io, &mut payload)
+                    .await
+                    .is_err()
+            {
+                return;
+            }
+            if kind == 0 && end_stream {
+                break;
+            }
+        }
+        let goaway: &[u8] = &[0, 0, 8, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let _ = tokio::io::AsyncWriteExt::write_all(&mut io, goaway).await;
+    }
+
+    /// The raw HTTP/2 server behind the refusal tests: each
+    /// connection reads the one request to the end of its stream -
+    /// hyper surely took the body - and then does its plan's action.
+    /// The accepts are counted.
+    fn serve_refusals(listener: TcpListener, plan: Vec<Refusal>) -> Arc<AtomicUsize> {
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let serve_accepted = Arc::clone(&accepted);
+        tokio::spawn(async move {
+            loop {
+                let Ok((io, _)) = listener.accept().await else {
+                    return;
+                };
+                let step = serve_accepted.fetch_add(1, Ordering::SeqCst);
+                let Some(action) = plan.get(step).copied() else {
+                    continue;
+                };
+                tokio::spawn(async move {
+                    if action == Refusal::GoAwayAboveEveryStream {
+                        go_away_above_every_stream(io).await;
+                        return;
+                    }
+                    let Ok(mut connection) = h2::server::handshake(io).await else {
+                        return;
+                    };
+                    if action == Refusal::GoAwayCoveringTheCall {
+                        // The body must be fully read before the
+                        // covering GOAWAY, and the connection must
+                        // keep being polled while it streams, or the
+                        // window updates never flush.
+                        let Some(Ok((request, _respond))) = connection.accept().await else {
+                            return;
+                        };
+                        let (done, mut done_rx) = tokio::sync::oneshot::channel::<()>();
+                        tokio::spawn(async move {
+                            let mut body = request.into_body();
+                            while let Some(Ok(chunk)) = body.data().await {
+                                let _ = body.flow_control().release_capacity(chunk.len());
+                            }
+                            let _ = done.send(());
+                        });
+                        loop {
+                            tokio::select! {
+                                result = connection.accept() => {
+                                    if result.is_none() {
+                                        return;
+                                    }
+                                }
+                                _ = &mut done_rx => {
+                                    connection.abrupt_shutdown(
+                                        h2::Reason::INTERNAL_ERROR,
+                                    );
+                                    let _ = std::future::poll_fn(|cx| {
+                                        connection.poll_closed(cx)
+                                    })
+                                    .await;
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    while let Some(Ok((request, mut respond))) = connection.accept().await {
+                        tokio::spawn(async move {
+                            let mut body = request.into_body();
+                            while let Some(Ok(chunk)) = body.data().await {
+                                let _ = body.flow_control().release_capacity(chunk.len());
+                            }
+                            match action {
+                                Refusal::Reset(reason) => {
+                                    respond.send_reset(reason);
+                                }
+                                Refusal::Answer => {
+                                    let response = http::Response::builder()
+                                        .status(200)
+                                        .header("content-type", "application/grpc")
+                                        .body(())
+                                        .expect("a valid response head");
+                                    let Ok(mut send) = respond.send_response(response, false)
+                                    else {
+                                        return;
+                                    };
+                                    let mut trailers = http::HeaderMap::new();
+                                    trailers.insert("grpc-status", "5".parse().expect("a status"));
+                                    let _ = send.send_data(bytes::Bytes::new(), false);
+                                    let _ = send.send_trailers(trailers);
+                                }
+                                _ => {}
+                            }
+                        });
+                    }
+                });
+            }
+        });
+        accepted
+    }
+
+    /// A stream the server refused after taking the whole body is sent
+    /// again: `REFUSED_STREAM` is the server's own word that it never
+    /// processed the stream, and the second proof of the gate is the
+    /// complete copy of what hyper took. The call reaches the server's
+    /// answer on the second connection. (#1419)
+    #[tokio::test]
+    async fn a_stream_refused_after_the_take_is_sent_again() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = serve_refusals(
+            listener,
+            vec![Refusal::Reset(h2::Reason::REFUSED_STREAM), Refusal::Answer],
+        );
+        let endpoint = Endpoint::from_shared(format!("http://{addr}")).unwrap();
+        let channel = endpoint.connect().await.unwrap();
+        let mut client = ObjectsClient::new(Resend::new(channel, endpoint));
+        let result = tokio::time::timeout(
+            Duration::from_secs(60),
+            client.resolve_ref(ResolveRefRequest::default()),
+        )
+        .await;
+        assert!(result.is_ok(), "the call ends in time");
+        assert_eq!(
+            result.unwrap().unwrap_err().code(),
+            Code::NotFound,
+            "the resent call reaches the server's answer"
+        );
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            2,
+            "one connection for the refusal, one for the resent call"
+        );
+    }
+
+    /// A reset with a reason that says nothing about processing - a
+    /// server that answered `INTERNAL_ERROR` - is never sent again: the
+    /// server may have read the whole call. (#1419)
+    #[tokio::test]
+    async fn a_stream_reset_for_another_reason_is_never_sent_again() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = serve_refusals(listener, vec![Refusal::Reset(h2::Reason::INTERNAL_ERROR)]);
+        let endpoint = Endpoint::from_shared(format!("http://{addr}")).unwrap();
+        let channel = endpoint.connect().await.unwrap();
+        let mut client = ObjectsClient::new(Resend::new(channel, endpoint));
+        let result = tokio::time::timeout(
+            Duration::from_secs(60),
+            client.resolve_ref(ResolveRefRequest::default()),
+        )
+        .await;
+        assert!(result.is_ok(), "the call ends in time");
+        assert!(
+            result.unwrap().is_err(),
+            "the server answered nothing, so the call ends in an error"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            1,
+            "an unexplained reset after the take is never resent"
+        );
+    }
+
+    /// A body bigger than the copy cap loses its copy, and a refusal
+    /// after the take is never resent: the middleware never holds more
+    /// than the cap. (#1419)
+    #[tokio::test]
+    async fn a_body_over_the_copy_cap_is_never_sent_again() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = serve_refusals(listener, vec![Refusal::Reset(h2::Reason::REFUSED_STREAM)]);
+        let endpoint = Endpoint::from_shared(format!("http://{addr}")).unwrap();
+        let channel = endpoint.connect().await.unwrap();
+        let mut client = ObjectsClient::new(Resend::new(channel, endpoint));
+        let big = "x".repeat(RESEND_BODY_KEEP_BYTES * 2);
+        let result = tokio::time::timeout(
+            Duration::from_secs(60),
+            client.resolve_ref(ResolveRefRequest {
+                repo: big,
+                name: String::new(),
+            }),
+        )
+        .await;
+        assert!(result.is_ok(), "the call ends in time");
+        assert!(
+            result.unwrap().is_err(),
+            "the server refused the call and the copy is gone"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            1,
+            "over the cap, a refused call is not resent"
+        );
+    }
+
+    /// A GOAWAY whose last stream id is below the call is the server's
+    /// word that it never processed the stream: h2 delivers that error
+    /// only to streams above the last id. The call is sent again and
+    /// reaches the answer. (#1419)
+    #[tokio::test]
+    async fn a_go_away_below_the_call_is_sent_again() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = serve_refusals(
+            listener,
+            vec![Refusal::GoAwayAboveEveryStream, Refusal::Answer],
+        );
+        let endpoint = Endpoint::from_shared(format!("http://{addr}")).unwrap();
+        let channel = endpoint.connect().await.unwrap();
+        let mut client = ObjectsClient::new(Resend::new(channel, endpoint));
+        let result = tokio::time::timeout(
+            Duration::from_secs(60),
+            client.resolve_ref(ResolveRefRequest::default()),
+        )
+        .await;
+        assert!(result.is_ok(), "the call ends in time");
+        assert_eq!(
+            result.unwrap().unwrap_err().code(),
+            Code::NotFound,
+            "the resent call reaches the server's answer"
+        );
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            2,
+            "one connection for the GOAWAY, one for the resent call"
+        );
+    }
+
+    /// A GOAWAY whose last stream id covers the call is the server's
+    /// word that the stream may have been processed: it is never sent
+    /// again, whatever the reason. (#1419)
+    #[tokio::test]
+    async fn a_go_away_covering_the_call_is_never_sent_again() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = serve_refusals(listener, vec![Refusal::GoAwayCoveringTheCall]);
+        let endpoint = Endpoint::from_shared(format!("http://{addr}")).unwrap();
+        let channel = endpoint.connect().await.unwrap();
+        let mut client = ObjectsClient::new(Resend::new(channel, endpoint));
+        let result = tokio::time::timeout(
+            Duration::from_secs(60),
+            client.resolve_ref(ResolveRefRequest::default()),
+        )
+        .await;
+        assert!(result.is_ok(), "the call ends in time");
+        assert!(
+            result.unwrap().is_err(),
+            "the server answered nothing, so the call ends in an error"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            1,
+            "a stream the server may have processed is never resent"
+        );
+    }
+
     /// A resent call leaves no connection behind: the fresh channel
     /// of the resend lives only as long as the call, so after the
     /// writers end, the only connection still open is the one the
@@ -773,8 +1202,10 @@ mod tests {
         let slot = Arc::new(Mutex::new(Slot {
             body: Some(Body::empty()),
             generation: 1,
+            sent: Some(Sent::default()),
         }));
         let mut old = ProxyBody {
+            replay: 0,
             slot: Arc::clone(&slot),
             generation: 0,
             inner: None,
@@ -805,6 +1236,7 @@ mod tests {
             Arc::new(Mutex::new(Slot {
                 body: Some(Body::empty()),
                 generation: 0,
+                sent: Some(Sent::default()),
             })),
             0,
         ));
