@@ -1,11 +1,16 @@
-//! The one module in the workspace where unsafe code is allowed, and
-//! only the macOS POSIX-ACL calls of [`fd_acl`]: the platform's ACL
-//! interface has no Rust binding, so the symbols are declared here and
-//! wrapped in a safe function that returns owned data. Every unsafe
-//! block carries the contract its call needs.
+//! The one module in the workspace where unsafe code is allowed: the
+//! macOS POSIX-ACL calls of [`fd_acl`], the macOS memory probe, and
+//! the Linux glibc `mallopt` cap. The platform's ACL interface has no
+//! Rust binding, so the symbols are declared here and wrapped in safe
+//! functions that return owned data. Every unsafe block carries the
+//! contract its call needs. Every macOS item is cfg'd flat to
+//! `target_os = "macos"`, so a Linux gnu build of this module compiles
+//! only the mallopt wrapper - the mod gate in `mod.rs` opens this file
+//! on both targets.
 
 #![allow(unsafe_code)]
 
+#[cfg(target_os = "macos")]
 use std::os::raw::{c_char, c_int, c_void};
 
 /// `ACL_TYPE_EXTENDED`, the only access-ACL kind macOS keeps on a
@@ -43,6 +48,7 @@ const EINVAL: c_int = 22;
 #[cfg(target_os = "macos")]
 const ACL_UNDEFINED_ID: u32 = 0xffff_ffff;
 
+#[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn acl_get_fd_np(fd: c_int, acl_type: c_int) -> *mut c_void;
     fn acl_get_entry(acl: *mut c_void, entry_id: c_int, entry_p: *mut *mut c_void) -> c_int;
@@ -56,6 +62,7 @@ unsafe extern "C" {
 }
 
 /// What the descriptor's extended ACL does.
+#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Verdict {
     /// The descriptor carries no ACL at all.
@@ -75,6 +82,7 @@ pub(crate) enum Verdict {
 /// this check cannot vouch for — and a single granting or unknown tag
 /// makes the whole ACL [`Verdict::Granting`].
 /// Names the kind of an entry the walk read, for the refusal message.
+#[cfg(target_os = "macos")]
 fn entry_kind(tag: c_int) -> &'static str {
     match tag {
         ACL_EXTENDED_ALLOW => "an allow entry",
@@ -85,6 +93,7 @@ fn entry_kind(tag: c_int) -> &'static str {
 /// The qualifier of the entry the walk read: the account it names,
 /// when the entry names one. `None` when it names everyone, or when
 /// the header hands back nothing to read.
+#[cfg(target_os = "macos")]
 fn entry_who(entry: *mut c_void) -> Option<u32> {
     // SAFETY: `entry` is the handle `acl_get_entry` returned from the
     // live `acl`; the call returns an owned qualifier the caller must
@@ -114,6 +123,7 @@ fn entry_who(entry: *mut c_void) -> Option<u32> {
 /// leaves no handle at all — `acl_get_fd_np` answers `ENOENT`, the
 /// no-ACL case — so a zero-entry ACL does not arise, and a first call
 /// that fails has read nothing and cannot vouch for the rest.
+#[cfg(target_os = "macos")]
 fn walk_step(entry_id: c_int, got: c_int, errno: c_int) -> Step {
     if got == 0 {
         return Step::Entry;
@@ -125,6 +135,7 @@ fn walk_step(entry_id: c_int, got: c_int, errno: c_int) -> Step {
 }
 
 /// One step of the `fd_acl` walk.
+#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Step {
     Entry,
@@ -135,6 +146,7 @@ enum Step {
 /// One walked entry or the walk's end, as [`verdict_of`] sees it: the
 /// step the call made, and — for an entry — the tag it typed with the
 /// account it names, or `None` when the kind could not be read.
+#[cfg(target_os = "macos")]
 type Walked = (Step, Option<(c_int, Option<u32>)>);
 
 /// The verdict a walk's steps carry: any entry that grants something
@@ -142,6 +154,7 @@ type Walked = (Step, Option<(c_int, Option<u32>)>);
 /// it did not read), an entry whose kind could not be read grants, and
 /// a walk that read every entry and found only deny entries denies
 /// only. The one place the walk's decision lives.
+#[cfg(target_os = "macos")]
 fn verdict_of(steps: impl Iterator<Item = Walked>) -> Verdict {
     for (step, typed) in steps {
         match step {
@@ -163,6 +176,7 @@ fn verdict_of(steps: impl Iterator<Item = Walked>) -> Verdict {
     Verdict::DenyOnly
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn fd_acl(fd: std::os::fd::RawFd) -> Verdict {
     // SAFETY: `acl_get_fd_np` reads the descriptor's ACL and returns a
     // handle the caller must release with `acl_free`; it writes nothing
@@ -319,6 +333,7 @@ unsafe extern "C" {
 /// call fails. The start-up memory probe reads the host through this,
 /// never through a subprocess: a child's pipe once kept that probe
 /// waiting as long as a client stayed connected (#795).
+#[cfg(target_os = "macos")]
 pub(crate) fn hw_memsize() -> Option<u64> {
     let mut size: u64 = 0;
     let mut len = std::mem::size_of::<u64>();
