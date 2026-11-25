@@ -610,6 +610,103 @@ mod tests {
         );
     }
 
+    /// A call the server received is never sent again. The raw
+    /// listener reads the request to the end of its stream - hyper
+    /// surely took the body - and answers nothing, so the call ends in
+    /// an error.
+    /// The clean code sends the call once and accepts no more
+    /// connections; the cap's mutant keeps resending a call whose body
+    /// is already gone, and the server would see the same write three
+    /// times. No write the server got is ever sent again. (#1419)
+    #[tokio::test]
+    async fn a_call_the_server_received_is_never_sent_again() {
+        // The raw listener: the server's side of the HTTP/2 handshake,
+        // then the request read to END_STREAM, then the connection
+        // drops with no response. Each accept is counted.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let serve_accepted = Arc::clone(&accepted);
+        tokio::spawn(async move {
+            loop {
+                let Ok((io, _)) = listener.accept().await else {
+                    return;
+                };
+                serve_accepted.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    // The server's side of the handshake: an empty
+                    // SETTINGS frame.
+                    let mut io = io;
+                    let settings: &[u8] = &[0, 0, 0, 4, 0, 0, 0, 0, 0];
+                    if io.try_write(settings).is_err() {
+                        return;
+                    }
+                    // The client's preface, then frames until a DATA
+                    // frame carries END_STREAM: the whole request body
+                    // is on the server now. Then drop the connection
+                    // without a response.
+                    let mut preface = [0u8; 24];
+                    if tokio::io::AsyncReadExt::read_exact(&mut io, &mut preface)
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    loop {
+                        let mut header = [0u8; 9];
+                        if tokio::io::AsyncReadExt::read_exact(&mut io, &mut header)
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        let length =
+                            u32::from_be_bytes([0, header[0], header[1], header[2]]) as usize;
+                        let kind = header[3];
+                        let end_stream = header[4] & 0x1 != 0;
+                        let mut payload = vec![0u8; length];
+                        if length > 0
+                            && tokio::io::AsyncReadExt::read_exact(&mut io, &mut payload)
+                                .await
+                                .is_err()
+                        {
+                            return;
+                        }
+                        // A DATA frame with END_STREAM: the whole call
+                        // is here, the body is taken for good.
+                        if kind == 0 && end_stream {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let endpoint = Endpoint::from_shared(format!("http://{addr}")).unwrap();
+        let channel = endpoint.connect().await.unwrap();
+        let mut client = ObjectsClient::new(Resend::new(channel, endpoint));
+        // The hang trap: without the cap the mutant retries forever
+        // and outlives the wait.
+        let result = tokio::time::timeout(
+            Duration::from_secs(60),
+            client.resolve_ref(ResolveRefRequest::default()),
+        )
+        .await;
+        assert!(result.is_ok(), "the call ends in time");
+        let outcome = result.unwrap();
+        assert!(
+            outcome.is_err(),
+            "the server answers nothing, so the call ends in an error: {outcome:?}"
+        );
+        // A late resend would need another connection; after a short
+        // wait there is none beyond the one the call ran on.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let accepted = accepted.load(Ordering::SeqCst);
+        assert_eq!(
+            accepted, 1,
+            "a call the server received is sent once, on one connection: {accepted} accepted"
+        );
+    }
+
     /// A resent call leaves no connection behind: the fresh channel
     /// of the resend lives only as long as the call, so after the
     /// writers end, the only connection still open is the one the
