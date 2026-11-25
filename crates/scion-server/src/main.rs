@@ -849,7 +849,7 @@ fn main() -> anyhow::Result<()> {
     // command is known and BEFORE the tokio runtime builds its workers:
     // a cap set after the workers exist reaches only the arenas they
     // have not minted yet (#1421). `serve` is the one command of this
-    // binary that lives long enough to hold what a leaked arena keeps;
+    // binary that lives long enough to hold what an extra arena keeps;
     // the one-shot commands run and exit.
     let cli = parse_cli();
     if matches!(cli.command, Command::Serve(_)) {
@@ -864,7 +864,7 @@ fn main() -> anyhow::Result<()> {
 /// The removed-flag refusal and the parse, single-threaded sync work
 /// in `main`: the refusal exits naming the removed flag, and the
 /// parsed CLI tells whether this run serves - the one command that
-/// lives long enough to hold what a leaked arena keeps - so the cap is
+/// lives long enough to hold what an extra arena keeps - so the cap is
 /// decided after the command is known and before the runtime builds
 /// its workers (#1421).
 fn parse_cli() -> Cli {

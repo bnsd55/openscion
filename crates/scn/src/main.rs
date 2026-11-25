@@ -135,17 +135,16 @@ fn main() -> ExitCode {
     // command is known and BEFORE the tokio runtime builds its workers:
     // a cap set after the workers exist reaches only the arenas they
     // have not minted yet (#1421). `mount` is the one command of this
-    // binary that lives long enough to hold what a leaked arena keeps
+    // binary that lives long enough to hold what an extra arena keeps
     // (it serves NFS until a signal); the one-shot commands run and
     // exit.
     let cli = parse_cli();
     if matches!(cli.command, Command::Mount(_)) {
-        scion_proto::runtime::arena::cap_malloc_arenas();
-        // scn has no log subscriber: the decision goes to stderr, the
+        // scn has no log subscriber: the outcome goes to stderr, the
         // same text the log line renders, so an operator sees it.
         eprintln!(
             "scn mount: {}",
-            scion_proto::runtime::arena::decision_text()
+            scion_proto::runtime::arena::cap_malloc_arenas()
         );
     }
     let runtime = tokio::runtime::Builder::new_multi_thread()

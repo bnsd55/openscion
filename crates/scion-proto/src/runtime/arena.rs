@@ -41,50 +41,53 @@ pub fn arena_cap_decision(arena_max_env: Option<&str>) -> ArenaCap {
     }
 }
 
-/// The one-line text of a startup decision, the same text the tracing
-/// line renders: the value applied, or the operator's variable named.
-/// `scn mount` has no log subscriber, so it prints this text to stderr
-/// instead - a decision an operator cannot see is the silent path.
-#[must_use]
-pub fn decision_text() -> String {
-    match arena_cap_decision(std::env::var("MALLOC_ARENA_MAX").ok().as_deref()) {
-        ArenaCap::LeftToEnv(value) => {
-            format!("malloc arenas left to MALLOC_ARENA_MAX={value}")
-        }
-        ArenaCap::Apply(n) => format!("malloc arenas capped at {n}"),
-    }
-}
-
-/// Applies [`arena_cap_decision`] to this process, at the very start
-/// of a serving binary's `main`: before the tokio runtime builds its
-/// worker threads, because a cap set after a thread exists reaches
-/// only the arenas that thread has not minted yet. On a Linux glibc
-/// process this calls `mallopt(M_ARENA_MAX, ..)` once; on any other
-/// target it compiles to nothing. The decision logs once: the value
-/// applied, or that the operator's environment carries one.
-pub fn cap_malloc_arenas() {
+/// Decides the arena cap, applies it to this process, and returns the
+/// one-line text of the outcome it took - the one function that
+/// decides, acts and reports, so the text cannot say what did not
+/// happen. Call it at the very start of a serving binary's `main`:
+/// before the tokio runtime builds its worker threads, because a cap
+/// set after a thread exists reaches only the arenas that thread has
+/// not minted yet.
+///
+/// `scn mount` has no log subscriber, so it prints the returned text
+/// to stderr instead - a decision an operator cannot see is the silent
+/// path.
+///
+/// Outcomes: `malloc arenas capped at N` (applied) / `malloc arenas
+/// left to MALLOC_ARENA_MAX=v` (the operator's variable named) / `not
+/// capped: mallopt(M_ARENA_MAX, N) failed` / `not capped: the
+/// allocator is not glibc`.
+pub fn cap_malloc_arenas() -> String {
     let decision = arena_cap_decision(std::env::var("MALLOC_ARENA_MAX").ok().as_deref());
     match decision {
-        ArenaCap::LeftToEnv(_) => {
-            tracing::info!("{}", decision_text());
+        ArenaCap::LeftToEnv(value) => {
+            let text = format!("malloc arenas left to MALLOC_ARENA_MAX={value}");
+            tracing::info!("{}", text);
+            text
         }
         ArenaCap::Apply(n) => {
             // The platform call lives in the crate's one platform-FFI
             // module; the open's own rule keeps the token out of here.
-            // A failure leaves the default arena behavior, which is the
-            // pre-#1421 world: warn and carry on.
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             if crate::runtime::auth::mallopt_arena_max(n) == 0 {
-                tracing::warn!(
-                    "mallopt(M_ARENA_MAX, {n}) failed; the allocator \
-                     keeps its default arena behavior"
-                );
+                // A failure leaves the default arena behavior, which is
+                // the pre-#1421 world: say so, warn, and carry on.
+                let text = format!("not capped: mallopt(M_ARENA_MAX, {n}) failed");
+                tracing::warn!("{}", text);
+                text
             } else {
-                tracing::info!("{}", decision_text());
+                let text = format!("malloc arenas capped at {n}");
+                tracing::info!("{}", text);
+                text
             }
             // Not glibc, not the climb #1421 measured: nothing to cap.
             #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-            let _ = n;
+            {
+                let _ = n;
+                let text = "not capped: the allocator is not glibc".to_owned();
+                tracing::info!("{}", text);
+                text
+            }
         }
     }
 }

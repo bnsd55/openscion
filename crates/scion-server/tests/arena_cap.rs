@@ -120,8 +120,8 @@ fn serve_logs_the_arena_cap_decision() {
     );
     #[cfg(not(target_os = "linux"))]
     assert!(
-        !log_text.contains("malloc arenas capped"),
-        "no cap applies on this platform: {log_text}"
+        log_text.contains("not capped: the allocator is not glibc"),
+        "the serve path says what did not happen: {log_text}"
     );
     let _ = child.kill();
     let _ = child.wait();
