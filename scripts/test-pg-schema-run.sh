@@ -24,7 +24,7 @@ command -v psql > /dev/null || fail "needs psql"
 
 # present NAME: the query ran, and the schema named NAME is in the
 # test database. A psql failure fails the test - absent must mean "the
-# query ran and found 0", never "the database did not answer" (F4).
+# query ran and found 0", never "the database did not answer".
 present() {
   local count
   count=$(psql "$SCION_TEST_POSTGRES_URL" -v ON_ERROR_STOP=1 -tAc \
@@ -46,8 +46,7 @@ trap 'rm -rf "$out"' EXIT
 run_case() {
   local mode=$1 log=$2
   # The record goes before every run: a child that dies before it
-  # writes must not leave the previous case's name behind to be read
-  # (F5).
+  # writes must not leave the previous case's name behind to be read.
   rm -f "$out/record" "$out/record.ready"
   bash "$here/test-pg-schema.sh" "$mode" "$out/record" > "$log" 2>&1
 }
