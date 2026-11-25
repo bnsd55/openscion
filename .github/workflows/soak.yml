@@ -58,7 +58,11 @@ jobs:
       # other artifacts.
       - name: install heaptrack
         if: github.event.inputs.heaptrack == 'on'
-        run: sudo apt-get update && sudo apt-get install -y heaptrack gdb
+        # The attach needs gdb, and runtime ptrace needs yama's scope at 0
+        # (heaptrack refuses at scope 1, the runner's default).
+        run: |
+          sudo apt-get update && sudo apt-get install -y heaptrack gdb
+          echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
       - name: run the soak
         env:
           # The nightly schedule runs 120 minutes; a dispatch names its
