@@ -4186,14 +4186,17 @@ fn schema_version(client: &mut impl SchemaRows, schema: &str) -> Result<u32> {
         .into_iter()
         .next()
         .and_then(|row| row.get(0));
-    let Some(ledger) = ledger else {
+    let Some(_) = ledger else {
         return Ok(0);
     };
-    // The ledger's name is the database's own serialization of the
-    // qualified identifier (regclassout quotes whatever the schema
-    // name carries), so it is safe to embed in the read that follows.
+    // The read is qualified the same way: regclass's text form drops
+    // the schema whenever the table is visible on the search_path, so
+    // embedding the probe's answer would resolve through the
+    // search_path again - the fallthrough shape this probe removes.
+    // The quoted schema names the one ledger, whatever the path holds.
+    let q = quote_ident(schema);
     let version: i64 = client
-        .schema_query(&format!("SELECT max(version) FROM {ledger}"))?
+        .schema_query(&format!("SELECT max(version) FROM {q}.schema_migrations"))?
         .first()
         .and_then(|row| row.get::<_, Option<i64>>(0))
         .unwrap_or(0);
