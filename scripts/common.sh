@@ -438,23 +438,27 @@ start_scion() {
   if [ ! -f "$WORK/ticket.key" ]; then
     "$BIN/scion-server" --data "$WORK/server" ticket-key --out "$WORK/ticket.key" > "$WORK/ticket.pub"
   fi
-  # The heaptrack probe (#1421): SOAK_HEAPTRACK on wraps the server so the
-  # run's peak and temporary allocations are recorded by stack. The wrapper
-  # writes heaptrack-server.*.zst next to the run's other artifacts.
+  # The heaptrack probe (#1421): SOAK_HEAPTRACK on ATTACHES heaptrack to
+  # the running server instead of wrapping it, so the pid that start(1)
+  # records and the soak measures stays the server's own. The attach is
+  # detached (ptrace), so the server's stop is the recording's stop.
   local wrap=""
   if [ "${SOAK_HEAPTRACK:-}" = "on" ]; then
     mkdir -p "${RUNNER_TEMP:-/tmp}/soak-artifacts"
-    # One word per shellcheck: the wrapper's value holds no spaces (the
-    # artifacts dir never does), and $wrap must split into words for the
-    # start line. shellcheck disable=SC2086.
-    # shellcheck disable=SC2086
-    wrap="heaptrack -o ${RUNNER_TEMP:-/tmp}/soak-artifacts/heaptrack-server"
+    wrap="heaptrack -p \$(lsof -t -iTCP:$SERVER_PORT -sTCP:LISTEN | head -n 1) -o ${RUNNER_TEMP:-/tmp}/soak-artifacts/heaptrack-server --detach &"
   fi
-  # shellcheck disable=SC2086 # $wrap is the probe's wrapper words
-  start server serving env SCION_POSTGRES_URL="$PG_URL" $wrap "$BIN/scion-server" --data "$WORK/server" serve \
+  start server serving env SCION_POSTGRES_URL="$PG_URL" "$BIN/scion-server" --data "$WORK/server" serve \
     --listen "127.0.0.1:$SERVER_PORT" \
     --ticket-key "$WORK/ticket.key" \
     --metrics-listen "127.0.0.1:$SERVER_METRICS_PORT"
+  # The probe attaches only after the server holds its port: the wait is
+  # start(1)'s readiness, which returned above.
+  if [ -n "$wrap" ]; then
+    # shellcheck disable=SC2086 # $wrap is the probe's attach words
+    eval "$wrap"
+    sleep 2
+    pgrep -f "heaptrack -p" > /dev/null || die "heaptrack did not attach to the server"
+  fi
   start cache serving "$BIN/scion-cache" --listen "127.0.0.1:$CACHE_PORT" \
     --upstream "$SERVER" \
     --ticket-public-key "$(cat "$WORK/ticket.pub")" \
