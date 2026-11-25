@@ -18,6 +18,9 @@ on:
       arena_max:
         description: "probe-only: MALLOC_ARENA_MAX for the server (#1421)"
         default: ""
+      agents:
+        description: "probe-only: the bench's agent count (soak AGENTS)"
+        default: ""
 
 # Every third-party action is pinned to the commit SHA its version tag
 # named, with the version in a comment, as ci.yml does.
@@ -74,6 +77,7 @@ jobs:
           RUN_MINUTES: ${{ github.event.inputs.minutes || '120' }}
           SOAK_HEAPTRACK: ${{ github.event.inputs.heaptrack == 'on' && 'on' || '' }}
           SOAK_ARENA_MAX: ${{ github.event.inputs.arena_max || '' }}
+          AGENTS: ${{ github.event.inputs.agents || '2' }}
           # The resource ceilings, each named here and enforced by
           # scripts/soak.sh: a server may grow to
           SOAK_RSS_PCT: "150" # 150 percent of its warm RSS,
