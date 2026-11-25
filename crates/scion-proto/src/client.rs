@@ -634,11 +634,17 @@ mod tests {
                 };
                 serve_accepted.fetch_add(1, Ordering::SeqCst);
                 tokio::spawn(async move {
-                    // The server's side of the handshake: an empty
-                    // SETTINGS frame.
                     let mut io = io;
+                    // The server's side of the handshake: an empty
+                    // SETTINGS frame. A blocking write: try_write can
+                    // answer WouldBlock before the reactor has marked
+                    // the socket writable, and a dropped handshake
+                    // would resend a call the body was never read on.
                     let settings: &[u8] = &[0, 0, 0, 4, 0, 0, 0, 0, 0];
-                    if io.try_write(settings).is_err() {
+                    if tokio::io::AsyncWriteExt::write_all(&mut io, settings)
+                        .await
+                        .is_err()
+                    {
                         return;
                     }
                     // The client's preface, then frames until a DATA
