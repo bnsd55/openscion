@@ -1542,6 +1542,9 @@ jobs:
       - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: protoc
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: cargo-nextest
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -1556,8 +1559,14 @@ jobs:
           sudo mkdir -p /mnt/xfs
           sudo mount "$LOOP" /mnt/xfs
           sudo chown "$(id -u):$(id -g)" /mnt/xfs
-      - run: TMPDIR=/mnt/xfs cargo test -p open-scion-server
+      - run: |
+          cargo nextest run -p open-scion-server --profile ci
+          cargo test --doc -p open-scion-server
         env:
+          # TMPDIR on the mount is the cell's evidence: every store the
+          # suite opens lands on xfs. It covers the doc tests too, so
+          # the whole cell stays an xfs run.
+          TMPDIR: /mnt/xfs
           # The xfs job proves filesystem parity, not more cases; the
           # main test job runs 64 on a pull request and 128 on main,
           # and the nightly's proof jobs carry the full 2000.
@@ -1566,6 +1575,15 @@ jobs:
           # The backup test dumps the live metadata with the job's own
           # Postgres, so its tools match the server.
           SCION_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
+          # nextest's default is the runner's CPU count, and a bigger
+          # runner would run more stores at once, so the count is set:
+          # the stores all land on the one 8 GB xfs image, and a
+          # bounded number of live stores keeps the image from filling.
+          NEXTEST_TEST_THREADS: "4"
+          # nextest, like the main test job (#1434): cargo test ran the
+          # test binaries one after another and sat within minutes of
+          # this job's 30-minute limit (21, 21, 25 and 30+ minutes on
+          # recent dispatched runs).
       - name: the loop device goes away
         if: always()
         run: |
