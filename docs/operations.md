@@ -2026,3 +2026,30 @@ or `-T`) carries more inodes for the same bytes; xfs sizes its inode
 pool dynamically and grows it while the filesystem has space left.
 The measured costs of blob counts, and the supported count, are in
 [support.md](support.md).
+
+### Directory size
+
+A land into a directory costs time, server memory and stored tree
+bytes in proportion to the directory's entries: the land stores and
+re-encodes a full version of every tree on its path, so each entry of
+a touched directory rides every land into it, at about 41 stored tree
+bytes per entry per land
+([#1428](https://github.com/bnsd55/openscion/issues/1428)). Measured
+per land, one 512-byte file into the target directory, on a fresh
+Postgres cluster:
+
+| entries | land time | server RSS peak | tree bytes stored |
+|---|---|---|---|
+| 1k | 0.09 s | +4 MB | 54,000 |
+| 10k | 0.12 s | +10 MB | 407,493 |
+| 50k | 0.23 s | +41 MB | 2,065,171 |
+| 100k | 0.71 s | +85 MB | 4,137,199 |
+| 100k entries in 100-entry directories | 0.10 s | +4 MB | 48,495 |
+
+At 10k entries a land costs about 0.1 s and 0.4 MB of stored tree; at
+100k about 0.7 s, 4.1 MB, and +85 MB of server memory. The same file
+count in a deep tree of 100-entry directories stores 48 KB, because a
+land rewrites only the small trees on its path. Keep a directory that
+gets frequent lands under about 10k entries, and split large drop
+points into subdirectories: a directory that only grows pays its size
+on every land into it.
