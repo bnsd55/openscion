@@ -853,23 +853,32 @@ fn a_server_killed_outside_names_its_signal_in_the_probe() {
         "a live server's probe says so: {}",
         probe.note()
     );
-    // The kill from outside the harness: a plain `kill -9` to the pid,
-    // the shape a runner's OOM killer or an operator's pkill takes.
+    // The kill from outside the harness: a plain `kill -s KILL` to the
+    // pid, the shape a runner's OOM killer or an operator's pkill takes.
+    // The `--` keeps a pid from ever being read as an option or a
+    // process group, the same rule as the other kill sites.
     let status = std::process::Command::new("kill")
-        .arg("-9")
+        .arg("-s")
+        .arg("KILL")
+        .arg("--")
         .arg(server.pid().to_string())
         .status()
         .expect("the kill command runs");
     assert!(status.success(), "the outside kill ran: {status}");
-    let note = loop {
-        // The kernel needs a moment to make the exit visible to
-        // try_wait; the note reads it through the same child.
-        let note = probe.note();
-        if !note.contains("still running") {
-            break note;
-        }
+    // The kernel needs a moment to make the exit visible to try_wait;
+    // the note reads it through the same child. The wait is bounded, so
+    // an exit that never shows fails the test instead of hanging it
+    // until the CI job's own timeout.
+    let give_up = std::time::Instant::now() + Duration::from_secs(60);
+    let mut note = probe.note();
+    while note.contains("still running") {
+        assert!(
+            std::time::Instant::now() < give_up,
+            "the killed server's exit never showed in the probe:\n{note}"
+        );
         std::thread::sleep(Duration::from_millis(20));
-    };
+        note = probe.note();
+    }
     assert!(
         note.contains("SIGKILL (signal 9)"),
         "the probe names the outside kill: {note}"
