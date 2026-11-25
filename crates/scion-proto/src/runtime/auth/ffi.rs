@@ -335,3 +335,16 @@ pub(crate) fn hw_memsize() -> Option<u64> {
     };
     (ok == 0 && size > 0).then_some(size)
 }
+
+/// Sets glibc's `M_ARENA_MAX` on the running process: `mallopt`
+/// answers nonzero when the tuning was accepted. The serving
+/// processes call this once in `main`, before any thread exists, so
+/// the cap reaches every arena a worker mints afterwards (#1421).
+///
+/// SAFETY: the call takes no pointers; its one hazard - another thread
+/// minting an arena while the cap changes - is excluded by the
+/// caller, which runs before any thread exists.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(crate) fn mallopt_arena_max(n: i32) -> i32 {
+    unsafe { libc::mallopt(libc::M_ARENA_MAX, n) }
+}

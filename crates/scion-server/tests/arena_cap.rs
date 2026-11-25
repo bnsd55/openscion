@@ -86,7 +86,16 @@ fn wait_for_serving(log: &std::path::Path) -> bool {
 #[test]
 fn serve_logs_the_arena_cap_decision() {
     let base = pg_url();
-    let schema = format!("scion_test_1421_arena_{}", std::process::id() % 100_000);
+    // A prefix of this test's own, NOT the harness's scion_test_
+    // namespace, and a name a concurrent run of the same test cannot
+    // collide with: the full pid plus a random suffix. The name is
+    // never registered with the harness, so a pattern cleanup must not
+    // mistake it for a harness schema (F8).
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock runs")
+        .subsec_nanos();
+    let schema = format!("scion_arena_cap_{}_{}", std::process::id(), suffix);
     create_schema(&schema);
     let dir = scion_server::test_support::private_tempdir();
     let data = dir.path().join("data");

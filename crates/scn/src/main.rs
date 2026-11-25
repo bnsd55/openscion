@@ -129,8 +129,35 @@ enum Command {
 /// error is 2, as for a bad command line.
 const ERROR_EXIT: u8 = 2;
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    // The removed-flag refusal and the parse are single-threaded sync
+    // work, done here so the arena cap can still be decided AFTER the
+    // command is known and BEFORE the tokio runtime builds its workers:
+    // a cap set after the workers exist reaches only the arenas they
+    // have not minted yet (#1421). `mount` is the one command of this
+    // binary that lives long enough to hold what a leaked arena keeps
+    // (it serves NFS until a signal); the one-shot commands run and
+    // exit.
+    let cli = parse_cli();
+    if matches!(cli.command, Command::Mount(_)) {
+        scion_proto::runtime::arena::cap_malloc_arenas();
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build();
+    match runtime {
+        Ok(runtime) => runtime.block_on(run(cli)),
+        Err(e) => {
+            eprintln!("scn: the async runtime could not be built: {e}");
+            ExitCode::from(ERROR_EXIT)
+        }
+    }
+}
+
+/// The removed-flag refusal and the CLI parse, single-threaded sync
+/// work in `main`: the arena cap is decided after the command is known
+/// and before the runtime builds its workers (#1421).
+fn parse_cli() -> Cli {
     if let Some(removed) = scion_proto::runtime::auth::removed::removed_flag_of(
         std::env::args_os().skip(1).collect::<Vec<_>>().as_slice(),
         &[scion_proto::runtime::auth::removed::RemovedFlag {
@@ -142,10 +169,13 @@ async fn main() -> ExitCode {
             "scn: {}",
             scion_proto::runtime::auth::removed::refusal_text(removed)
         );
-        return ExitCode::from(ERROR_EXIT);
+        std::process::exit(i32::from(ERROR_EXIT));
     }
-    let cli = Cli::parse();
-    match run(cli).await {
+    Cli::parse()
+}
+
+async fn run(cli: Cli) -> ExitCode {
+    match run_code(cli).await {
         Ok(code) => code,
         Err(e) => {
             let err: &(dyn std::error::Error + 'static) = e.as_ref();
@@ -212,7 +242,7 @@ fn chain_text(error: &(dyn std::error::Error + 'static)) -> String {
     out
 }
 
-async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
+async fn run_code(cli: Cli) -> anyhow::Result<ExitCode> {
     // A build without the writable-mount feature has no write path at
     // all. The refusal fires before anything connects, so it names the
     // build, not the syntax and not the server.
