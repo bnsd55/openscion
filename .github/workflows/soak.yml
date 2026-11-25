@@ -57,7 +57,7 @@ jobs:
       # recorded by stack, and heaptrack_print's summaries upload with the
       # other artifacts.
       - name: install heaptrack
-        if: env.SOAK_HEAPTRACK != ''
+        if: github.event.inputs.heaptrack == 'on'
         run: sudo apt-get update && sudo apt-get install -y heaptrack
       - name: run the soak
         env:
@@ -65,7 +65,7 @@ jobs:
           # own length, 10 by default. The input goes through env:, not
           # through the run: string, so no shell sees it unquoted.
           RUN_MINUTES: ${{ github.event.inputs.minutes || '120' }}
-          SOAK_HEAPTRACK: ${{ github.event.inputs.heaptrack || '' }}
+          SOAK_HEAPTRACK: ${{ github.event.inputs.heaptrack == 'on' && 'on' || '' }}
           # The resource ceilings, each named here and enforced by
           # scripts/soak.sh: a server may grow to
           SOAK_RSS_PCT: "150" # 150 percent of its warm RSS,
@@ -88,7 +88,7 @@ jobs:
           timeout 9000 scripts/soak.sh
       # The heaptrack probe's summaries and the raw recording (#1421).
       - name: print the heaptrack summary
-        if: always() && env.SOAK_HEAPTRACK != ''
+        if: always() && github.event.inputs.heaptrack == 'on'
         run: |
           mkdir -p "${RUNNER_TEMP:-/tmp}/soak-artifacts"
           for zst in "${RUNNER_TEMP:-/tmp}"/soak-artifacts/heaptrack-server.*.zst; do
