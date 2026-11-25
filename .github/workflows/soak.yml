@@ -12,6 +12,9 @@ on:
         # A dispatch is the bounded manual run; the nightly schedule runs
         # 120 regardless of this default.
         default: "10"
+      heaptrack:
+        description: "set to 'on' to run the server under heaptrack (#1421 probe)"
+        default: ""
 
 # Every third-party action is pinned to the commit SHA its version tag
 # named, with the version in a comment, as ci.yml does.
@@ -49,12 +52,20 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The heaptrack probe (#1421): when SOAK_HEAPTRACK is set, heaptrack
+      # wraps the server so the run's peak and temporary allocations are
+      # recorded by stack, and heaptrack_print's summaries upload with the
+      # other artifacts.
+      - name: install heaptrack
+        if: env.SOAK_HEAPTRACK != ''
+        run: sudo apt-get update && sudo apt-get install -y heaptrack
       - name: run the soak
         env:
           # The nightly schedule runs 120 minutes; a dispatch names its
           # own length, 10 by default. The input goes through env:, not
           # through the run: string, so no shell sees it unquoted.
           RUN_MINUTES: ${{ github.event.inputs.minutes || '120' }}
+          SOAK_HEAPTRACK: ${{ github.event.inputs.heaptrack || '' }}
           # The resource ceilings, each named here and enforced by
           # scripts/soak.sh: a server may grow to
           SOAK_RSS_PCT: "150" # 150 percent of its warm RSS,
@@ -75,6 +86,20 @@ jobs:
           # the build, the checks and the teardown live in the job's
           # remaining 15. (9000 s = 150 min.)
           timeout 9000 scripts/soak.sh
+      # The heaptrack probe's summaries and the raw recording (#1421).
+      - name: print the heaptrack summary
+        if: env.SOAK_HEAPTRACK != ''
+        run: |
+          mkdir -p "${RUNNER_TEMP:-/tmp}/soak-artifacts"
+          for zst in "${RUNNER_TEMP:-/tmp}"/soak-artifacts/heaptrack-server.*.zst; do
+            [ -e "$zst" ] || continue
+            heaptrack_print "$zst" > "${zst%.zst}.summary.txt" || true
+            heaptrack_print "$zst" --print-only-peaks > "${zst%.zst}.peaks.txt" || true
+          done
+          # Keep the raw recording only when it is small: the artifact
+          # cap the lead named is 200 MB.
+          find "${RUNNER_TEMP:-/tmp}/soak-artifacts" -name 'heaptrack-server.*.zst' \
+            -size +200M -delete
       # The bounds live in the script; a failed bound fails the step and
       # keeps the CSVs and logs.
       - name: upload the samples and the logs

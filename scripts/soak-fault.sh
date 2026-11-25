@@ -192,7 +192,14 @@ SLOW_EXPECTED=$("$TIMEOUT" 60 "$BIN/scn" --server "$SERVER" cat "$SLOW_FILE" | w
 # the point: the clients must resume against a restarted upstream
 # through a live tier.
 start_server() {
-  start server serving "$BIN/scion-server" --data "$WORK/server" \
+  # The heaptrack probe (#1421): SOAK_HEAPTRACK on wraps the server, the
+  # same rule start_scion applies.
+  local wrap=""
+  if [ "${SOAK_HEAPTRACK:-}" = "on" ]; then
+    wrap="heaptrack -o ${RUNNER_TEMP:-/tmp}/soak-artifacts/heaptrack-server"
+  fi
+  # shellcheck disable=SC2086 # $wrap is the probe's wrapper words
+  start server serving $wrap "$BIN/scion-server" --data "$WORK/server" \
     serve \
     --listen "127.0.0.1:$SERVER_PORT" \
     --ticket-key "$WORK/ticket.key" \

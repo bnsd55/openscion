@@ -438,7 +438,20 @@ start_scion() {
   if [ ! -f "$WORK/ticket.key" ]; then
     "$BIN/scion-server" --data "$WORK/server" ticket-key --out "$WORK/ticket.key" > "$WORK/ticket.pub"
   fi
-  start server serving env SCION_POSTGRES_URL="$PG_URL" "$BIN/scion-server" --data "$WORK/server" serve \
+  # The heaptrack probe (#1421): SOAK_HEAPTRACK on wraps the server so the
+  # run's peak and temporary allocations are recorded by stack. The wrapper
+  # writes heaptrack-server.*.zst next to the run's other artifacts.
+  local wrap=""
+  if [ "${SOAK_HEAPTRACK:-}" = "on" ]; then
+    mkdir -p "${RUNNER_TEMP:-/tmp}/soak-artifacts"
+    # One word per shellcheck: the wrapper's value holds no spaces (the
+    # artifacts dir never does), and $wrap must split into words for the
+    # start line. shellcheck disable=SC2086.
+    # shellcheck disable=SC2086
+    wrap="heaptrack -o ${RUNNER_TEMP:-/tmp}/soak-artifacts/heaptrack-server"
+  fi
+  # shellcheck disable=SC2086 # $wrap is the probe's wrapper words
+  start server serving env SCION_POSTGRES_URL="$PG_URL" $wrap "$BIN/scion-server" --data "$WORK/server" serve \
     --listen "127.0.0.1:$SERVER_PORT" \
     --ticket-key "$WORK/ticket.key" \
     --metrics-listen "127.0.0.1:$SERVER_METRICS_PORT"
