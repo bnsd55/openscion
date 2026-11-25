@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use scion_core::{BlobId, Changeset, ChangesetId, RepoPath};
+use scion_proto::client::Resend;
 use scion_proto::runtime::auth::{Bearer, check_ancestors};
 use scion_proto::runtime::request_id;
 use scion_proto::runtime::tls::ClientTls;
@@ -20,7 +21,7 @@ use tokio_stream::{StreamExt as _, wrappers::ReceiverStream};
 use tonic::metadata::{Ascii, MetadataValue};
 use tonic::service::Interceptor;
 use tonic::service::interceptor::InterceptedService;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::Endpoint;
 use tonic::{Request, Status};
 
 /// The deadline of every call: the server's own limit for a call, so it
@@ -59,11 +60,14 @@ fn live(endpoint: Endpoint) -> Endpoint {
 /// not a repo that grew.
 pub(crate) const MAX_JOINED_REPLY_BYTES: usize = 1 << 30;
 
-/// A connected client.
-pub type Client = ScionClient<InterceptedService<Channel, Call>>;
+/// A connected client. The channel is wrapped in [`Resend`]: a call that
+/// never reached the wire at a connection's end is sent again, and the
+/// interceptor sits outside it, so the resent attempt keeps the one
+/// request ID the command was given.
+pub type Client = ScionClient<InterceptedService<Resend, Call>>;
 
 /// A connected client for the object reads that a cache tier can answer.
-pub type Objects = ObjectsClient<InterceptedService<Channel, Call>>;
+pub type Objects = ObjectsClient<InterceptedService<Resend, Call>>;
 
 /// Adds the bearer token, the deadline (`CALL_TIMEOUT`) and the request
 /// ID to every call. One command makes one ID ([`Ctx::connect`]) and sends
@@ -155,11 +159,9 @@ fn mutation_whole_file() -> bool {
 /// Panics when `url` is not a valid address.
 #[cfg(any(test, feature = "test-hooks"))]
 pub async fn test_objects(url: &str, token: &str) -> Objects {
-    let channel = Endpoint::from_shared(url.to_owned())
-        .unwrap()
-        .connect()
-        .await
-        .unwrap();
+    let endpoint = Endpoint::from_shared(url.to_owned()).unwrap();
+    let channel = endpoint.connect().await.unwrap();
+    let channel = Resend::new(channel, endpoint);
     let call = Call::new(
         Bearer::new(token).unwrap(),
         request_id::generate()
@@ -219,12 +221,14 @@ impl Ctx {
             .with_context(|| format!("cannot trust the certificate of {server}"))?;
         // A server at its connection cap leaves a new connection unread, so
         // a call also has a limit here, until its reply starts.
-        let channel = live(endpoint)
+        let endpoint = live(endpoint)
             .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(CALL_TIMEOUT)
+            .timeout(CALL_TIMEOUT);
+        let channel = endpoint
             .connect()
             .await
             .with_context(|| format!("cannot connect to {server}"))?;
+        let channel = Resend::new(channel, endpoint);
         let call = Call::new(
             Bearer::new(token).context("token is not valid ASCII")?,
             request_id::generate()
@@ -253,12 +257,14 @@ impl Ctx {
                 let endpoint = ClientTls::load(ca, None, None)
                     .and_then(|tls| tls.apply_to(objects, endpoint))
                     .with_context(|| format!("cannot trust the certificate of {objects}"))?;
-                let channel = live(endpoint)
+                let endpoint = live(endpoint)
                     .connect_timeout(CONNECT_TIMEOUT)
-                    .timeout(CALL_TIMEOUT)
+                    .timeout(CALL_TIMEOUT);
+                let channel = endpoint
                     .connect()
                     .await
                     .with_context(|| format!("cannot connect to {objects}"))?;
+                let channel = Resend::new(channel, endpoint);
                 ObjectsClient::with_interceptor(channel, call.clone())
                     .max_decoding_message_size(MAX_PART_MESSAGE_BYTES)
                     .max_encoding_message_size(MAX_MESSAGE_BYTES)

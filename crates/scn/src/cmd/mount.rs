@@ -973,11 +973,12 @@ mod silent_failures {
     /// refuse or stop before the first RPC, so the lazy channel is never
     /// dialed.
     fn dummy_ctx() -> Ctx {
+        use scion_proto::client::Resend;
         use scion_proto::runtime::auth::Bearer;
         use scion_proto::v1::{objects_client::ObjectsClient, scion_client::ScionClient};
-        let channel = tonic::transport::Endpoint::from_shared("http://127.0.0.1:1")
-            .unwrap()
-            .connect_lazy();
+        let endpoint = tonic::transport::Endpoint::from_shared("http://127.0.0.1:1").unwrap();
+        let channel = endpoint.connect_lazy();
+        let channel = Resend::new(channel, endpoint);
         let call =
             crate::client::Call::new(Bearer::new("token").unwrap(), "mount-test".parse().unwrap());
         Ctx {

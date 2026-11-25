@@ -33,6 +33,8 @@
 //! The object bytes themselves live in
 //! [`scion-core`](https://docs.rs/open-scion-core).
 
+pub mod client;
+
 /// The runtime code that serves the contract: transport, TLS, the
 /// listener, metrics, the reply loop, and the access rules our binaries
 /// enforce.
@@ -45,7 +47,6 @@
 /// publishes it for the server, the tiers and the daemon of this
 /// repository, which share it.
 pub mod runtime;
-
 pub mod ticket;
 
 /// The buffer type of `ObjectPart.data`: parts of one object are slices of one

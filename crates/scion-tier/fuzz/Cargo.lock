@@ -793,6 +793,7 @@ dependencies = [
  "blake3",
  "bytes",
  "ed25519-dalek",
+ "h2",
  "http",
  "http-body",
  "http-body-util",
