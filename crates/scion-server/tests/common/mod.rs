@@ -11,8 +11,8 @@ use std::io::Write as _;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use scion_core::{BlobId, Changeset, ChangesetId, Entry, FileState, IdentityTime, RepoPath, Tree};
@@ -72,9 +72,67 @@ impl Rng {
 
 /// SIGKILL.
 pub(crate) struct Server {
-    child: Child,
+    /// The child, behind a mutex so a test's client tasks can read its
+    /// exit state at the moment a call fails (#1424): the probe needs
+    /// `try_wait`, and `try_wait` needs the child.
+    child: Arc<Mutex<Child>>,
     addr: SocketAddr,
     pub url: String,
+}
+
+/// What a server looked like at a moment of a test's choosing: its
+/// exit status, read from the same child the harness spawned, and the
+/// tail of its log. A client call that fails before the kill is a bug
+/// whose cause the server's own state names (#1424): a process death
+/// reads as socket errors on every connection at once, and the status
+/// says what killed it - SIGKILL from the runner's OOM killer or an
+/// operator, SIGABRT from an allocation failure or a panic-with-abort.
+#[derive(Clone)]
+pub(crate) struct ServerProbe {
+    child: Arc<Mutex<Child>>,
+    log: PathBuf,
+}
+
+impl ServerProbe {
+    /// The server's exit state and the last 50 lines of its log, for a
+    /// panic's message. A server that exited names how: a signal number
+    /// reads as its name for the two signals that kill a server in
+    /// practice. The log's tail carries whatever the server wrote last -
+    /// an abort's message, a panic's, or nothing at all before a SIGKILL.
+    pub(crate) fn note(&self) -> String {
+        let state = {
+            let mut child = self.child.lock().unwrap_or_else(PoisonError::into_inner);
+            match child.try_wait() {
+                Ok(Some(status)) => exit_note(status),
+                Ok(None) => "the server is still running".to_owned(),
+                Err(e) => format!("the server's exit status cannot be read: {e}"),
+            }
+        };
+        let text = fs::read_to_string(&self.log).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        let skip = lines.len().saturating_sub(50);
+        let shown = &lines[skip..];
+        format!(
+            "{state}\nthe server's last {} log lines:\n{}",
+            shown.len(),
+            shown.join("\n")
+        )
+    }
+}
+
+/// How a server process ended, named for a human: a signal number
+/// reads as its name for the two signals that kill a server in
+/// practice, and the raw status backs the name up.
+fn exit_note(status: std::process::ExitStatus) -> String {
+    use std::os::unix::process::ExitStatusExt as _;
+    match status.signal() {
+        Some(9) => "the server was killed by SIGKILL (signal 9)".to_owned(),
+        Some(6) => "the server died by SIGABRT (signal 6; an abort, an allocation \
+             failure, or a panic that aborted)"
+            .to_owned(),
+        Some(sig) => format!("the server was killed by signal {sig} ({status})"),
+        None => format!("the server exited with {status}"),
+    }
 }
 
 /// The land park directory of a data directory: a sibling of it in the
@@ -164,20 +222,35 @@ impl Server {
     /// The server process's id, for a test that must tell the server's
     /// files from another process's.
     pub(crate) fn pid(&self) -> u32 {
-        self.child.id()
+        self.lock_child().id()
+    }
+
+    fn lock_child(&self) -> MutexGuard<'_, Child> {
+        self.child.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Whether the server process exited, and how: `None` while it runs.
     pub(crate) fn try_wait(&mut self) -> Option<std::process::ExitStatus> {
-        self.child.try_wait().unwrap()
+        self.lock_child().try_wait().unwrap()
     }
 
     /// Kills the server at once (SIGKILL) and reaps it. A land the
     /// server held dies with the process; the rows it committed
     /// outlive it.
     pub(crate) fn kill(&mut self) {
-        self.child.kill().unwrap();
-        self.child.wait().unwrap();
+        let mut child = self.lock_child();
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    /// A handle on the server's exit state and log, safe to hold in a
+    /// test's client tasks: a call that fails before the kill reads the
+    /// state at the moment of the failure (#1424).
+    pub(crate) fn probe(&self, log: &Path) -> ServerProbe {
+        ServerProbe {
+            child: Arc::clone(&self.child),
+            log: log.to_path_buf(),
+        }
     }
 }
 
@@ -217,7 +290,7 @@ impl Server {
             .expect("the log's length fits usize");
         let start = Instant::now();
         while !server.listens(log) {
-            if let Some(status) = server.child.try_wait().unwrap() {
+            if let Some(status) = server.try_wait() {
                 panic!("{}", exit_report(log, mark, status));
             }
             assert!(start.elapsed() < Duration::from_secs(60), "no listen");
@@ -269,7 +342,7 @@ impl Server {
             .expect("the log's length fits usize");
         let start = Instant::now();
         while !server.listens(log) {
-            if let Some(status) = server.child.try_wait().unwrap() {
+            if let Some(status) = server.try_wait() {
                 panic!("{}", exit_report(log, mark, status));
             }
             assert!(start.elapsed() < Duration::from_secs(60), "no listen");
@@ -372,7 +445,7 @@ impl Server {
             .expect("the log's length fits usize");
         let start = Instant::now();
         while !server.listens(log) {
-            if let Some(status) = server.child.try_wait().unwrap() {
+            if let Some(status) = server.try_wait() {
                 panic!("{}", exit_report(log, mark, status));
             }
             assert!(start.elapsed() < Duration::from_secs(60), "no listen");
@@ -406,7 +479,7 @@ impl Server {
             .expect("the log's length fits usize");
         let start = Instant::now();
         while !server.listens(log) {
-            if let Some(status) = server.child.try_wait().unwrap() {
+            if let Some(status) = server.try_wait() {
                 panic!("{}", exit_report(log, mark, status));
             }
             assert!(start.elapsed() < Duration::from_secs(60), "no listen");
@@ -573,7 +646,7 @@ impl Server {
         })
         .unwrap();
         Self {
-            child,
+            child: Arc::new(Mutex::new(child)),
             addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             url: String::new(),
         }
@@ -683,9 +756,12 @@ impl Drop for Server {
     fn drop(&mut self) {
         // Every path reaps the child, panics included: `kill` sends
         // SIGKILL (a frozen server dies too), and `wait` takes its
-        // status, so no zombie outlives the test that started it.
-        self.child.kill().ok();
-        self.child.wait().ok();
+        // status, so no zombie outlives the test that started it. A
+        // probe's clone of the child handle outliving this drop reads
+        // the reaped status, never a zombie.
+        let mut child = self.lock_child();
+        child.kill().ok();
+        child.wait().ok();
     }
 }
 
@@ -777,7 +853,7 @@ impl Server {
     /// one either. The caller kills the frozen server; nothing of it runs
     /// past the cut.
     pub(crate) fn freeze(&mut self) {
-        let pid = self.child.id();
+        let pid = self.lock_child().id();
         let pid_i32 = pid.cast_signed();
         rustix::process::kill_process(
             rustix::process::Pid::from_raw(pid_i32).unwrap(),
@@ -891,6 +967,36 @@ pub(crate) fn author() -> IdentityTime {
 
 pub(crate) fn changeset_id(bytes: &[u8]) -> ChangesetId {
     ChangesetId::try_from(bytes).unwrap()
+}
+
+/// One land's ledger line for a check's panic (#1424): its replies with
+/// their sources and result ids. A check that finds a changeset on a
+/// ref with no LANDED reply must say what the ledger holds, or the CI
+/// log cannot tell a land that committed unseen from one that never ran.
+pub(crate) fn ledger_line(
+    idx: usize,
+    caller: usize,
+    key: &str,
+    target: &str,
+    replies: &[(&'static str, LandResponse)],
+) -> String {
+    if replies.is_empty() {
+        return format!("land[{idx}] caller={caller} key={key} target={target}: no replies");
+    }
+    let list: Vec<String> = replies
+        .iter()
+        .map(|(source, reply)| {
+            format!(
+                "{source}={:?} result={}",
+                reply.state(),
+                changeset_id(&reply.result_changeset_id)
+            )
+        })
+        .collect();
+    format!(
+        "land[{idx}] caller={caller} key={key} target={target}: {}",
+        list.join(" ")
+    )
 }
 
 /// A land that a client sent, and its reply if one came.
