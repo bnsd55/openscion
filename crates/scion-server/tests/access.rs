@@ -2198,7 +2198,14 @@ async fn an_upload_over_its_share_is_refused_before_a_permit() {
         .unwrap();
     let bearer = Bearer::token("Bearer p".parse().unwrap());
     let p = ScionClient::with_interceptor(channel, bearer);
-    let mut b = scion(&url, Some("b")).await;
+    // `b`'s channel has no call timeout either: its held uploads must
+    // sit open for the whole test, and the default channel would end
+    // them at its 30 s deadline.
+    let channel_b = common::channel_within(&url, std::time::Duration::from_secs(1 << 30))
+        .await
+        .unwrap();
+    let bearer_b = Bearer::token("Bearer b".parse().unwrap());
+    let mut b = ScionClient::with_interceptor(channel_b, bearer_b);
 
     // `p` opens uploads that stay open: the first message names the
     // repo, then one message every second keeps the server's idle
@@ -2220,14 +2227,26 @@ async fn an_upload_over_its_share_is_refused_before_a_permit() {
     // streams do. A probe is a completed upload; the principal's own
     // share refusal says its streams have all taken their share and
     // permit server-side. The two refusals prove 16 of 16 permits held.
-    let mut extra = 0;
+    // Each phase refills the principal it probes: a hold lost to the
+    // connect race - a probe took the last unit while a held stream was
+    // still connecting, so that stream was refused at once and is gone -
+    // is replaced by a hold of the same principal. A refill of the other
+    // principal would replace nothing, and its share could never fill.
+    // The cap is per phase.
+    let mut extra_p = 0;
     let mut refill_p = || {
-        extra += 1;
-        assert!(extra <= 32, "the held uploads never filled the share");
+        extra_p += 1;
+        assert!(extra_p <= 32, "p's held uploads never filled the share");
         hold_one(p.clone(), p_stops.clone());
     };
     until_share_full(&p, "p", &mut refill_p).await;
-    until_share_full(&b, "b", &mut refill_p).await;
+    let mut extra_b = 0;
+    let mut refill_b = || {
+        extra_b += 1;
+        assert!(extra_b <= 32, "b's held uploads never filled the share");
+        hold_one(b.clone(), b_stops.clone());
+    };
+    until_share_full(&b, "b", &mut refill_b).await;
 
     // Every permit is taken now: `p`'s next upload is refused at once,
     // before it can wait for a permit.
