@@ -273,7 +273,7 @@ async fn run(
                     rpc = %path,
                     attempt = attempt + 1,
                     kind,
-                    "call lost before the wire"
+                    "call lost"
                 );
                 attempt += 1;
             }
@@ -994,13 +994,7 @@ mod tests {
                             }
                         }
                     }
-                    loop {
-                        let accepted_stream = connection.accept().await;
-                        let Some(Ok((request, mut respond))) = accepted_stream else {
-                            println!("SERVER accept[{step}]: {accepted_stream:?}");
-                            return;
-                        };
-                        println!("SERVER accept[{step}]: got a stream");
+                    while let Some(Ok((request, mut respond))) = connection.accept().await {
                         tokio::spawn(async move {
                             let mut body = request.into_body();
                             while let Some(Ok(chunk)) = body.data().await {
@@ -1057,10 +1051,8 @@ mod tests {
         )
         .await;
         assert!(result.is_ok(), "the call ends in time");
-        let error = result.unwrap().unwrap_err();
-        println!("DEBUG error: {error:?}");
         assert_eq!(
-            error.code(),
+            result.unwrap().unwrap_err().code(),
             Code::NotFound,
             "the resent call reaches the server's answer"
         );
