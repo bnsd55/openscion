@@ -17,10 +17,22 @@
 //! was lost on - which would refuse the resent stream - is bypassed,
 //! and the fresh connection is dropped when the call ends.
 //!
-//! A call that was sent and then lost is never resent: by then hyper
-//! has polled the request body - the proxy body took the real body
-//! out of its slot on its first poll - so the slot no longer holds
-//! it, and an upload that started is never sent twice.
+//! A call whose body hyper already took gets a second proof, because
+//! the slot no longer holds the request: the middleware keeps a copy
+//! of the frames hyper took, complete when the body reached its end,
+//! and sends the call again only when the server itself refused the
+//! stream as never processed - a `RST_STREAM` with `REFUSED_STREAM`
+//! from the remote, or a `GOAWAY` delivered to this stream (h2 hands
+//! a GOAWAY only to streams above its last stream id). Anything else
+//! that happens after the take says nothing about what the server
+//! read, and is never resent - an upload that started once and was
+//! seen once is never sent twice.
+//!
+//! Trust boundary: the second proof takes the server's `REFUSED_STREAM`
+//! and `GOAWAY` at their word (RFC 9113 8.7 and 6.8: a server that
+//! refused a stream did not process it, and a GOAWAY's last stream id
+//! covers every stream at or below it). A server that broke that rule
+//! could cause a duplicate write.
 
 use std::error::Error as _;
 use std::future::{Future, poll_fn};
@@ -37,9 +49,10 @@ use tonic::body::Body;
 use tonic::transport::{Channel, Endpoint, Error as TransportError};
 use tower::Service;
 
-/// How many times a call that never reached the wire may be sent: the
-/// first send and two more. A resend is only ever made while the slot
-/// still holds the body, so each one must re-earn it.
+/// How many times a call may be sent: the first send and two more.
+/// Each resend must re-earn its proof - either the slot still holds
+/// the body (hyper never polled it), or the kept copy is complete and
+/// the server itself refused the stream unprocessed.
 const MAX_ATTEMPTS: usize = 3;
 
 /// The most body hyper may have taken from a call while the middleware
@@ -51,9 +64,11 @@ const RESEND_BODY_KEEP_BYTES: usize = 256 * 1024;
 
 /// The client half of the connection age. A tower service that wraps
 /// the channel: a call whose error's source chain holds a
-/// `hyper::Error` - hyper's transport failures, both of them marks of
-/// a request that was never sent - and whose body hyper never polled
-/// is handed to the channel again, with the same request.
+/// `hyper::Error` - hyper's transport failure - is handed to the
+/// channel again, with the same request, when one of two proofs says
+/// the send was safe to repeat: the body hyper never polled is still
+/// whole in the slot, or the kept copy of what hyper took is complete
+/// and the server itself refused the stream as never processed.
 #[derive(Clone, Debug)]
 pub struct Resend {
     inner: Channel,
@@ -96,13 +111,15 @@ impl Service<Request<Body>> for Resend {
 }
 
 /// Whether the error's source chain carries a `hyper::Error` - the
-/// transport failure of the connection, which at a connection's end
-/// means a request that was never sent: still in the dispatch queue
-/// (`Canceled`), or taken by the dispatcher with its HTTP/2 stream
-/// pending open (dispatch-gone). The chain walk fails closed: no
-/// `hyper::Error`, no resend. The slot check in [`run`] does the rest:
-/// a body hyper polled is a request on the wire, never resent, whether
-/// the server processed it or refused the stream.
+/// transport failure of the connection. This alone does not justify a
+/// resend; it lets the gate look further. The request may be unsent -
+/// still in the dispatch queue (`Canceled`), or taken by the
+/// dispatcher with its HTTP/2 stream pending open (dispatch-gone) -
+/// or the server may have refused the stream unprocessed. The chain
+/// walk fails closed: no `hyper::Error`, no resend. What the gate
+/// does with it is [`Slot::may_resend`]'s call: a body hyper never
+/// polled resends as it is; a taken body resends only on the
+/// server's own refused-unprocessed frames.
 fn is_unsent(error: &(dyn std::error::Error + 'static)) -> bool {
     let mut chain = Some(error);
     while let Some(error) = chain {
@@ -143,14 +160,28 @@ fn kind_of(error: &HyperError) -> &'static str {
         "canceled"
     } else if error.is_user() {
         "dispatch gone"
-    } else if error.is_closed() {
-        "channel closed"
-    } else if error.is_incomplete_message() {
-        "incomplete message"
-    } else if error.is_timeout() {
-        "timeout"
     } else {
-        "protocol"
+        let mut chain: Option<&(dyn std::error::Error + 'static)> = Some(error);
+        while let Some(error) = chain {
+            if let Some(h2) = error.downcast_ref::<h2::Error>() {
+                if h2.is_reset() && h2.reason() == Some(h2::Reason::REFUSED_STREAM) {
+                    return "refused stream";
+                }
+                if h2.is_go_away() {
+                    return "go away";
+                }
+            }
+            chain = error.source();
+        }
+        if error.is_closed() {
+            "channel closed"
+        } else if error.is_incomplete_message() {
+            "incomplete message"
+        } else if error.is_timeout() {
+            "timeout"
+        } else {
+            "protocol"
+        }
     }
 }
 
@@ -179,7 +210,17 @@ async fn run(
                 rpc = %path,
                 attempt,
                 transport = "fresh connection",
-                "sending a call again that hyper never put on the wire"
+                proof = if slot
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .body
+                    .is_some()
+                {
+                    "unsent"
+                } else {
+                    "refused unprocessed"
+                },
+                "sending a call again"
             );
         }
         slot.lock()
@@ -219,7 +260,7 @@ async fn run(
                         tracing::warn!(
                             rpc = %path,
                             attempts = attempt + 1,
-                            "a call that never reached the wire ran out of attempts"
+                            "a call ran out of resend attempts"
                         );
                     }
                     return Err(error);
@@ -262,6 +303,8 @@ struct Slot {
 #[derive(Debug, Default)]
 struct Sent {
     frames: Vec<bytes::Bytes>,
+    /// The running size of the kept frames, so no poll re-sums them.
+    total: usize,
     complete: bool,
 }
 
@@ -285,9 +328,11 @@ impl Slot {
 }
 
 /// The body of a possibly-resent call: the real body waits in the
-/// slot, and the owning attempt's first poll takes it out. Once it is
-/// out, hyper has the request on the wire, and no second attempt is
-/// ever made.
+/// slot, and the owning attempt's first poll takes it out. Every
+/// frame hyper takes is kept as a refcount clone while the body
+/// streams; once the body ends the copy is complete, and a resent
+/// attempt may replay it - but only when the server itself refused
+/// the stream as never processed.
 #[derive(Debug)]
 struct ProxyBody {
     slot: Arc<Mutex<Slot>>,
@@ -336,83 +381,83 @@ impl HttpBody for ProxyBody {
                 slot.body.take(),
                 slot.sent
                     .as_ref()
-                    .filter(|sent| sent.complete)
-                    .map(|sent| sent.frames.clone()),
+                    .map(|sent| (sent.complete, sent.frames.get(self.replay).cloned())),
             )
         };
-        if self.inner.is_some() || taken.is_some() {
-            // The attempt that got the body: it streams from the real
-            // one, and every frame hyper takes is kept as a refcount
-            // clone until the body ends or the copy passes the cap.
-            if let Some(body) = taken {
+        // The real-body poll: the attempt that got the body streams
+        // from it, and the bookkeeping below keeps every frame hyper
+        // takes as a refcount clone until the body ends or the copy
+        // passes the cap. It runs on every poll of the owning attempt -
+        // the body's end usually arrives on a later poll than the take.
+        let poll = match taken {
+            Some(mut body) => {
+                let poll = Pin::new(&mut body).poll_frame(cx);
                 self.inner = Some(body);
+                poll
             }
-            match Pin::new(self.inner.as_mut().expect("the body was just taken")).poll_frame(cx) {
-                Poll::Ready(Some(Ok(frame))) => {
-                    let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
-                    match (&mut slot.sent, frame.data_ref()) {
-                        (Some(sent), Some(bytes)) => {
-                            sent.frames.push(bytes.clone());
-                            let total = sent.frames.iter().map(bytes::Bytes::len).sum::<usize>();
-                            if total > RESEND_BODY_KEEP_BYTES {
-                                slot.sent = None;
-                            }
+            None => match self.inner.as_mut() {
+                Some(body) => Pin::new(body).poll_frame(cx),
+                // The body of this attempt is gone: a resent attempt
+                // replays the kept frames, the whole body as hyper
+                // took it, and returns early - a replayed frame never
+                // runs the bookkeeping below, which would grow the
+                // copy with its own echoes and corrupt the resent body.
+                None => match replay {
+                    Some((true, Some(bytes))) => {
+                        self.replay += 1;
+                        return Poll::Ready(Some(Ok(Frame::data(bytes))));
+                    }
+                    Some((true, None)) => return Poll::Ready(None),
+                    // Without a complete copy - the cap dropped it, or
+                    // hyper never ended the stream - an error frame
+                    // makes hyper reset this stream; a clean end would
+                    // hand the server a request of its own.
+                    _ => {
+                        return Poll::Ready(Some(Err(Status::cancelled(
+                            "the call was lost before it was sent",
+                        ))));
+                    }
+                },
+            },
+        };
+        match poll {
+            Poll::Ready(Some(Ok(frame))) => {
+                let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+                match (&mut slot.sent, frame.data_ref()) {
+                    (Some(sent), Some(bytes)) => {
+                        sent.total += bytes.len();
+                        sent.frames.push(bytes.clone());
+                        if sent.total > RESEND_BODY_KEEP_BYTES {
+                            slot.sent = None;
                         }
-                        // A trailers frame, or the copy already gone
-                        // over the cap: the copy stops being a proof.
-                        _ => slot.sent = None,
                     }
-                    Poll::Ready(Some(Ok(frame)))
+                    // A trailers frame, or the copy already gone over
+                    // the cap: the copy stops being a proof.
+                    _ => slot.sent = None,
                 }
-                Poll::Ready(None) => {
-                    // The body reached its end: the copy is complete,
-                    // and it lives until the call ends.
-                    let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
-                    if let Some(sent) = slot.sent.as_mut() {
-                        sent.complete = true;
-                    }
-                    Poll::Ready(None)
-                }
-                poll => poll,
+                Poll::Ready(Some(Ok(frame)))
             }
-        } else {
-            // The body of this attempt is gone: a resent attempt
-            // replays the kept frames, the whole body as hyper took
-            // it. Without a complete copy - the cap dropped it, or
-            // hyper never ended the stream - an error frame makes
-            // hyper reset this stream; a clean end would hand the
-            // server a request of its own.
-            let Some(frames) = replay else {
-                return Poll::Ready(Some(Err(Status::cancelled(
-                    "the call was lost before it was sent",
-                ))));
-            };
-            match frames.get(self.replay) {
-                Some(bytes) => {
-                    self.replay += 1;
-                    Poll::Ready(Some(Ok(Frame::data(bytes.clone()))))
+            Poll::Ready(None) => {
+                // The body reached its end: the copy is complete, and
+                // it lives until the call ends.
+                let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+                if let Some(sent) = slot.sent.as_mut() {
+                    sent.complete = true;
                 }
-                None => Poll::Ready(None),
+                Poll::Ready(None)
             }
+            poll => poll,
         }
     }
 
     fn size_hint(&self) -> SizeHint {
-        let slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
-        match (&self.inner, &slot.sent) {
-            (Some(body), _) => body.size_hint(),
-            (None, Some(sent)) if sent.complete => {
-                let mut hint = SizeHint::default();
-                hint.set_exact(sent.frames.iter().map(bytes::Bytes::len).sum::<usize>() as u64);
-                hint
-            }
-            // Unknown until taken, never the real body's hint: hyper
-            // sends HEADERS with END_STREAM when the hint is exactly
-            // zero, without ever polling the body, and an empty
-            // client-streaming call could then reach the server while
-            // the slot is still full. Unknown makes hyper poll.
-            (None, _) => SizeHint::default(),
-        }
+        // Unknown on every attempt, the first send included: hyper
+        // polls the body either way, and the resent HEADERS then carry
+        // the same no-content-length head the first ones did. The
+        // exact hint is a trap twice over - it lets hyper send
+        // HEADERS with END_STREAM without ever polling the body, and
+        // it makes the resend's headers differ from the first send's.
+        SizeHint::default()
     }
 
     fn is_end_stream(&self) -> bool {
@@ -448,7 +493,7 @@ mod tests {
     use tonic::transport::{Channel, Endpoint, Server};
     use tonic::{Code, Request, Response, Status};
 
-    use super::{ProxyBody, RESEND_BODY_KEEP_BYTES, Resend, Sent, Slot, is_unsent};
+    use super::{MAX_ATTEMPTS, ProxyBody, RESEND_BODY_KEEP_BYTES, Resend, Sent, Slot, is_unsent};
 
     /// The stub: `ResolveRef` answers at once, so back-to-back calls
     /// queue behind each other in hyper's dispatch; `GetObjects`
@@ -949,7 +994,13 @@ mod tests {
                             }
                         }
                     }
-                    while let Some(Ok((request, mut respond))) = connection.accept().await {
+                    loop {
+                        let accepted_stream = connection.accept().await;
+                        let Some(Ok((request, mut respond))) = accepted_stream else {
+                            println!("SERVER accept[{step}]: {accepted_stream:?}");
+                            return;
+                        };
+                        println!("SERVER accept[{step}]: got a stream");
                         tokio::spawn(async move {
                             let mut body = request.into_body();
                             while let Some(Ok(chunk)) = body.data().await {
@@ -1006,8 +1057,10 @@ mod tests {
         )
         .await;
         assert!(result.is_ok(), "the call ends in time");
+        let error = result.unwrap().unwrap_err();
+        println!("DEBUG error: {error:?}");
         assert_eq!(
-            result.unwrap().unwrap_err().code(),
+            error.code(),
             Code::NotFound,
             "the resent call reaches the server's answer"
         );
@@ -1139,6 +1192,43 @@ mod tests {
             accepted.load(Ordering::SeqCst),
             1,
             "a stream the server may have processed is never resent"
+        );
+    }
+
+    /// A server that refuses every stream after taking the whole body,
+    /// on every connection: `REFUSED_STREAM` each time. The second
+    /// proof earns each resend, and the cap is what ends the call -
+    /// exactly `MAX_ATTEMPTS` connections, then the error. This pins
+    /// the cap without a timing race: the test that used to reach it
+    /// needed the connection age to land between three writers' sends
+    /// and flaked. (#1419)
+    #[tokio::test]
+    async fn a_server_that_refuses_every_stream_loses_the_call_at_the_cap() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = serve_refusals(
+            listener,
+            vec![Refusal::Reset(h2::Reason::REFUSED_STREAM); 20],
+        );
+        let endpoint = Endpoint::from_shared(format!("http://{addr}")).unwrap();
+        let channel = endpoint.connect().await.unwrap();
+        let mut client = ObjectsClient::new(Resend::new(channel, endpoint));
+        let result = tokio::time::timeout(
+            Duration::from_secs(60),
+            client.resolve_ref(ResolveRefRequest::default()),
+        )
+        .await;
+        assert!(result.is_ok(), "the call ends in time");
+        assert_eq!(
+            result.unwrap().unwrap_err().code(),
+            Code::Unavailable,
+            "the server refused the call unprocessed, so the gate resends until the cap"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            MAX_ATTEMPTS,
+            "the cap bounds the connections"
         );
     }
 
