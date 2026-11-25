@@ -22,10 +22,15 @@ fail() {
 : "${SCION_TEST_POSTGRES_URL:?SCION_TEST_POSTGRES_URL must name the test database}"
 command -v psql > /dev/null || fail "needs psql"
 
-# present NAME: the schema named NAME exists in the test database.
+# present NAME: the query ran, and the schema named NAME is in the
+# test database. A psql failure fails the test - absent must mean "the
+# query ran and found 0", never "the database did not answer" (F4).
 present() {
-  psql "$SCION_TEST_POSTGRES_URL" -tAc \
-    "SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = '$1'" | grep -q 1
+  local count
+  count=$(psql "$SCION_TEST_POSTGRES_URL" -v ON_ERROR_STOP=1 -tAc \
+    "SELECT count(*) FROM pg_catalog.pg_namespace WHERE nspname = '$1'") \
+    || fail "cannot ask the database about $1"
+  [ "$count" -ge 1 ]
 }
 
 drop_one() {
@@ -40,6 +45,10 @@ trap 'rm -rf "$out"' EXIT
 # child's record names the schema its own run made.
 run_case() {
   local mode=$1 log=$2
+  # The record goes before every run: a child that dies before it
+  # writes must not leave the previous case's name behind to be read
+  # (F5).
+  rm -f "$out/record" "$out/record.ready"
   bash "$here/test-pg-schema.sh" "$mode" "$out/record" > "$log" 2>&1
 }
 
@@ -49,7 +58,7 @@ run_case() {
 assert_no_schema() {
   local rc=$1 want_rc=$2 mode=$3 name
   [ "$rc" -eq "$want_rc" ] || fail "$mode: the run ended $rc, not $want_rc: $(cat "$out/child.$mode.log")"
-  name=$(sed -n '1p' "$out/record")
+  name=$(sed -n '1p' "$out/record" 2> /dev/null)
   [ -n "$name" ] || fail "$mode: the run made no schema"
   present "$name" && fail "$mode: the run's own schema $name stayed behind"
   return 0
@@ -81,6 +90,7 @@ for sig in INT TERM; do
   esac
   bash "$here/test-pg-schema.sh" "$mode" "$out/record" > "$out/child.$sig.log" 2>&1 &
   pid=$!
+  rm -f "$out/record"
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     [ -e "$out/record.ready" ] && break
     kill -0 "$pid" 2> /dev/null || break

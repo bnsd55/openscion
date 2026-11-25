@@ -44,9 +44,10 @@ url=$(pg_url_for "$target") || fail "pg_url_for failed"
 # rule: drop only what your own run recorded).
 schema=$(printf '%s\n' "$url" | sed -n 's/.*search_path%3D\([^&%]*\).*/\1/p')
 [ -n "$schema" ] || fail "pg_url_for named no schema"
-psql "$SCION_TEST_POSTGRES_URL" -tAc \
-  "SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = '$schema'" | grep -q 1 \
-  || fail "the schema $schema is not in the database"
+count=$(psql "$SCION_TEST_POSTGRES_URL" -v ON_ERROR_STOP=1 -tAc \
+  "SELECT count(*) FROM pg_catalog.pg_namespace WHERE nspname = '$schema'") \
+  || fail "cannot ask the database about $schema"
+[ "$count" -ge 1 ] || fail "the schema $schema is not in the database"
 case $mode in
   outside)
     # The rule this case pins: a caller's own directory records
