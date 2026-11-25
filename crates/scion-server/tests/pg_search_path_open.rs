@@ -22,12 +22,15 @@ fn pg_url() -> String {
 
 /// The URL with the scripts' options shape: the target schema first,
 /// the victim second, in `public`'s role - the member an unqualified
-/// name falls through to.
+/// name falls through to. The separator follows the base URL, the way
+/// the test support's URL helper does: a base that already carries a
+/// query string (`?sslmode=disable`) takes `&`, or libpq never applies
+/// the options and the `search_path` stays the default.
 fn url_with_search_path(target: &str, victim: &str) -> String {
-    format!(
-        "{}?options=--search_path%3D{target}%2C{victim}",
-        pg_url().trim_end_matches('/')
-    )
+    let base = pg_url();
+    let base = base.trim_end_matches('/');
+    let sep = if base.contains('?') { '&' } else { '?' };
+    format!("{base}{sep}options=--search_path%3D{target}%2C{victim}")
 }
 
 fn raw() -> Client {
@@ -53,8 +56,20 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// The schemas one test run made. Dropped on every exit path, panics
-/// included: the test only ever drops names it minted itself.
+/// included: the test only ever drops names it minted itself. The
+/// guard is registered BEFORE any schema is created, so a panic in
+/// between leaves nothing behind.
 struct Schemas(Vec<String>);
+
+impl Schemas {
+    fn one(name: String) -> Self {
+        Self(vec![name])
+    }
+
+    fn push(&mut self, name: String) {
+        self.0.push(name);
+    }
+}
 
 impl Drop for Schemas {
     fn drop(&mut self) {
@@ -129,21 +144,43 @@ fn snapshot(schema: &str) -> String {
     )
 }
 
-/// A victim: a store the standard test path migrated in its own schema,
-/// with the rows a served store carries when `served` (one repo, one
-/// changeset, one ref at `main`). Returns (schema, uuid hex).
-fn make_victim(served: bool) -> (String, String, tempfile::TempDir) {
+/// The session's `search_path` under `url`, read with `SHOW`.
+fn search_path_of(url: &str) -> String {
+    Client::connect(url, postgres::NoTls)
+        .expect("the URL's session connects")
+        .query("SHOW search_path", &[])
+        .expect("the search_path reads")[0]
+        .get(0)
+}
+
+/// The premise of both tests, checked loudly: the URL's session really
+/// rides the target and the victim as its first `search_path` members. A
+/// base URL whose query string swallowed the options would leave the
+/// default path, the tests would pass vacuously after the fix and
+/// never reproduce the bug before it - this assert turns that into a
+/// failure instead.
+fn assert_search_path(url: &str, target: &str, victim: &str) {
+    let path = search_path_of(url);
+    assert!(
+        path.contains(target) && path.contains(victim),
+        "the URL's search_path lost the premise; SHOW search_path says: {path}"
+    );
+}
+
+/// A victim: a store the standard test path migrated in the caller's
+/// schema (created by the caller, whose guard covers it), with the
+/// rows a served store carries when `served` (one repo, one changeset,
+/// one ref at `main`). Returns (uuid hex, the data directory).
+fn make_victim(schema: &str, served: bool) -> (String, tempfile::TempDir) {
     let dir = scion_server::test_support::private_tempdir();
-    let victim = schema_name("victim");
-    create_schema(&victim);
     // The shared open migrates the schema and mints its store UUID; it
     // takes no one-server lock, which this test's process does not need.
     let store =
-        Backend::open_test_shared_in_schema(dir.path(), &victim).expect("the victim store opens");
+        Backend::open_test_shared_in_schema(dir.path(), schema).expect("the victim store opens");
     if served {
         let mut c = raw();
         c.batch_execute(&format!(
-            "SET search_path TO {victim};
+            "SET search_path TO {schema};
              INSERT INTO repos (name) VALUES ('r');
              INSERT INTO changesets (id, gen, body)
                VALUES (repeat('x', 32)::bytea, 1, 'b');
@@ -154,9 +191,9 @@ fn make_victim(served: bool) -> (String, String, tempfile::TempDir) {
         ))
         .expect("the victim's served rows are made");
     }
-    let uuid = hex(&store_uuid_of(&victim));
+    let uuid = hex(&store_uuid_of(schema));
     let _ = store; // the schema outlives this function; the dir keeps the marker
-    (victim, uuid, dir)
+    (uuid, dir)
 }
 
 /// A served victim (its repos row makes the pairing refuse): the open
@@ -166,18 +203,19 @@ fn make_victim(served: bool) -> (String, String, tempfile::TempDir) {
 /// victim's rows byte-identical.
 #[test]
 fn an_empty_schema_next_to_a_served_store_opens_as_its_own_store() {
-    let (victim, victim_uuid, _victim_dir) = make_victim(true);
+    let victim = schema_name("victim");
+    let mut schemas = Schemas::one(victim.clone());
+    create_schema(&victim);
+    let (victim_uuid, _victim_dir) = make_victim(&victim, true);
     let before = snapshot(&victim);
     let target = schema_name("target");
+    schemas.push(target.clone());
     create_schema(&target);
-    let _schemas = Schemas(vec![victim.clone(), target.clone()]);
     let target_dir = scion_server::test_support::private_tempdir();
+    let url = url_with_search_path(&target, &victim);
+    assert_search_path(&url, &target, &victim);
 
-    let opened = Backend::open_migrating(
-        target_dir.path(),
-        &url_with_search_path(&target, &victim),
-        None,
-    );
+    let opened = Backend::open_migrating(target_dir.path(), &url, None);
     let store = match opened {
         Ok(store) => store,
         Err(error) => panic!(
@@ -223,19 +261,20 @@ fn an_empty_schema_next_to_a_served_store_opens_as_its_own_store() {
 /// and mint a fresh identity.
 #[test]
 fn an_empty_schema_next_to_an_unserved_store_never_adopts_its_identity() {
-    let (victim, victim_uuid, _victim_dir) = make_victim(false);
+    let victim = schema_name("victim");
+    let mut schemas = Schemas::one(victim.clone());
+    create_schema(&victim);
+    let (victim_uuid, _victim_dir) = make_victim(&victim, false);
     let before = snapshot(&victim);
     let target = schema_name("target");
+    schemas.push(target.clone());
     create_schema(&target);
-    let _schemas = Schemas(vec![victim.clone(), target.clone()]);
     let target_dir = scion_server::test_support::private_tempdir();
+    let url = url_with_search_path(&target, &victim);
+    assert_search_path(&url, &target, &victim);
 
-    let store = Backend::open_migrating(
-        target_dir.path(),
-        &url_with_search_path(&target, &victim),
-        None,
-    )
-    .unwrap_or_else(|error| panic!("the empty target refused: {error}"));
+    let store = Backend::open_migrating(target_dir.path(), &url, None)
+        .unwrap_or_else(|error| panic!("the empty target refused: {error}"));
 
     // The target's own ledger exists (the open migrated the empty
     // schema; on today's code the probe fell through, skipped the
