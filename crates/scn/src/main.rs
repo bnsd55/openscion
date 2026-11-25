@@ -141,6 +141,12 @@ fn main() -> ExitCode {
     let cli = parse_cli();
     if matches!(cli.command, Command::Mount(_)) {
         scion_proto::runtime::arena::cap_malloc_arenas();
+        // scn has no log subscriber: the decision goes to stderr, the
+        // same text the log line renders, so an operator sees it.
+        eprintln!(
+            "scn mount: {}",
+            scion_proto::runtime::arena::decision_text()
+        );
     }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

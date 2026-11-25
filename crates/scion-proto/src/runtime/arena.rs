@@ -41,6 +41,20 @@ pub fn arena_cap_decision(arena_max_env: Option<&str>) -> ArenaCap {
     }
 }
 
+/// The one-line text of a startup decision, the same text the tracing
+/// line renders: the value applied, or the operator's variable named.
+/// `scn mount` has no log subscriber, so it prints this text to stderr
+/// instead - a decision an operator cannot see is the silent path.
+#[must_use]
+pub fn decision_text() -> String {
+    match arena_cap_decision(std::env::var("MALLOC_ARENA_MAX").ok().as_deref()) {
+        ArenaCap::LeftToEnv(value) => {
+            format!("malloc arenas left to MALLOC_ARENA_MAX={value}")
+        }
+        ArenaCap::Apply(n) => format!("malloc arenas capped at {n}"),
+    }
+}
+
 /// Applies [`arena_cap_decision`] to this process, at the very start
 /// of a serving binary's `main`: before the tokio runtime builds its
 /// worker threads, because a cap set after a thread exists reaches
@@ -51,8 +65,8 @@ pub fn arena_cap_decision(arena_max_env: Option<&str>) -> ArenaCap {
 pub fn cap_malloc_arenas() {
     let decision = arena_cap_decision(std::env::var("MALLOC_ARENA_MAX").ok().as_deref());
     match decision {
-        ArenaCap::LeftToEnv(value) => {
-            tracing::info!("malloc arenas left to MALLOC_ARENA_MAX={value}");
+        ArenaCap::LeftToEnv(_) => {
+            tracing::info!("{}", decision_text());
         }
         ArenaCap::Apply(n) => {
             // The platform call lives in the crate's one platform-FFI
@@ -66,7 +80,7 @@ pub fn cap_malloc_arenas() {
                      keeps its default arena behavior"
                 );
             } else {
-                tracing::info!("malloc arenas capped at {n}");
+                tracing::info!("{}", decision_text());
             }
             // Not glibc, not the climb #1421 measured: nothing to cap.
             #[cfg(not(all(target_os = "linux", target_env = "gnu")))]

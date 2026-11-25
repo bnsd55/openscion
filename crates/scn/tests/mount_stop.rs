@@ -174,6 +174,13 @@ fn a_terminated_mount_unmounts_and_answers_0() {
         Some(0),
         "a stopped mount answers 0: {stderr}"
     );
+    // The startup decision went to stderr, where a log subscriber
+    // would have rendered it (#1421, F9c): a serving mount's operator
+    // sees which arena cap it took.
+    assert!(
+        stderr.contains("malloc arenas"),
+        "the mount prints its arena decision: {stderr}"
+    );
     // The rest of the stdout: the stop's own line ends it, and it names
     // the dir the mount stopped serving.
     let mut rest = String::new();
@@ -185,7 +192,18 @@ fn a_terminated_mount_unmounts_and_answers_0() {
         rest.contains(&format!("stopped serving {}", serving.dir.display())),
         "the mount names the dir it stopped serving: {rest}"
     );
-    assert!(!stderr.contains("scn mount:"), "a clean stop warns nothing");
+    // The startup decision went to stderr; a clean stop warns nothing
+    // else: only the decision line is allowed through (umount's own
+    // noise on --no-mount rides in the stderr pipe and is not scn's).
+    let warnings: String = stderr
+        .lines()
+        .filter(|line| line.contains("scn mount:") && !line.contains("malloc arenas"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        warnings.is_empty(),
+        "a clean stop warns nothing but the arena decision: {warnings}"
+    );
     // The overlay is gone, and the table holds no record: the next
     // mount of the dir is not refused, and the next unmount finds
     // nothing to clean.

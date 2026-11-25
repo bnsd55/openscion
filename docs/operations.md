@@ -2030,23 +2030,25 @@ The measured costs of blob counts, and the supported count, are in
 
 ### The malloc arena cap
 
-A long-lived serving process (`serve`, `scion-cache`, `scion-daemon`)
-caps its glibc malloc arenas at 2 at startup, before any worker thread
-exists: each glibc arena mints a mapped heap region the process never
-gives back, so a thread count that grows during a run showed as an RSS
-step of 18-30 MB while the live heap stayed near 11 MB. With the cap,
-the 60-minute soak that stepped to 152 MB sits at 35.8 MB at 24k lands,
-and the p99 latencies do not move. The concurrency bench agrees: 16
-agents at a cap of 2 show no throughput or latency cost against
-uncapped (runner variance dominates the table on #1421), and peak RSS
-falls from 46 MB to 30 MB.
+A long-lived serving process (`serve`, `scn mount`, `scion-cache`,
+`scion-daemon`) caps its glibc malloc arenas at 2 at startup, before
+any worker thread exists: under thread contention glibc opens more
+arenas, and each arena keeps its own freed memory, so a thread count
+that grows during a run showed as an RSS step of 18-30 MB while the
+live heap stayed near 11 MB. The measured pair at 24k lands: 73.5 MB
+uncapped, 35.8 MB with the cap, p99 unchanged. The concurrency bench
+agrees: 16 agents at a cap of 2 show no throughput or latency cost
+against uncapped (runner variance dominates the table on #1421), and
+peak RSS falls from 46 MB to 30 MB.
 
 The cap is a default, not a setting: `MALLOC_ARENA_MAX` in the
 environment wins over it, so a host that wants more arenas (or one the
-bench says serves better uncapped) sets the variable it already knows,
-and the server logs which one it took — `malloc arenas capped at 2`, or
-`malloc arenas left to MALLOC_ARENA_MAX=4`. On a platform whose
-allocator is not glibc, the cap compiles to nothing.
+bench says serves better uncapped) sets the variable it already knows.
+The decision is visible: the log subscriber processes carry one line —
+`malloc arenas capped at 2`, or `malloc arenas left to
+MALLOC_ARENA_MAX=4` — and `scn mount`, which has no log subscriber,
+prints the same text to stderr. On a platform whose allocator is not
+glibc, the cap compiles to nothing.
 
 ### Directory size
 
