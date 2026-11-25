@@ -18,6 +18,9 @@ mod ffi;
 #[cfg(target_os = "macos")]
 pub(crate) use ffi::hw_memsize;
 
+#[cfg(target_os = "linux")]
+pub(crate) use ffi::mallopt_arena_max;
+
 pub mod removed;
 
 use rustix::fs::OFlags;

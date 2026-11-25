@@ -1,5 +1,6 @@
 //! The runtime code that serves the contract, collected in one module.
 
+pub mod arena;
 pub mod auth;
 pub mod check;
 pub mod deadline;

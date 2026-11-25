@@ -834,9 +834,7 @@ impl Drop for StagingFolder {
         }
     }
 }
-#[tokio::main]
-#[allow(clippy::too_many_lines)]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     // Logs go to stderr: stdout carries the output of `ticket-key` and
     // `hash-token`, which callers capture with $(...).
     // Color only when stderr is a terminal: a file or a pipe is a log
@@ -846,6 +844,22 @@ async fn main() -> anyhow::Result<()> {
         .with_ansi(std::io::stderr().is_terminal())
         .with_writer(std::io::stderr)
         .init();
+    // The arena cap rides ahead of the tokio runtime's workers: a cap
+    // set after the workers exist reaches only the arenas they have
+    // not minted yet (#1421). `serve` is the one command of this
+    // binary that lives long enough to hold what a leaked arena keeps;
+    // the one-shot commands run and exit.
+    if std::env::args_os().skip(1).any(|arg| arg == "serve") {
+        scion_proto::runtime::arena::cap_malloc_arenas();
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run() -> anyhow::Result<()> {
     if let Some(removed) = scion_proto::runtime::auth::removed::removed_flag_of(
         std::env::args_os().skip(1).collect::<Vec<_>>().as_slice(),
         &[

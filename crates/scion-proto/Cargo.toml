@@ -14,6 +14,7 @@ authors.workspace = true
 name = "scion_proto"
 
 [dependencies]
+libc.workspace = true
 anyhow.workspace = true
 blake3.workspace = true
 bytes.workspace = true
