@@ -74,12 +74,26 @@ fn seed_behind_store(url: &str, schema: &str) {
 }
 
 /// A fresh database: the check reports version 0, every step pending,
-/// and exits 3 - the code that says "steps to run", not "failed".
+/// and exits 3 - the code that says "steps to run", not "failed". The
+/// fresh database is an EMPTY SCHEMA: it exists, the URL's `search_path`
+/// names it, and it holds no ledger. A schema the URL names but the
+/// database never had is the next test's refusal.
 #[test]
 fn a_check_on_a_fresh_database_prints_the_steps_and_exits_3() {
     let base = std::env::var("SCION_TEST_POSTGRES_URL")
         .expect("SCION_TEST_POSTGRES_URL must name the test database");
-    let url = url_for(&base, "mig_check_fresh");
+    let schema = "mig_check_fresh";
+    // A rerun of the suite meets the last run's store: the fresh state
+    // is an empty schema, so the last run's tables go first.
+    postgres::Client::connect(&base, postgres::NoTls)
+        .expect("the test database connects")
+        .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .unwrap();
+    postgres::Client::connect(&base, postgres::NoTls)
+        .expect("the test database connects")
+        .batch_execute(&format!("CREATE SCHEMA {schema}"))
+        .unwrap();
+    let url = url_for(&base, schema);
     let dir = scion_server::test_support::private_tempdir();
     let run = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
         .args(["--data", dir.path().join("data").to_str().unwrap()])
@@ -93,6 +107,36 @@ fn a_check_on_a_fresh_database_prints_the_steps_and_exits_3() {
     assert!(out.contains("schema version 0, this build ships"), "{out}");
     assert!(out.contains("would run: 0001_init"), "{out}");
     assert!(out.contains("would run: 0006_land_reason"), "{out}");
+}
+
+/// A `search_path` that names a schema the database never had: the check
+/// cannot read a state that is not there, so it exits 1 and says to
+/// create the schema - the same answer `migrate` would give, since the
+/// check must predict what migrate does.
+#[test]
+fn a_check_on_a_missing_schema_exits_1_and_says_to_create_it() {
+    let base = std::env::var("SCION_TEST_POSTGRES_URL")
+        .expect("SCION_TEST_POSTGRES_URL must name the test database");
+    // The schema is deliberately never created.
+    let url = url_for(&base, "mig_check_missing");
+    let dir = scion_server::test_support::private_tempdir();
+    let run = std::process::Command::new(env!("CARGO_BIN_EXE_scion-server"))
+        .args(["--data", dir.path().join("data").to_str().unwrap()])
+        .env("SCION_POSTGRES_URL", &url)
+        .args(["migrate", "--check"])
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("the check runs");
+    assert_eq!(run.status.code(), Some(1), "the state cannot be read");
+    let out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        out.contains("create it first"),
+        "the refusal says to create the schema first: {out}"
+    );
 }
 
 /// A database one version behind: the check names the pending step and

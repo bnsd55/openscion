@@ -1206,8 +1206,9 @@ scion-server --data /srv/scion \
 It prints the database's version, this build's version, and one
 `would run:` line per pending migration. It exits 0 when nothing is
 pending, 3 when steps are pending, and 1 when the state cannot be read
-— a database that is newer than this build, or one that does not
-answer. Exit 3 is the answer the check exists for, not a failure: a
+— a database that is newer than this build, one that does not
+answer, or a URL whose search_path names no existing schema (create
+the schema first). Exit 3 is the answer the check exists for, not a failure: a
 script tells "steps to run" from "cannot reach the database" by the
 code, never by the text.
 
