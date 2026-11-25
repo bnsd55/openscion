@@ -99,14 +99,14 @@ jobs:
         if: always() && github.event.inputs.heaptrack == 'on'
         run: |
           mkdir -p "${RUNNER_TEMP:-/tmp}/soak-artifacts"
-          for zst in "${RUNNER_TEMP:-/tmp}"/soak-artifacts/heaptrack-server.*.zst; do
+          for zst in "${RUNNER_TEMP:-/tmp}"/soak-artifacts/heaptrack.*.zst; do
             [ -e "$zst" ] || continue
             heaptrack_print "$zst" > "${zst%.zst}.summary.txt" || true
             heaptrack_print "$zst" --print-only-peaks > "${zst%.zst}.peaks.txt" || true
           done
           # Keep the raw recording only when it is small: the artifact
           # cap the lead named is 200 MB.
-          find "${RUNNER_TEMP:-/tmp}/soak-artifacts" -name 'heaptrack-server.*.zst' \
+          find "${RUNNER_TEMP:-/tmp}/soak-artifacts" -name "heaptrack.*.zst" \
             -size +200M -delete
       # The bounds live in the script; a failed bound fails the step and
       # keeps the CSVs and logs.

@@ -233,10 +233,11 @@ sleep 2
 # before any bound: a failed run needs them more than a passed one. The
 # EXIT trap of common.sh's make_work removes $WORK after this.
 mkdir -p "${RUNNER_TEMP:-/tmp}/soak-artifacts"
-# The heaptrack probe (#1421): heaptrack -o does not create its -o path
-# when it attaches at runtime, so its recording lands in the server's
-# working directory instead; move it with the other artifacts.
-for f in "$WORK"/heaptrack-server.*.zst; do
+# The heaptrack probe (#1421): when it attaches at runtime, heaptrack
+# names its recording itself (heaptrack.<target>.<pid>.zst) in the
+# target's working directory, whatever -o said; move every heaptrack
+# recording of the run's directories to the artifacts.
+for f in "$PWD"/heaptrack.*.zst "$WORK"/heaptrack.*.zst; do
   [ -e "$f" ] || continue
   mv "$f" "${RUNNER_TEMP:-/tmp}/soak-artifacts/"
 done
