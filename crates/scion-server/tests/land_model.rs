@@ -234,7 +234,19 @@ async fn check_chain(
             continue;
         }
         let rec_idx = land.unwrap_or_else(|| {
-            panic!("{target}: {id} is on the ref, but no land replied LANDED with it")
+            let ledger: Vec<String> = model
+                .recs
+                .iter()
+                .enumerate()
+                .map(|(idx, rec)| {
+                    common::ledger_line(idx, rec.caller, &rec.key, &rec.target, &rec.replies)
+                })
+                .collect();
+            panic!(
+                "{target}: {id} is on the ref, but no land replied LANDED with it\
+                 \nthe ledger the run produced:\n{}",
+                ledger.join("\n")
+            )
         });
         let rec = &model.recs[rec_idx];
         assert_eq!(
@@ -560,6 +572,7 @@ async fn build_changes(
 
 /// One principal: its ops for one round. A call that fails is the kill;
 /// anything else is a bug.
+#[allow(clippy::too_many_arguments)]
 async fn principal(
     url: String,
     caller: usize,
@@ -567,12 +580,13 @@ async fn principal(
     mut rng: Rng,
     ops: u64,
     signals: Arc<Signals>,
+    probe: common::ServerProbe,
 ) -> Notebook {
     let name = format!("p{caller}");
     let mut recs: Vec<Rec> = Vec::new();
     let (mut scion, mut objects) = match connect(&url).await {
         Ok(both) => both,
-        Err(error) => return cut(recs, &name, "connect", &error, &signals),
+        Err(error) => return cut(recs, &name, "connect", &error, &signals, &probe),
     };
     let mut bases = HashMap::new();
     for op in 0..ops {
@@ -587,14 +601,14 @@ async fn principal(
             let request = recs[idx].request();
             let reply = match scion.land(request).await {
                 Ok(reply) => reply.into_inner(),
-                Err(status) => return cut(recs, &name, "retry", &status, &signals),
+                Err(status) => return cut(recs, &name, "retry", &status, &signals, &probe),
             };
             recs[idx].replies.push(("retry", reply));
             continue;
         }
         let polled = match poll_one(&mut scion, &recs, &mut rng).await {
             Ok(polled) => polled,
-            Err(status) => return cut(recs, &name, "GetLand", &status, &signals),
+            Err(status) => return cut(recs, &name, "GetLand", &status, &signals, &probe),
         };
         if let Some((idx, reply)) = polled {
             recs[idx].replies.push(("poll", reply));
@@ -617,14 +631,16 @@ async fn principal(
                 };
                 match resolve_ref(&mut objects, name_for_base).await {
                     Ok(id) => id,
-                    Err(status) => return cut(recs, &name, "ResolveRef", &status, &signals),
+                    Err(status) => {
+                        return cut(recs, &name, "ResolveRef", &status, &signals, &probe);
+                    }
                 }
             }
         };
         bases.insert(target.clone(), base);
         let changes = match build_changes(&mut scion, op, &mut rng).await {
             Ok(changes) => changes,
-            Err(status) => return cut(recs, &name, "PutBlob", &status, &signals),
+            Err(status) => return cut(recs, &name, "PutBlob", &status, &signals, &probe),
         };
         let original = Changeset::new(
             vec![base],
@@ -643,7 +659,7 @@ async fn principal(
             .await
         {
             Ok(reply) => reply.into_inner(),
-            Err(status) => return cut(recs, &name, "CreateChangeset", &status, &signals),
+            Err(status) => return cut(recs, &name, "CreateChangeset", &status, &signals, &probe),
         };
         assert_eq!(changeset_id(&reply.changeset_id), id);
         let rec = Rec {
@@ -669,7 +685,7 @@ async fn principal(
         } else {
             let reply = match scion.land(request).await {
                 Ok(reply) => reply.into_inner(),
-                Err(status) => return cut(recs, &name, "land", &status, &signals),
+                Err(status) => return cut(recs, &name, "land", &status, &signals, &probe),
             };
             recs[idx].replies.push(("land", reply));
         }
@@ -677,16 +693,25 @@ async fn principal(
     Notebook { recs }
 }
 
-/// A failed call is the kill; anything else is a bug.
+/// A failed call is the kill; anything else is a bug. The panic carries
+/// the server's own state at the moment of the failure (#1424): its exit
+/// status names a process death (a SIGKILL or a SIGABRT reads as socket
+/// errors on every connection at once), and the log's tail carries
+/// whatever the server wrote last.
 fn cut(
     recs: Vec<Rec>,
     name: &str,
     call: &str,
     error: &dyn std::fmt::Debug,
     signals: &Signals,
+    probe: &common::ServerProbe,
 ) -> Notebook {
     let killed = signals.killed.load(Ordering::SeqCst);
-    assert!(killed, "{name}: {call} failed before the kill: {error:?}");
+    assert!(
+        killed,
+        "{name}: {call} failed before the kill: {error:?}\n{}",
+        probe.note()
+    );
     Notebook { recs }
 }
 
@@ -718,14 +743,19 @@ async fn the_model_holds_across_lands_retries_and_restarts() {
         // failing the round's start.
         let (server, _) = start_after_kill(&data, &log);
         let signals = Arc::new(Signals::default());
+        // The probe the principals' cut panics carry (#1424): the
+        // server's exit state read at the moment a call fails, from the
+        // same child the round's harness spawned.
+        let probe = server.probe(&log);
         let principals: Vec<_> = (0..PRINCIPALS)
             .map(|caller| {
-                let (url, rng, signals) = (
+                let (url, rng, signals, probe) = (
                     server.url.clone(),
                     Rng::new(rng.next()),
                     Arc::clone(&signals),
+                    probe.clone(),
                 );
-                tokio::spawn(principal(url, caller, round, rng, OPS, signals))
+                tokio::spawn(principal(url, caller, round, rng, OPS, signals, probe))
             })
             .collect();
         // Let the principals get to work, then kill the server under
@@ -806,4 +836,46 @@ async fn the_model_holds_across_lands_retries_and_restarts() {
          the wide lands must keep pending common"
     );
     println!("{pending_kills} of {rounds} kill rounds met a land pending in the database");
+}
+
+/// The probe names a death the harness did not cause (#1424): a server
+/// killed from outside reads as socket errors on every client at once,
+/// and the panic's note must say which signal took it.
+#[test]
+fn a_server_killed_outside_names_its_signal_in_the_probe() {
+    let dir = scion_server::test_support::private_tempdir();
+    let (data, log) = (dir.path().join("data"), dir.path().join("server.log"));
+    create_repo(&data);
+    let server = common::Server::start(&data, &log);
+    let probe = server.probe(&log);
+    assert!(
+        probe.note().contains("still running"),
+        "a live server's probe says so: {}",
+        probe.note()
+    );
+    // The kill from outside the harness: a plain `kill -9` to the pid,
+    // the shape a runner's OOM killer or an operator's pkill takes.
+    let status = std::process::Command::new("kill")
+        .arg("-9")
+        .arg(server.pid().to_string())
+        .status()
+        .expect("the kill command runs");
+    assert!(status.success(), "the outside kill ran: {status}");
+    let note = loop {
+        // The kernel needs a moment to make the exit visible to
+        // try_wait; the note reads it through the same child.
+        let note = probe.note();
+        if !note.contains("still running") {
+            break note;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(
+        note.contains("SIGKILL (signal 9)"),
+        "the probe names the outside kill: {note}"
+    );
+    assert!(
+        note.contains("the server's last"),
+        "the probe carries the log's tail: {note}"
+    );
 }

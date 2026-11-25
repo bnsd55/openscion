@@ -580,6 +580,14 @@ jobs:
           SCION_DMW_REQUIRE: "1"
           SCION_DMW_REPLAY: ${{ runner.temp }}/replay-log
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+      # A test whose server process died mid-run reads as socket errors
+      # on every connection at once (#1424); the kernel's own lines name
+      # the killer when it was the OOM killer. Evidence, not a gate: the
+      # step never fails the job.
+      - name: the kernel's OOM lines, on failure
+        if: failure()
+        run: |
+          sudo dmesg -T | grep -iE 'out of memory|killed process' | tail -20 || true
 
   test-restore-ceiling:
     name: test (restore rss ceiling)
@@ -816,6 +824,11 @@ jobs:
           SCION_DMW_REQUIRE: "1"
           SCION_DMW_REPLAY: ${{ runner.temp }}/replay-log
           SCION_TEST_POSTGRES_URL: postgres://postgres:scion@localhost:5432/scion
+      # The kernel's OOM lines on failure, as in the main test job (#1424).
+      - name: the kernel's OOM lines, on failure
+        if: failure()
+        run: |
+          sudo dmesg -T | grep -iE 'out of memory|killed process' | tail -20 || true
       - name: the work tree is still clean after the tests
         run: |
           # New untracked files count too (a stray bench-output.txt);
@@ -932,6 +945,11 @@ jobs:
           # The backup test dumps the live metadata with this job's own
           # Postgres, so its tools match the server.
           SCION_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
+      # The kernel's OOM lines on failure, as in the main test job (#1424).
+      - name: the kernel's OOM lines, on failure
+        if: failure()
+        run: |
+          sudo dmesg -T | grep -iE 'out of memory|killed process' | tail -20 || true
       - name: the work tree is still clean after the tests
         run: |
           dirty=$(git status --porcelain --untracked-files=all)

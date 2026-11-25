@@ -1424,7 +1424,18 @@ async fn check_chain(scion: &mut Scion, objects: &mut Objects, target: &str, lan
             continue;
         }
         let rec_idx = land.unwrap_or_else(|| {
-            panic!("{target}: {id} is on the ref, but no land replied LANDED with it")
+            let ledger: Vec<String> = lands
+                .iter()
+                .enumerate()
+                .map(|(idx, rec)| {
+                    common::ledger_line(idx, rec.caller, &rec.key, &rec.target, &rec.replies)
+                })
+                .collect();
+            panic!(
+                "{target}: {id} is on the ref, but no land replied LANDED with it\
+                 \nthe ledger the run produced:\n{}",
+                ledger.join("\n")
+            )
         });
         let rec = &lands[rec_idx];
         check_assert!(
