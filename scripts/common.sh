@@ -442,12 +442,20 @@ start_scion() {
   # the running server instead of wrapping it, so the pid that start(1)
   # records and the soak measures stays the server's own. The attach is
   # detached (ptrace), so the server's stop is the recording's stop.
+  # SOAK_ARENA_MAX, probe-only too: MALLOC_ARENA_MAX for the server's
+  # environment alone, the direct test of the arena hypothesis - if the
+  # RSS step needs glibc to open new arenas under contention, capping
+  # them removes the step.
   local wrap=""
+  local arena_env=()
+  if [ -n "${SOAK_ARENA_MAX:-}" ]; then
+    arena_env=(MALLOC_ARENA_MAX="$SOAK_ARENA_MAX")
+  fi
   if [ "${SOAK_HEAPTRACK:-}" = "on" ]; then
     mkdir -p "${RUNNER_TEMP:-/tmp}/soak-artifacts"
     wrap="heaptrack -p \$(lsof -t -iTCP:$SERVER_PORT -sTCP:LISTEN | head -n 1) -o ${RUNNER_TEMP:-/tmp}/soak-artifacts/heaptrack-server --detach &"
   fi
-  start server serving env SCION_POSTGRES_URL="$PG_URL" "$BIN/scion-server" --data "$WORK/server" serve \
+  start server serving env SCION_POSTGRES_URL="$PG_URL" "${arena_env[@]}" "$BIN/scion-server" --data "$WORK/server" serve \
     --listen "127.0.0.1:$SERVER_PORT" \
     --ticket-key "$WORK/ticket.key" \
     --metrics-listen "127.0.0.1:$SERVER_METRICS_PORT"
