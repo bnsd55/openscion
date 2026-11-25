@@ -844,22 +844,30 @@ fn main() -> anyhow::Result<()> {
         .with_ansi(std::io::stderr().is_terminal())
         .with_writer(std::io::stderr)
         .init();
-    // The arena cap rides ahead of the tokio runtime's workers: a cap
-    // set after the workers exist reaches only the arenas they have
-    // not minted yet (#1421). `serve` is the one command of this
+    // The removed-flag refusal and the parse are single-threaded sync
+    // work, done here so the arena cap can still be decided AFTER the
+    // command is known and BEFORE the tokio runtime builds its workers:
+    // a cap set after the workers exist reaches only the arenas they
+    // have not minted yet (#1421). `serve` is the one command of this
     // binary that lives long enough to hold what a leaked arena keeps;
     // the one-shot commands run and exit.
-    if std::env::args_os().skip(1).any(|arg| arg == "serve") {
+    let cli = parse_cli();
+    if matches!(cli.command, Command::Serve(_)) {
         scion_proto::runtime::arena::cap_malloc_arenas();
     }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run())
+        .block_on(run(cli))
 }
 
-#[allow(clippy::too_many_lines)]
-async fn run() -> anyhow::Result<()> {
+/// The removed-flag refusal and the parse, single-threaded sync work
+/// in `main`: the refusal exits naming the removed flag, and the
+/// parsed CLI tells whether this run serves - the one command that
+/// lives long enough to hold what a leaked arena keeps - so the cap is
+/// decided after the command is known and before the runtime builds
+/// its workers (#1421).
+fn parse_cli() -> Cli {
     if let Some(removed) = scion_proto::runtime::auth::removed::removed_flag_of(
         std::env::args_os().skip(1).collect::<Vec<_>>().as_slice(),
         &[
@@ -879,7 +887,11 @@ async fn run() -> anyhow::Result<()> {
         );
         std::process::exit(2);
     }
-    let cli = Cli::parse();
+    Cli::parse()
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run(cli: Cli) -> anyhow::Result<()> {
     // Every `serve` flag is checked before the data directory opens: a bad
     // flag must not take the data directory's one-server lock, and must
     // not create a file in an empty directory.

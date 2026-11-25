@@ -59,7 +59,7 @@ pub fn cap_malloc_arenas() {
             // module; the open's own rule keeps the token out of here.
             // A failure leaves the default arena behavior, which is the
             // pre-#1421 world: warn and carry on.
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
             if crate::runtime::auth::mallopt_arena_max(n) == 0 {
                 tracing::warn!(
                     "mallopt(M_ARENA_MAX, {n}) failed; the allocator \
@@ -69,7 +69,7 @@ pub fn cap_malloc_arenas() {
                 tracing::info!("malloc arenas capped at {n}");
             }
             // Not glibc, not the climb #1421 measured: nothing to cap.
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
             let _ = n;
         }
     }

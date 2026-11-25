@@ -12,13 +12,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, io};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"),))]
 mod ffi;
 
 #[cfg(target_os = "macos")]
 pub(crate) use ffi::hw_memsize;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub(crate) use ffi::mallopt_arena_max;
 
 pub mod removed;
