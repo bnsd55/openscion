@@ -136,6 +136,10 @@ impl Backend {
     /// # Errors
     ///
     /// What the database returns, and a missing test URL.
+    ///
+    /// A test that drops a store and opens the same directory at once
+    /// races the dropped store's write connection; use
+    /// [`Backend::reopen_test`] for that shape.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn open_test(data: &Path) -> Result<Self> {

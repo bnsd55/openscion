@@ -96,7 +96,7 @@ fn a_failed_dir_fsync_of_the_marker_refuses_the_open() {
     let dir = scion_server::test_support::private_tempdir();
     let fresh = dir.path().join("fresh");
     scion_server::test_support::backend::fail_marker_dir_fsync(&fresh);
-    let Err(error) = Backend::open_test(&fresh) else {
+    let Err(error) = Backend::reopen_test(&fresh) else {
         panic!("the open must refuse while the marker's directory fsync fails");
     };
     let scion_server::Error::Io(io) = &error else {
@@ -114,7 +114,7 @@ fn a_failed_dir_fsync_of_the_marker_refuses_the_open() {
     assert_eq!(uuid.len(), 32, "{text:?}");
     // The next open reads the marker it names and writes nothing: the
     // file survives the open byte for byte.
-    let store = Backend::open_test(&fresh).unwrap();
+    let store = Backend::reopen_test(&fresh).unwrap();
     drop(store);
     assert_eq!(
         std::fs::read_to_string(&marker).unwrap(),
@@ -236,7 +236,7 @@ fn a_database_refuses_the_directory_of_another_store() {
     assert_eq!(uuid.len(), 32, "{text:?}");
     // The marker of another store: database A restored with directory B.
     std::fs::write(&marker, format!("postgres\n{}\n", "0".repeat(32))).unwrap();
-    let Err(error) = Backend::open_test(dir.path()) else {
+    let Err(error) = Backend::reopen_test(dir.path()) else {
         panic!("the other store's marker refuses the open");
     };
     let message = error.to_string();
@@ -244,7 +244,7 @@ fn a_database_refuses_the_directory_of_another_store() {
     assert!(message.contains(&"0".repeat(32)), "{message}");
     // The real marker still opens: nothing was written by the refusal.
     std::fs::write(&marker, text).expect("the marker restores");
-    assert!(Backend::open_test(dir.path()).is_ok());
+    assert!(Backend::reopen_test(dir.path()).is_ok());
 }
 
 /// A process that loses the one-server lock is fenced: another process
