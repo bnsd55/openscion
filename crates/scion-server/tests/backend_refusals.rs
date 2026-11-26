@@ -96,7 +96,7 @@ fn a_failed_dir_fsync_of_the_marker_refuses_the_open() {
     let dir = scion_server::test_support::private_tempdir();
     let fresh = dir.path().join("fresh");
     scion_server::test_support::backend::fail_marker_dir_fsync(&fresh);
-    let Err(error) = Backend::reopen_test(&fresh) else {
+    let Err(error) = Backend::open_test(&fresh) else {
         panic!("the open must refuse while the marker's directory fsync fails");
     };
     let scion_server::Error::Io(io) = &error else {

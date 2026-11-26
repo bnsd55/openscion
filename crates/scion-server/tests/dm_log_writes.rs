@@ -299,7 +299,7 @@ fn an_acknowledged_blob_survives_a_cut_at_the_last_barrier_before_its_reply() {
                 String::from_utf8_lossy(&out.stdout)
             );
         }
-        let store = Backend::open_test(mount.join("data").as_path()).unwrap();
+        let store = Backend::reopen_test(mount.join("data").as_path()).unwrap();
         for (k, id) in ids.iter().take(n.try_into().unwrap()).enumerate() {
             let k = k + 1;
             assert_eq!(

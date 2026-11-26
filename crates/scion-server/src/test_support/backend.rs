@@ -137,9 +137,11 @@ impl Backend {
     ///
     /// What the database returns, and a missing test URL.
     ///
-    /// A test that drops a store and opens the same directory at once
-    /// races the dropped store's write connection; use
-    /// [`Backend::reopen_test`] for that shape.
+    /// A test that opens a directory right after dropping a store on it,
+    /// or right after an open of it refused, races the connection that
+    /// held the one-server lock: the drop or the refusal returns before
+    /// the worker thread has closed the connection. Use
+    /// [`Backend::reopen_test`] for both shapes.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn open_test(data: &Path) -> Result<Self> {
