@@ -8538,7 +8538,7 @@ pub(crate) mod pool_tests {
         // its store: the next open pairs (no marker, held, repos) and
         // refuses. The marker file is backend.rs's MARKER.
         std::fs::remove_file(data.path().join("backend")).unwrap();
-        let Err(refused) = crate::Backend::open_test(data.path()) else {
+        let Err(refused) = crate::Backend::reopen_test(data.path()) else {
             panic!("the markerless open of a served schema answered ok")
         };
         let text = format!("{refused}");
@@ -9110,7 +9110,7 @@ pub(crate) mod pool_tests {
         let first = crate::Backend::open_test(data.path()).unwrap();
         assert_eq!(first.migrated(), None, "a creation is not a move");
         drop(first);
-        let second = crate::Backend::open_test(data.path()).unwrap();
+        let second = crate::Backend::reopen_test(data.path()).unwrap();
         assert_eq!(
             second.migrated(),
             None,

@@ -193,7 +193,7 @@ fn blob_count_costs() {
     // The open after the fill: the open a restart pays, with the blob
     // folders in place.
     let started = Instant::now();
-    let backend = Backend::open_test(&dir).expect("the store opens again");
+    let backend = Backend::reopen_test(&dir).expect("the store opens again");
     let open = started.elapsed();
     main_line("reopen_seconds", format!("{:.3}", open.as_secs_f64()));
 
